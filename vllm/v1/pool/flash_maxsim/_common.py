@@ -3,8 +3,6 @@
 """Shared utilities for flash-maxsim kernels: padding, autotune configs,
 and pruning."""
 
-import torch
-
 from vllm.triton_utils import triton
 
 
@@ -40,17 +38,21 @@ def _smem_budget() -> int:
     (e.g. CPU-only import).
     """
     try:
-        props = triton.runtime.driver.active.utils.get_device_properties(
-            torch.cuda.current_device()
-        )
+        driver = triton.runtime.driver.active
+        props = driver.utils.get_device_properties(driver.get_current_device())
         return int(props["max_shared_mem"])
     except Exception:
-        if torch.cuda.is_available():
-            major, _ = torch.cuda.get_device_capability()
-            if major >= 9:
-                return 232_448  # Hopper+: 227 KB opt-in
-            if major == 8:
-                return 101_376  # worst sm_8x (86/89); A100 has more
+        try:
+            from vllm.platforms import current_platform
+
+            cap = current_platform.get_device_capability()
+            if cap is not None:
+                if cap.major >= 9:
+                    return 232_448  # Hopper+: 227 KB opt-in
+                if cap.major == 8:
+                    return 101_376  # worst sm_8x (86/89); A100 has more
+        except Exception:
+            pass
         return 98_304  # conservative pre-Ampere default
 
 
