@@ -833,6 +833,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
     ),
+    "DeepseekV4ForConditionalGeneration": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
         "dots-studio/dots3-note-prev",
         is_available_online=False,
@@ -1723,7 +1726,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
