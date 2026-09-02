@@ -17,10 +17,10 @@ class MultiModelKeys:
 
     @staticmethod
     def from_string_field(
-        language_model: str | list[str] = None,
-        connector: str | list[str] = None,
-        tower_model: str | list[str] = None,
-        generator: str | list[str] = None,
+        language_model: str | list[str] | None = None,
+        connector: str | list[str] | None = None,
+        tower_model: str | list[str] | None = None,
+        generator: str | list[str] | None = None,
         **kwargs,
     ) -> "MultiModelKeys":
         def to_list(value):

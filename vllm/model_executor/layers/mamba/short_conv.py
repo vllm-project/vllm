@@ -113,8 +113,10 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
-            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+            assert attn_metadata is None or isinstance(
+                attn_metadata, ShortConvAttentionMetadata
+            )
 
         BCx, _ = self.in_proj(hidden_states)
         B, C, x = BCx.chunk(3, dim=-1)
@@ -225,7 +227,8 @@ class ShortConv(MambaBase, PluggableLayer):
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
             assert isinstance(attn_metadata_raw, dict)
-            attn_metadata = attn_metadata_raw[self.prefix]
+            attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is not None:
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
             conv_state = (
                 self.kv_cache[0]
