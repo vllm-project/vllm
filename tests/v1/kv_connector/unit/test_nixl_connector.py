@@ -2885,15 +2885,14 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
 
     One transfer handle is created per remote rank, and when a peer goes away
     they do not all fail in the same poll: one errors while another is still
-    PROC. Each failure queues the request id on _failed_recv_reqs, so
-    get_finished() sees the id once per handle. The first pass pops the
-    metadata and reports the request; the second must tolerate finding nothing
-    and must not report the request again.
+    PROC. The first failure reports the request via _failed_recv_reqs and
+    get_finished() pops its metadata; when the remaining handles fail in a
+    later poll, the request must be cleaned up without being reported again.
 
-    Either half taken alone kills the EngineCore. Asserting on the missing
-    metadata raises out of worker_busy_loop, and reporting the request twice
-    trips the scheduler's own assert in _update_from_kv_xfer_finished, which
-    only expects a finished recv for a request still waiting for KVs.
+    Reporting twice kills the EngineCore: the scheduler's assert in
+    _update_from_kv_xfer_finished only expects a finished recv for a request
+    still waiting for KVs, having moved this one out of
+    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
     """
     vllm_config = create_vllm_config()
     connector = NixlConnector(
@@ -2944,11 +2943,11 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     assert request_id not in worker._recving_metadata
     assert worker._recving_transfers[request_id] == [second]
 
-    # Poll 2: the second handle fails too, and the same id is cleaned up again.
-    # The request was already reported, so it must not be reported a second
-    # time: the scheduler has since moved it out of WAITING_FOR_REMOTE_KVS to
-    # recompute locally, and asserts on a finished recv for a request in that
-    # state.
+    # Poll 2: the second handle fails too. The request was already reported,
+    # so it must not be reported a second time: the scheduler has since moved
+    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
+    # finished recv for a request in that state. Its remaining handles are
+    # still released and the transfer entry removed.
     with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
