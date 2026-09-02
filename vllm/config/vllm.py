@@ -1110,8 +1110,6 @@ class VllmConfig:
             unsupported.append("EPLB")
         if parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
-        if self.scheduler_config.async_scheduling:
-            unsupported.append("async scheduling")
         if self.lora_config is not None:
             unsupported.append("LoRA")
         if (

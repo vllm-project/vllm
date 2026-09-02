@@ -43,12 +43,18 @@ def test_dp_execution_contract_accepts_validated_subset():
     VllmConfig._verify_dp_execution_contract(_config())
 
 
+def test_dp_execution_contract_accepts_async_scheduling():
+    config = _config()
+    config.scheduler_config.async_scheduling = True
+
+    VllmConfig._verify_dp_execution_contract(config)
+
+
 @pytest.mark.parametrize(
     ("path", "value", "match"),
     [
         (("model_config", "architecture"), "OtherMoEForCausalLM", "architecture"),
         (("parallel_config", "all2all_backend"), "deepep_low_latency", "backend"),
-        (("scheduler_config", "async_scheduling"), True, "async scheduling"),
     ],
 )
 def test_dp_execution_contract_rejects_unvalidated_combinations(path, value, match):
