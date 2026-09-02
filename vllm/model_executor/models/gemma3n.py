@@ -1068,7 +1068,17 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        # KV-shared layers (the last `num_kv_shared_layers`) reuse K/V from
+        # earlier layers, so transformers doesn't create their k_proj/v_proj/
+        # k_norm and save_pretrained omits them from fine-tuned checkpoints
+        # (original Google checkpoints ship redundant copies). k_norm is the
+        # only standalone parameter among them; mark it loaded so the
+        # missing-weights check doesn't reject such checkpoints.
+        for i in range(self.start_layer, self.end_layer):
+            if getattr(self.layers[i].self_attn, "is_kv_shared", False):
+                loaded_params.add(f"layers.{i}.self_attn.k_norm.weight")
+        return loaded_params
 
 
 class Gemma3nForCausalLM(nn.Module):

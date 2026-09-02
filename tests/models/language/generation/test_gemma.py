@@ -10,6 +10,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import gemma
+from vllm.model_executor.models.gemma3n import Gemma3nTextModel
 from vllm.model_executor.models.gemma4 import Gemma4Model
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
@@ -70,6 +71,30 @@ def test_gemma4_kv_shared_k_norm_marked_loaded_when_absent() -> None:
             ]
 
     loaded = Gemma4Model.load_weights(cast(Gemma4Model, StubModel()), [])
+
+    assert loaded == {
+        "layers.2.self_attn.k_norm.weight",
+        "layers.3.self_attn.k_norm.weight",
+    }
+
+
+@pytest.mark.cpu_test
+def test_gemma3n_kv_shared_k_norm_marked_loaded_when_absent() -> None:
+    """Same pruning as Gemma 4: transformers omits k_norm on Gemma 3n
+    KV-shared layers, so load_weights must report it as loaded anyway."""
+
+    class StubModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hf_to_vllm_mapper = Gemma3nTextModel.hf_to_vllm_mapper
+            self.start_layer = 0
+            self.end_layer = 4
+            self.layers = [
+                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared=(i >= 2)))
+                for i in range(4)
+            ]
+
+    loaded = Gemma3nTextModel.load_weights(cast(Gemma3nTextModel, StubModel()), [])
 
     assert loaded == {
         "layers.2.self_attn.k_norm.weight",
