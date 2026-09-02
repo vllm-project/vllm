@@ -183,11 +183,11 @@ impl FromStr for LoraModulePath {
     /// Accept the two CLI forms Python's `LoRAParserAction` accepts:
     /// `name=path`, or a JSON object with the struct's fields.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.contains('=') && !value.contains(',') {
-            let (name, path) = value.split_once('=').expect("checked for '='");
-            if name.is_empty() || path.is_empty() {
-                return Err(format!("expected `name=path`, got `{value}`"));
-            }
+        if !value.trim_start().starts_with('{') {
+            let (name, path) = value
+                .split_once('=')
+                .filter(|(name, path)| !name.is_empty() && !path.is_empty())
+                .ok_or_else(|| format!("expected `name=path`, got `{value}`"))?;
             return Ok(Self {
                 name: name.to_string(),
                 path: path.to_string(),
@@ -370,6 +370,13 @@ mod lora_module_path_tests {
                 is_3d_lora_weight: true,
             }
         );
+    }
+
+    #[test]
+    fn parses_name_equals_path_with_comma() {
+        let module: LoraModulePath = "alice=/adapters/a,b".parse().unwrap();
+        assert_eq!(module.name, "alice");
+        assert_eq!(module.path, "/adapters/a,b");
     }
 
     #[test]

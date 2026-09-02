@@ -150,6 +150,24 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     ))
 }
 
+async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from --lora-modules",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
+}
+
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
 /// cancelled.
 ///
@@ -187,19 +205,9 @@ where
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
     };
-    for module in &config.lora_modules {
-        let request = state.load_static_lora(module).await.with_context(|| {
-            format!(
-                "failed to load LoRA adapter `{}` from --lora-modules",
-                module.name
-            )
-        })?;
-        info!(
-            lora_name = %request.lora_name,
-            lora_int_id = request.lora_int_id,
-            lora_path = %request.lora_path,
-            "loaded static LoRA adapter"
-        );
+    tokio::select! {
+        result = load_static_loras(&state, &config.lora_modules) => result?,
+        _ = shutdown.cancelled() => return Ok(()),
     }
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
