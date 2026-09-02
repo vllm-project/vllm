@@ -414,9 +414,15 @@ def test_pcp_direct_kv_disabled_skips_support_checks(monkeypatch):
     assert not pcp.use_pcp_direct_kv(object())
 
 
-def test_pcp_direct_kv_forced_without_pcp_warns_and_disables(monkeypatch, caplog):
+def test_pcp_direct_kv_forced_without_pcp_warns_and_disables(monkeypatch):
     import vllm.v1.worker.gpu.pcp_manager as pcp
 
+    warnings = []
+    monkeypatch.setattr(
+        pcp.logger,
+        "warning_once",
+        lambda message, *args: warnings.append(message % args if args else message),
+    )
     monkeypatch.setenv("VLLM_USE_PCP_DIRECT_KV", "1")
     result = pcp.maybe_build_pcp_manager(
         _pcp_direct_kv_config(pcp_size=1),
@@ -427,19 +433,27 @@ def test_pcp_direct_kv_forced_without_pcp_warns_and_disables(monkeypatch, caplog
     )
 
     assert result == (None, None)
-    assert "VLLM_USE_PCP_DIRECT_KV=1 was ignored because PCP is disabled" in caplog.text
+    assert len(warnings) == 1
+    assert "VLLM_USE_PCP_DIRECT_KV=1 was ignored because PCP is disabled" in warnings[0]
 
 
-def test_pcp_direct_kv_forced_with_dcp_warns_and_disables(monkeypatch, caplog):
+def test_pcp_direct_kv_forced_with_dcp_warns_and_disables(monkeypatch):
     import vllm.v1.worker.gpu.pcp_manager as pcp
 
+    warnings = []
+    monkeypatch.setattr(
+        pcp.logger,
+        "warning_once",
+        lambda message, *args: warnings.append(message % args if args else message),
+    )
     monkeypatch.setenv("VLLM_USE_PCP_DIRECT_KV", "1")
     config = _pcp_direct_kv_config()
     config.parallel_config.decode_context_parallel_size = 2
 
     assert not pcp.use_pcp_direct_kv(config)
-    assert "VLLM_USE_PCP_DIRECT_KV=1 was ignored" in caplog.text
-    assert "decode-context-parallel-size must be 1" in caplog.text
+    assert len(warnings) == 1
+    assert "VLLM_USE_PCP_DIRECT_KV=1 was ignored" in warnings[0]
+    assert "decode-context-parallel-size must be 1" in warnings[0]
 
 
 def run_fp8_ds_mla_indexer_oracle(
