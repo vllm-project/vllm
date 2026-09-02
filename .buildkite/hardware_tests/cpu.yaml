@@ -30,6 +30,8 @@ steps:
   - vllm/v1/sample/ops/topk_topp_triton.py
   - vllm/v1/sample/ops/topk_topp_sampler.py
   - tests/v1/sample/test_topk_topp_sampler.py
+  - vllm/utils/cpu_triton_utils.py
+  - tests/v1/sample/test_rejection_sampler.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
@@ -46,7 +48,8 @@ steps:
       pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
       pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
       pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp
+      pytest -x -v -s tests/v1/sample/test_rejection_sampler.py -k test_cpu_sample_recovered_tokens_preserves_fp64_inv_q"
 
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests

@@ -427,7 +427,10 @@ void expand_kernel_impl(torch::Tensor& output, const torch::Tensor& input,
   }
 }
 
-void sample_recovered_tokens_kernel_impl(
+namespace {
+
+template <typename inv_q_t>
+void sample_recovered_tokens_impl(
     torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
@@ -441,7 +444,7 @@ void sample_recovered_tokens_kernel_impl(
   const float* draft_probs_ptr =
       no_draft_probs ? nullptr : draft_probs.value().data_ptr<float>();
   const float* target_probs_ptr = target_probs.data_ptr<float>();
-  const float* inv_q_ptr = inv_q.data_ptr<float>();
+  const inv_q_t* inv_q_ptr = inv_q.data_ptr<inv_q_t>();
 
   const int64_t target_stride = target_probs.stride(0);
   const int64_t draft_probs_stride =
@@ -454,7 +457,7 @@ void sample_recovered_tokens_kernel_impl(
     int64_t end_idx = cu_draft_ptr[req_idx];
     int64_t num_draft_tokens = end_idx - start_idx;
 
-    const float* req_inv_q = inv_q_ptr + req_idx * inv_q_stride;
+    const inv_q_t* req_inv_q = inv_q_ptr + req_idx * inv_q_stride;
 
     for (int64_t pos = 0; pos < num_draft_tokens; ++pos) {
       int64_t token_idx = start_idx + pos;
@@ -467,7 +470,7 @@ void sample_recovered_tokens_kernel_impl(
                          : (draft_probs_ptr + token_idx * draft_probs_stride);
 
       int64_t best_id = 0;
-      float best_val = -1.0f;
+      inv_q_t best_val = -1;
 
       for (int64_t v = 0; v < vocab_size; ++v) {
         float prob = token_target_probs[v];
@@ -478,7 +481,7 @@ void sample_recovered_tokens_kernel_impl(
           prob = diff > 0.0f ? diff : 0.0f;
         }
 
-        float val = prob * req_inv_q[v];
+        inv_q_t val = static_cast<inv_q_t>(prob) * req_inv_q[v];
         if (val > best_val) {
           best_val = val;
           best_id = v;
@@ -487,6 +490,26 @@ void sample_recovered_tokens_kernel_impl(
       out_ptr[token_idx] = best_id;
     }
   }
+}
+
+}  // namespace
+
+void sample_recovered_tokens_kernel_impl(
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids,
+    const std::optional<torch::Tensor>& draft_probs,
+    const torch::Tensor& target_probs, const torch::Tensor& inv_q,
+    const int64_t vocab_size, const bool no_draft_probs) {
+  // `inv_q` carries the exponential-race noise at the precision the caller
+  // selected via `use_fp64_gumbel`. Dispatch on its dtype so fp64 noise keeps
+  // full precision through both the score and the argmax, matching the Triton
+  // kernel. The fp32 instantiation is unchanged.
+  AT_DISPATCH_FLOATING_TYPES(
+      inv_q.scalar_type(), "sample_recovered_tokens_kernel_impl", [&] {
+        sample_recovered_tokens_impl<scalar_t>(
+            output_token_ids, cu_num_draft_tokens, draft_token_ids, draft_probs,
+            target_probs, inv_q, vocab_size, no_draft_probs);
+      });
 }
 
 }  // namespace cpu_utils
