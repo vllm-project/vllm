@@ -796,5 +796,5 @@ def test_worker_setup_tolerates_finer_scratch_group():
     # A 13-token prompt sharing the prefix must hit the first hash unit.
     assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
     # The scratch group's namespace never enters the store.
-    scratch_prefix = worker.token_dbs[2]._key_prefix
+    scratch_prefix = worker.token_dbs[2].key_for(hs[0]).rsplit("@", 1)[0]
     assert not any(key.startswith(scratch_prefix) for key in store._data)

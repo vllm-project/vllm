@@ -1679,9 +1679,23 @@ class MooncakeConnectorWorker:
                 if isinstance(layer_spec, KpoolTailSpec):
                     kv_block_len = layer_spec.unpadded_page_size_bytes // 2
                 elif isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
-                    kv_block_len = layer_spec.page_size_bytes
+                    assert (
+                        layer_spec.page_size_bytes
+                        % self._physical_blocks_per_logical_kv_block
+                        == 0
+                    )
+                    kv_block_len = (
+                        layer_spec.page_size_bytes
+                        // self._physical_blocks_per_logical_kv_block
+                    )
                 else:
                     kv_block_len = block_len
+                if kv_block_len > block_len:
+                    raise RuntimeError(
+                        "Mooncake transfer length exceeds physical block stride "
+                        f"for {layer_name}: kv_block_len={kv_block_len}, "
+                        f"block_len={block_len}."
+                    )
                 self.block_len_per_layer.append(block_len)
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
