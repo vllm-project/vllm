@@ -177,8 +177,12 @@ steps:
   device: h100
   optional: true
   num_devices: 2
+  parallelism: 4
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+    # Timing-balanced static split of the former config-h100.txt (measured on
+    # build 83851): shards ~12.4/13.6/12.4/14.5m of eval time. New configs must
+    # be added to exactly one config-h100-shard-*.txt.
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
   
 - label: ":nvidia: (B200) MoE Refactor Integration TEMPORARY Shard %N"
   key: moe-refactor-integration-test-b200-temporary
