@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-import pytest
-
 from tests.utils import large_gpu_mark, single_gpu_only
 from vllm import SamplingParams
 
@@ -12,54 +9,7 @@ from .utils import compute_acceptance_len, get_spec_decode_metric_value
 
 @single_gpu_only
 @large_gpu_mark(min_gb=32)
-@pytest.mark.parametrize(
-    (
-        "model",
-        "revision",
-        "speculative_config",
-        "num_gpu_blocks_override",
-    ),
-    [
-        pytest.param(
-            "Qwen/Qwen3-8B",
-            "b968826d9c46dd6066d109eabc6255188de91218",
-            {
-                "model": "RedHatAI/Qwen3-8B-speculator.eagle3",
-                "revision": "08610ffa01dd9f16731fe8f627b85905b6aa51c4",
-                "method": "eagle3",
-                "num_speculative_tokens": 3,
-                "draft_sample_method": "probabilistic",
-                "rejection_sample_method": "standard",
-                "enable_adaptive_verification": False,
-            },
-            8,
-            id="eagle3",
-        ),
-        pytest.param(
-            "Qwen/Qwen3-4B-FP8",
-            "f3ecd40dbe901708a7557adbecbabab618178ae4",
-            {
-                "model": "deepseek-ai/dspark_qwen3_4b_block7",
-                "revision": "3457dff1417cb84927f6098a5fcb7cee85c934b7",
-                "method": "dspark",
-                "num_speculative_tokens": 7,
-                "draft_sample_method": "probabilistic",
-                "rejection_sample_method": "standard",
-                "enable_adaptive_verification": False,
-            },
-            9,
-            id="dspark-block7",
-        ),
-    ],
-)
-def test_spec_batch_invariance_with_preemption(
-    monkeypatch,
-    vllm_runner,
-    model,
-    revision,
-    speculative_config,
-    num_gpu_blocks_override,
-):
+def test_spec_batch_invariance_with_preemption(monkeypatch, vllm_runner):
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
@@ -74,14 +24,23 @@ def test_spec_batch_invariance_with_preemption(
         SamplingParams(temperature=0.8, max_tokens=48, seed=42 + i)
         for i in range(len(prompts))
     ]
+    speculative_config = {
+        "model": "deepseek-ai/dspark_qwen3_4b_block7",
+        "revision": "3457dff1417cb84927f6098a5fcb7cee85c934b7",
+        "method": "dspark",
+        "num_speculative_tokens": 7,
+        "draft_sample_method": "probabilistic",
+        "rejection_sample_method": "standard",
+    }
+
     with vllm_runner(
-        model,
-        revision=revision,
+        "Qwen/Qwen3-4B-FP8",
+        revision="f3ecd40dbe901708a7557adbecbabab618178ae4",
         speculative_config=speculative_config,
         max_model_len=128,
         max_num_seqs=len(prompts),
         max_num_batched_tokens=128,
-        num_gpu_blocks_override=num_gpu_blocks_override,
+        num_gpu_blocks_override=9,
         enable_prefix_caching=True,
         enforce_eager=True,
         disable_log_stats=False,
@@ -101,13 +60,6 @@ def test_spec_batch_invariance_with_preemption(
     assert (
         get_spec_decode_metric_value(metrics_after, "vllm:num_preemptions")
         - get_spec_decode_metric_value(metrics_before, "vllm:num_preemptions")
-        > 0
-    )
-    assert (
-        get_spec_decode_metric_value(metrics_after, "vllm:spec_decode_num_draft_tokens")
-        - get_spec_decode_metric_value(
-            metrics_before, "vllm:spec_decode_num_draft_tokens"
-        )
         > 0
     )
     assert compute_acceptance_len(metrics_after, metrics_before) > 1

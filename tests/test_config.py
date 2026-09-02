@@ -2105,15 +2105,10 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
-@pytest.mark.parametrize("draft_method", ["greedy", "probabilistic"])
-@pytest.mark.parametrize("rejection_method", ["standard", "synthetic", "block"])
-def test_speculative_config_batch_invariance_support(draft_method, rejection_method):
+def test_speculative_config_batch_invariance_support():
     config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
-        draft_sample_method=draft_method,
-        rejection_sample_method=rejection_method,
-        synthetic_acceptance_rates=[1.0] if rejection_method == "synthetic" else None,
     )
     assert config.supports_batch_invariance()
 

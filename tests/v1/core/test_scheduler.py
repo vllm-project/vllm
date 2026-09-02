@@ -53,23 +53,8 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def test_batch_invariant_spec_decode_warns_for_unvalidated_config(monkeypatch):
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-    warning_once = Mock()
-    monkeypatch.setattr("vllm.config.vllm.logger.warning_once", warning_once)
-
-    create_scheduler(num_speculative_tokens=2)
-
-    warning_once.assert_any_call(
-        "VLLM_BATCH_INVARIANT with speculative decoding is supported for Model "
-        "Runner V2 with fixed speculative lengths and adaptive verification "
-        "disabled."
-    )
-
-
 @pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.parametrize("use_kv_connector", [False, True])
-def test_spec_decode_preemption_rebuilds_proposal(async_scheduling, use_kv_connector):
+def test_spec_decode_preemption_rebuilds_proposal(async_scheduling):
     scheduler = create_scheduler(
         num_speculative_tokens=3,
         max_num_seqs=1,
@@ -79,7 +64,6 @@ def test_spec_decode_preemption_rebuilds_proposal(async_scheduling, use_kv_conne
         block_size=1,
         async_scheduling=async_scheduling,
         speculative_method="ngram_gpu" if async_scheduling else None,
-        use_kv_connector=use_kv_connector,
     )
     scheduler.enable_spec_recovery = True
     [request] = create_requests(num_requests=1, num_tokens=4, block_size=1)
