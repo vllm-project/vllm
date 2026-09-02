@@ -6,7 +6,6 @@ Unit tests for the breakable cudagraph primitives.
 
 from __future__ import annotations
 
-import os
 import threading
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -14,7 +13,21 @@ from unittest.mock import patch
 import pytest
 import torch
 
-os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+
+@pytest.fixture(autouse=True)
+def _enable_breakable_cudagraph(monkeypatch: pytest.MonkeyPatch):
+    """Enable breakable cudagraphs for this module's tests only.
+
+    eager_break_during_capture reads the env at decoration time, which
+    happens inside the test bodies, so a per-test fixture suffices.
+    monkeypatch restores the env so other test files running in the same
+    pytest process are unaffected (a module-level os.environ assignment
+    used to leak into test_cudagraph_dispatch.py and break it).
+    """
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    envs.disable_envs_cache()
 
 
 def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
@@ -86,10 +99,19 @@ def cuda_capture_stream():
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+    from vllm.utils.torch_utils import _current_stream_tls
+
+    prev_stream = getattr(_current_stream_tls, "value", None)
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         yield stream
     torch.cuda.current_stream().wait_stream(stream)
+    # Exiting torch.cuda.stream() records the default stream in vllm's
+    # patched set_stream cache. A later CUDAGraphWrapper capture in the same
+    # process would then run on the default stream, which cannot capture
+    # (this broke test_cudagraph_dispatch.py when run in-process after this
+    # file). Restore the pre-fixture value so this module leaves no trace.
+    _current_stream_tls.value = prev_stream
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +331,54 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     cap.replay()
     torch.accelerator.synchronize()
     assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
+
+
+def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
+    """Handle an eager attention break inside a multi-stream overlap region."""
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+    from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
+    x = torch.zeros(1024, device="cuda")
+    output = torch.empty_like(x)
+    aux_stream = torch.cuda.Stream()
+    main_event = torch.cuda.Event()
+    aux_event = torch.cuda.Event()
+
+    @eager_break_during_capture
+    def attention(query: torch.Tensor, out: torch.Tensor) -> None:
+        torch.add(query, 3.0, out=out)
+
+    def attention_frontend() -> torch.Tensor:
+        query = x * 2.0
+        attention_output = torch.empty_like(x)
+        attention(query, attention_output)
+        return attention_output
+
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        attention_output, gate = maybe_execute_in_parallel(
+            attention_frontend,
+            lambda: x * 5.0,
+            main_event,
+            aux_event,
+            aux_stream,
+        )
+        torch.add(attention_output, gate, out=output)
+
+    assert cap.num_graphs == 2
+    assert cap.num_eager_breaks == 1
+
+    for value in (1.0, 7.0, 19.0):
+        x.fill_(value)
+        cap.replay()
+        cuda_capture_stream.synchronize()
+        torch.testing.assert_close(
+            output,
+            torch.full_like(output, value * 7.0 + 3.0),
+        )
 
 
 # ---------------------------------------------------------------------------

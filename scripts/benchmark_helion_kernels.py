@@ -5,8 +5,10 @@
 Benchmark a registered Helion kernel against a baseline.
 
 For each input case produced by the kernel's registered input generator, this
-measures the latency of the Helion kernel and a chosen baseline, then reports
-the speedup.
+checks the Helion kernel's numerics once against its eager reference, measures
+its latency against a chosen performance baseline, then reports the speedup.
+Use ``--numerics-with-perf-baseline`` to check numerics against the performance
+baseline instead.
 
 Two baselines are supported (``--baseline``):
 
@@ -30,9 +32,17 @@ Usage:
     python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --baseline cuda
 
+    # Check numerics against the performance baseline instead of eager
+    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+        --baseline cuda --numerics-with-perf-baseline
+
     # Disable CUDA graph capture and save results
     python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
         --no-cudagraph --output results.json
+
+    # Only verify numerics, skipping the timing runs
+    python scripts/benchmark_helion_kernels.py --kernel per_token_group_fp8_quant \\
+        --numerics-only
 """
 
 import argparse
@@ -43,21 +53,46 @@ import statistics
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import torch
+from torch.utils._pytree import tree_flatten
 
 from vllm.triton_utils import triton
 
 try:
+    from helion.autotuner.accuracy import assert_close as helion_assert_close
+    from helion.autotuner.accuracy import is_fp8_dtype
+
     from vllm.benchmarks.lib.utils import default_vllm_config
     from vllm.kernels.helion import get_kernel_by_name, get_registered_kernels
-    from vllm.kernels.helion.ops import import_all_kernels
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
     print(f"Error importing vLLM: {e}")
     print("Please ensure vLLM is installed and in your Python path")
     sys.exit(1)
+
+
+def import_all_kernels() -> None:
+    """Trigger Helion op registration, tolerating cross-version name drift.
+
+    Current vLLM registers every Helion kernel as a side effect of importing
+    ``vllm.kernels.helion.ops``; some builds instead expose an explicit importer
+    whose name has drifted (``import_all_kernels`` / ``import_all_ops``). Call
+    whichever exists; if none does, importing the module already registered
+    them.
+    """
+    try:
+        import vllm.kernels.helion.ops as ops
+    except ImportError:
+        return
+    for fn_name in ("import_all_kernels", "import_all_ops"):
+        fn = getattr(ops, fn_name, None)
+        if callable(fn):
+            fn()
+            return
+
 
 logger = init_logger("vllm.scripts.benchmark_helion_kernels")
 
@@ -121,6 +156,21 @@ def print_table(rows: list[Row]) -> None:
         print(fmt(row))
 
 
+def log_versions() -> None:
+    """Log torch/helion/triton versions at the head of the output."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    def pkg_version(name: str) -> str:
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            return "not installed"
+
+    logger.info("torch: %s", torch.__version__)
+    logger.info("helion: %s", pkg_version("helion"))
+    logger.info("triton: %s", getattr(triton, "__version__", pkg_version("triton")))
+
+
 def list_kernels() -> None:
     kernels = get_registered_kernels()
 
@@ -176,12 +226,8 @@ def make_cuda_baseline(kernel_name: str) -> Callable:
     return cuda_op
 
 
-def make_autotune_baseline(kernel_name: str) -> Callable:
-    """Return the kernel's autotune baseline wrapped in ``torch.compile``.
-
-    The baseline is the native-torch reference the kernel is tuned against,
-    registered via ``helion_settings.autotune_baseline_fn``.
-    """
+def make_eager_baseline(kernel_name: str) -> Callable:
+    """Return the kernel's registered native-torch reference."""
     wrapper = get_kernel_by_name(kernel_name)
     settings = wrapper.helion_settings
     baseline_fn = getattr(settings, "autotune_baseline_fn", None)
@@ -195,6 +241,13 @@ def make_autotune_baseline(kernel_name: str) -> Callable:
         )
         sys.exit(1)
 
+    return baseline_fn
+
+
+def make_autotune_baseline(kernel_name: str) -> Callable:
+    """Return the kernel's autotune baseline wrapped in ``torch.compile``."""
+    baseline_fn = make_eager_baseline(kernel_name)
+
     return torch.compile(
         baseline_fn,
         fullgraph=True,
@@ -202,6 +255,25 @@ def make_autotune_baseline(kernel_name: str) -> Callable:
         backend="inductor",
         options=_TORCH_COMPILE_OPTIONS,
     )
+
+
+def make_correctness_baseline(
+    kernel_name: str,
+    timed_baseline_fn: Callable,
+    numerics_with_perf_baseline: bool,
+) -> Callable:
+    """Choose the numerical reference independently from the timed baseline."""
+    if not numerics_with_perf_baseline:
+        logger.info(
+            "Using the eager reference for '%s' correctness",
+            kernel_name,
+        )
+        return make_eager_baseline(kernel_name)
+    logger.info(
+        "Using the selected performance baseline for '%s' correctness",
+        kernel_name,
+    )
+    return timed_baseline_fn
 
 
 def cleanup_gpu_resources() -> None:
@@ -225,6 +297,118 @@ _REDUCERS: dict[str, Callable[[list[float]], float]] = {
 
 def _reduce(times: list[float], return_mode: str) -> float:
     return _REDUCERS[return_mode](times)
+
+
+def _assert_close(actual: object, expected: object, atol: float, rtol: float) -> None:
+    """Compare pytrees, allowing the one-ULP FP8 variance used by kernel tests."""
+    actual_flat, actual_spec = tree_flatten(actual)
+    expected_flat, expected_spec = tree_flatten(expected)
+    if actual_spec != expected_spec:
+        raise AssertionError(
+            f"Output structure mismatch: {actual_spec} != {expected_spec}"
+        )
+
+    for actual_leaf, expected_leaf in zip(actual_flat, expected_flat, strict=True):
+        is_fp8 = isinstance(actual_leaf, torch.Tensor) and is_fp8_dtype(
+            actual_leaf.dtype
+        )
+        helion_assert_close(
+            actual_leaf,
+            expected_leaf,
+            atol=1 if is_fp8 else atol,
+            rtol=0 if is_fp8 else rtol,
+        )
+
+
+def check_correctness(
+    kernel: Any,
+    baseline_fn: Callable,
+    inputs: tuple[Any, ...],
+    case: str,
+) -> None:
+    """Run one numerical comparison on copies separate from benchmark inputs."""
+    kernel_inputs = copy.deepcopy(inputs)
+    baseline_inputs = copy.deepcopy(inputs)
+
+    kernel_output = kernel(*kernel_inputs)
+    baseline_output = baseline_fn(*baseline_inputs)
+
+    settings = kernel.helion_settings
+    try:
+        custom_check = getattr(settings, "autotune_baseline_accuracy_check_fn", None)
+        if custom_check is not None:
+            custom_check(kernel_output, baseline_output)
+            custom_check(kernel_inputs, baseline_inputs)
+            return
+
+        configured_atol = getattr(settings, "autotune_baseline_atol", None)
+        configured_rtol = getattr(settings, "autotune_baseline_rtol", None)
+        atol = 1e-2 if configured_atol is None else configured_atol
+        rtol = 1e-2 if configured_rtol is None else configured_rtol
+        _assert_close(
+            kernel_output,
+            baseline_output,
+            atol=atol,
+            rtol=rtol,
+        )
+        _assert_close(
+            kernel_inputs,
+            baseline_inputs,
+            atol=atol,
+            rtol=rtol,
+        )
+    except AssertionError as e:
+        raise AssertionError(f"Numerics check failed for case {case}:\n{e}") from e
+
+
+@dataclass
+class CorrectnessResult:
+    """Outcome of the numerics check for a single shape case."""
+
+    case: str
+    passed: bool
+    error: str | None = None
+
+
+def check_kernel_correctness(
+    kernel: Any,
+    baseline_fn: Callable,
+    inputs_dict: dict[Any, tuple[Any, ...]] | None = None,
+) -> list[CorrectnessResult]:
+    """Run the per-shape numerics check for a kernel, continuing past failures.
+
+    Runs the same comparison as ``check_correctness`` for every shape case
+    produced by the kernel's input generator, but records the outcome per case
+    instead of raising on the first mismatch. This lets callers (e.g. a CI gate)
+    report every failing shape in one pass rather than aborting early.
+
+    Args:
+        kernel: The Helion kernel wrapper to check.
+        baseline_fn: Reference callable sharing the kernel's argument interface.
+        inputs_dict: Optional mapping of case key to input tuple. Defaults to
+            ``kernel.get_inputs()``.
+
+    Returns:
+        One ``CorrectnessResult`` per shape case, in iteration order. A case that
+        raises (compile/run error or numerics mismatch) is marked
+        ``passed=False`` with the exception text in ``error``; iteration
+        continues regardless. An empty input mapping returns an empty list, which
+        the CLI reports as a skipped check.
+    """
+    if inputs_dict is None:
+        inputs_dict = kernel.get_inputs()
+
+    results: list[CorrectnessResult] = []
+    for key, inputs in inputs_dict.items():
+        case = str(key)
+        try:
+            check_correctness(kernel, baseline_fn, inputs, case)
+        except Exception as e:  # noqa: BLE001 - any failure is recorded, not fatal
+            results.append(CorrectnessResult(case=case, passed=False, error=str(e)))
+        else:
+            results.append(CorrectnessResult(case=case, passed=True))
+        cleanup_gpu_resources()
+    return results
 
 
 def do_bench_cudagraph_l2_clear(
@@ -298,6 +482,7 @@ def do_bench_cudagraph_l2_clear(
 def benchmark(
     kernel_name: str,
     baseline_fn: Callable,
+    correctness_fn: Callable,
     repeat: int,
     cudagraph: bool,
     return_mode: str,
@@ -312,6 +497,9 @@ def benchmark(
 
     for key, inputs in inputs_dict.items():
         logger.info("Benchmarking case %s", key)
+
+        check_correctness(kernel, correctness_fn, inputs, str(key))
+        logger.info("Numerics check passed for case %s", key)
 
         # Kernels may mutate their inputs in place; give each side its own copy.
         kernel_inputs = copy.deepcopy(inputs)
@@ -374,7 +562,7 @@ def main() -> None:
         choices=["cuda", "autotune"],
         default="autotune",
         help=(
-            "Baseline to compare against: 'autotune' uses the kernel's "
+            "Performance baseline: 'autotune' uses the kernel's "
             "autotune_baseline_fn under torch.compile; 'cuda' uses the mapped "
             "torch.ops._C op (default: autotune)"
         ),
@@ -390,8 +578,23 @@ def main() -> None:
         type=str,
         help="Path to save benchmark results as JSON (default: log only)",
     )
+    parser.add_argument(
+        "--numerics-only",
+        action="store_true",
+        help="Only run the per-case numerics check; skip timing and reporting",
+    )
+    parser.add_argument(
+        "--numerics-with-perf-baseline",
+        action="store_true",
+        help=(
+            "Compare numerics against the selected performance baseline instead "
+            "of the eager reference"
+        ),
+    )
 
     args = parser.parse_args()
+
+    log_versions()
 
     import_all_kernels()
 
@@ -425,10 +628,43 @@ def main() -> None:
             baseline_fn = make_cuda_baseline(args.kernel)
         else:
             baseline_fn = make_autotune_baseline(args.kernel)
+        correctness_fn = make_correctness_baseline(
+            args.kernel,
+            baseline_fn,
+            args.numerics_with_perf_baseline,
+        )
+
+        if args.numerics_only:
+            results = check_kernel_correctness(wrapper, correctness_fn)
+            if not results:
+                logger.warning(
+                    "No input cases generated for '%s'; skipping numerics check",
+                    args.kernel,
+                )
+                return
+            for r in results:
+                if r.passed:
+                    logger.info("Numerics check passed for case %s", r.case)
+                else:
+                    logger.error(
+                        "Numerics check FAILED for case %s: %s", r.case, r.error
+                    )
+            failed = [r for r in results if not r.passed]
+            if failed:
+                logger.error(
+                    "%d/%d case(s) failed numerics for '%s'",
+                    len(failed),
+                    len(results),
+                    args.kernel,
+                )
+                sys.exit(1)
+            logger.info("Numerics check passed for all cases of '%s'", args.kernel)
+            return
 
         rows = benchmark(
             args.kernel,
             baseline_fn,
+            correctness_fn,
             args.repeat,
             args.cudagraph,
             args.return_mode,
@@ -442,6 +678,9 @@ def main() -> None:
                 {
                     "kernel": args.kernel,
                     "baseline": args.baseline,
+                    "numerics_baseline": (
+                        args.baseline if args.numerics_with_perf_baseline else "eager"
+                    ),
                     "cudagraph": args.cudagraph,
                     "repeat": args.repeat,
                     "return_mode": args.return_mode,

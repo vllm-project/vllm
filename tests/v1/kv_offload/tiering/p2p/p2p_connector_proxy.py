@@ -81,6 +81,8 @@ async def lifespan(app: FastAPI):
     app.state.decode_dp_iterator = itertools.cycle(range(global_args.decoder_dp_size))
 
     mode = "decoder-first" if global_args.decoder_first else "prefiller-first"
+    if global_args.p2p:
+        mode += ",p2p"
     pd_host = global_args.p2p_connector_host
     pd_port = global_args.p2p_connector_port
     n_pref = len(app.state.prefill_clients)
@@ -146,6 +148,14 @@ def parse_args():
         "waiting when KV blocks arrive (decoder-first mode)",
     )
     p.add_argument(
+        "--p2p",
+        action="store_true",
+        help="P2P mode: do not inject kv_transfer_params on the prefiller; "
+        "on the decoder, inject kv_transfer_params with a top-level "
+        "'remote_kv_source' block ({kv_request_id, remote_host, remote_port}) "
+        "instead of the default 'remote_prefiller' block.",
+    )
+    p.add_argument(
         "--prefiller-dp-size",
         type=int,
         default=1,
@@ -206,11 +216,14 @@ def _auth_headers(request_id: str) -> dict:
 async def _prefill(client_info, endpoint, req_data, request_id, dp_rank=None):
     """Send a prefill-only request (max_tokens=1) to the prefiller."""
     data = req_data.copy()
-    data["kv_transfer_params"] = {
-        "decode": {
-            "kv_request_id": request_id,
-        },
-    }
+    if global_args.p2p:
+        data.pop("kv_transfer_params", None)
+    else:
+        data["kv_transfer_params"] = {
+            "remote_decoder": {
+                "kv_request_id": request_id,
+            },
+        }
     data["stream"] = False
     data["max_tokens"] = 1
     data.pop("max_completion_tokens", None)
@@ -259,8 +272,9 @@ async def _handle_completions(api: str, request: Request):
         # Inject the prefiller's P2PConnector address so the decoder can pull
         # KV blocks from it. remote_port = base + prefill_rank targets the
         # replica that produced the KV (base+0 == base when dp=1).
+        decoder_key = "remote_kv_source" if global_args.p2p else "remote_prefiller"
         req_data["kv_transfer_params"] = {
-            "prefill": {
+            decoder_key: {
                 "kv_request_id": request_id,
                 "remote_host": global_args.p2p_connector_host,
                 "remote_port": global_args.p2p_connector_port + prefill_rank,
@@ -311,9 +325,10 @@ async def _handle_completions_decoder_first(api: str, request: Request):
         prefill_client = _get_next(request.app, "prefill")
         decode_client = _get_next(request.app, "decode")
 
+        decoder_key = "remote_kv_source" if global_args.p2p else "remote_prefiller"
         decode_data = req_data.copy()
         decode_data["kv_transfer_params"] = {
-            "prefill": {
+            decoder_key: {
                 "kv_request_id": request_id,
                 "remote_host": global_args.p2p_connector_host,
                 "remote_port": global_args.p2p_connector_port + prefill_rank,

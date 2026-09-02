@@ -299,8 +299,9 @@ class BenchmarkConfig:
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
     sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
-    sparse_mla_mha_mode: str = "auto"  # "auto" or "dense"
+    sparse_mla_mha_mode: str = "auto"  # "auto", "dense", or "masked"
     sparse_mla_dense_mha_max_seq_len: int | None = None
+    sparse_mla_masked_mha_max_seq_len: int | None = None
     sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 

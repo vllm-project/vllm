@@ -26,7 +26,7 @@ fn cache_dir() -> std::path::PathBuf {
 
 /// Download SPEED-Bench dataset from HuggingFace datasets-server API.
 /// Results are cached as JSON locally for subsequent runs.
-pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
+pub async fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
     let config_name = config.as_str();
 
     let dir = cache_dir();
@@ -42,7 +42,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
 
     tracing::info!(config = config_name, "downloading SPEED-Bench dataset");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| BenchError::Config(format!("Failed to build HTTP client: {e}")))?;
@@ -66,13 +66,14 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
         let max_retries = 3;
         let mut data: Option<serde_json::Value> = None;
         for attempt in 0..=max_retries {
-            let resp = match client.get(&url).send() {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     if attempt < max_retries {
-                        std::thread::sleep(std::time::Duration::from_secs(
+                        tokio::time::sleep(std::time::Duration::from_secs(
                             2 * (attempt as u64 + 1),
-                        ));
+                        ))
+                        .await;
                         continue;
                     }
                     return Err(BenchError::Config(format!(
@@ -82,7 +83,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
             };
 
             if resp.status().is_server_error() && attempt < max_retries {
-                std::thread::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1)));
+                tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt as u64 + 1))).await;
                 continue;
             }
 
@@ -93,7 +94,7 @@ pub fn download_speed_bench(config: SpeedBenchConfig) -> Result<String> {
                 )));
             }
 
-            data = Some(resp.json().map_err(|e| {
+            data = Some(resp.json().await.map_err(|e| {
                 BenchError::Config(format!("Failed to parse SPEED-Bench API response: {e}"))
             })?);
             break;

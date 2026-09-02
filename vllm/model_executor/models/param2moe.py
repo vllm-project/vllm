@@ -32,7 +32,9 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -325,7 +327,7 @@ class Param2MoEMoEBlock(nn.Module):
         else:
             self.shared_experts = None  # type: ignore[assignment]
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -342,7 +344,7 @@ class Param2MoEMoEBlock(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
         )
 
-    def maybe_get_fused_moe(self) -> FusedMoE:
+    def maybe_get_fused_moe(self) -> FusedMoEFactory:
         return self.experts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -647,15 +649,14 @@ class Param2MoEForCausalLM(
 
         self.tie_word_embeddings: bool = getattr(config, "tie_word_embeddings", False)
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if self.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()

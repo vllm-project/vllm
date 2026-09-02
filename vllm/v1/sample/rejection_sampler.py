@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.logger import init_logger
 from vllm.model_executor.triton_dispatcher import pluggable_kernel
 from vllm.triton_utils import tl, triton
@@ -68,10 +69,7 @@ class RejectionSampler(nn.Module):
         self.sampler = sampler
         self.use_fp64_gumbel = getattr(sampler, "use_fp64_gumbel", False)
         logprobs_mode = self.sampler.logprobs_mode
-        self.is_processed_logprobs_mode = logprobs_mode in (
-            "processed_logprobs",
-            "processed_logits",
-        )
+        self.is_processed_logprobs_mode = logprobs_mode in PROCESSED_LOGPROBS_MODES
         self.is_logits_logprobs_mode = logprobs_mode in (
             "raw_logits",
             "processed_logits",

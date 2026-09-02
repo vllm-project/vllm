@@ -36,6 +36,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
+        use_all2all: bool = False,
     ):
         super().__init__(
             cpu_group,
@@ -44,19 +45,28 @@ class CudaCommunicator(DeviceCommunicatorBase):
             unique_name,
             global_ranks,
             global_world_size,
+            use_all2all=use_all2all,
         )
         if "tp" not in unique_name:
             # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
+            use_flashinfer_pcie_ipc_allreduce = False
             use_aiter_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            # FlashInfer all-reduce does not provide a fixed reduction order.
+            use_flashinfer_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+            )
+            use_flashinfer_pcie_ipc_allreduce = (
+                envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
+                and not envs.VLLM_BATCH_INVARIANT
+            )
             use_aiter_allreduce = use_custom_allreduce and bool(
                 rocm_aiter_ops.is_custom_all_reduce_enabled()
             )
@@ -64,6 +74,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
 
         # lazy import to avoid documentation build error
@@ -72,6 +83,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
+        )
+        from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (  # noqa: E501
+            FlashInferPcieIpcAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -92,6 +106,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
         self.aiter_ar_comm: AiterCustomAllreduce | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
@@ -103,6 +118,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.use_flashinfer_allreduce and self.world_size > 1:
             self.fi_ar_comm = FlashInferAllReduce(
                 group=self.cpu_group,
+                device=self.device,
+            )
+
+        if (
+            self.use_flashinfer_pcie_ipc_allreduce
+            and self.world_size > 1
+            and self.device_group is not None
+        ):
+            self.fi_pcie_ipc_ar_comm = FlashInferPcieIpcAllReduce(
+                group=self.device_group,
+                tune_group=self.cpu_group,
                 device=self.device,
             )
 
@@ -215,15 +241,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "FLASHINFER_PCIE_IPC",
+            "FLASHINFER",
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
-            "FLASHINFER",
             "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if (
+            self.fi_pcie_ipc_ar_comm is not None
+            and not self.fi_pcie_ipc_ar_comm.disabled
+        ):
+            enabled_ar_backends.append("FLASHINFER_PCIE_IPC")
+        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
+            enabled_ar_backends.append("FLASHINFER")
         # Mirror the static preconditions of `should_nccl_symm_mem_allreduce`:
         # VLLM_BATCH_INVARIANT off, NCCL symm mem enabled, world_size meets
         # min_world_size, and world_size either has a tuned entry in
@@ -250,8 +284,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
         if self.qr_comm is not None and not self.qr_comm.disabled:
             enabled_ar_backends.append("QUICK_REDUCE")
-        if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
-            enabled_ar_backends.append("FLASHINFER")
         if self.aiter_ar_comm is not None and not self.aiter_ar_comm.disabled:
             enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
@@ -271,16 +303,23 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        fi_ar_comm = self.fi_ar_comm
+        use_fi_ar = (
+            fi_ar_comm is not None
+            and not fi_ar_comm.disabled
+            and fi_ar_comm.should_use_fi_ar(input_)
+        )
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
-        if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
-            self.pynccl_comm.world_size, input_
+        if (
+            self.pynccl_comm is not None
+            and not use_fi_ar
+            and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then the AITER or vLLM
-        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -290,12 +329,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = qr_comm.quick_all_reduce(input_)
             assert out is not None
             return out
-        fi_ar_comm = self.fi_ar_comm
-        if (
-            fi_ar_comm is not None
-            and not fi_ar_comm.disabled
-            and fi_ar_comm.should_use_fi_ar(input_)
-        ):
+        fi_pcie_ipc_ar_comm = self.fi_pcie_ipc_ar_comm
+        if fi_pcie_ipc_ar_comm is not None and fi_pcie_ipc_ar_comm.should_use(input_):
+            return fi_pcie_ipc_ar_comm.all_reduce(input_)
+        if use_fi_ar:
+            assert fi_ar_comm is not None
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
@@ -337,6 +375,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = input_.clone()
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
+
+    def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_all_gather(input_.contiguous())
+
+    def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_reduce_scatter(input_.contiguous())
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
@@ -434,7 +484,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
+            if use_deterministic_rs:
+                # Reduce to a fixed root (0) for determinism
+                reduced = torch.empty_like(input_tensor)
+                sizes = sizes if sizes else [chunk_size] * world_size
+                pynccl_comm.reduce(reduced, input_tensor, root=0)
+                pynccl_comm.scatter(output, reduced, sizes, root=0)
+            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)
@@ -567,9 +624,36 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
+        if self.fi_pcie_ipc_ar_comm is not None:
+            self.fi_pcie_ipc_ar_comm.destroy()
+            self.fi_pcie_ipc_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
+
+    def suspend(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.suspend()
+
+    def resume(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.resume()
+
+    def checkpoint_prepare(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_restore()
 
     def all_gatherv(
         self,
