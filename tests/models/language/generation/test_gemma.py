@@ -10,7 +10,10 @@ import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models import gemma
-from vllm.model_executor.models.gemma3n import Gemma3nTextModel
+from vllm.model_executor.models.gemma3n import (
+    Gemma3nTextModel,
+    _kv_sharing_weights_mapper,
+)
 from vllm.model_executor.models.gemma4 import Gemma4Model
 
 MODELS = ["google/gemma-2b", "google/gemma-2-2b", "google/gemma-3-4b-it"]
@@ -54,50 +57,64 @@ def test_checkpoint_lm_head_can_override_tied_config(monkeypatch) -> None:
 
 
 @pytest.mark.cpu_test
-def test_gemma4_kv_shared_k_norm_marked_loaded_when_absent() -> None:
-    """Fine-tuned checkpoints omit k_norm on KV-shared layers; it must
-    still count as loaded."""
+def test_gemma4_kv_shared_layer_loads_plain_q_proj() -> None:
+    """KV-shared layers have q_proj instead of a packed qkv_proj; their
+    redundant K/V tensors in original checkpoints have no parameter and are
+    skipped rather than failing the load."""
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(num_experts=0)
+    model.start_layer, model.end_layer = 0, 2
+    model.layers = torch.nn.ModuleList([torch.nn.Module(), torch.nn.Module()])
+    for layer in model.layers:
+        layer.self_attn = torch.nn.Module()
+    model.layers[0].self_attn.qkv_proj = torch.nn.Linear(2, 6, bias=False)
+    model.layers[1].self_attn.q_proj = torch.nn.Linear(2, 2, bias=False)
+    shards: list[str] = []
+    model.layers[0].self_attn.qkv_proj.weight.weight_loader = (
+        lambda param, weight, shard_id: shards.append(shard_id)
+    )
 
-    class StubModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.config = SimpleNamespace()
-            self.start_layer = 0
-            self.end_layer = 4
-            self.layers = [
-                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared_layer=(i >= 2)))
-                for i in range(4)
-            ]
+    q_weight = torch.full((2, 2), 2.0)
+    weights = [
+        (f"layers.{i}.self_attn.{tensor}.weight", q_weight)
+        for i in (0, 1)
+        for tensor in ("q_proj", "k_proj", "v_proj")
+    ] + [("layers.1.self_attn.k_norm.weight", torch.ones(2))]
+    loaded = Gemma4Model.load_weights(cast(Gemma4Model, model), weights)
 
-    loaded = Gemma4Model.load_weights(cast(Gemma4Model, StubModel()), [])
-
-    assert loaded == {
-        "layers.2.self_attn.k_norm.weight",
-        "layers.3.self_attn.k_norm.weight",
-    }
+    assert shards == ["q", "k", "v"]
+    assert "layers.1.self_attn.q_proj.weight" in loaded
+    assert not any(name.startswith("layers.1.self_attn.k") for name in loaded)
+    assert not any(name.startswith("layers.1.self_attn.v") for name in loaded)
+    assert torch.equal(model.layers[1].self_attn.q_proj.weight, q_weight)
 
 
 @pytest.mark.cpu_test
-def test_gemma3n_kv_shared_k_norm_marked_loaded_when_absent() -> None:
-    """Gemma 3n has the same KV-shared k_norm pruning as Gemma 4."""
+def test_gemma3n_kv_shared_layer_mapper() -> None:
+    """Only non-shared layers pack q/k/v into qkv_proj; KV-shared layers keep
+    q_proj and drop the redundant K/V tensors original checkpoints ship."""
+    config = SimpleNamespace(num_hidden_layers=4, num_kv_shared_layers=2)
+    mapper = Gemma3nTextModel.hf_to_vllm_mapper | _kv_sharing_weights_mapper(config)
+    weights = [
+        (f"layers.{i}.self_attn.{tensor}.weight", torch.empty(0))
+        for i in (1, 3)
+        for tensor in ("q_proj", "k_proj", "v_proj", "k_norm", "o_proj")
+    ]
 
-    class StubModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.hf_to_vllm_mapper = Gemma3nTextModel.hf_to_vllm_mapper
-            self.start_layer = 0
-            self.end_layer = 4
-            self.layers = [
-                SimpleNamespace(self_attn=SimpleNamespace(is_kv_shared_layer=(i >= 2)))
-                for i in range(4)
-            ]
+    mapped = [
+        (name, getattr(weight, "shard_id", None))
+        for name, weight in mapper.apply(weights)
+    ]
 
-    loaded = Gemma3nTextModel.load_weights(cast(Gemma3nTextModel, StubModel()), [])
-
-    assert loaded == {
-        "layers.2.self_attn.k_norm.weight",
-        "layers.3.self_attn.k_norm.weight",
-    }
+    assert mapped == [
+        ("layers.1.self_attn.qkv_proj.weight", "q"),
+        ("layers.1.self_attn.qkv_proj.weight", "k"),
+        ("layers.1.self_attn.qkv_proj.weight", "v"),
+        ("layers.1.self_attn.k_norm.weight", None),
+        ("layers.1.self_attn.o_proj.weight", None),
+        ("layers.3.self_attn.q_proj.weight", None),
+        ("layers.3.self_attn.o_proj.weight", None),
+    ]
 
 
 @pytest.mark.parametrize("model", MODELS)

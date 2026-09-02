@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
@@ -911,22 +911,6 @@ def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
         )
 
     return make_empty_intermediate_tensors
-
-
-def mark_kv_shared_k_norms_loaded(
-    loaded_params: set[str],
-    layers: Sequence[nn.Module],
-    start_layer: int,
-    end_layer: int,
-) -> None:
-    """Mark k_norm on KV-shared layers as loaded.
-
-    transformers doesn't create k_norm on KV-shared layers,
-    so fine-tuned checkpoints omit the unused weight.
-    """
-    for i in range(start_layer, end_layer):
-        if getattr(layers[i].self_attn, "is_kv_shared_layer", False):
-            loaded_params.add(f"layers.{i}.self_attn.k_norm.weight")
 
 
 def maybe_prefix(prefix: str, name: str) -> str:
