@@ -54,15 +54,13 @@ class RoutedExpertsArtifactBuffer:
     def _tail(self, request_id: Hashable, block_start: int) -> _RequestTail:
         tail = self._requests.get(request_id)
         if tail is not None:
-            if tail.block_start != block_start:
-                raise RuntimeError(
-                    "artifact capture skipped an incomplete block: "
-                    f"request={request_id}, expected={tail.block_start}, "
-                    f"actual={block_start}"
-                )
+            assert tail.block_start == block_start, (
+                "artifact capture skipped an incomplete block: "
+                f"request={request_id}, expected={tail.block_start}, "
+                f"actual={block_start}"
+            )
             return tail
-        if not self._free_slots:
-            raise RuntimeError("artifact block pool is exhausted")
+        assert self._free_slots, "artifact block pool is exhausted"
         tail = _RequestTail(self._free_slots.pop(), block_start)
         self._requests[request_id] = tail
         return tail
@@ -72,8 +70,9 @@ class RoutedExpertsArtifactBuffer:
     ) -> list[tuple[int, np.ndarray]]:
         """Stage rows and return completed blocks without retaining them."""
         rows = np.asarray(rows)
-        if rows.shape[1:] != self.shape_per_token or rows.dtype != self.dtype:
-            raise RuntimeError("routed-experts capture profile changed")
+        assert rows.shape[1:] == self.shape_per_token and rows.dtype == self.dtype, (
+            "routed-experts capture profile changed"
+        )
         if token_start < 0:
             raise ValueError("artifact token start must be non-negative")
 
@@ -95,12 +94,11 @@ class RoutedExpertsArtifactBuffer:
                 continue
 
             tail = self._tail(request_id, block_start)
-            if local_start != tail.length:
-                raise RuntimeError(
-                    "artifact capture is not contiguous: "
-                    f"request={request_id}, expected={block_start + tail.length}, "
-                    f"actual={position}"
-                )
+            assert local_start == tail.length, (
+                "artifact capture is not contiguous: "
+                f"request={request_id}, expected={block_start + tail.length}, "
+                f"actual={position}"
+            )
             count = min(self.block_size - local_start, len(rows) - offset)
             if count == 1:
                 self._rows[tail.slot, local_start] = rows[offset]
@@ -122,24 +120,21 @@ class RoutedExpertsArtifactBuffer:
         self, request_id: Hashable, token_start: int, token_end: int
     ) -> np.ndarray:
         tail = self._requests.get(request_id)
-        if tail is None:
-            raise RuntimeError(f"artifact buffer is missing request {request_id}")
+        assert tail is not None, f"artifact buffer is missing request {request_id}"
         local_start = token_start - tail.block_start
         local_end = token_end - tail.block_start
-        if local_start < 0 or local_end > tail.length or local_start >= local_end:
-            raise RuntimeError(
-                "artifact range is unavailable: "
-                f"request={request_id}, range=[{token_start}, {token_end}), "
-                f"available=[{tail.block_start}, {tail.block_start + tail.length})"
-            )
+        assert 0 <= local_start < local_end <= tail.length, (
+            "artifact range is unavailable: "
+            f"request={request_id}, range=[{token_start}, {token_end}), "
+            f"available=[{tail.block_start}, {tail.block_start + tail.length})"
+        )
         return self._rows[tail.slot, local_start:local_end].copy()
 
     def retain_block(self, rows: np.ndarray) -> np.ndarray:
         """Retain one unkeyed block after the current capture call."""
         if id(rows) in self._owned_slots:
             return rows
-        if not self._free_slots:
-            raise RuntimeError("artifact block pool is exhausted")
+        assert self._free_slots, "artifact block pool is exhausted"
         slot = self._free_slots.pop()
         retained = self._rows[slot]
         retained[...] = rows
