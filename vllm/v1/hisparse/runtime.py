@@ -874,7 +874,6 @@ class HiSparseCacheHandle:
         self.num_actual_tokens = 0
         self.num_decode_tokens = 0
         self.req_id_per_token: torch.Tensor | None = None
-        self.row_mirror_enabled = True
         self.host_mirror_required = False
         self.mirror_slot_mapping: torch.Tensor | None = None
         self.mirror_staging_cache: torch.Tensor | None = None
@@ -905,10 +904,8 @@ class HiSparseCacheHandle:
             and attn_metadata.max_query_len == 1
             and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
         )
-        self.host_mirror_required = (
-            self.row_mirror_enabled
-            and attn_metadata is not None
-            and (not self.decode_batch or self.runtime.eager_host_mirror)
+        self.host_mirror_required = attn_metadata is not None and (
+            not self.decode_batch or self.runtime.eager_host_mirror
         )
 
     def write_target(

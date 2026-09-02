@@ -47,6 +47,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
+    row_mirrors_from_resident: bool = False
 
 
 @dataclass
@@ -75,10 +76,10 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
 class HiSparseConnectorScheduler:
     def __init__(
-        self, coordinator: HiSparseCoordinator, *, row_mirror_enabled: bool
+        self, coordinator: HiSparseCoordinator, *, async_speculative: bool
     ) -> None:
         self.coordinator = coordinator
-        self.row_mirror_enabled = row_mirror_enabled
+        self.async_speculative = async_speculative
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -122,21 +123,39 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
+        row_mirrors_from_resident = self.async_speculative and any(
+            scheduler_output.num_output_placeholders.get(request_id, 0)
+            for request_id in scheduler_output.num_scheduled_tokens
+        )
         row_mirrors = {}
-        if self.row_mirror_enabled:
-            for (
-                request_id,
-                scheduled_count,
-            ) in scheduler_output.num_scheduled_tokens.items():
-                row_mirrors[request_id] = self.coordinator.build_row_mirrors(
-                    ((request_id, num_computed_tokens[request_id], scheduled_count),),
+        for (
+            request_id,
+            scheduled_count,
+        ) in scheduler_output.num_scheduled_tokens.items():
+            scheduled_start = num_computed_tokens[request_id]
+            mirror_start = scheduled_start
+            if self.async_speculative:
+                mirror_start = max(
+                    0,
+                    scheduled_start
+                    - scheduler_output.num_output_placeholders.get(request_id, 0),
                 )
+            row_mirrors[request_id] = self.coordinator.build_row_mirrors(
+                (
+                    (
+                        request_id,
+                        mirror_start,
+                        scheduled_count + scheduled_start - mirror_start,
+                    ),
+                ),
+            )
         return HiSparseConnectorMetadata(
             command,
             host_block_copies,
             tuple(source_block_ids),
             row_mirrors,
             self.coordinator.all_context_pages_resident(scheduled_requests),
+            row_mirrors_from_resident=row_mirrors_from_resident,
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -176,7 +195,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError("HiSparse scheduler requires a coordinator.")
             self.connector_scheduler = HiSparseConnectorScheduler(
                 coordinator,
-                row_mirror_enabled=not (
+                async_speculative=bool(
                     vllm_config.scheduler_config.async_scheduling
                     and vllm_config.speculative_config is not None
                 ),

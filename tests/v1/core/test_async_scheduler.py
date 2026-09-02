@@ -145,6 +145,19 @@ def test_abort():
         assert req.num_output_tokens == abort_order_copy.index(i)
 
 
+def test_scheduler_output_snapshots_unresolved_output_positions():
+    """Connectors must see positions that async scheduling advanced optimistically."""
+    scheduler = create_scheduler(async_scheduling=True)
+    (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=4)
+    scheduler.add_request(request)
+
+    first = scheduler.schedule()
+    second = scheduler.schedule()
+
+    assert first.num_output_placeholders == {request.request_id: 0}
+    assert second.num_output_placeholders == {request.request_id: 1}
+
+
 def test_preempt():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)

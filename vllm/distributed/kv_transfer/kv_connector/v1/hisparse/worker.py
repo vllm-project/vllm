@@ -122,10 +122,6 @@ class HiSparseConnectorWorker:
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.row_mirror_enabled = not (
-            vllm_config.scheduler_config.async_scheduling
-            and vllm_config.speculative_config is not None
-        )
         self._initialized = False
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -252,8 +248,6 @@ class HiSparseConnectorWorker:
             partial(self._enqueue_layer_mirror, layer_index)
             for layer_index in range(len(cache_handles))
         )
-        for handle in cache_handles:
-            handle.row_mirror_enabled = self.row_mirror_enabled
         self._initialized = True
 
     def set_request_state_indices(self, indices: torch.Tensor) -> None:
@@ -318,6 +312,7 @@ class HiSparseConnectorWorker:
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
         self._set_row_mirrors(mirrors)
+        self._row_mirrors_from_resident = metadata.row_mirrors_from_resident
         self._dma_submitted = False
         self._per_layer_mirrored.clear()
         self._submitted_mirror_layers.clear()
@@ -467,10 +462,12 @@ class HiSparseConnectorWorker:
         self._row_mirror_num_rows = int(self._row_mirror_counts.sum())
 
     def _require_row_mirrors(self, num_rows: int) -> tuple[SparseKVRowMirror, ...]:
-        if self._row_mirror_num_rows != num_rows:
+        mirror_rows = self._row_mirror_num_rows
+        from_resident = getattr(self, "_row_mirrors_from_resident", False)
+        if mirror_rows < num_rows or (not from_resident and mirror_rows != num_rows):
             raise RuntimeError(
                 "HiSparse DMA metadata does not match the forward: "
-                f"{self._row_mirror_num_rows} rows for {num_rows} tokens."
+                f"{mirror_rows} rows for {num_rows} tokens."
             )
         return self._row_mirrors
 
@@ -490,6 +487,9 @@ class HiSparseConnectorWorker:
         destination_starts = self._row_mirror_destination_starts
         row_counts = self._row_mirror_counts
         decode_batch = self.cache_handles[layer_indices[0]].decode_batch
+        from_resident = decode_batch or getattr(
+            self, "_row_mirrors_from_resident", False
+        )
         staging_starts = np.cumsum(row_counts, dtype=np.int64) - row_counts
         for descriptor_offset, layer_index in enumerate(layer_indices):
             cache = self.cache_handles[layer_index]
@@ -498,12 +498,12 @@ class HiSparseConnectorWorker:
                 raise RuntimeError("HiSparse row DMA source index is out of range.")
             source_rows = (
                 self._row_mirror_source_starts[:, source_index]
-                if decode_batch
+                if from_resident
                 else staging_starts
             )
             source = (
                 self.resident_caches[layer_index]
-                if decode_batch
+                if from_resident
                 else self.mirror_caches[layer_index]
             )
             destination = self.host_caches[layer_index]
@@ -519,7 +519,7 @@ class HiSparseConnectorWorker:
             source_out_of_range = np.any(source_blocks < 0) or np.any(
                 source_blocks >= source.shape[0]
             )
-            if decode_batch:
+            if from_resident:
                 source_out_of_range |= np.any(
                     source_row_offsets + row_counts > self.kernel_block_size
                 )
@@ -590,7 +590,7 @@ class HiSparseConnectorWorker:
     def _enqueue_pre_forward_transfers(
         self, transfers: list[SparseKVPageTransfer]
     ) -> None:
-        if self.row_mirror_enabled and self.cache_handles[0].runtime.eager_host_mirror:
+        if self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
             self._enqueue_transfers(transfers)
@@ -754,7 +754,7 @@ class HiSparseConnectorWorker:
         transfers = self._post_forward_transfers
         self._post_forward_transfers = []
         self._enqueue_host_mirror(self._forward_ready_event)
-        if self.row_mirror_enabled and self.cache_handles[0].runtime.eager_host_mirror:
+        if self.cache_handles[0].runtime.eager_host_mirror:
             self._record_transfer_completion(transfers)
         else:
             self._enqueue_transfers(transfers)
