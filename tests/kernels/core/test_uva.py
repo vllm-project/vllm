@@ -86,7 +86,9 @@ def test_non_pinned_cpu_tensor(device):
 
 
 @pytest.mark.skipif(not is_uva_available(), reason="UVA is not available.")
-@pytest.mark.skipif(not current_platform.is_xpu(), reason="XPU non-contiguous UVA test.")
+@pytest.mark.skipif(
+    not current_platform.is_xpu(), reason="XPU non-contiguous UVA test."
+)
 @pytest.mark.parametrize("pinned", [False, True])
 @pytest.mark.parametrize("device", DEVICES)
 def test_non_contiguous_strided_view(device, pinned):
