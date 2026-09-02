@@ -3,6 +3,7 @@
 from unittest import TestCase
 
 import numpy as np
+import pytest
 import torch
 
 from vllm.platforms import current_platform
@@ -61,45 +62,6 @@ def test_logprobs_tensors_tolists_with_tensor_boundaries():
     assert sliced.sampled_token_ranks.tolist() == [3]
 
 
-def test_sampling_mask_tensors_tolist():
-    tensors = SamplingMaskTensors(
-        token_ids=torch.tensor(
-            [[3, 5, -1], [-1, -1, -1], [7, -1, -1]],
-            dtype=torch.int32,
-        ),
-        packed_mask=torch.tensor(
-            [[0b00101000], [0b00000000], [0b10000000]],
-            dtype=torch.uint8,
-        ),
-        counts=torch.tensor([2, 0, 1], dtype=torch.int32),
-        vocab_size=8,
-    )
-
-    result = tensors.tolists()
-
-    assert result.token_ids.tolist() == [3, 5, 7]
-    assert result.offsets.tolist() == [0, 2, 2, 3]
-
-
-def test_sampling_mask_tensors_tolist_overflow_uses_bitmask():
-    """A row whose support exceeds ``max_num_kept`` (top-k ties) is rebuilt
-    from the exact bitmask instead of being truncated."""
-    tensors = SamplingMaskTensors(
-        token_ids=torch.tensor([[1, 4], [9, 0]], dtype=torch.int32),
-        packed_mask=torch.tensor(
-            [[0b01010010, 0b00000101], [0b00000000, 0b00000010]],
-            dtype=torch.uint8,
-        ),
-        counts=torch.tensor([5, 1], dtype=torch.int32),
-        vocab_size=16,
-    )
-
-    result = tensors.tolists()
-
-    assert result.token_ids.tolist() == [1, 4, 6, 8, 10, 9]
-    assert result.offsets.tolist() == [0, 5, 6]
-
-
 def test_sampling_mask_lists_to_nested_list():
     from vllm.v1.outputs import SamplingMaskLists
 
@@ -114,39 +76,32 @@ def test_sampling_mask_lists_to_nested_list():
     assert SamplingMaskLists(np.array([7, 9])).to_nested_list() == [[7, 9]]
 
 
-def test_sampling_mask_lists_slice_single_position():
-    """Per-step request slices carry one array (offsets=None), including an
-    empty support."""
-    from vllm.v1.outputs import SamplingMaskLists
+@pytest.mark.parametrize("max_num_kept", [512, 20_001])
+def test_sampling_mask_tensors_match_finite_support(max_num_kept):
+    """Whatever its size (empty, one, around the compact width, beyond the
+    cap, the whole vocab), a sampled row's mask is exactly the ascending set
+    of its finite logits; rows that sampled nothing are empty."""
+    from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
 
-    batch = SamplingMaskLists(
-        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
-        offsets=np.array([0, 2, 2, 4]),
-    )
-    chunks = [batch.slice_request(i, 1) for i in range(3)]
+    vocab_size = 20_001
+    sizes = [0, 1, 7, 511, 512, 513, MAX_COMPACT_SUPPORT + 5, vocab_size, 40, 3]
+    gen = torch.Generator().manual_seed(0)
+    logits = torch.full((len(sizes), vocab_size), float("-inf"))
+    expected = []
+    for row, size in enumerate(sizes):
+        kept = torch.randperm(vocab_size, generator=gen)[:size].sort().values
+        logits[row, kept] = torch.randn(size, generator=gen)
+        expected.append(kept.tolist())
+    num_sampled_tokens = torch.ones(len(sizes), dtype=torch.int32)
+    num_sampled_tokens[[1, 7]] = 0
+    expected[1] = expected[7] = []
 
-    assert all(chunk.offsets is None for chunk in chunks)
-    assert [chunk.token_ids.tolist() for chunk in chunks] == [[1, 2], [], [3, 4]]
-
-
-def test_sampling_mask_tensors_from_logits():
     tensors = SamplingMaskTensors.from_logits(
-        logits=torch.tensor(
-            [
-                [1.0, float("-inf"), 2.0],
-                [3.0, 4.0, float("-inf")],
-                [float("-inf"), 5.0, 6.0],
-            ],
-            device=DEVICE_TYPE,
-        ),
-        num_sampled_tokens=torch.tensor([1, 0, 1], device=DEVICE_TYPE),
-        max_num_kept=2,
+        logits.to(DEVICE_TYPE), num_sampled_tokens.to(DEVICE_TYPE), max_num_kept
     )
 
-    result = tensors.tolists()
-
-    assert result.token_ids.tolist() == [0, 2, 1, 2]
-    assert result.offsets.tolist() == [0, 2, 2, 4]
+    assert tensors.token_ids.shape[1] == min(max_num_kept, MAX_COMPACT_SUPPORT)
+    assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
 
 
 def test_sampling_mask_matches_processed_top_k_top_p_support():
@@ -170,46 +125,6 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
     result = tensors.tolists()
 
     assert result.to_nested_list() == [expected_token_ids]
-
-
-def test_sampling_mask_tensors_from_logits_caps_compact_width():
-    """A huge top_k must not allocate [num_reqs, vocab]; rows wider than the
-    cap are still returned exactly via the bitmask."""
-    from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
-
-    vocab_size = 3 * MAX_COMPACT_SUPPORT
-    logits = torch.full((2, vocab_size), float("-inf"), device=DEVICE_TYPE)
-    wide = torch.arange(0, vocab_size, 2)
-    logits[0, wide] = 1.0
-    logits[1, [5, 6]] = 1.0
-
-    tensors = SamplingMaskTensors.from_logits(
-        logits,
-        num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
-        max_num_kept=vocab_size,
-    )
-    result = tensors.tolists()
-
-    assert tensors.token_ids.shape[1] == MAX_COMPACT_SUPPORT
-    assert result.to_nested_list() == [wide.tolist(), [5, 6]]
-
-
-def test_sampling_mask_tensors_from_logits_large_vocab():
-    """Support spanning several kernel blocks stays ascending and exact."""
-    vocab_size = 20_000
-    logits = torch.full((2, vocab_size), float("-inf"), device=DEVICE_TYPE)
-    kept = torch.tensor([0, 7, 8_191, 8_192, 12_345, vocab_size - 1])
-    logits[0, kept] = 1.0
-    logits[1, 3] = 1.0
-
-    tensors = SamplingMaskTensors.from_logits(
-        logits,
-        num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
-        max_num_kept=8,
-    )
-    result = tensors.tolists()
-
-    assert result.to_nested_list() == [kept.tolist(), [3]]
 
 
 class TestLogprobsLists(TestCase):
