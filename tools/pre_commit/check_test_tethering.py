@@ -53,16 +53,22 @@ TESTS_DIR = REPO_ROOT / "tests"
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "test_tethering_allowlist.txt"
 
 # `pytest` options that take a value in the *next* token, so that token must not
-# be mistaken for a test path (e.g. `-k expr`, `--shard-id 3`).
+# be mistaken for a test path (e.g. `-k expr`, `--shard-id 3`). Options that only
+# ever take their value with `=` (`--cov=...`) don't belong here - a bare
+# `--cov` takes no value and would wrongly swallow the following test path.
 PYTEST_OPTIONS_WITH_VALUE = {
     "-k", "-m", "-p", "-n", "-c", "-o", "-W", "-r",
     "--shard-id", "--num-shards", "--dist", "--durations", "--maxfail",
-    "--timeout", "--rootdir", "--junitxml", "--cov", "--tb", "--deselect",
-    "--co", "--last-failed-no-failures",
+    "--timeout", "--rootdir", "--junitxml", "--tb",
 }  # fmt: skip
 
-# `pytest` options whose value is a path that is *removed* from collection.
-PYTEST_IGNORE_OPTIONS = {"--ignore", "--ignore-glob", "--deselect"}
+# `pytest` options whose value is a path that is *removed* from collection at
+# file granularity.
+PYTEST_IGNORE_OPTIONS = {"--ignore", "--ignore-glob"}
+
+# `--deselect` takes a value too, but it removes individual node IDs - a file
+# with one parametrization deselected is still collected and still "run".
+PYTEST_DESELECT_OPTION = "--deselect"
 
 PYTEST_COMMANDS = {"pytest", "py.test"}
 
@@ -118,8 +124,27 @@ def _token_is_test_path(token: str) -> bool:
 
 
 def _path_is_within(parent: str, path: str) -> bool:
-    """True if ``path`` is ``parent`` itself or nested underneath it."""
+    """True if ``path`` is ``parent`` itself or nested underneath it. A ``''`` /
+    ``'.'`` parent (a command run with no path arg) contains everything."""
+    if parent in ("", "."):
+        return True
     return path == parent or path.startswith(parent + "/")
+
+
+def _glob_match_path(pattern: str, path: str) -> bool:
+    """Like :func:`fnmatch.fnmatch`, but ``*`` and ``?`` do not match across a
+    ``/`` - the way the shell and ``pytest`` treat an unexpanded glob path
+    argument (``kernels/test_foo_*.py`` selects one directory, not the tree).
+    A ``**`` component keeps the cross-separator meaning."""
+    if not any(ch in pattern for ch in "*?["):
+        return pattern == path
+    if "**" in pattern:
+        return fnmatch.fnmatch(path, pattern)
+    pattern_parts = pattern.split("/")
+    path_parts = path.split("/")
+    return len(pattern_parts) == len(path_parts) and all(
+        fnmatch.fnmatch(part, glob) for part, glob in zip(path_parts, pattern_parts)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -146,12 +171,9 @@ class PytestSelection:
         """True if a single pytest path argument selects ``test_file`` - by
         exact match, by being a parent directory, or as a glob."""
         path_arg = normalize_test_path(path_arg)
-        if path_arg in ("", "."):
-            # bare `pytest` with no path: collects everything under the cwd
-            return True
         if _path_is_within(path_arg, test_file):
             return True
-        return fnmatch.fnmatch(test_file, path_arg)
+        return _glob_match_path(path_arg, test_file)
 
 
 @dataclass
@@ -195,10 +217,11 @@ def _glob_any(name: str, globs: list[str]) -> bool:
 def _parse_pytest_command(tokens: list[str]) -> PytestSelection:
     """Read a ``pytest ...`` invocation's tokens into a :class:`PytestSelection`.
 
-    Positional path args are the included paths; ``--ignore`` / ``--deselect``
-    values are the ignored paths. Value-taking options and their values, and
-    every other flag, are skipped. ``-k`` / ``-m`` filtering is intentionally
-    *not* modelled - a file that a marker expression narrows is still "run".
+    Positional path args are the included paths; ``--ignore`` / ``--ignore-glob``
+    values (and a bare-path ``--deselect``) are the ignored paths. Value-taking
+    options and their values, and every other flag, are skipped. ``-k`` / ``-m``
+    filtering is intentionally *not* modelled - a file that a marker expression
+    narrows is still "run".
     """
     selection = PytestSelection()
 
@@ -209,13 +232,18 @@ def _parse_pytest_command(tokens: list[str]) -> PytestSelection:
             break
 
     for token in tokens:
-        ignore_prefix = next(
-            (opt for opt in PYTEST_IGNORE_OPTIONS if token == opt), None
-        )
-        if ignore_prefix is not None:
+        if token in PYTEST_IGNORE_OPTIONS:
             selection.ignored_paths.append(next(tokens, ""))
         elif any(token.startswith(opt + "=") for opt in PYTEST_IGNORE_OPTIONS):
             selection.ignored_paths.append(token.split("=", 1)[1])
+        elif token == PYTEST_DESELECT_OPTION or token.startswith(
+            PYTEST_DESELECT_OPTION + "="
+        ):
+            value = token.split("=", 1)[1] if "=" in token else next(tokens, "")
+            # A `path::node_id` deselect leaves the file collected; only a
+            # bare-path deselect removes anything at file granularity.
+            if value and "::" not in value:
+                selection.ignored_paths.append(value)
         elif token in PYTEST_OPTIONS_WITH_VALUE:
             next(tokens, None)  # consume and discard the option's value
         elif token.startswith("-"):
@@ -247,9 +275,8 @@ def _parse_find_command(tokens: list[str]) -> FindSelection | None:
             glob = next(tokens, "").strip("'\"")
             (exclude_name_globs if negated else name_globs).append(glob)
         elif token == "-maxdepth":
-            max_depth = int(next(tokens, "0"))
-        elif token == "|":
-            break
+            depth = next(tokens, "")
+            max_depth = int(depth) if depth.isdigit() else None
         elif (
             root is None and not token.startswith("-") and token not in PYTEST_COMMANDS
         ):
@@ -270,7 +297,8 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
     if script_arg is None:
         return []
 
-    rel = script_arg.strip().strip("'\"").lstrip("./").replace("vllm-workspace/", "")
+    rel = script_arg.strip().strip("'\"").replace("/vllm-workspace/", "")
+    rel = rel.replace("vllm-workspace/", "").removeprefix("./").removeprefix("/")
     candidates = [REPO_ROOT / rel, TESTS_DIR / normalize_test_path(rel)]
     script_path = next((p for p in candidates if p.is_file()), None)
     if script_path is None or str(script_path) in visited:
@@ -285,60 +313,95 @@ def _parse_shell_script(tokens: list[str], visited: set[str]) -> list[Selection]
     return selections
 
 
+# Shell tokens (or runs of them) that separate one sub-command from the next.
+_SHELL_SEP_CHARS = set("|&;()<>")
+_RUNNER_KEYWORDS = PYTEST_COMMANDS | FILE_RUNNER_COMMANDS
+
+
+def _split_subcommands(command: str) -> list[list[str]]:
+    """Tokenize a shell line - honouring quotes - and split it at the shell
+    operators (``|``, ``||``, ``&&``, ``;``, subshell parens). A line that
+    cannot be tokenized (unbalanced quote, ...) yields nothing: better to miss a
+    selection than to misparse one. Splitting *after* tokenizing means an
+    operator inside a quoted argument stays part of that argument."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+
+    subcommands: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= _SHELL_SEP_CHARS:
+            subcommands.append([])
+        else:
+            subcommands[-1].append(token)
+    return [sub for sub in subcommands if sub]
+
+
+def _looks_like_command_string(token: str) -> bool:
+    """True for a single token that is itself a command line - e.g. a quoted
+    ``"pytest a.py && torchrun b.py"`` passed as an argument to a runner
+    script."""
+    return " " in token and any(word in _RUNNER_KEYWORDS for word in token.split())
+
+
+def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection]:
+    """Map one already-tokenized sub-command to the selections it implies:
+    find / pytest / ``bash <script>`` / direct file runner. Anything else
+    contributes nothing - better to miss a real selection than to invent
+    coverage that isn't there."""
+    if not tokens:
+        return []
+
+    is_find = "find" in tokens and any(t in ("-name", "-iname") for t in tokens)
+    if is_find:
+        find_selection = _parse_find_command(tokens)
+        return [find_selection] if find_selection is not None else []
+
+    if any(token in PYTEST_COMMANDS for token in tokens):
+        return [_parse_pytest_command(tokens)]
+
+    command_name = tokens[0].rsplit("/", 1)[-1]
+    if command_name in ("bash", "sh") or command_name.endswith(".sh"):
+        selections = _parse_shell_script(tokens, visited)
+        # Runner scripts (run-multi-node-test.sh, ...) take the real test
+        # commands as quoted string arguments - parse those too.
+        for arg in tokens[1:]:
+            if _looks_like_command_string(arg):
+                selections.extend(_parse_command(arg, visited))
+        return selections
+
+    # `python` / `torchrun` / `coverage <file>.py`, possibly after an env-var
+    # prefix - so search for the runner rather than assuming it is token 0.
+    runner_index = next(
+        (
+            i
+            for i, t in enumerate(tokens)
+            if t.rsplit("/", 1)[-1] in FILE_RUNNER_COMMANDS
+        ),
+        None,
+    )
+    if runner_index is not None:
+        run_paths = [t for t in tokens[runner_index + 1 :] if _token_is_test_path(t)]
+        if run_paths:
+            return [PytestSelection(included_paths=run_paths)]
+
+    return []
+
+
 def _parse_command(command: str, visited: set[str] | None = None) -> list[Selection]:
     """Turn one yaml ``commands:`` entry into the selections it implies.
 
-    The line is split on ``|``, ``&&`` and ``;`` so that, e.g., a ``find``
-    segment and a ``pytest`` segment on the same line are handled independently.
-    Each segment is classified as find / pytest / ``bash <script>`` / direct file
-    runner. A segment that matches none of those contributes nothing - it is
-    better to miss a real selection than to invent coverage that isn't there.
+    The line is tokenized (respecting quotes) and split into sub-commands at the
+    shell operators, and each sub-command is classified independently so that,
+    e.g., a ``find`` and a ``pytest`` on the same line are both handled.
     """
     visited = visited if visited is not None else set()
     selections: list[Selection] = []
-
-    for segment in command.replace("&&", "|").replace(";", "|").split("|"):
-        try:
-            tokens = shlex.split(segment, comments=True)
-        except ValueError:
-            continue
-        if not tokens:
-            continue
-
-        is_find = "find" in tokens and any(t in ("-name", "-iname") for t in tokens)
-        if is_find:
-            find_selection = _parse_find_command(tokens)
-            if find_selection is not None:
-                selections.append(find_selection)
-            continue
-
-        if any(token in PYTEST_COMMANDS for token in tokens):
-            selections.append(_parse_pytest_command(tokens))
-            continue
-
-        command_name = tokens[0].rsplit("/", 1)[-1]
-        if command_name in ("bash", "sh") or command_name.endswith(".sh"):
-            selections.extend(_parse_shell_script(tokens, visited))
-            continue
-
-        # `python` / `torchrun` / `coverage <file>.py`, possibly after an
-        # env-var prefix - so search for the runner rather than assuming it is
-        # the first token.
-        runner_index = next(
-            (
-                i
-                for i, t in enumerate(tokens)
-                if t.rsplit("/", 1)[-1] in FILE_RUNNER_COMMANDS
-            ),
-            None,
-        )
-        if runner_index is not None:
-            run_paths = [
-                t for t in tokens[runner_index + 1 :] if _token_is_test_path(t)
-            ]
-            if run_paths:
-                selections.append(PytestSelection(included_paths=run_paths))
-
+    for sub in _split_subcommands(command):
+        selections.extend(_classify_subcommand(sub, visited))
     return selections
 
 
