@@ -12,7 +12,6 @@ from vllm.utils.mem_utils import (
     cap_unified_memory_budget,
     limit_torch_allocator_to_budget,
     memory_profiling,
-    unified_memory_allocator_ceiling_bytes,
     unified_memory_host_reserve_bytes,
 )
 
@@ -177,43 +176,6 @@ def test_unified_memory_host_reserve_scales_with_pool():
         assert unified_memory_host_reserve_bytes(total) == 20 * GiB_bytes
 
 
-def test_allocator_ceiling_leaves_util_slice_at_low_util():
-    """At moderate util, (1-util)*total dominates the floor -> ceiling=util*total."""
-    total = 120 * GiB_bytes
-    with patch("vllm.utils.mem_utils.envs") as mock_envs:
-        mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
-        # (1-0.7)*120 = 36 GiB > 8 GiB floor -> ceiling = 120 - 36 = 84 GiB.
-        ceiling = unified_memory_allocator_ceiling_bytes(total, 0.7)
-    assert abs(ceiling - 84 * GiB_bytes) <= 2  # tolerate fp rounding on (1-util)
-
-
-def test_allocator_ceiling_uses_reserve_floor_at_high_util():
-    """At high util, the absolute reserve floor dominates (1-util)*total."""
-    total = 120 * GiB_bytes
-    with patch("vllm.utils.mem_utils.envs") as mock_envs:
-        mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
-        # (1-0.97)*120 = 3.6 GiB < 8 GiB floor -> ceiling = 120 - 8 = 112 GiB.
-        ceiling = unified_memory_allocator_ceiling_bytes(total, 0.97)
-    assert abs(ceiling - 112 * GiB_bytes) <= 2  # tolerate fp rounding
-
-
-def test_allocator_ceiling_is_at_or_above_budget():
-    """The host-safety ceiling must not clip the available-bounded KV budget."""
-    total = 120 * GiB_bytes
-    available = 100 * GiB_bytes
-    with (
-        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
-        patch("vllm.utils.mem_utils.envs") as mock_envs,
-    ):
-        mock_platform.is_integrated_gpu.return_value = True
-        mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
-        budget = cap_unified_memory_budget(
-            "cuda:0", math.ceil(total * 0.7), available, total
-        )
-        ceiling = unified_memory_allocator_ceiling_bytes(total, 0.7)
-    assert ceiling >= budget
-
-
 def test_cap_unified_memory_budget_noop_on_discrete_gpu():
     """Discrete GPUs keep the full util*total budget (independent pools)."""
     requested = 60 * GiB_bytes
@@ -299,3 +261,33 @@ def test_limit_torch_allocator_caps_fraction_on_integrated_gpu():
     fraction, index = mock_set.call_args.args
     assert index == 0
     assert abs(fraction - 0.7) < 1e-6
+
+
+def test_allocator_cap_tracks_capped_budget_on_busy_host():
+    """Regression: with ``available < util * total`` the allocator cap must not
+    exceed the available-bounded budget, or profiling could still run past the
+    host reserve. total=120 GiB, available=60 GiB, util=0.7, reserve=8 GiB:
+    budget is 52 GiB, and the allocator must be capped there, not at 84 GiB.
+    """
+    total = 120 * GiB_bytes
+    available = 60 * GiB_bytes
+    util = 0.7
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.envs") as mock_envs,
+        patch("torch.cuda.set_per_process_memory_fraction") as mock_set,
+    ):
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_envs.VLLM_UNIFIED_MEMORY_HOST_RESERVE_GB = 8.0
+        budget = cap_unified_memory_budget(
+            "cuda:0", math.ceil(total * util), available, total
+        )
+        applied = limit_torch_allocator_to_budget("cuda:0", budget, total)
+    assert budget == 52 * GiB_bytes
+    assert applied is True
+    mock_set.assert_called_once()
+    fraction, _ = mock_set.call_args.args
+    applied_ceiling = fraction * total
+    assert applied_ceiling <= budget + 1  # float rounding
+    assert applied_ceiling <= available - 8 * GiB_bytes
+    assert fraction < util
