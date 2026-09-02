@@ -148,7 +148,7 @@ fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
 fn load_lora_status(error: LoadLoraError) -> Status {
     let code = match &error {
         LoadLoraError::Disabled(_) => Code::FailedPrecondition,
-        LoadLoraError::InvalidRequest(_) => Code::InvalidArgument,
+        LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
             Code::Internal

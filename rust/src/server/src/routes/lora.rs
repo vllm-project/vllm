@@ -40,7 +40,7 @@ fn load_lora_api_error(error: LoadLoraError) -> ApiError {
     let message = error.to_report_string();
     match error {
         LoadLoraError::Disabled(_) => ApiError::invalid_request(message, None),
-        LoadLoraError::InvalidRequest(_) => ApiError::invalid_request(message, None),
+        LoadLoraError::InvalidAdapter { .. } => ApiError::invalid_request(message, None),
         LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => {
             ApiError::invalid_request(message, Some("lora_path"))
         }

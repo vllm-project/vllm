@@ -685,7 +685,7 @@ fn serve_args_reject_malformed_lora_module() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'alice' for '--lora-modules <MODULE>...': expected `name=path` or a JSON object: expected value at line 1 column 1
+        error: invalid value 'alice' for '--lora-modules <MODULE>...': expected `name=path`, got `alice`
 
         For more information, try '--help'.
     "#]].assert_eq(&error.to_string());

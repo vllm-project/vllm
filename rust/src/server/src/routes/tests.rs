@@ -1018,6 +1018,35 @@ async fn static_lora_module_fails_when_engine_rejects_it() {
     assert!(state.served_lora_requests().await.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_rejects_empty_name_or_path() {
+    // The JSON form of `--lora-modules` is not validated at parse time; the
+    // manager rejects empty fields before any engine RPC.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        ready,
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+
+    for (name, path) in [("", "org/alice"), ("alice", "")] {
+        let module = LoraModulePath {
+            name: name.to_string(),
+            path: path.to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let error = state.load_static_lora(&module).await.expect_err("empty field");
+        assert!(
+            matches!(error, LoadLoraError::InvalidAdapter { .. }),
+            "{error:?}"
+        );
+    }
+}
+
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
     test_app_with_stream_output_specs(default_stream_output_specs()).await
 }

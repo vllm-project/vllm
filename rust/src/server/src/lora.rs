@@ -9,7 +9,7 @@ use thiserror::Error;
 use thiserror_ext::Macro;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::config::LoraModulePath;
 
@@ -105,12 +105,12 @@ pub(crate) struct LoraManager {
 #[error("engine was not started with LoRA enabled")]
 pub(crate) struct LoraDisabledError;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
 pub(crate) enum LoadLoraError {
     #[error(transparent)]
     Disabled(#[from] LoraDisabledError),
-    #[error(transparent)]
-    InvalidRequest(#[from] LoraRequestError),
+    #[error("{message}")]
+    InvalidAdapter { message: String },
     #[error(transparent)]
     PathAccess(#[from] LoraPathAccessError),
     #[error("LoRA adapter `{lora_name}` is already loaded")]
@@ -225,6 +225,12 @@ impl LoraManager {
             base_model_name,
             is_3d_lora_weight,
         } = module;
+        if lora_name.trim().is_empty() {
+            bail_invalid_adapter!("lora_name must not be empty");
+        }
+        if lora_path.trim().is_empty() {
+            bail_invalid_adapter!("lora_path must not be empty");
+        }
         let _guard = self.update_lock.lock().await;
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
@@ -237,15 +243,15 @@ impl LoraManager {
 
         let lora_int_id = existing_lora_int_id
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let mut lora_request = LoraRequest::new(
-            lora_name.clone(),
+        let lora_request = LoraRequest {
+            lora_name: lora_name.clone(),
             lora_int_id,
             lora_path,
+            base_model_name,
+            tensorizer_config_dict: None,
             load_inplace,
             is_3d_lora_weight,
-        )
-        .map_err(LoadLoraError::InvalidRequest)?;
-        lora_request.base_model_name = base_model_name;
+        };
         drop(requests);
 
         let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
