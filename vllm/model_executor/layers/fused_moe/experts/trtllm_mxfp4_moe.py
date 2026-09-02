@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -363,9 +362,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> None:
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         trtllm_fp4_block_scale_routed_moe(
-            topk_ids=packed_tensor,
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
@@ -417,6 +415,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        topk_ids = topk_ids.to(dtype=torch.int32)
+
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         local_expert_offset = self.moe_config.ep_rank * local_num_experts

@@ -1,12 +1,50 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable, Mapping
+from fnmatch import fnmatch
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import regex as re
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
+
+def get_quark_ocp_mx_group_size(
+    quant_config: "QuantizationConfig | None",
+    layer_name: str,
+) -> int | None:
+    """Return the OCP MX group size for a quantized Quark linear layer."""
+    if quant_config is None:
+        return None
+
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
+
+    if not isinstance(quant_config, QuarkConfig):
+        return None
+
+    if should_ignore_layer(
+        layer_name,
+        ignore=quant_config.quant_config.get("exclude") or [],
+        fused_mapping=quant_config.packed_modules_mapping,
+    ):
+        return None
+
+    layer_quant_config = (
+        quant_config.get_layer_quant_config_from_name(layer_name)
+        or quant_config.quant_config.get("global_quant_config")
+        or {}
+    )
+    weight_quant = layer_quant_config.get("weight")
+    input_quant = layer_quant_config.get("input_tensors")
+    if not quant_config._is_w_ocp_mx_a_x(weight_quant, input_quant):
+        return None
+
+    assert weight_quant is not None
+    return int(weight_quant["group_size"])
 
 
 def is_shared_expert_quant_fse_compatible(
@@ -32,7 +70,11 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+    )
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
     if isinstance(quant_config, DeepseekV4FP8Config):
@@ -99,15 +141,27 @@ def is_shared_expert_quant_fse_compatible(
         )
 
     if isinstance(quant_config, QuarkConfig):
+        from vllm.model_executor.layers.quantization.quark.utils import (
+            should_ignore_layer,
+        )
+
         # TODO: layer_type_quant_config is not taken into account here.
         assert "exclude" in quant_config.quant_config
         assert "global_quant_config" in quant_config.quant_config
 
-        is_compatible = not any(
-            "shared_expert" in str(entry)
-            for entry in quant_config.quant_config["exclude"]
+        exclude = quant_config.quant_config["exclude"]
+
+        # should_ignore_layer raises a rightful ValueError in case different shards
+        # have a different ignore policy, as unsupported.
+        is_excluded = any(
+            should_ignore_layer(
+                f"{shared_expert_prefix}.{projection_name}",
+                ignore=exclude,
+                fused_mapping=quant_config.packed_modules_mapping,
+            )
+            for projection_name in projection_names
         )
-        if not is_compatible:
+        if is_excluded:
             return False, f"Quark excludes shared experts at {shared_expert_prefix}"
 
         global_quant_config = quant_config.quant_config["global_quant_config"]
@@ -144,6 +198,46 @@ def is_shared_expert_quant_fse_compatible(
             f"shared experts at {shared_expert_prefix}",
         )
 
+    if isinstance(quant_config, Fp8Config):
+        if quant_config.store_dtype is not None:
+            return (
+                False,
+                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                f"is not supported for fused shared experts at "
+                f"{shared_expert_prefix}",
+            )
+
+        # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
+        # the shared-expert weight chunker cannot slice into the appended expert
+        # slots; online FP8 is simply untested. Both lack a weight block size.
+        if quant_config.weight_block_size is None:
+            return (
+                False,
+                "FP8 shared-expert FSE is only implemented for block-quantized "
+                "checkpoints",
+            )
+
+        def is_ignored(layer_name: str) -> bool:
+            return is_layer_skipped(
+                prefix=layer_name,
+                ignored_layers=quant_config.ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+
+        expert_ignored = is_ignored(expert_prefix)
+        if any(
+            is_ignored(f"{shared_expert_prefix}.{projection_name}") != expert_ignored
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "FP8 ignores routed and shared experts inconsistently at "
+                f"{shared_expert_prefix}",
+            )
+
+        return True, None
+
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
     # quantization config. This may be refactored as part of QuantizationConfig later.
@@ -153,3 +247,76 @@ def is_shared_expert_quant_fse_compatible(
         "shared-expert FSE quantization compatibility is not implemented for "
         f"{type(quant_config).__name__}",
     )
+
+
+def find_matching_patterns(
+    layer_name: str,
+    patterns: Iterable[str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    use_fnmatch: bool = False,
+) -> list[set[str]]:
+    """Return matching patterns for a layer or each shard of a fused layer.
+
+    A pattern matching the fused layer directly takes precedence. Otherwise,
+    return one set of matching patterns for every shard.
+    """
+    patterns = list(patterns)
+    matches = [
+        pattern
+        for pattern in patterns
+        if is_equal_or_regex_match(layer_name, pattern, use_fnmatch=use_fnmatch)
+    ]
+    if matches:
+        return [set(matches)]
+
+    proj_name = layer_name.split(".")[-1]
+    if proj_name not in fused_mapping:
+        return [set()]
+
+    shard_names = [
+        layer_name.replace(proj_name, shard_proj_name)
+        for shard_proj_name in fused_mapping[proj_name]
+    ]
+    per_shard_matches = [
+        {
+            pattern
+            for pattern in patterns
+            if is_equal_or_regex_match(shard_name, pattern, use_fnmatch=use_fnmatch)
+        }
+        for shard_name in shard_names
+    ]
+    return per_shard_matches
+
+
+def get_layer_name_after_index(layer_name: str) -> str:
+    """Return the suffix following the final numeric component of a layer name."""
+    parts = layer_name.split(".")
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index].isdigit():
+            return ".".join(parts[index + 1 :])
+    return layer_name
+
+
+def is_equal_or_regex_match(
+    value: str,
+    target: str,
+    check_contains: bool = False,
+    use_fnmatch: bool = False,
+) -> bool:
+    """
+    Checks whether a value is exactly equal or a regex match for target
+    if target starts with 're:'. If check_contains is set to True,
+    additionally checks if the target string is contained within the value.
+    If use_fnmatch is set, supports shell-style patterns in target.
+    """
+
+    if target.startswith("re:"):
+        pattern = target[3:]
+        if re.match(pattern, value):
+            return True
+    elif check_contains:
+        if target.lower() in value.lower():
+            return True
+    elif target == value or use_fnmatch and fnmatch(value, target):
+        return True
+    return False

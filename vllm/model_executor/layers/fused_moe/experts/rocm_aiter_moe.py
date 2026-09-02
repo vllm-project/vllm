@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -28,6 +29,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
 )
+
+if TYPE_CHECKING:
+    from aiter import ActivationType
 
 
 class QuantMethod(IntEnum):
@@ -253,6 +257,7 @@ def rocm_aiter_fused_experts(
 
     # Gate/up interleave hint; only the SWIGLUOAI activations override it.
     activation_interleave = None
+    activation_method: ActivationMethod | ActivationType
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
@@ -266,6 +271,8 @@ def rocm_aiter_fused_experts(
         activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
+    if activation_method is None:
+        raise ValueError(f"AITER does not support activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)

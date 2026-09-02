@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend_with_overrides,
 )
+from vllm.v1.attention.backends.cpu_attn import CPUAttentionBackend
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 try:
@@ -225,6 +226,7 @@ def create_whisper_attention_backend_with_block_pooling(
         b
         for b in (
             AiterFlashAttentionBackend,
+            CPUAttentionBackend,
             FlashAttentionBackend,
             RocmAttentionBackend,
             TritonAttentionBackend,
@@ -239,7 +241,9 @@ def create_whisper_attention_backend_with_block_pooling(
             "appreciated."
         )
 
-    if not issubclass(underlying_attn_backend, FlashAttentionBackend):
+    if not issubclass(
+        underlying_attn_backend, (CPUAttentionBackend, FlashAttentionBackend)
+    ):
         logger.info(
             "Using %s for Whisper causal attention with block pooling. "
             "This backend was recently enabled for this model. "

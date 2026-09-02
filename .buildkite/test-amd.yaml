@@ -112,7 +112,7 @@ steps:
 #########################################################################################################################################
 
 - label: ":computer: (CPU) Basic Models Other" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -128,7 +128,7 @@ steps:
   - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -143,7 +143,7 @@ steps:
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":computer: (CPU) V1 Others" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -163,7 +163,7 @@ steps:
   - pytest -v -s -m 'cpu_test' v1/metrics
 
 - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -202,7 +202,7 @@ steps:
   - pytest -v -s config --ignore=config/test_mp_reducer.py
 
 - label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -217,7 +217,7 @@ steps:
   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
 - label: ":computer: (CPU) Rust Frontend Cargo" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -232,7 +232,7 @@ steps:
   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
 
 - label: ":computer: (CPU) Docker Build Metadata" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -262,7 +262,7 @@ steps:
 #----------------------------------------------------------  mi250 · compile  ----------------------------------------------------------#
 
 - label: ":amd: (MI250) PyTorch Fullgraph Smoke" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -281,7 +281,7 @@ steps:
 #--------------------------------------------------------  mi250 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI250) Pipeline + Context Parallelism" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_4
   num_gpus: 4
@@ -304,7 +304,7 @@ steps:
 #----------------------------------------------------------  mi250 · kernels  ----------------------------------------------------------#
 
 - label: ":amd: (MI250) Helion Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -321,7 +321,7 @@ steps:
 #-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI250) Language Models (PPL)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   working_dir: "/vllm-workspace/tests"
@@ -334,7 +334,7 @@ steps:
 #----------------------------------------------------  mi250 · models / multimodal  ----------------------------------------------------#
 
 - label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -349,7 +349,7 @@ steps:
 #------------------------------------------------------------  mi250 · v1  -------------------------------------------------------------#
 
 - label: ":amd: (MI250) Batch Invariance" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -367,7 +367,7 @@ steps:
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: ":amd: (MI250) CUDAGraph" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -383,7 +383,7 @@ steps:
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
 - label: ":amd: (MI250) E2E Core" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -396,7 +396,7 @@ steps:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
 - label: ":amd: (MI250) E2E Scheduling" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -409,7 +409,7 @@ steps:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
 
 - label: ":amd: (MI250) V1 Engine" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -430,7 +430,7 @@ steps:
   - pytest -v -s config/test_mp_reducer.py
 
 - label: ":amd: (MI250) Spec Decode Draft Model" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -447,7 +447,7 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: ":amd: (MI250) Spec Decode Speculators + MTP" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -468,7 +468,7 @@ steps:
 #-------------------------------------------------------------  mi250 · misc  ------------------------------------------------------------#
 
 - label: ":amd: (MI300) Python-only Installation" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -490,7 +490,7 @@ steps:
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Basic Correctness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -508,7 +508,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
 - label: ":amd: (MI300) Distributed Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -539,7 +539,7 @@ steps:
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
 - label: ":amd: (MI300) Benchmarks CLI" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -554,7 +554,7 @@ steps:
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
 - label: ":amd: (MI300) PyTorch Compilation" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -574,7 +574,7 @@ steps:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: ":amd: (MI300) Fusion E2E Config Sweep" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -595,7 +595,7 @@ steps:
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: ":amd: (MI300) Fusion E2E Quick" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -617,7 +617,7 @@ steps:
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 - label: ":amd: (MI300) PyTorch Compilation Passes" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -629,7 +629,7 @@ steps:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: ":amd: (MI300) PyTorch Fullgraph" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -647,12 +647,11 @@ steps:
   - pytest -v -s compile/fullgraph/test_full_graph.py
 
 - label: ":amd: (MI300) PyTorch Nightly Dependency Override Check" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
   optional: true
-  soft_fail: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - requirements/test/nightly-torch.txt
@@ -661,7 +660,7 @@ steps:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: ":amd: (MI300) Distributed Compile" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 95
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -680,7 +679,7 @@ steps:
   - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
 
 - label: ":amd: (MI300) Distributed Compile + RPC" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -706,7 +705,7 @@ steps:
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
 - label: ":amd: (MI300) CUDA Platform" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -721,7 +720,7 @@ steps:
 #--------------------------------------------------------  mi300 · detokenizer  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Async Engine, Inputs, Utils, Worker" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -741,7 +740,7 @@ steps:
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Distributed Comm Ops" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -758,7 +757,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
 
 - label: ":amd: (MI300) EPLB Algorithm" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -774,7 +773,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
 
 - label: ":amd: (MI300) EPLB Execution" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -790,7 +789,7 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: ":amd: (MI300) Distributed Features" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -817,7 +816,7 @@ steps:
   - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: ":amd: (MI300) Distributed" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -835,7 +834,7 @@ steps:
   - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
 - label: ":amd: (MI300) Distributed Torchrun + Examples" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -861,7 +860,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_http_ipc.py
 
 - label: ":amd: (MI300) Elastic EP Scaling" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -879,7 +878,7 @@ steps:
   - pytest -v -s distributed/test_elastic_ep.py
 
 - label: ":amd: (MI300) RayExecutorV2" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -902,7 +901,7 @@ steps:
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
 - label: ":amd: (MI300) Distributed DP + EP" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_8
@@ -921,7 +920,7 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: ":amd: (MI300) Distributed Torchrun + Shutdown" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -945,7 +944,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: ":amd: (MI300) Distributed Compile + Comm" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -969,7 +968,7 @@ steps:
 #----------------------------------------------------------  mi300 · engine  -----------------------------------------------------------#
 
 - label: ":amd: (MI300) Engine Core" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -990,7 +989,7 @@ steps:
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Entrypoints Unit" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1009,7 +1008,7 @@ steps:
   - pytest -v -s entrypoints/launchers
 
 - label: ":amd: (MI300) Entrypoints Integration (LLM)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1026,7 +1025,7 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1044,7 +1043,7 @@ steps:
   - pytest -v -s entrypoints/scale_out
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 1)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1054,13 +1053,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server OpenAI - Part 2)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1070,14 +1068,13 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: ":amd: (MI300) Entrypoints Integration (API Server Generate)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1089,6 +1086,7 @@ steps:
   - tests/tool_use
   - tests/entrypoints/tool_parsers
   - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   - tests/entrypoints/generate
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1096,9 +1094,10 @@ steps:
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
+  - pytest -v -s entrypoints/cohere
 
 - label: ":amd: (MI300) Entrypoints Integration (Responses API)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1113,7 +1112,7 @@ steps:
   - pytest -v -s entrypoints/openai/responses
 
 - label: ":amd: (MI300) Entrypoints Integration (Speech to Text)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1127,7 +1126,7 @@ steps:
   - pytest -v -s entrypoints/speech_to_text
 
 - label: ":amd: (MI300) Entrypoints Integration (Multimodal)"
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1142,7 +1141,7 @@ steps:
   - pytest -v -s entrypoints/multimodal
 
 - label: ":amd: (MI300) Entrypoints Integration (Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1157,7 +1156,7 @@ steps:
   - pytest -v -s entrypoints/pooling
 
 - label: ":amd: (MI300) OpenAI API Correctness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1179,7 +1178,7 @@ steps:
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
 - label: ":amd: (MI300) DeepSeek V2-Lite Prefetch Offload Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1200,7 +1199,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
 - label: ":amd: (MI300) LM Eval Small Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1218,7 +1217,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 - label: ":amd: (MI300) MRCR Eval Small Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1236,7 +1235,7 @@ steps:
   - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
 
 - label: ":amd: (MI300) LM Eval Small Models Harness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1255,7 +1254,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
 
 - label: ":amd: (MI300) Multimodal Accuracy Eval (Small Models)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1271,7 +1270,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: ":amd: (MI300) GPQA Eval (GPT-OSS)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1294,7 +1293,7 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 - label: ":amd: (MI300) LM Eval Small Models FP8 + Mixed" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1313,7 +1312,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: ":amd: (MI300) DeepSeek V2-Lite Sync EPLB Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1336,7 +1335,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
 - label: ":amd: (MI300) LM Eval Large Models Harness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1357,7 +1356,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: ":amd: (MI300) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1379,7 +1378,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
 - label: ":amd: (MI300) Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1401,7 +1400,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 - label: ":amd: (MI300) Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1424,7 +1423,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
 - label: ":amd: (MI300) LM Eval Large Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_8
@@ -1448,7 +1447,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: ":amd: (MI300) LM Eval Large Models ROCm Harness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_8
@@ -1470,7 +1469,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 - label: ":amd: (MI300) LM Eval Large Models FP8" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1493,7 +1492,7 @@ steps:
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
 - label: ":amd: (MI300) Examples" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1530,7 +1529,7 @@ steps:
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
 - label: ":amd: (MI300) vLLM IR" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1546,7 +1545,7 @@ steps:
   - pytest -v -s tests/kernels/ir
 
 - label: ":amd: (MI300) MLA Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1568,7 +1567,7 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":amd: (MI300) Attention Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1587,7 +1586,7 @@ steps:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Core Operation Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1605,7 +1604,7 @@ steps:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) KDA Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1625,7 +1624,7 @@ steps:
   - pytest -v -s models/kimi_k3/test_kda.py models/kimi_k3/test_kda_metadata.py
 
 - label: ":amd: (MI300) Mamba Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1640,7 +1639,7 @@ steps:
   - pytest -v -s kernels/mamba
 
 - label: ":amd: (MI300) MoE Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1666,7 +1665,7 @@ steps:
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) Quantization Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1690,7 +1689,7 @@ steps:
   - pytest -v -s kernels/quantization
 
 - label: ":amd: (MI300) DeepEP FP8 MoE Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1711,7 +1710,7 @@ steps:
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
 - label: ":amd: (MI300) LoRA Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1726,7 +1725,7 @@ steps:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
 - label: ":amd: (MI300) LoRA TP (Distributed)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1749,7 +1748,7 @@ steps:
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Model Executor" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1772,7 +1771,7 @@ steps:
 #----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Model Runner V2 Core" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1797,7 +1796,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
 - label: ":amd: (MI300) Model Runner V2 Examples" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1832,7 +1831,7 @@ steps:
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 - label: ":amd: (MI300) Model Runner V2 Distributed" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -1854,7 +1853,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
 
 - label: ":amd: (MI300) Model Runner V2 Pipeline Parallelism" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -1874,7 +1873,7 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: ":amd: (MI300) Model Runner V2 Spec Decode" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1901,7 +1900,7 @@ steps:
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Basic Models (Extra Initialization) Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1918,7 +1917,7 @@ steps:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Basic Models (Initialization)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1931,7 +1930,7 @@ steps:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
 - label: ":amd: (MI300) Basic Models (Other)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1950,7 +1949,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Language Models (MTEB)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1963,7 +1962,7 @@ steps:
   - pytest -v -s models/language/pooling_mteb_test
 
 - label: ":amd: (MI300) Language Models (Extended Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1976,7 +1975,7 @@ steps:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: ":amd: (MI300) Language Models (Standard)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -1990,7 +1989,7 @@ steps:
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
 - label: ":amd: (MI300) Language Models (Extra Standard) Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2013,7 +2012,7 @@ steps:
   - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Language Models (Extended Generation)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 95
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2028,7 +2027,7 @@ steps:
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: ":amd: (MI300) Language Models (Hybrid) Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2046,7 +2045,7 @@ steps:
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
 - label: ":amd: (MI300) Multimodal Models (Extended Generation 1)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2061,7 +2060,7 @@ steps:
   - pytest -v -s models/multimodal/test_mapping.py
 
 - label: ":amd: (MI300) Multimodal Models (Extended Generation 2)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2075,7 +2074,7 @@ steps:
 
 
 - label: ":amd: (MI300) Multimodal Models (Extended Generation 3)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2088,7 +2087,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 1: qwen2" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2102,7 +2101,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 3: llava + qwen2_vl" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2117,7 +2116,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2132,7 +2131,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 - label: ":amd: (MI300) Multimodal Processor" # 1h 42m
-  timeout_in_minutes: 180
+  timeout_in_minutes: 110
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2146,7 +2145,7 @@ steps:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: ":amd: (MI300) Multimodal Models (Extended Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2159,7 +2158,7 @@ steps:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 - label: ":amd: (MI300) Multimodal Models (Standard) 2: qwen3 + gemma" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2176,7 +2175,7 @@ steps:
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
 - label: ":amd: (MI300) Quantized Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2193,7 +2192,7 @@ steps:
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
 
 - label: ":amd: (MI300) Transformers Nightly Models (Initialization) Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2215,7 +2214,7 @@ steps:
   - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Transformers Nightly Models (Processing) Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 145
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2237,7 +2236,7 @@ steps:
   - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI300) Transformers Nightly Models (Single)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2265,7 +2264,7 @@ steps:
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
 
 - label: ":amd: (MI300) Plugin Integration" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2317,12 +2316,11 @@ steps:
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
 
 - label: ":amd: (MI300) GGUF Plugin" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
   optional: true
-  soft_fail: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
@@ -2336,7 +2334,7 @@ steps:
 #-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Rust Frontend OpenAI Coverage" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2369,7 +2367,7 @@ steps:
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: ":amd: (MI300) Rust Frontend Serve + Admin Coverage" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2397,7 +2395,7 @@ steps:
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
 
 - label: ":amd: (MI300) Rust Frontend Core Correctness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2415,7 +2413,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":amd: (MI300) Rust Frontend Tool Use" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2434,7 +2432,7 @@ steps:
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: ":amd: (MI300) Rust Frontend Distributed" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2465,7 +2463,7 @@ steps:
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
 - label: ":amd: (MI300) Quantization" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 115
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2492,7 +2490,7 @@ steps:
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
 - label: ":amd: (MI300) Samplers" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2513,7 +2511,7 @@ steps:
 #------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
 
 - label: ":amd: (MI300) Regression" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2528,7 +2526,7 @@ steps:
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
 
 - label: ":amd: (MI300) Ray Dependency Compatibility Check" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2543,7 +2541,7 @@ steps:
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
 - label: ":amd: (MI300) Acceptance Length (Large Models)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2559,7 +2557,7 @@ steps:
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 - label: ":amd: (MI300) E2E Scheduling" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2573,7 +2571,7 @@ steps:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
 
 - label: ":amd: (MI300) V1 Engine" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2588,7 +2586,7 @@ steps:
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
 
 - label: ":amd: (MI300) Spec Decode Draft Model" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2606,7 +2604,7 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/draft_model/
 
 - label: ":amd: (MI300) Spec Decode Eagle" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2624,7 +2622,7 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/eagle/
 
 - label: ":amd: (MI300) Spec Decode N-Gram + Suffix" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2644,7 +2642,7 @@ steps:
   - python3 spec_decode/test_custom_proposer.py
 
 - label: ":amd: (MI300) Spec Decode Speculators + MTP" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2664,7 +2662,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode/mtp/
 
 - label: ":amd: (MI300) Speculators Correctness" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2696,7 +2694,7 @@ steps:
   - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
 - label: ":amd: (MI300) V1 Spec Decode" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2709,7 +2707,7 @@ steps:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
 - label: ":amd: (MI300) Extract Hidden States Integration" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2741,7 +2739,7 @@ steps:
   - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":amd: (MI300) V1 Attention Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2760,7 +2758,7 @@ steps:
   - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) V1 Core + KV + Metrics" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2794,7 +2792,7 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":amd: (MI300) V1 Sample + Logits" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -2816,7 +2814,7 @@ steps:
   - pytest -v -s v1/test_outputs.py
 
 - label: ":amd: (MI300) Distributed DP Basic" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2841,7 +2839,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
 
 - label: ":amd: (MI300) Metrics, Tracing" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2862,7 +2860,7 @@ steps:
   - pytest -v -s tracing
 
 - label: ":amd: (MI300) V1 E2E" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2879,7 +2877,7 @@ steps:
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
 
 - label: ":amd: (MI300) NixlConnector PD + Spec Decode acceptance" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -2896,7 +2894,7 @@ steps:
   - KV_CACHE_MEMORY_BYTES=8G ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
 - label: ":amd: (MI300) CrossLayer KV layout Distributed NixlConnector PD accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2912,7 +2910,7 @@ steps:
   - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: ":amd: (MI300) Distributed DP Extended" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2936,7 +2934,7 @@ steps:
   - pytest -v -s distributed/test_utils.py
 
 - label: ":amd: (MI300) Distributed NixlConnector PD accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2952,7 +2950,7 @@ steps:
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: ":amd: (MI300) DP EP Distributed NixlConnector PD accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2968,7 +2966,7 @@ steps:
   - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -2984,7 +2982,7 @@ steps:
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: ":amd: (MI300) Hybrid SSM NixlConnector PD prefix cache" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -3002,7 +3000,7 @@ steps:
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
 
 - label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -3021,7 +3019,7 @@ steps:
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
 
 - label: ":amd: (MI300) MultiConnector (Nixl+Offloading) PD edge cases" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -3040,7 +3038,7 @@ steps:
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
 
 - label: ":amd: (MI300) V1 E2E Hybrid Chunked Prefill" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_4
@@ -3056,7 +3054,7 @@ steps:
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI300) Weight Loading Multi-GPU" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -3069,7 +3067,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: ":amd: (MI300) Weight Loading Multi-GPU (Large Models)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_2
@@ -3091,7 +3089,7 @@ steps:
 #--------------------------------------------------------  mi355 · benchmarks  ---------------------------------------------------------#
 
 - label: ":amd: (MI355) Attention Benchmark Smoke" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3108,7 +3106,7 @@ steps:
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Distributed Features" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3153,7 +3151,7 @@ steps:
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3171,7 +3169,7 @@ steps:
   - pytest -v -s entrypoints/scale_out
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server OpenAI - Part 1)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3181,13 +3179,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server OpenAI - Part 2)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3197,14 +3194,13 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 - label: ":amd: (MI355) Entrypoints Integration (API Server Generate)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3225,7 +3221,7 @@ steps:
   - pytest -v -s entrypoints/anthropic
 
 - label: ":amd: (MI355) Entrypoints Integration (Speech to Text)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3239,7 +3235,7 @@ steps:
   - pytest -v -s entrypoints/speech_to_text
 
 - label: ":amd: (MI355) Entrypoints Integration (Multimodal)"
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3253,7 +3249,7 @@ steps:
   - pytest -v -s entrypoints/multimodal
 
 - label: ":amd: (MI355) Entrypoints Integration (Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3269,7 +3265,7 @@ steps:
 #-----------------------------------------------------------  mi355 · evals  -----------------------------------------------------------#
 
 - label: ":amd: (MI355) GPQA Eval (GPT-OSS)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3292,7 +3288,7 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: ":amd: (MI355) LM Eval Qwen3-5 Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3315,7 +3311,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
 - label: ":amd: (MI355) LM Eval Small Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3335,7 +3331,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3356,7 +3352,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
 - label: ":amd: (MI355) LM Eval Large Models FP8" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_4
@@ -3377,7 +3373,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 - label: ":amd: (MI355) LM Eval Large Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_8
@@ -3402,7 +3398,7 @@ steps:
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
 - label: ":amd: (MI355) Examples" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3438,7 +3434,7 @@ steps:
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
 - label: ":amd: (MI355) Core Operation Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3456,7 +3452,7 @@ steps:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3482,7 +3478,7 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
 
 - label: ":amd: (MI355) MLA Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3504,7 +3500,7 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: ":amd: (MI355) Attention Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3522,7 +3518,7 @@ steps:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3556,7 +3552,7 @@ steps:
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) FusedMoE Layer Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3582,7 +3578,7 @@ steps:
   - pytest -v -s kernels/moe/test_moe_layer.py
 
 - label: ":amd: (MI355) Quantization Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3605,7 +3601,7 @@ steps:
   - pytest -v -s kernels/quantization
 
 - label: ":amd: (MI355) FP8 MoE Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3626,7 +3622,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
 - label: ":amd: (MI355) DeepEP FP8 MoE Kernels" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3647,7 +3643,7 @@ steps:
 #-----------------------------------------------------  mi355 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI355) Language Models (Extended Generation)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3661,7 +3657,7 @@ steps:
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: ":amd: (MI355) Language Models (Extended Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3674,7 +3670,7 @@ steps:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: ":amd: (MI355) Language Models (PPL)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3703,7 +3699,7 @@ steps:
   - pytest -v -s models/language/generation_ppl_test
 
 - label: ":amd: (MI355) Language Models (Standard)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3718,7 +3714,7 @@ steps:
 #----------------------------------------------------  mi355 · models / multimodal  ----------------------------------------------------#
 
 - label: ":amd: (MI355) Multimodal Models (Extended Generation 1)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3733,7 +3729,7 @@ steps:
   - pytest -v -s models/multimodal/test_mapping.py
 
 - label: ":amd: (MI355) Multimodal Models (Extended Generation 3)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3746,7 +3742,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: ":amd: (MI355) Multimodal Models (Extended Pooling)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3759,7 +3755,7 @@ steps:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
 - label: ":amd: (MI355) Multimodal Models (Standard) 1: qwen2" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3773,7 +3769,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 - label: ":amd: (MI355) Multimodal Models (Standard) 4: other + whisper" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3791,7 +3787,7 @@ steps:
 #-----------------------------------------------------  mi355 · models / quantized  -----------------------------------------------------#
 
 - label: ":amd: (MI355) Quantized Models" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3808,7 +3804,7 @@ steps:
 #-------------------------------------------------------  mi355 · quantization  --------------------------------------------------------#
 
 - label: ":amd: (MI355) Quantization" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3854,7 +3850,7 @@ steps:
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
 - label: ":amd: (MI355) V1 Attention Shard %N" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3872,7 +3868,7 @@ steps:
   - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355) V1 Core + KV + Metrics" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3901,7 +3897,7 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: ":amd: (MI355) V1 Sample + Logits" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3922,7 +3918,7 @@ steps:
   - pytest -v -s v1/test_outputs.py
 
 - label: ":amd: (MI355) V1 Spec Decode" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
@@ -3933,10 +3929,38 @@ steps:
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
+- label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/sample/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/models/gemma4.py
+  - vllm/model_executor/models/gemma4_mm.py
+  - vllm/model_executor/models/gemma4_mtp.py
+  - vllm/model_executor/models/llama.py
+  - vllm/model_executor/models/llama_eagle3.py
+  - vllm/model_executor/models/medusa.py
+  - vllm/model_executor/models/registry.py
+  - tests/evals/gsm8k/
+  - tests/utils.py
+  - tests/v1/e2e/spec_decode/
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 
 - label: ":amd: (MI355) Weight Loading Multi-GPU" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3949,7 +3973,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: ":amd: (MI355) Weight Loading Multi-GPU (Large Models)" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_2
@@ -3965,7 +3989,7 @@ steps:
 #-----------------------------------------------------------  mi355 · misc  ------------------------------------------------------------#
 
 - label: ":amd: (MI355) Regression" # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
