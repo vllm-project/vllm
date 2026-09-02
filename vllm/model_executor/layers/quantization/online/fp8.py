@@ -115,7 +115,7 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
     def __init__(
         self,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = _UNSET,
     ):
         super().__init__(activation_quant_key)
 
@@ -229,7 +229,7 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
 
     def __init__(
         self,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kFp8Dynamic128Sym,
     ):
         super().__init__(activation_quant_key)
         self.weight_block_size = [128, 128]
@@ -324,7 +324,7 @@ class Fp8PtpcOnlineLinearMethod(OnlineLinearBase):
 
     def __init__(
         self,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kFp8DynamicTokenSym,
     ):
         super().__init__(activation_quant_key)
 
@@ -535,7 +535,7 @@ class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kFp8DynamicTensorSym,
     ):
         super().__init__(
             weight_block_size=None,
@@ -596,7 +596,7 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kFp8Dynamic128Sym,
     ):
         super().__init__(
             weight_block_size=[128, 128],
@@ -703,7 +703,7 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kFp8DynamicTokenSym,
     ):
         from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 

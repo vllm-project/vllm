@@ -7,7 +7,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.config.quantization import _UNSET
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -188,9 +187,7 @@ class Fp8Config(QuantizationConfig):
                     Fp8PerTensorOnlineLinearMethod,
                 )
 
-                online_method = Fp8PerTensorOnlineLinearMethod(
-                    activation_quant_key=_UNSET,
-                )
+                online_method = Fp8PerTensorOnlineLinearMethod()
                 online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return online_method
             else:
@@ -218,10 +215,7 @@ class Fp8Config(QuantizationConfig):
                     Fp8PerTensorOnlineMoEMethod,
                 )
 
-                return Fp8PerTensorOnlineMoEMethod(
-                    layer=layer,
-                    activation_quant_key=kFp8DynamicTensorSym,
-                )
+                return Fp8PerTensorOnlineMoEMethod(layer=layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None

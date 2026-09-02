@@ -46,7 +46,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
 
     def __init__(
         self,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kMxfp8Dynamic,
     ):
         super().__init__(activation_quant_key)
         # TODO: remove once `init_mxfp8_linear_kernel` truly supports None
@@ -120,7 +120,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kMxfp8Dynamic,
     ):
         super().__init__(layer=layer, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]

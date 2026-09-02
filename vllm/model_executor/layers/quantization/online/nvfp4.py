@@ -90,7 +90,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kNvfp4Dynamic,
     ):
         if not current_platform.is_device_capability_family(100):
             raise ValueError(

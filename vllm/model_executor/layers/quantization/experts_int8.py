@@ -17,9 +17,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kInt8DynamicTokenSym,
-)
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -59,8 +56,5 @@ class ExpertsInt8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
-            return Int8OnlineMoEMethod(
-                layer=layer,
-                activation_quant_key=kInt8DynamicTokenSym,
-            )
+            return Int8OnlineMoEMethod(layer=layer)
         return None

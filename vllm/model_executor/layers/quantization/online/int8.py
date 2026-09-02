@@ -41,7 +41,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         layer: torch.nn.Module,
-        activation_quant_key: "QuantKey | None",
+        activation_quant_key: "QuantKey | None" = kInt8DynamicTokenSym,
     ):
         super().__init__(layer=layer, activation_quant_key=activation_quant_key)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
