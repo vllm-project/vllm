@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for BF16 skinny GEMMs and the Kimi-K3 SM90/SM100/SM103 selectors."""
+"""Tests for BF16 skinny GEMMs and model-specific selectors."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
 from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
+from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). 1536x7168 is
 # the unified shared_gate_up_proj/mla_g_proj entry (dsv3 M1..16).
@@ -75,6 +76,12 @@ GLM_CUTE_CASES = [
     (spec, config)
     for spec in glm52_gemm.GLM52_PROJECTIONS.values()
     for _, config in spec.cute_configs
+]
+
+QWEN4_EXP_SM90_CASES = [
+    (n, k, num_tokens, config)
+    for (n, k), plans in qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS.items()
+    for num_tokens, config in plans.items()
 ]
 
 EXPECTED_CUTE_CONFIGS = {
@@ -244,6 +251,65 @@ def test_residual_cute_configs_match_measured_table() -> None:
         for num_tokens, config in spec.residual_configs
     }
     assert actual == EXPECTED_RESIDUAL_CUTE_CONFIGS
+
+
+def test_kda_overlap_configs_match_measured_table() -> None:
+    assert k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS == 14
+    assert k3_gemm.KDA_SKINNY_N_MAX_TOKENS == 14
+    assert k3_gemm.KDA_SKINNY_K_MAX_TOKENS == 14
+    assert _config_tuple(k3_gemm.KDA_M1_QKVG_CONFIG) == (64, 4, 2, 8)
+    assert _config_tuple(k3_gemm.KDA_M1_FAB_CONFIG) == (224, 1, 2, 8)
+    assert {
+        num_tokens: _config_tuple(config)
+        for num_tokens, config in k3_gemm.KDA_QKVG_CONFIGS.items()
+    } == {
+        1: (64, 4, 2, 8),
+        2: (64, 3, 2, 8),
+    }
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 16])
+def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
+    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+
+    kda = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
+    nn.Module.__init__(kda)
+    kda.tp_size = tp_size
+    kda._projection_overlap_max_tokens = 0
+
+    assert not k3_gemm._enable_kda_projection_overlap(kda)
+    assert kda._projection_overlap_max_tokens == 0
+
+
+def test_kda_qkvg_autotune_enables_full_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import flashinfer.gemm
+
+    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+
+    kda = KimiK3DeltaAttention.__new__(KimiK3DeltaAttention)
+    nn.Module.__init__(kda)
+    kda._projection_overlap_max_tokens = max(k3_gemm.KDA_QKVG_CONFIGS)
+    kda.in_proj_qkvgfab = nn.Module()
+    kda.in_proj_qkvgfab.weight = nn.Parameter(
+        torch.empty(6144, 8, dtype=torch.bfloat16),
+        requires_grad=False,
+    )
+    calls = []
+
+    def fake_mm_bf16(a, b, *, pdl, backend):
+        calls.append((a.shape, b.shape, pdl, backend))
+        return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
+
+    monkeypatch.setattr(flashinfer.gemm, "mm_bf16", fake_mm_bf16)
+
+    k3_gemm.autotune_kda_qkvg(kda)
+
+    assert calls == [(torch.Size([14, 8]), torch.Size([8, 6144]), True, "cute-dsl")]
+    assert (
+        kda._projection_overlap_max_tokens == k3_gemm.KDA_PROJECTION_OVERLAP_MAX_TOKENS
+    )
 
 
 def test_glm52_projection_plans_are_separate() -> None:
@@ -528,6 +594,43 @@ def test_low_latency_table_capability_routing(
     assert k3_gemm._low_latency_table() is None
 
 
+def test_qwen4_exp_hopper_plans_are_valid() -> None:
+    plans = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS
+
+    assert len(plans) == 9
+    assert sum(map(len, plans.values())) == 31
+    assert (320, 10240) in plans
+    assert (10240, 320) not in plans
+    for (n, k), shape_plans in plans.items():
+        for num_tokens, config in shape_plans.items():
+            assert config.num_rows == num_tokens
+            assert n % config.outputs_per_block == 0
+            assert k % (config.block_size * config.vector_width) == 0
+            assert config.static_k in (None, k)
+
+
+@pytest.mark.parametrize(
+    "capability,expected_plans",
+    [
+        ((10, 3), qwen4_exp_gemm.QWEN4_EXP_GEMM_PLANS),
+        ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
+        ((8, 0), {}),
+    ],
+)
+def test_qwen4_exp_gemm_capability_routing(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
+    expected_plans: dict[tuple[int, int], dict[int, SkinnyGemmConfig]],
+) -> None:
+    monkeypatch.setattr(
+        qwen4_exp_gemm.current_platform,
+        "is_device_capability",
+        lambda target: capability == target,
+    )
+
+    assert qwen4_exp_gemm._gemm_plans() == expected_plans
+
+
 def test_installation_is_shape_specific_and_unquantized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -643,7 +746,7 @@ def _require_capability_and_cute(capability: tuple[int, int]) -> None:
         not torch.cuda.is_available()
         or torch.cuda.get_device_capability() != capability
     ):
-        pytest.skip(f"Kimi-K3 selection requires SM{capability[0]}{capability[1]}")
+        pytest.skip(f"CuTe DSL selection requires SM{capability[0]}{capability[1]}")
     if not k3_gemm.shape_dynamic_skinny_gemm.is_available():
         pytest.skip("CuTe DSL is not available")
 
@@ -677,6 +780,29 @@ def test_glm_cute_selected_shapes(
     assert output is not None
     reference = x.float() @ weight.float().t()
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
+
+
+@pytest.mark.parametrize("n,k,num_tokens,config", QWEN4_EXP_SM90_CASES)
+def test_qwen4_exp_sm90_selected_shapes(
+    n: int,
+    k: int,
+    num_tokens: int,
+    config: SkinnyGemmConfig,
+) -> None:
+    _require_capability_and_cute((9, 0))
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
+
+    selected = qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS[(n, k)][num_tokens]
+    assert selected == config
+    output = qwen4_exp_gemm._qwen4_exp_low_latency_gemm(x, weight)
+
+    reference = torch.nn.functional.linear(x, weight)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.float().flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
 
 
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
@@ -743,6 +869,65 @@ def test_cute_selected_shapes(
         output.float().flatten(), reference.float().flatten(), dim=0
     ).item()
     assert cosine > 0.999
+
+
+@pytest.mark.parametrize("num_tokens", [1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14])
+def test_kda_projection_overlap_cuda_graph(num_tokens: int) -> None:
+    """The TP8 split must preserve projection results across both streams."""
+    _require_sm103_and_cute()
+    _require_sm103_and_dsv3()
+    torch.manual_seed(43)
+    hidden_states = torch.randn(num_tokens, 7168, dtype=torch.bfloat16, device="cuda")
+    packed_weight = torch.randn(6288, 7168, dtype=torch.bfloat16, device="cuda")
+    f_b_weight = torch.randn(1536, 128, dtype=torch.bfloat16, device="cuda")
+    aux_stream = torch.cuda.Stream()
+    events = (torch.cuda.Event(), torch.cuda.Event())
+
+    k3_gemm.run_kda_projection_overlap(
+        hidden_states,
+        packed_weight,
+        f_b_weight,
+        aux_stream,
+        events,
+    )
+    torch.accelerator.synchronize()
+
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=capture_stream):
+        projected_qkvg, g1, beta = k3_gemm.run_kda_projection_overlap(
+            hidden_states,
+            packed_weight,
+            f_b_weight,
+            aux_stream,
+            events,
+        )
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    assert beta.stride() == ((140 if num_tokens == 1 else 144), 1)
+
+    expected_qkvg = torch.nn.functional.linear(
+        hidden_states.float(), packed_weight[:6144].float()
+    )
+    expected_fab = torch.nn.functional.linear(
+        hidden_states.float(), packed_weight[6144:6284].float()
+    )
+    expected_g1 = torch.nn.functional.linear(
+        expected_fab[:, :128].to(torch.bfloat16).float(),
+        f_b_weight.float(),
+    )
+    for actual, expected in (
+        (projected_qkvg, expected_qkvg),
+        (g1, expected_g1),
+        (beta, expected_fab[:, 128:]),
+    ):
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.float().flatten(), expected.flatten(), dim=0
+        ).item()
+        assert cosine > 0.999
 
 
 def _dsv3_probe_tokens(tokens: frozenset[int]) -> set[int]:
