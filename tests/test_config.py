@@ -139,7 +139,9 @@ def test_per_request_spec_decode_metrics_requires_spec_decode():
         ),
     ],
 )
-def test_pd_dcp_interleave_size_is_adjusted_to_block_size(caplog, kv_transfer_config):
+def test_pd_dcp_interleave_size_is_adjusted_to_block_size(
+    caplog, disable_log_dedup, kv_transfer_config
+):
     config = VllmConfig(
         cache_config=CacheConfig(block_size=16),
         device_config=DeviceConfig(device="cpu"),
