@@ -10,7 +10,7 @@ use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
-use crate::request::{ChatMessage, ChatRequest, GenerationPromptMode, ReasoningEffort};
+use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
 
 fn render_request(request: &ChatRequest) -> String {
     DeepSeekV4ChatRenderer::new()
@@ -19,6 +19,19 @@ fn render_request(request: &ChatRequest) -> String {
         .prompt
         .into_text()
         .expect("deepseek v4 renderer should return text prompt")
+}
+
+fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
+    let mut request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".to_string(), Value::Bool(true));
+    request.chat_options.reasoning_effort = Some(ReasoningEffort::Low);
+    request
 }
 
 fn fixture_request(input_name: &str) -> ChatRequest {
@@ -69,6 +82,114 @@ fn renders_developer_tools_like_hf_python() {
         "test_input_developer_tools.json",
         expect_file!["fixtures/test_output_developer_tools.txt"],
     );
+}
+
+#[test]
+fn drop_thinking_removes_developer_before_last_user() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning {
+                text: "old reasoning".to_string(),
+            },
+            AssistantContentBlock::Text {
+                text: "old answer".to_string(),
+            },
+        ]),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn dropped_developer_does_not_hide_following_assistant() {
+    let request = thinking_request(vec![
+        ChatMessage::user("old question"),
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>next question<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn drop_thinking_keeps_last_developer() {
+    let request = thinking_request(vec![
+        ChatMessage::user("old question"),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::developer("latest instruction", None),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜><｜User｜>old question<｜Assistant｜></think>old answer<｜end▁of▁sentence｜><｜User｜>latest instruction<｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn drop_thinking_false_keeps_historical_developer() {
+    let mut request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+    request
+        .chat_options
+        .template_kwargs
+        .insert("drop_thinking".to_string(), Value::Bool(false));
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("<｜User｜>old instruction"));
+}
+
+#[test]
+fn drop_thinking_removes_developer_before_tool_response() {
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", None),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::tool_response("result", "call-1"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    expect![
+        "<｜begin▁of▁sentence｜>old answer<｜end▁of▁sentence｜><｜User｜><tool_result>result</tool_result><｜Assistant｜><think>"
+    ]
+    .assert_eq(&rendered);
+}
+
+#[test]
+fn tools_keep_historical_developer() {
+    let tool = ChatTool {
+        name: "lookup".to_string(),
+        description: None,
+        parameters: Value::Object(Default::default()),
+        strict: None,
+    };
+    let request = thinking_request(vec![
+        ChatMessage::developer("old instruction", Some(vec![tool])),
+        ChatMessage::assistant_text("old answer"),
+        ChatMessage::user("next question"),
+    ]);
+
+    let rendered = render_request(&request);
+
+    assert!(rendered.contains("<｜User｜>old instruction"));
 }
 
 #[test]
