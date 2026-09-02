@@ -79,7 +79,11 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+    ) as remote_server:
         yield remote_server
 
 
