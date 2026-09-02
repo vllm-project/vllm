@@ -91,9 +91,6 @@ def _encode_mm_kwargs_with_metadata(
     return kwargs_data, mm_metadata
 
 
-
-
-
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:

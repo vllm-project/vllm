@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-
 from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -12,7 +11,6 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
     extract_mm_features,
 )
@@ -296,7 +294,6 @@ class ServingRender(BaseServing):
             ec_transfer_params=request.ec_transfer_params,
             token_offsets=engine_input.get("prompt_token_offsets"),
         )
-
 
     def _placeholder_metadata_fields(self, modality: str) -> set[str]:
         """Fields the EC consumer still requires after embeddings transfer."""
