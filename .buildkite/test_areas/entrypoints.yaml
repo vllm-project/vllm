@@ -81,7 +81,6 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
@@ -103,7 +102,6 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
@@ -127,13 +125,15 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
-  - tests/entrypoints/anthropic
   - tests/entrypoints/generate
+  - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   commands:
   - pytest -v -s tool_use
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
+  - pytest -v -s entrypoints/cohere
   mirror:
     amd:
       label: ":amd: (MI300) Entrypoints Integration (API Server Generate)"

@@ -5393,9 +5393,11 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
-                self.model = model_loader.load_model(
-                    vllm_config=self.vllm_config, model_config=self.model_config
-                )
+                # Capture warmup providers selected while constructing the model.
+                with self.jit_warmup_registry.activate():
+                    self.model = model_loader.load_model(
+                        vllm_config=self.vllm_config, model_config=self.model_config
+                    )
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
@@ -7432,6 +7434,7 @@ class GPUModelRunner(
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
         )
         return kv_caches
 
@@ -7483,7 +7486,9 @@ class GPUModelRunner(
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config, self.kv_cache_config
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            use_replayssm=self.vllm_config.cache_config.use_replayssm,
         )
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
@@ -7500,11 +7505,13 @@ class GPUModelRunner(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-        kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config,
-            kernel_block_sizes,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        # Capture warmup providers that depend on allocated KV-cache strides.
+        with self.jit_warmup_registry.activate():
+            kv_caches = self.initialize_kv_cache_tensors(
+                kv_cache_config,
+                kernel_block_sizes,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
 
         if (
             self.speculative_config

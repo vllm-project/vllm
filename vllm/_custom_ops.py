@@ -57,13 +57,9 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        # Must be zero-initialized: the swizzled scale buffer is padded to
-        # (round_up(m, 128), round_up(scale_n, 4) // 4) but the NVFP4 quant
-        # kernel does not write every padded element that the downstream
-        # NVFP4 GEMM reads. torch.empty leaves those padded scale factors
-        # uninitialized, which corrupts dequantization and causes a severe
-        # Blackwell NVFP4 decode throughput/output-length regression.
-        return torch.zeros(
+        # The NVFP4 quant kernel explicitly zeroes every padded scale entry,
+        # so no separate zero-initialization kernel is required here.
+        return torch.empty(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
@@ -3079,6 +3075,31 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, workspace_starts, batch_size, seq_starts
+    )
+
+
+def cp_gather_and_upconvert_nvfp4_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+) -> None:
+    """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
+
+    Args:
+        src_cache: NVFP4 KV cache [num_blocks, block_size, 352] (uint8)
+        dst: BF16 output workspace [total_tokens, 576]
+        block_table: Block indices [num_reqs, max_blocks]
+        workspace_starts: Workspace start offsets [num_reqs]
+        batch_size: Number of requests
+    """
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        src_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        batch_size,
     )
 
 
