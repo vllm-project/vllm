@@ -47,6 +47,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.kv_cache_utils import (
+    dcp_world_size_for_kv_cache_spec,
+    resolve_dcp_kv_block_size,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -187,9 +191,16 @@ class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
-        self.vllm_config = vllm_config
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.group_block_sizes = tuple(
-            group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups
+            resolve_dcp_kv_block_size(
+                group.kv_cache_spec,
+                dcp_world_size_for_kv_cache_spec(
+                    group.kv_cache_spec,
+                    dcp_world_size,
+                ),
+            )
+            for group in kv_cache_config.kv_cache_groups
         )
 
         # Track which requests have already been filled
@@ -253,7 +264,7 @@ class DecodeBenchConnectorScheduler:
         # block_groups is a tuple of lists, one per KV cache group
         block_groups = blocks.get_block_ids()
 
-        # Extract the blocks covering num_external_tokens from each group
+        # Extract the blocks covering the external tokens from each group
         block_ids_per_group = tuple(
             group_blocks[: cdiv(num_external_tokens, group_block_size)]
             for group_blocks, group_block_size in zip(
@@ -269,12 +280,14 @@ class DecodeBenchConnectorScheduler:
         )
         self._filled_requests.add(req_id)
 
+        block_counts = tuple(len(group) for group in block_ids_per_group)
         logger.debug(
-            "DecodeBenchConnector: Allocated %s blocks across %d KV cache groups "
-            "for request %s",
-            tuple(len(block_ids) for block_ids in block_ids_per_group),
+            "DecodeBenchConnector: Selected %d total blocks across %d KV cache "
+            "groups for request %s (per-group counts: %s)",
+            sum(block_counts),
             len(block_groups),
             req_id,
+            ", ".join(map(str, block_counts)),
         )
 
     def build_connector_meta(
@@ -302,9 +315,6 @@ class DecodeBenchConnectorWorker:
     """Worker-side implementation for DecodeBenchConnector."""
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
-        self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
-
         # Get fill parameters from extra config
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
@@ -348,13 +358,15 @@ class DecodeBenchConnectorWorker:
             for group_idx, block_ids in enumerate(block_ids_per_group):
                 self._fill_blocks(group_idx, block_ids, num_tokens)
 
+            block_counts = tuple(len(group) for group in block_ids_per_group)
             logger.debug(
-                "DecodeBenchConnector: Filled %d blocks (%d tokens) across %d groups "
-                "for request %s",
-                len(block_ids_per_group[0]) if block_ids_per_group else 0,
+                "DecodeBenchConnector: Filled %d total blocks (%d tokens) across "
+                "%d groups for request %s (per-group counts: %s)",
+                sum(block_counts),
                 num_tokens,
                 len(block_ids_per_group),
                 req_id,
+                ", ".join(map(str, block_counts)),
             )
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
