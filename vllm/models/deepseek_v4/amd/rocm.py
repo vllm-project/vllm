@@ -23,6 +23,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -523,6 +524,152 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+        if self.indexer is None:
+            self.aux_stream_list = None
+        else:
+            # ROCm uses only the outer overlap to avoid nested stream waits.
+            self.indexer.aux_stream = None
+
+    def _run_sequential_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Disable ROCm streams when the current execution region cannot overlap."""
+        aux_streams = self.aux_stream_list
+        self.aux_stream_list = None
+        try:
+            super()._attn_pipeline(hidden_states, positions, o_padded)
+        finally:
+            self.aux_stream_list = aux_streams
+
+    def _attn_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Move ROCm stream fan-out ahead of all CSA input projections."""
+        attn_metadata = get_forward_context().attn_metadata
+        if self.aux_stream_list is None or (
+            isinstance(attn_metadata, dict)
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+            return
+
+        # The ROCm override consumes these sentinels inside the capture boundary.
+        self._prepare_and_attn_fn(
+            hidden_states,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            positions,
+            o_padded,
+        )
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | None,
+        kv: torch.Tensor | None,
+        qr_scale: torch.Tensor | None,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Run the ROCm CSA fork/join inside the graph capture boundary."""
+        aux_streams = self.aux_stream_list
+        if aux_streams is None or qr is not None:
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                super()._prepare_and_attn(
+                    hidden_states,
+                    cast(torch.Tensor, qr),
+                    cast(torch.Tensor, kv),
+                    qr_scale,
+                    cast(torch.Tensor, kv_score),
+                    cast(torch.Tensor, indexer_kv_score),
+                    cast(torch.Tensor, indexer_weights),
+                    positions,
+                    o_padded,
+                )
+            finally:
+                self.aux_stream_list = saved_streams
+            return
+
+        attn_metadata = get_forward_context().attn_metadata
+        if (
+            isinstance(attn_metadata, dict)
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            # Piecewise eager regions must rebuild inputs on their owning stream.
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+            return
+
+        indexer = self.indexer
+        compressor = self.compressor
+        assert indexer is not None and compressor is not None
+
+        def default_chain():
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr_out, qr_scale_out, kv_out = self._split_qkv_and_norm(qr_kv)
+            q = self._wq_b_proj(qr_out, qr_scale_out).view(
+                -1, self.n_local_heads, self.head_dim
+            )
+            q = self._fused_qnorm_rope_kv_insert(q, kv_out, positions, attn_metadata)
+            return q, qr_out, qr_scale_out, kv_out
+
+        def main_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            compressor(score, positions, self.rotary_emb)
+
+        def indexer_compressor_chain() -> None:
+            score = torch.mm(
+                hidden_states,
+                indexer.compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            indexer.forward_compressor(score, positions, self.indexer_rotary_emb)
+
+        (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
+            default_chain,
+            [main_compressor_chain, indexer_compressor_chain],
+            self.ln_events[0],
+            self.ln_events[1:3],
+            aux_streams[:2],
+            enable=True,
+        )
+
+        indexer_weights_out, _ = indexer.weights_proj(hidden_states)
+        index_q, index_q_scale, weights = indexer.forward_q(
+            qr_out,
+            indexer_weights_out,
+            positions,
+            self.indexer_rotary_emb,
+            qr_scale_out,
+        )
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            weights,
+            q,
+            kv_out,
+            positions,
+            o_padded,
+        )
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

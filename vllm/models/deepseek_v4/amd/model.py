@@ -934,15 +934,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4Attention._run_parallel_input_projections
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
+        # Keep the shared three-slot layout. ROCm CSA uses the first two
+        # streams for its compressor chains and joins before indexer query work.
         aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
+            [torch.cuda.Stream() for _ in range(3)]
+            if envs.VLLM_ROCM_DSV4_CSA_MULTI_STREAM
+            else None
         )
 
         self.device = current_platform.device_type

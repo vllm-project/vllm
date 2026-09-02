@@ -292,8 +292,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
-            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. None on
-            # ROCm, where aux_stream_list is None.
+            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. The ROCm
+            # subclass disables this nested overlap.
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
             )
@@ -317,7 +317,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # graph and MRV1 produces garbage (#51430).
             self._prepare_and_attn_fn = self._prepare_and_attn_eager
 
-        # Will be None on ROCm for now.
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
@@ -473,8 +472,22 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             device=hidden_states.device,
         )
 
-        # Keep the attention input preparation in the captured graph. Only the
-        # sparse indexer and MLA attention run in the eager break below.
+        self._attn_pipeline(hidden_states, positions, o_padded)
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
+
+    def _attn_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Run input preparation through attention.
+
+        ROCm overrides this boundary to start its streams before projections.
+        """
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self._run_parallel_input_projections(hidden_states)
         )
@@ -491,10 +504,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             positions,
             o_padded,
         )
-        o = o_padded[:, : self.n_local_heads, :]
-
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -578,7 +587,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # Keep Q projection and KV insertion on the default stream. The indexer
         # and MLA compressor use aux streams 0 and 1; aux 2 is internal to the
-        # indexer. ROCm runs the same work sequentially without aux streams.
+        # indexer. Platform subclasses can replace this scheduling boundary.
         if indexer is not None:
             assert compressor is not None
             q, (indexer_inputs, _) = execute_in_parallel(
@@ -665,7 +674,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # On ROCm, aux_streams is None and execute_in_parallel runs serially.
+        # Without aux streams, execute_in_parallel runs these projections serially.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -1008,7 +1017,7 @@ class DeepseekV4Indexer(nn.Module):
             compress_ratio=self.compress_ratio,
         )
 
-        # None on ROCm — maybe_execute_in_parallel falls back to sequential.
+        # Platform subclasses can disable this nested overlap.
         self.aux_stream = aux_stream
         self.ln_events: list[torch.cuda.Event] = [
             torch.cuda.Event(),
@@ -1041,8 +1050,6 @@ class DeepseekV4Indexer(nn.Module):
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        compressor = self.compressor
-
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
@@ -1052,7 +1059,49 @@ class DeepseekV4Indexer(nn.Module):
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
-                compressor(compressed_kv_score, positions, rotary_emb)
+                self.forward_compressor(compressed_kv_score, positions, rotary_emb)
+                return self.forward_q(
+                    qr, indexer_weights, positions, rotary_emb, qr_scale
+                )
+
+        # compressor returns None and writes K to the indexer KV cache; the
+        # join orders that write before indexer_op (skip_k_cache_insert=True).
+        query_result, _ = maybe_execute_in_parallel(
+            lambda: self.forward_q(
+                qr, indexer_weights, positions, rotary_emb, qr_scale
+            ),
+            lambda: self.forward_compressor(compressed_kv_score, positions, rotary_emb),
+            self.ln_events[0],
+            self.ln_events[1],
+            self.aux_stream,
+        )
+        return query_result
+
+    def forward_compressor(
+        self,
+        compressed_kv_score: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: nn.Module,
+    ) -> None:
+        """Write indexer K cache independently for the ROCm auxiliary stream."""
+        self.compressor(compressed_kv_score, positions, rotary_emb)
+
+    def forward_q(
+        self,
+        qr: torch.Tensor,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        rotary_emb: nn.Module,
+        qr_scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Build indexer queries after the ROCm stream join."""
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
+            if (
+                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                and not torch.cuda.is_current_stream_capturing()
+            ):
                 assert self.topk_indices_buffer is not None
                 num_tokens = (
                     indexer_metadata.num_decode_tokens
@@ -1069,27 +1118,16 @@ class DeepseekV4Indexer(nn.Module):
                     )
                 return None, None, None
 
-        def wq_b_and_q_quant():
-            q = self._wq_b_proj(qr, qr_scale)
-            q = q.view(-1, self.n_head, self.head_dim)
-            return fused_indexer_q_rope_quant(
-                positions,
-                q,
-                rotary_emb.cos_sin_cache,
-                indexer_weights,
-                self.softmax_scale,
-                self.n_head**-0.5,
-                use_fp4=self.use_fp4_kv,
-            )
-
-        # compressor returns None and writes K to the indexer KV cache; the
-        # join orders that write before indexer_op (skip_k_cache_insert=True).
-        (q_quant, weights), _ = maybe_execute_in_parallel(
-            wq_b_and_q_quant,
-            lambda: compressor(compressed_kv_score, positions, rotary_emb),
-            self.ln_events[0],
-            self.ln_events[1],
-            self.aux_stream,
+        q = self._wq_b_proj(qr, qr_scale)
+        q = q.view(-1, self.n_head, self.head_dim)
+        q_quant, weights = fused_indexer_q_rope_quant(
+            positions,
+            q,
+            rotary_emb.cos_sin_cache,
+            indexer_weights,
+            self.softmax_scale,
+            self.n_head**-0.5,
+            use_fp4=self.use_fp4_kv,
         )
         if isinstance(q_quant, tuple):
             q, q_scale = q_quant
