@@ -57,7 +57,7 @@ Example:
 python3 tools/recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
-  --input-tokens 2048 \
+  --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
   --ttft-sla-ms 3000 \
@@ -172,13 +172,13 @@ max-num-batched-tokens = max(
 )
 ```
 
-For example, with 2048 input tokens, 128 output tokens, and concurrency 32:
+For example, with 128 input tokens, 128 output tokens, and concurrency 32:
 
 ```text
 decode_budget      = 32
 prefills_per_step  = max(1, 32 / 128) = 1
-prefill_budget     = 2048
-candidate          = max(2048, 32, 32 + 2048) = 2080
+prefill_budget     = 128
+candidate          = max(2048, 32, 32 + 128) = 2048
 ```
 
 If chunked prefill is explicitly disabled and `max-model-len` is available, the
@@ -261,7 +261,7 @@ python3 /recipes/recipe_json_to_vllm_config.py \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --hardware xeon6 \
   --detect-hardware \
-  --input-tokens 2048 \
+  --input-tokens 128 \
   --output-tokens 128 \
   --concurrency 32 \
   --ttft-sla-ms 3000 \

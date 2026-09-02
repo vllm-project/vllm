@@ -45,6 +45,7 @@ logger = init_logger(__name__)
 
 @dataclass(slots=True)
 class LookupState:
+    generation: int
     result: bool | None = None  # True (found), False (not found), None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
 
@@ -78,21 +79,24 @@ class AsyncLookupManager(ABC):
         self._lookup_state: dict[OffloadKey, LookupState] = {}
         # req_id → keys looked up by that request (reverse index for cleanup).
         self._req_keys: dict[str, set[OffloadKey]] = {}
+        # Results from an older state must not be applied after cleanup removes
+        # and recreates a key.
+        self._next_generation = 0
 
-        # Accumulates (key, req_context) pairs during lookup() calls.
+        # Accumulates (key, req_context, generation) triples during lookup().
         # Flushed as one queue item per step by flush().
-        self._lookup_batch: list[tuple[OffloadKey, ReqContext]] = []
+        self._lookup_batch: list[tuple[OffloadKey, ReqContext, int]] = []
 
         # Scheduler → worker: one full step's batch per item.
         # None is used as a shutdown sentinel.
         self._lookup_queue: queue.SimpleQueue[
-            list[tuple[OffloadKey, ReqContext]] | None
+            list[tuple[OffloadKey, ReqContext, int]] | None
         ] = queue.SimpleQueue()
 
         # Worker → scheduler: completed result batches.
-        # Each item is a list of (key, found) pairs.
+        # Each item is a list of (key, generation, found) triples.
         # SimpleQueue is explicitly thread-safe for one writer / one reader.
-        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, bool]]] = (
+        self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
             queue.SimpleQueue()
         )
         self._need_to_drain: bool = False
@@ -137,9 +141,10 @@ class AsyncLookupManager(ABC):
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
-            state = LookupState()
+            state = LookupState(generation=self._next_generation)
+            self._next_generation += 1
             self._lookup_state[key] = state
-            self._lookup_batch.append((key, req_context))
+            self._lookup_batch.append((key, req_context, state.generation))
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
         return state.result
@@ -167,19 +172,19 @@ class AsyncLookupManager(ABC):
                 batch = self._pending_results.get_nowait()
             except queue.Empty:
                 break
-            for key, result in batch:
+            for key, generation, result in batch:
                 state = self._lookup_state.get(key)
-                if state is not None:
-                    # A key is enqueued for probing exactly once, so a decided
-                    # verdict must never receive a second result. Enforcing it
-                    # keeps a late/duplicate result from resurrecting a stale
-                    # True and reopening the failed-load livelock.
-                    assert state.result is None, (
-                        "cached key received a second lookup result; the "
-                        "enqueue-once invariant is broken and could reopen the "
-                        "failed-load livelock"
-                    )
-                    state.result = result
+                if state is None or state.generation != generation:
+                    continue
+                # Each lookup generation is enqueued exactly once. A matching
+                # generation must not receive a second result; stale
+                # generations were discarded above.
+                assert state.result is None, (
+                    "cached key received a second lookup result; the "
+                    "enqueue-once invariant is broken and could reopen the "
+                    "failed-load livelock"
+                )
+                state.result = result
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
@@ -218,18 +223,19 @@ class AsyncLookupManager(ABC):
                 break
 
             # Group by req_id.
-            batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
-            for key, req_context in pending:
+            batches: dict[str, tuple[ReqContext, list[tuple[OffloadKey, int]]]] = {}
+            for key, req_context, generation in pending:
                 req_id = req_context.req_id
                 if req_id not in batches:
                     batches[req_id] = (req_context, [])
-                batches[req_id][1].append(key)
+                batches[req_id][1].append((key, generation))
 
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, bool]] = []
-            for req_context, keys in batches.values():
+            results: list[tuple[OffloadKey, int, bool]] = []
+            for req_context, entries in batches.values():
+                keys = [key for key, _ in entries]
                 try:
                     hits = self.batch_lookup(keys, req_context)
                 except Exception as exc:
@@ -241,8 +247,8 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
-                for key, hit in zip(keys, hits):
-                    results.append((key, hit))
+                for (key, generation), hit in zip(entries, hits):
+                    results.append((key, generation, hit))
 
             # Post the entire batch as one item — no lock needed.
             if results:
