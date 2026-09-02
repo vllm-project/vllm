@@ -363,6 +363,7 @@ def test_replayssm_materialize_ready_rejects_incomplete_cache():
     with pytest.raises(RuntimeError, match="ring trackers"):
         ssu_dispatch._replayssm_materialize_ready([mixer])
 
+
 def test_replayssm_materialize_ready_requires_cuda_ssm_state():
     mixer = _materialize_mixer(device="cpu")
 
@@ -429,7 +430,7 @@ def test_modelwide_replayssm_postprocess_launches_materializer_once(monkeypatch)
         mamba_block_size=4,
         num_reqs=1,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert kernel.call_count == 1
     args = kernel.call_args.args

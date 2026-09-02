@@ -16,9 +16,9 @@ try:
         allocate_checkpointing_ssu_scratch,
     )
 
-    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(
-        CheckpointingSSURunner
-    ) and callable(allocate_checkpointing_ssu_scratch)
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner) and callable(
+        allocate_checkpointing_ssu_scratch
+    )
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -338,9 +338,7 @@ def _check_flashinfer_replayssm_prefix_caching(
 
         with vllm_runner(model_name, **common) as llm:
             assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
-            baseline_block_size = (
-                llm.llm.llm_engine.vllm_config.cache_config.block_size
-            )
+            baseline_block_size = llm.llm.llm_engine.vllm_config.cache_config.block_size
             llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )

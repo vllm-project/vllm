@@ -1012,9 +1012,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ).squeeze(1)
                     state_indices_tensor_d_input = live_indices
                     state_indices_tensor_d_output = live_indices
-                    block_idx_last_computed_token_d = (
-                        block_idx_last_scheduled_token_d
-                    )
+                    block_idx_last_computed_token_d = block_idx_last_scheduled_token_d
                 elif self.num_spec > 0:
                     assert block_idx_last_scheduled_token_prev_step_d is not None
                     input_indices = (

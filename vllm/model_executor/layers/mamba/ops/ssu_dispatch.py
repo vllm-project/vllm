@@ -579,9 +579,7 @@ class ReplaySSMModelContext:
         """Copy exact live state when align assigns a new writable slot."""
         if num_reqs == 0:
             return
-        _copy_reassigned_replayssm_slots_kernel[
-            (self.max_num_reqs, self.num_groups)
-        ](
+        _copy_reassigned_replayssm_slots_kernel[(self.max_num_reqs, self.num_groups)](
             idx_mapping,
             src_cols,
             dst_cols,

@@ -173,9 +173,7 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
     ("with_replayssm", "num_computed_tokens", "expected_order"),
     [
         pytest.param(True, 4, ["materialize", "copy"], id="replayssm-boundary"),
-        pytest.param(
-            True, 3, ["materialize", "copy"], id="replayssm-no-boundary"
-        ),
+        pytest.param(True, 3, ["materialize", "copy"], id="replayssm-no-boundary"),
         pytest.param(False, 4, ["copy"], id="generic"),
     ],
 )

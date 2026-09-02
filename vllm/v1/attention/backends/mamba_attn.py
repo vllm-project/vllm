@@ -895,9 +895,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             return state_indices_tensor_d[:, 0]
 
         assert block_idx_last_scheduled_token is not None
-        live_cols = block_idx_last_scheduled_token[
-            : state_indices_tensor_d.size(0)
-        ].to(torch.int64)
+        live_cols = block_idx_last_scheduled_token[: state_indices_tensor_d.size(0)].to(
+            torch.int64
+        )
         return state_indices_tensor_d.gather(1, live_cols.unsqueeze(1)).squeeze(1)
 
     def update_block_table(
