@@ -405,6 +405,11 @@ class RequestOffloadState:
         ``next_stored_chunk_idx``, so it is never re-considered and a
         permanent hole breaks prefix-reuse lookup.
         """
+        # E23 fix: zero-chunk groups (KpoolTail: tokens_per_chunk=4 <
+        # tokens_per_hash=16) carry no hash-addressable offload blocks; also
+        # guard the division itself.
+        if group_config.tokens_per_chunk <= 0:
+            return 0
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
         if group_config.is_eagle_group and is_decoding:
@@ -1285,6 +1290,10 @@ class OffloadingConnectorScheduler:
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
+                # E23 fix: zero-chunk groups produce empty key lists; skipping
+                # them keeps offload_keys/offload_block_ids length-consistent.
+                if group_config.tokens_per_chunk <= 0:
+                    continue
                 num_chunks = req_status.storable_chunks(
                     group_config, group_state, num_offloadable_tokens
                 )
