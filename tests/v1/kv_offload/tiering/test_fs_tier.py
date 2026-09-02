@@ -895,7 +895,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     view = memoryview(tensor.numpy())
     mock_region = MagicMock()
     mock_region.create_kv_memoryview.return_value = view
-    primary = CPUPrimaryTierOffloadingManager(num_blocks=4, mmap_region=mock_region)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
         primary_kv_view=primary.get_kv_memoryview(),
