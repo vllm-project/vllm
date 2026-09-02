@@ -342,7 +342,7 @@ steps:
   - vllm/entrypoints/chat_utils.py
   - vllm/entrypoints/mcp/
   - vllm/entrypoints/openai/chat_completion/protocol.py
-  - vllm/entrypoints/openai/engine/protocol.py
+  - vllm/entrypoints/generate/base/protocol.py
   - vllm/envs.py
   - vllm/exceptions.py
   - vllm/inputs/

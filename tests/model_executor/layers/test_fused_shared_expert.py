@@ -18,7 +18,11 @@ from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
+    get_quark_ocp_mx_group_size,
     is_shared_expert_quant_fse_compatible,
+)
+from vllm.model_executor.models.qwen3_next import (
+    _should_replicate_misaligned_shared_expert,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v4 import quant_config as deepseek_v4_quant_config
@@ -454,7 +458,7 @@ def test_is_model_fused_shared_expert_compatible() -> None:
     [
         (False, []),
         (True, []),
-        (True, ["*.shared_experts.*"]),
+        (True, [r"re:.*\.shared_experts?\..*"]),
     ],
 )
 def test_models_fse_init(
@@ -549,6 +553,7 @@ def test_models_fse_init(
                     method="mtp",
                     parallel_drafting=False,
                     enable_adaptive_verification=False,
+                    use_dspark=lambda: False,
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
@@ -578,7 +583,7 @@ def test_models_fse_init(
 
 @pytest.mark.parametrize(
     ("exclude", "expected"),
-    [([], True), (["*.shared_expert.*"], False)],
+    [([], True), ([r"re:.*\.shared_expert\..*"], False)],
 )
 def test_quark_shared_expert_fse_compatibility(
     exclude: list[str], expected: bool
@@ -603,6 +608,174 @@ def test_quark_shared_expert_fse_compatibility(
             reason
             == "Quark excludes shared experts at model.layers.0.mlp.shared_expert"
         )
+
+
+def test_quark_shared_expert_fse_exclude_is_scoped_to_the_layer() -> None:
+    """Excluding one layer's shared experts must not disable FSE elsewhere.
+
+    amd/GLM-5.2-MXFP4 excludes its MTP layer (78) wholesale, including
+    ``model.layers.78.mlp.shared_experts.{gate,up,down}_proj``, while the 75
+    target MoE layers keep MXFP4 shared experts.
+    """
+    quant_config = QuarkConfig(
+        {
+            "exclude": [
+                f"model.layers.78.mlp.shared_experts.{projection_name}"
+                for projection_name in ("gate_proj", "up_proj", "down_proj")
+            ],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.3.mlp.experts",
+        "model.layers.3.mlp.shared_experts",
+    ) == (True, None)
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.78.mlp.experts",
+        "model.layers.78.mlp.shared_experts",
+    )
+    assert compatible is False
+    assert (
+        reason == "Quark excludes shared experts at model.layers.78.mlp.shared_experts"
+    )
+
+
+def test_quark_shared_expert_fse_rejects_partially_excluded_packed_projection() -> None:
+    """Packed shared-expert projections require consistent shard exclusions."""
+    shared_expert_prefix = "model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            "exclude": [f"{shared_expert_prefix}.gate_proj"],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    with pytest.raises(ValueError, match="different quantization schemes"):
+        is_shared_expert_quant_fse_compatible(
+            quant_config, "model.layers.0.mlp.experts", shared_expert_prefix
+        )
+
+
+def test_quark_shared_expert_fse_ignores_sibling_gate_exclusions() -> None:
+    """Gates beside a shared expert must not disable FSE.
+
+    Qwen3.x MoE checkpoints (e.g. amd/Qwen3.5-397B-A17B-MoE-MXFP4) quantize the
+    shared expert to MXFP4 but leave the tiny routing gates next to it in BF16:
+    ``model.language_model.layers.N.mlp.shared_expert_gate`` and
+    ``model.language_model.layers.N.mlp.gate``. Neither is a shared-expert
+    projection, so fusion must stay enabled. Matching ``shared_expert`` against
+    raw exclude entries also matches ``shared_expert_gate``, which silently
+    disables FSE on every such checkpoint.
+    """
+    expert_prefix = "model.language_model.layers.0.mlp.experts"
+    shared_expert_prefix = "model.language_model.layers.0.mlp.shared_expert"
+    quant_config = QuarkConfig(
+        {
+            "exclude": [
+                "model.language_model.layers.0.mlp.gate",
+                f"{shared_expert_prefix}_gate",
+            ],
+            "global_quant_config": {},
+            "layer_quant_config": {},
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    assert is_shared_expert_quant_fse_compatible(
+        quant_config, expert_prefix, shared_expert_prefix
+    ) == (True, None)
+
+    # The gate exclusions must not mask a genuinely unquantized shared expert.
+    quant_config.quant_config["exclude"].append(f"{shared_expert_prefix}.down_proj")
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config, expert_prefix, shared_expert_prefix
+    )
+    assert compatible is False
+    assert reason == f"Quark excludes shared experts at {shared_expert_prefix}"
+
+
+def test_quark_ocp_mx_group_size_for_layer() -> None:
+    quant_config = QuarkConfig({**_QUARK_FSE_CONFIG, "exclude": []})
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        == 32
+    )
+
+    quant_config.quant_config["exclude"] = ["model.layers.0.mlp.shared_expert_gate"]
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        == 32
+    )
+
+    quant_config.quant_config["exclude"] = [
+        "model.layers.0.mlp.shared_expert.down_proj"
+    ]
+    assert (
+        get_quark_ocp_mx_group_size(
+            quant_config,
+            "model.layers.0.mlp.shared_expert.down_proj",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+def test_quark_ocp_mx_shared_expert_uses_supported_tp_shards(tp_size: int) -> None:
+    assert not _should_replicate_misaligned_shared_expert(
+        intermediate_size=640,
+        tp_size=tp_size,
+        group_size=32,
+        enable_expert_parallel=False,
+        is_sequence_parallel=False,
+    )
+
+
+def test_quark_ocp_mx_shared_expert_rejects_plain_tp8() -> None:
+    with pytest.raises(
+        ValueError,
+        match="TP size 8 produces a partition of 80",
+    ):
+        _should_replicate_misaligned_shared_expert(
+            intermediate_size=640,
+            tp_size=8,
+            group_size=32,
+            enable_expert_parallel=False,
+            is_sequence_parallel=False,
+        )
+
+
+def test_quark_ocp_mx_shared_expert_is_replicated_for_tep8() -> None:
+    assert _should_replicate_misaligned_shared_expert(
+        intermediate_size=640,
+        tp_size=8,
+        group_size=32,
+        enable_expert_parallel=True,
+        is_sequence_parallel=False,
+    )
+
+
+def test_quark_ocp_mx_shared_expert_is_replicated_when_not_tp_divisible() -> None:
+    assert _should_replicate_misaligned_shared_expert(
+        intermediate_size=672,
+        tp_size=8,
+        group_size=32,
+        enable_expert_parallel=True,
+        is_sequence_parallel=False,
+    )
 
 
 def test_quark_shared_expert_fse_requires_matching_layer_quant_configs() -> None:
