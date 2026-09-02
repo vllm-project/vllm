@@ -269,24 +269,62 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def _dict_properties(schema: Any) -> dict[str, dict[str, Any]]:
+    """Property schemas of *schema* that are dicts; booleans carry no types."""
+    if not isinstance(schema, dict):
+        return {}
+    return {
+        name: prop
+        for name, prop in schema.get("properties", {}).items()
+        if isinstance(prop, dict)
+    }
+
+
+def _root_schema_properties(params: dict[str, Any]) -> dict[str, Any]:
+    """Property schemas declared directly or inside root combinators.
+
+    Root ``allOf`` members always apply, so their properties refine the
+    direct ``properties``. Which ``anyOf``/``oneOf`` branch applies depends
+    on argument values a streaming parser only sees incrementally, so a
+    branch property is used only when no other branch declares it
+    differently.
+    """
+    properties = dict(params.get("properties", {}))
+    for member in params.get("allOf", []):
+        for name, schema in _dict_properties(member).items():
+            base = properties.get(name)
+            properties[name] = base | schema if isinstance(base, dict) else schema
+    branches = [
+        _dict_properties(branch)
+        for keyword in ("anyOf", "oneOf")
+        for branch in params.get(keyword, [])
+    ]
+    for branch in branches:
+        for name, schema in branch.items():
+            if name not in properties and all(
+                other.get(name, schema) == schema for other in branches
+            ):
+                properties[name] = schema
+    return properties
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its properties dict, or {}."""
+    """Find a tool by name and return its parameter property schemas, or {}."""
     if not tools:
         return {}
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
-            for name, params in iter_response_function_tool_info(tool):
-                if name == tool_name:
-                    return (params or {}).get("properties", {})
+            tool_info = iter_response_function_tool_info(tool)
+        elif _is_function_tool(tool):
+            tool_info = [_extract_tool_info(tool)]
+        else:
             continue
-        if not _is_function_tool(tool):
-            continue
-        name, params = _extract_tool_info(tool)
-        if name == tool_name:
-            return (params or {}).get("properties", {})
+        for name, params in tool_info:
+            if name == tool_name:
+                return _root_schema_properties(params or {})
     return {}
 
 
