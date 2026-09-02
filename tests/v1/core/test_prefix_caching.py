@@ -4412,6 +4412,44 @@ def test_swa_reachable_block_mask_with_dcp_scaling():
     )
 
 
+@pytest.mark.parametrize(
+    "block_size,dcp_world_size,alignment_tokens",
+    [
+        (16, 1, 24),  # 24 % 16 != 0
+        (16, 3, 64),  # effective block_size 48; 64 % 48 != 0
+    ],
+)
+def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
+    block_size, dcp_world_size, alignment_tokens
+):
+    """The mask is block-granular, so a sub-block alignment_tokens (not a
+    multiple of the DCP-scaled block size) cannot be represented exactly. This
+    happens for hybrid offloading (e.g. Gemma), where alignment_tokens is the
+    full-attention chunk size and need not divide the SWA block size. The mask
+    must fall back to dense (None) rather than raise."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=alignment_tokens,
+        reachable_boundaries=(),
+        dcp_world_size=dcp_world_size,
+    )
+    assert mask is None
+
+
 def test_mamba_reachable_block_mask_ignores_dcp():
     """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
     state block spans kv_cache_spec.block_size tokens regardless of DCP. The

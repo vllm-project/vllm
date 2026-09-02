@@ -1024,7 +1024,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
         block_size = kv_cache_spec.block_size * dcp_world_size
-        assert alignment_tokens % block_size == 0
+        if alignment_tokens % block_size != 0:
+            # The mask is block-granular, so a sub-block alignment cannot be
+            # represented exactly. This happens for hybrid offloading, where
+            # ``alignment_tokens`` is the full-attention chunk size and need not
+            # be a multiple of this SWA group's (DCP-scaled) block size (e.g.
+            # Gemma). Fall back to dense: every block is reachable, which never
+            # drops a block that could serve a hit.
+            return None
 
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
