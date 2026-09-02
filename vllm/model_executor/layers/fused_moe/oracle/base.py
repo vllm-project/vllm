@@ -27,7 +27,9 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -51,6 +53,15 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     that are appropriate for oracles which do not need them
     (e.g. `make_quant_config` raises on the unquantized oracle).
     """
+
+    @staticmethod
+    def get_user_moe_activation_override() -> tuple["QuantKey | None", bool]:
+        """Return the configured MoE activation key and whether it was set."""
+        args = get_current_vllm_config().model_config.quantization_config
+        if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
+            return None, False
+
+        return args.moe.activation, "activation" in args.moe.fields_set
 
     @abstractmethod
     def backend_enum_cls(self) -> type[BackendT]:

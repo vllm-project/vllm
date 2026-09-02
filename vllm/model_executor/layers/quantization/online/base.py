@@ -36,6 +36,8 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.linear_base import OnlineLinearBase
+from vllm.model_executor.layers.quantization.online.moe_base import OnlineMoEMethodBase
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -47,6 +49,9 @@ from vllm.model_executor.layers.quantization.online.mxfp8 import (
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.utils import (
+    get_activation_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -54,21 +59,19 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp4Static,
-    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
 
 logger = init_logger(__name__)
 
 
-# Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
-# corresponding method class handles the activation choice via its
-# `supported_activation_quant` set.
+# Online dispatch tables, keyed by the QuantSpec.weight QuantKey.
 _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineLinearMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
-    kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+    kMxfp8Static: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
 
@@ -76,7 +79,7 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
     kFp8StaticChannelSym: Fp8PtpcOnlineMoEMethod,
-    kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
+    kMxfp8Static: Mxfp8OnlineMoEMethod,
     kMxfp4Static: Mxfp4OnlineMoEMethod,
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
     kNvfp4Static: Nvfp4OnlineMoEMethod,
@@ -142,17 +145,25 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
-        # Online method classes pick their own activation format internally.
-        # Per-class activation overrides are not yet wired through; reject
-        # explicit overrides until the relevant method class opts in.
-        if spec.activation is not None:
-            raise ValueError(
-                f"activation override (activation={spec.activation}) is not "
-                f"yet supported for online {cls.__name__}"
-            )
         if isinstance(layer, RoutedExperts):
-            return cls(layer=layer)
-        return cls()
+            assert issubclass(cls, OnlineMoEMethodBase)
+            activation_quant_key = get_activation_quant_key(
+                cls.default_activation_quant_key, "moe"
+            )
+            return cls(
+                layer=layer,
+                activation_quant_key=activation_quant_key,
+            )
+        elif isinstance(layer, LinearBase):
+            assert issubclass(cls, OnlineLinearBase)
+            activation_quant_key = get_activation_quant_key(
+                cls.default_activation_quant_key, "linear"
+            )
+            return cls(
+                activation_quant_key=activation_quant_key,
+            )
+        else:
+            return None
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str

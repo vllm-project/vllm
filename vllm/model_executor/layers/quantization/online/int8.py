@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
@@ -35,16 +36,18 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     Loads fp16/bf16 weights and quantizes them per-row to int8 during loading.
     """
 
+    default_activation_quant_key = kInt8DynamicTokenSym
+
     def __init__(
         self,
-        *,
         layer: torch.nn.Module,
+        activation_quant_key: "QuantKey | None" = kInt8DynamicTokenSym,
     ):
-        super().__init__(layer.moe_config)
+        super().__init__(layer=layer, activation_quant_key=activation_quant_key)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
             weight_key=kInt8StaticChannelSym,
-            activation_key=kInt8DynamicTokenSym,
+            activation_key=activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
