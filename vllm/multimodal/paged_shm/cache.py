@@ -156,6 +156,7 @@ class PagedShmCache:
         4. Submit an async task to write chunks and close the write handle.
         5. Immediately return `(None, updates)` indicating the item is now cached.
         """
+        assert mm_item is not None
         encoded = encode_item(mm_item, self._encoder)
 
         if encoded is None:
@@ -206,7 +207,7 @@ class PagedShmCache:
                 )
             raise  # re-raise original exception
 
-    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheInItem:
+    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem:
         """
         Read and decode an item from shared memory.
 

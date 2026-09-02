@@ -19,7 +19,9 @@ The overall layout in shared memory is:
     - Padding (unused space) may exist at the end of the last block of each chunk.
 
 The Metadata Chunk consists of:
-    1. An 8‑byte header:
+    1. A 10‑byte header:
+       - 2 bytes: magic number "M0"
+           (identifies vLLM paged shared memory format version 0)
        - 4 bytes: size of the entire metadata chunk (including this header)
        - 4 bytes: total number of chunks (metadata chunk + all data chunks)
     2. For each data chunk, a metadata entry:
@@ -38,18 +40,34 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 
-from vllm.multimodal.cache import MultiModalProcessorCacheInItem
+from vllm.multimodal.cache import (
+    MultiModalProcessorCacheInItem,
+    MultiModalProcessorCacheOutItem,
+)
 from vllm.multimodal.paged_shm.storage import PagedShmStorage
 from vllm.multimodal.paged_shm.types import PagedShmCacheOutItem
 from vllm.utils.torch_utils import DeviceLikeType
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+# Magic number: two bytes 'M' and '0' indicating version 0 of this format.
+MAGIC = b"M0"
 
 
 def encode_item(
     mm_item: MultiModalProcessorCacheInItem,
     encoder: MsgpackEncoder,
 ) -> tuple[Sequence[bytes | np.ndarray | torch.Tensor], Sequence[int]] | None:
-    """Encode a multi-modal item into chunks for shared memory storage."""
+    """Encode a multi-modal item into chunks for shared memory storage.
+
+    Returns None when only a single data chunk exists (no large tensor), meaning
+    shared memory transfer is unnecessary.
+
+    The metadata chunk is built with a 10-byte header (magic + size + count)
+    followed by per-chunk (length, type) entries.
+    """
+    if mm_item is None:
+        return None
+
     raw_chunks = encoder.encode(
         PagedShmCacheOutItem(kwargs_item=mm_item[0], prompt_updates=mm_item[1])
     )
@@ -87,10 +105,12 @@ def encode_item(
             flag = 0
         meta_body += struct.pack("<I", length) + struct.pack("<B", flag)
 
-    # Metadata chunk: 8‑byte header + body.
-    meta_chunk_size = 8 + len(meta_body)
+    # Metadata chunk: 10‑byte header (2 magic + 4 size + 4 count) + body.
+    meta_chunk_size = 10 + len(meta_body)
     num_total_chunks = 1 + len(converted)
-    header = struct.pack("<I", meta_chunk_size) + struct.pack("<I", num_total_chunks)
+    header = (
+        MAGIC + struct.pack("<I", meta_chunk_size) + struct.pack("<I", num_total_chunks)
+    )
     meta_chunk = header + meta_body
 
     chunks = [meta_chunk] + converted
@@ -132,16 +152,17 @@ def read_decoded_from_blocks(
     block_size: int,
     decoder: MsgpackDecoder,
     device: DeviceLikeType = "cpu",
-) -> MultiModalProcessorCacheInItem:
+) -> MultiModalProcessorCacheOutItem:
     """
     Read and decode data from shared memory blocks using the metadata format.
 
     The layout is expected to match the encoding produced by encode_item():
-        - First, the metadata chunk (with 8‑byte header and per‑chunk entries).
+        - First, the metadata chunk (with a 10‑byte header and per‑chunk entries).
         - Then, the data chunks.
 
     The read process:
-        1. Read the first 8 bytes to get metadata chunk size and total chunk count.
+        1. Read the first 10 bytes to get magic, metadata chunk size and total
+           chunk count.
         2. Read the entire metadata chunk.
         3. Parse per‑chunk lengths and type flags.
         4. Read each data chunk, placing torch.Tensor data on the specified device
@@ -161,14 +182,19 @@ def read_decoded_from_blocks(
         A tuple (kwargs_item, prompt_updates) as decoded.
 
     Raises:
-        ValueError: If blocks list is empty or insufficient for any chunk.
+        ValueError: If blocks list is empty or insufficient for any chunk,
+                    or if magic number is invalid.
     """
     if not blocks:
         raise ValueError("Blocks list cannot be empty")
 
-    # Read the first 8 bytes to get metadata chunk size and total chunk count.
-    first8 = storage.read_to_tensor(8, [blocks[0]], device="cpu").numpy().tobytes()
-    meta_chunk_size, num_total_chunks = struct.unpack("<II", first8)
+    # Read the first 10 bytes to get magic, metadata chunk size and total chunk count.
+    first10 = storage.read_to_tensor(10, [blocks[0]], device="cpu").numpy().tobytes()
+    magic = first10[:2]
+    if magic != MAGIC:
+        raise ValueError(f"Invalid magic number: expected {MAGIC!r}, got {magic!r}")
+
+    meta_chunk_size, num_total_chunks = struct.unpack("<II", first10[2:10])
     num_data_chunks = num_total_chunks - 1
 
     # Read the entire metadata chunk.
@@ -184,7 +210,8 @@ def read_decoded_from_blocks(
     meta_bytes = meta_tensor.numpy().tobytes()
 
     # Parse per‑data‑chunk lengths and types.
-    pos = 8
+    # Skip the 10-byte header.
+    pos = 10
     original_lengths = []
     type_flags = []
     for _ in range(num_data_chunks):

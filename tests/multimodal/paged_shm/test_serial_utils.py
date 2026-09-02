@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.paged_shm.client import PagedShmClient
 from vllm.multimodal.paged_shm.serial_utils import (
+    MAGIC,
     encode_item,
     read_decoded_from_blocks,
     write_encoded_to_blocks,
@@ -149,13 +150,15 @@ class TestEncode:
         meta = chunks[0]
         assert isinstance(meta, bytes)
 
-        # Parse 8-byte header
-        meta_size = struct.unpack("<I", meta[:4])[0]
-        total_chunks = struct.unpack("<I", meta[4:8])[0]
+        # Parse 10-byte header: magic (2), size (4), count (4)
+        magic = meta[:2]
+        assert magic == MAGIC, f"Invalid magic: {magic}"
+        meta_size = struct.unpack("<I", meta[2:6])[0]
+        total_chunks = struct.unpack("<I", meta[6:10])[0]
         assert total_chunks == len(chunks)
 
-        # Parse per-data-chunk metadata entries
-        offset = 8
+        # Parse per-data-chunk metadata entries starting at offset 10
+        offset = 10
         stored_lengths = []
         for _ in range(total_chunks - 1):  # data chunks
             stored_len = struct.unpack("<I", meta[offset : offset + 4])[0]
@@ -430,9 +433,7 @@ class TestIntegration:
         decoder = MsgpackDecoder(PagedShmCacheOutItem)
 
         # Create many data chunks, enough to make metadata chunk > block_size
-        num_tensors = (
-            1000  # This many tensors, but encoder may produce more/less data chunks
-        )
+        num_tensors = 1000
         data_dict = {}
         for i in range(num_tensors):
             data_dict[f"t{i}"] = MultiModalFieldElem(
@@ -455,8 +456,10 @@ class TestIntegration:
         )
 
         # Parse header to verify total_chunks == len(chunks)
-        meta_size = struct.unpack("<I", meta_chunk[:4])[0]
-        total_chunks = struct.unpack("<I", meta_chunk[4:8])[0]
+        magic = meta_chunk[:2]
+        assert magic == MAGIC
+        meta_size = struct.unpack("<I", meta_chunk[2:6])[0]
+        total_chunks = struct.unpack("<I", meta_chunk[6:10])[0]
         assert total_chunks == len(chunks)
         assert meta_size == len(meta_chunk)
 
@@ -511,12 +514,12 @@ class TestErrorHandling:
         block_size = storage.block_size
 
         # Construct a metadata chunk with one data chunk whose length requires
-        # more blocks than available.
+        # more blocks than available. The header now includes the M0 magic.
         data_length = 10000  # > block_size, needs multiple blocks
         meta_body = struct.pack("<I", data_length) + struct.pack("<B", 0)  # type 0
-        meta_size = 8 + len(meta_body)
+        meta_size = 10 + len(meta_body)
         total_chunks = 2  # metadata + 1 data
-        header = struct.pack("<I", meta_size) + struct.pack("<I", total_chunks)
+        header = MAGIC + struct.pack("<I", meta_size) + struct.pack("<I", total_chunks)
         meta_chunk = header + meta_body
 
         # Write the metadata chunk into block 0 (it fits in one block)
@@ -525,6 +528,20 @@ class TestErrorHandling:
         # Attempt to read with only block 0 available.
         # The metadata chunk can be read, but the data chunk requires more blocks.
         with pytest.raises(ValueError, match="Insufficient blocks for data chunk"):
+            read_decoded_from_blocks(
+                storage, [0], block_size, MsgpackDecoder(PagedShmCacheOutItem)
+            )
+
+    def test_invalid_magic_raises(self, client):
+        """Test that an invalid magic number in the header raises an error."""
+        storage = client._storage
+        block_size = storage.block_size
+
+        # Write a header with an invalid magic ('XX' instead of 'M0')
+        wrong_header = b"XX" + struct.pack("<I", 10) + struct.pack("<I", 1)
+        storage.write(wrong_header, [0])
+
+        with pytest.raises(ValueError, match="Invalid magic number"):
             read_decoded_from_blocks(
                 storage, [0], block_size, MsgpackDecoder(PagedShmCacheOutItem)
             )
