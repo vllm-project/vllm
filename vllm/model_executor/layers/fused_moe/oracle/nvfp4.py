@@ -99,9 +99,11 @@ def backend_to_kernel_cls(
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
             FlashInferCuteDSLExperts,
+            FlashInferCuteDSLExpertsMonolithic,
         )
 
-        return [FlashInferCuteDSLExperts]
+        # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        return [FlashInferCuteDSLExpertsMonolithic, FlashInferCuteDSLExperts]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501

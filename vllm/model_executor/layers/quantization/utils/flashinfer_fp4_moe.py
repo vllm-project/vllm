@@ -68,7 +68,7 @@ def reorder_w1w3_to_w3w1(
 
 def interleave_linear_and_gate(
     x: torch.Tensor,
-    group_size: int = 64,
+    group_size: int = 16,
     dim: int = -1,
 ) -> torch.Tensor:
     """Interleave gate and linear weight rows for CuteDSL wrapper."""
@@ -146,8 +146,8 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
         )
 
         # Interleave up/gate rows for w13 weights and scales.
-        w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
-        w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+        w13 = interleave_linear_and_gate(w13, group_size=16, dim=1)
+        w13_scale = interleave_linear_and_gate(w13_scale, group_size=16, dim=1)
 
     w13_scale = swizzle_blockscale(w13_scale)
     w2_scale = swizzle_blockscale(w2_scale)
