@@ -2367,6 +2367,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     prefill_start : num_reqs + 1
                 ]
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
+                # plan() copies these to the GPU with non_blocking=True;
+                # stage them in pinned memory so the copies stay async
+                # (the reused buffers themselves are intentionally not pinned).
+                if PIN_MEMORY:
+                    qo_indptr_prefill_cpu = qo_indptr_prefill_cpu.pin_memory()
+                    paged_kv_indptr_prefill_cpu = (
+                        paged_kv_indptr_prefill_cpu.pin_memory()
+                    )
+                    paged_kv_last_page_len_prefill_cpu = (
+                        paged_kv_last_page_len_prefill_cpu.pin_memory()
+                    )
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -2497,6 +2508,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 indptr_cpu = self.paged_kv_indptr.cpu[: num_input_tokens + 1]
                 last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_input_tokens]
+                # The sizing probe and plan() both copy these to the GPU with
+                # non_blocking=True; stage them in pinned memory so the copies stay
+                # async (the reused buffers themselves are intentionally not pinned).
+                if PIN_MEMORY:
+                    indptr_cpu = indptr_cpu.pin_memory()
+                    last_page_len_cpu = last_page_len_cpu.pin_memory()
                 self._ensure_flashinfer_wrapper_workspace(
                     decode_wrapper,
                     self._get_decode_workspace_size(
