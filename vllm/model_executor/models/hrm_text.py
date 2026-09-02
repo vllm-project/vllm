@@ -248,7 +248,7 @@ class HrmTextDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx_in_stack: int,
-        stack_kind: str,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -312,7 +312,7 @@ class HrmTextStack(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        stack_kind: str,
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
