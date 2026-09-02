@@ -125,28 +125,37 @@ def _tool_strict_level() -> ToolStrictLevel:
         return ToolStrictLevel.OFF
 
 
-def _force_tool_strict(
+def _with_tool_strict(
     tool: ChatCompletionToolsParam | ResponsesTool,
+    strict: bool,
 ) -> ChatCompletionToolsParam | ResponsesTool:
-    """Return a copy of *tool* marked strict, leaving the caller's copy alone."""
+    """Return a copy of *tool* with ``strict`` set, leaving the caller's alone.
+
+    Setting it explicitly matters in both directions: xgrammar treats an absent
+    ``strict`` as "constrain the arguments", so leaving it unset at the
+    ``function`` level would silently pin argument schemas as well.
+    """
     if isinstance(tool, FunctionTool):
-        return tool.model_copy(update={"strict": True})
+        return tool.model_copy(update={"strict": strict})
     if isinstance(tool, ChatCompletionToolsParam):
         return tool.model_copy(
-            update={"function": tool.function.model_copy(update={"strict": True})}
+            update={"function": tool.function.model_copy(update={"strict": strict})}
         )
     return tool
+
+
+def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
+    if isinstance(tool, FunctionTool):
+        return tool.strict is True
+    if isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.strict is True
+    return False
 
 
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
-    for tool in tools:
-        if isinstance(tool, FunctionTool) and tool.strict is True:
-            return True
-        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
-            return True
-    return False
+    return any(_tool_is_strict(tool) for tool in tools)
 
 
 def get_model_structural_tag(
@@ -169,8 +178,15 @@ def get_model_structural_tag(
     ):
         return None
 
-    if strict_level >= ToolStrictLevel.PARAMETER:
-        tools = [_force_tool_strict(tool) for tool in tools]
+    if strict_level >= ToolStrictLevel.FUNCTION:
+        # "function" pins only the tool-call envelope, so argument schemas must
+        # be switched off explicitly; "parameter" pins them for every tool.
+        # Tools the client already marked strict keep their schemas either way.
+        want_strict = strict_level >= ToolStrictLevel.PARAMETER
+        tools = [
+            tool if _tool_is_strict(tool) else _with_tool_strict(tool, want_strict)
+            for tool in tools
+        ]
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)

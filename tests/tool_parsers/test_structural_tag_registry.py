@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import json
+
 import pytest
 
 from vllm import envs
@@ -728,6 +730,87 @@ def test_tool_strict_level_off_is_the_default(
 ):
     """Default behaviour is unchanged: auto + non-strict still gets no tag."""
     assert envs.VLLM_TOOL_STRICT_LEVEL == ToolStrictLevel.OFF.name.lower()
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_pins_envelope_only(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """"function" constrains the call envelope but leaves arguments free.
+
+    xgrammar treats an absent ``strict`` as "constrain the arguments", so the
+    level has to switch it off explicitly or it would silently behave like
+    "parameter" and break OpenAI's strict semantics.
+    """
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' not in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_parameter_pins_argument_schemas(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "parameter", raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_function_keeps_client_strict_tools_strict(
+    sample_tools_strict: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A tool the client marked strict is never downgraded by the level."""
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
+    )
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_unknown_value_falls_back_to_off(
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "nonsense", raising=False)
     assert (
         get_model_structural_tag(
             model="deepseek_v4",
