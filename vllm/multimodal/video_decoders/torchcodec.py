@@ -19,18 +19,22 @@ logger = init_logger(__name__)
 
 try:
     from torchcodec.decoders import VideoDecoder
-except Exception:
+except Exception as exc:
     # A broken optional dependency fails somewhere inside its own import chain,
-    # so the exception is whatever that chain raises: ImportError when absent,
-    # RuntimeError when the system ffmpeg libraries are missing, and OSError
-    # from torch.ops.load_library when an installed shared object cannot be
-    # loaded. Fall back for all of them, and log the cause so that an installed
-    # but unusable torchcodec is not silently swallowed.
-    logger.warning(
-        "torchcodec was found but failed to import; "
-        "the torchcodec video backend will be unavailable",
-        exc_info=True,
-    )
+    # so the exception is whatever that chain raises: ModuleNotFoundError when
+    # absent, RuntimeError when the system ffmpeg libraries are missing, and
+    # OSError from torch.ops.load_library when an installed shared object
+    # cannot be loaded. Fall back for all of them.
+    if not (isinstance(exc, ModuleNotFoundError) and exc.name == "torchcodec"):
+        # torchcodec is optional and is not built for every platform, so an
+        # absent one is normal and stays quiet. Anything else means it is
+        # installed but unusable, which is worth surfacing rather than
+        # swallowing.
+        logger.warning(
+            "torchcodec is installed but failed to import; "
+            "the torchcodec video backend will be unavailable",
+            exc_info=True,
+        )
     VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.VideoDecoder"
     )
