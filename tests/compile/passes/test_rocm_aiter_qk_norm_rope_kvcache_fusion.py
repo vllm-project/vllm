@@ -8,10 +8,8 @@ import pytest
 import torch
 from packaging.version import Version
 
-import vllm._aiter_ops as aiter_ops_module
 import vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion as fusion_module
 import vllm.config
-import vllm.v1.attention.backends.rocm_aiter_unified_attn as rocm_aiter_backend
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -19,8 +17,8 @@ from tests.v1.attention.utils import (
     dense_kv_cache_views,
 )
 from vllm._aiter_ops import (
+    IS_AITER_FOUND,
     is_aiter_found_and_supported,
-    is_aiter_mrope_strided_kv_cache_supported,
     rocm_aiter_ops,
 )
 from vllm.compilation.passes.fusion.matcher_utils import MROPE_OP, ROTARY_OP
@@ -352,7 +350,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     mrope_interleaved: bool = False,
     observe_mrope_k: bool = False,
     expect_fusion: bool = True,
-    force_mrope_support: bool = False,
     use_quark_scalar_query_scale: bool = False,
 ) -> None:
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
@@ -395,12 +392,6 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         )
         m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
-        if force_mrope_support:
-            m.setattr(
-                rocm_aiter_backend,
-                "is_aiter_mrope_strided_kv_cache_supported",
-                lambda: True,
-            )
 
         expected_query_quant_group_shape = None
         if use_quark_scalar_query_scale:
@@ -664,8 +655,8 @@ def test_qk_norm_rope_kvcache_fusion(
 )
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.skipif(
-    not is_aiter_mrope_strided_kv_cache_supported(),
-    reason=("Requires AITER v0.1.20.dev1+ or v0.1.21.dev0+ containing ROCm/aiter#4531"),
+    not IS_AITER_FOUND,
+    reason="Requires AITER",
 )
 def test_qk_norm_mrope_kvcache_fusion(
     mrope_section: tuple[int, int, int],
@@ -751,7 +742,6 @@ def test_mrope_fusion_rejects_observable_k(monkeypatch: pytest.MonkeyPatch):
         mrope_section=(16, 24, 24),
         observe_mrope_k=True,
         expect_fusion=False,
-        force_mrope_support=True,
     )
 
 
@@ -777,7 +767,6 @@ def test_mrope_fusion_rejects_unaligned_rotary_dim(
         monkeypatch=monkeypatch,
         mrope_section=(1, 1, 1),
         expect_fusion=False,
-        force_mrope_support=True,
     )
 
 
@@ -822,29 +811,6 @@ def test_opaque_layer_name_patterns_register_once(monkeypatch: pytest.MonkeyPatc
 
     assert models
     assert fusion_pass.patterns
-
-
-@pytest.mark.parametrize(
-    ("aiter_version", "expected"),
-    [
-        ("0.1.19", False),
-        ("0.1.20.dev0", False),
-        ("0.1.20.dev1", True),
-        ("0.1.20.dev2", True),
-        ("0.1.20", False),
-        ("0.1.20.post1", False),
-        ("0.1.21.dev0", True),
-        ("0.1.21", True),
-    ],
-)
-def test_mrope_strided_cache_version_gate(
-    monkeypatch: pytest.MonkeyPatch,
-    aiter_version: str,
-    expected: bool,
-):
-    monkeypatch.setattr(aiter_ops_module, "IS_AITER_FOUND", True)
-    monkeypatch.setattr(aiter_ops_module, "version", lambda _: aiter_version)
-    assert is_aiter_mrope_strided_kv_cache_supported() is expected
 
 
 def _call_fused_mrope_impl(q_out: torch.Tensor) -> None:
