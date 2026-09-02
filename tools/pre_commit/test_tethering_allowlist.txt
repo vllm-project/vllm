@@ -1,9 +1,14 @@
 # Allowlist for tools/pre_commit/check_test_tethering.py
 #
 # Every path below is a test file that is currently collected by NO job in
-# .buildkite/test_areas/ - it exists but never runs in CI. These are
-# pre-existing gaps, captured when the check was first added so that the gate
-# could start green. The list is meant to only ever shrink.
+# .buildkite/test_areas/. These are pre-existing gaps, captured when the check
+# was first added so that the gate could start green. The list is meant to only
+# ever shrink.
+#
+# "Untethered" here is scoped to .buildkite/test_areas/, which is all the check
+# parses. A few entries below are still run by the legacy hand-maintained
+# .buildkite/test-amd.yaml pipeline and are marked as such; they are listed
+# because they have no coverage in the native pipeline that test_areas defines.
 #
 # Rules:
 #   * Do not add a new entry to unblock a PR without a real justification and a
@@ -32,9 +37,9 @@ tests/distributed/test_kv_cache_events.py
 tests/distributed/test_kvlayout.py
 tests/distributed/test_mq_connect_ip.py
 tests/distributed/test_pipeline_partition.py
-tests/distributed/test_quick_all_reduce.py
-tests/distributed/test_rocm_aiter_custom_ar.py
-tests/distributed/test_rocm_quick_reduce.py
+tests/distributed/test_quick_all_reduce.py  # runs in test-amd.yaml only
+tests/distributed/test_rocm_aiter_custom_ar.py  # runs in test-amd.yaml only
+tests/distributed/test_rocm_quick_reduce.py  # runs in test-amd.yaml only
 tests/distributed/test_split_group.py
 tests/distributed/test_weight_transfer_nccl_uid.py
 
@@ -75,9 +80,6 @@ tests/test_tensorizer_revision_pin.py
 tests/test_triton_utils.py
 tests/test_version.py
 tests/test_zen_cpu_platform_detection.py
-
-# tests/tools/
-tests/tools/test_config_validator.py
 
 # tests/platforms/ - CPU-only unit test in a dir no job targets.
 tests/platforms/test_cpu.py
