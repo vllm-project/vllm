@@ -2,7 +2,7 @@ group: Models - Language
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Language Models (Standard)"
+- label: ":nvidia: (H200 MIG 18GB) Language Models (Standard)"
   key: language-models-tests-standard
   timeout_in_minutes: 30
   device: h200_18gb
@@ -23,7 +23,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200) Language Models (Extra Standard) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N"
   device: h200_35gb
   key: language-models-tests-extra-standard
   timeout_in_minutes: 40
@@ -57,7 +57,7 @@ steps:
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-- label: ":nvidia: (H200) Language Models (Hybrid) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N"
   device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 65
@@ -92,6 +92,8 @@ steps:
 # correctness test on L4 until its H200 output matches the Transformers reference.
 - label: ":nvidia: (L4) Granite Language Model Compatibility"
   key: language-models-tests-granite-l4-compatibility
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/
@@ -104,7 +106,7 @@ steps:
     - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
-- label: ":nvidia: (H200) Language Models (Extended Generation)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
   timeout_in_minutes: 80
@@ -133,7 +135,7 @@ steps:
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-- label: ":nvidia: (H200) Language Models (PPL)"
+- label: ":nvidia: (H200 MIG 18GB) Language Models (PPL)"
   key: language-models-test-ppl
   timeout_in_minutes: 30
   device: h200_18gb
@@ -144,8 +146,34 @@ steps:
   - tests/models/language/generation_ppl_test
   commands:
     - pytest -v -s models/language/generation_ppl_test
+  mirror:
+    amd:
+      label: ":amd: (MI250) Language Models (PPL)"
+      device: mi250_1
+      timeout_in_minutes: 65
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_5_mtp.py
+      - vllm/transformers_utils/configs/qwen3_5.py
+      - vllm/transformers_utils/configs/qwen3_5_moe.py
+      - vllm/model_executor/models/qwen2.py
+      - vllm/model_executor/models/qwen3.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/model_executor/models/qwen3_next_mtp.py
+      - vllm/model_executor/layers/fla/ops/
+      - vllm/_aiter_ops.py
+      - vllm/v1/attention/backends/triton_attn.py
+      - vllm/v1/attention/backends/rocm_attn.py
+      - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+      - vllm/v1/attention/backends/rocm_aiter_fa.py
+      - vllm/v1/attention/backends/flex_attention.py
+      - vllm/v1/attention/ops/
+      - vllm/platforms/rocm.py
+      - tests/models/language/generation_ppl_test
 
-- label: ":nvidia: (H200) Language Models (Extended Pooling) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N"
   device: h200_35gb
   key: language-models-test-extended-pooling
   timeout_in_minutes: 120
@@ -169,7 +197,7 @@ steps:
       commands:
       - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: ":nvidia: (H200) Language Models (MTEB)"
+- label: ":nvidia: (H200 MIG 18GB) Language Models (MTEB)"
   key: language-models-test-mteb
   timeout_in_minutes: 68
   device: h200_18gb
@@ -180,3 +208,10 @@ steps:
   - tests/models/language/pooling_mteb_test
   commands:
     - pytest -v -s models/language/pooling_mteb_test
+  mirror:
+    amd:
+      label: ":amd: (MI250) Language Models (MTEB)"
+      device: mi250_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd

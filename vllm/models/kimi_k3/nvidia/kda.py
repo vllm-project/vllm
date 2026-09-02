@@ -399,6 +399,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        aux_stream: torch.cuda.Stream | None = None,
         run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
@@ -421,6 +422,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         assert kda_config.get("use_full_rank_gate", False), (
             "KimiK3DeltaAttention requires a full-rank gate"
         )
+        self._projection_aux_stream = aux_stream
+        self._projection_events = (
+            (torch.cuda.Event(), torch.cuda.Event()) if aux_stream is not None else None
+        )
+        self._projection_overlap_max_tokens = 0
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row
         # to select the aligned BF16 GEMM path.
@@ -605,19 +611,44 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         num_tokens = hidden_states.size(0)
-        projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
-        split_sizes = [
-            3 * self.local_projection_size,
-            self.local_projection_size,
-            self.head_dim,
-            self.local_num_heads,
-        ]
-        if self.in_proj_padding:
-            split_sizes.append(self.in_proj_padding)
-        projected = projected_qkvgfab.split(split_sizes, dim=-1)
-        mixed_qkv, g_proj_states, f_a, beta = projected[:4]
+        projection_events = self._projection_events
+        projection_aux_stream = self._projection_aux_stream
+        if (
+            0 < num_tokens <= self._projection_overlap_max_tokens
+            and hidden_states.stride() == (self.hidden_size, 1)
+            and projection_events is not None
+            and projection_aux_stream is not None
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
+                run_kda_projection_overlap,
+            )
 
-        g1 = self.f_b_proj(f_a)[0]
+            projected_qkvg, g1, beta = run_kda_projection_overlap(
+                hidden_states,
+                self.in_proj_qkvgfab.weight,
+                self.f_b_proj.weight,
+                projection_aux_stream,
+                projection_events,
+            )
+            mixed_qkv, g_proj_states = projected_qkvg.split(
+                [3 * self.local_projection_size, self.local_projection_size],
+                dim=-1,
+            )
+        else:
+            projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+            split_sizes = [
+                3 * self.local_projection_size,
+                self.local_projection_size,
+                self.head_dim,
+                self.local_num_heads,
+            ]
+            if self.in_proj_padding:
+                split_sizes.append(self.in_proj_padding)
+            projected = projected_qkvgfab.split(split_sizes, dim=-1)
+            mixed_qkv, g_proj_states, f_a, beta = projected[:4]
+            g1 = self.f_b_proj(f_a)[0]
+
         beta = beta.unsqueeze(0)
         g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
