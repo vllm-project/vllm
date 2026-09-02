@@ -64,11 +64,30 @@ def test_processor_override(
     assert img_tok_count == expected_toks_per_img * num_imgs
 
 
+class _StubVisionEncoder:
+    """Fakes just the attribute get_mm_lora_token_counts reads off
+    vision_encoder for the image path."""
+
+    def __init__(self, compression=None):
+        self.image_token_compression = compression
+
+
+class _StubCompression:
+    """Fakes an nn.AvgPool2d-like object with just a `.kernel_size`."""
+
+    def __init__(self, kernel_size):
+        self.kernel_size = kernel_size
+
+
 class _StubModel:
-    """get_mm_lora_token_counts for Phi4MM reads only its arguments
-    (modality, num_mm_embeds), not any instance state, so an empty
-    stub is sufficient to exercise it without constructing the full
-    `nn.Module` (vision tower, audio tower, language model, etc.)."""
+    """get_mm_lora_token_counts for Phi4MM reads self.vision_encoder
+    .image_token_compression.kernel_size for the image path (to reverse
+    the tower's internal 2x2 avg-pool compression), and nothing from
+    `self` for the audio path. A stub vision_encoder is sufficient to
+    exercise both paths without constructing the full `nn.Module`
+    (vision tower, audio tower, language model, etc.)."""
+
+    vision_encoder = None
 
 
 def _get_mm_lora_token_counts():
@@ -79,20 +98,61 @@ def _get_mm_lora_token_counts():
     return Phi4MMForCausalLM.get_mm_lora_token_counts
 
 
-@pytest.mark.parametrize("modality", ["image", "audio"])
 @pytest.mark.parametrize("num_mm_embeds", [0, 1, 16, 197, 1500])
-def test_mm_lora_token_counts_passthrough(modality, num_mm_embeds):
-    """Phi4MM's tower/connector modules are shape-preserving in the
+def test_mm_lora_token_counts_image_with_compression(num_mm_embeds):
+    """SigLIP tower runs on full-resolution patches; a 2x2 AvgPool2d
+    (image_token_compression) reduces tokens by 4x right after the
+    tower, before the connector. So tower_tokens should be 4x the
+    LM-side embed count, while connector_tokens (shape-preserving)
+    equals it directly.
+    """
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+    stub.vision_encoder = _StubVisionEncoder(_StubCompression(2))
+
+    tower_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality="image",
+        mm_kwargs=None,
+        num_mm_embeds=num_mm_embeds,
+    )
+
+    assert tower_tokens == num_mm_embeds * 4
+    assert connector_tokens == num_mm_embeds
+
+
+def test_mm_lora_token_counts_image_no_compression():
+    """If image_token_compression is None (compression disabled),
+    tower and connector token counts should both equal the embed count.
+    """
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+    stub.vision_encoder = _StubVisionEncoder(None)
+
+    tower_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality="image",
+        mm_kwargs=None,
+        num_mm_embeds=100,
+    )
+
+    assert tower_tokens == 100
+    assert connector_tokens == 100
+
+
+@pytest.mark.parametrize("num_mm_embeds", [0, 1, 16, 197, 1500])
+def test_mm_lora_token_counts_audio_passthrough(num_mm_embeds):
+    """Audio's tower/connector modules are shape-preserving in the
     token dimension (all downsampling happens upstream, inside tower
     processing), so tower and connector token counts should both
-    equal the input embed count, for both image and audio modalities.
+    equal the input embed count.
     """
     get_mm_lora_token_counts = _get_mm_lora_token_counts()
     stub = _StubModel()
 
     tower_tokens, connector_tokens = get_mm_lora_token_counts(
         stub,
-        modality=modality,
+        modality="audio",
         mm_kwargs=None,
         num_mm_embeds=num_mm_embeds,
     )
@@ -101,18 +161,33 @@ def test_mm_lora_token_counts_passthrough(modality, num_mm_embeds):
     assert connector_tokens == num_mm_embeds
 
 
-@pytest.mark.parametrize("modality", ["image_embeds", "audio_embeds"])
-def test_mm_lora_token_counts_modality_prefix_match(modality):
+def test_mm_lora_token_counts_modality_prefix_match_image():
     """Modality strings are matched by prefix (e.g. `image_embeds`
     should still match `image`), consistent with how vLLM passes
     modality-variant strings elsewhere in the codebase.
     """
     get_mm_lora_token_counts = _get_mm_lora_token_counts()
     stub = _StubModel()
+    stub.vision_encoder = _StubVisionEncoder(_StubCompression(2))
 
     tower_tokens, connector_tokens = get_mm_lora_token_counts(
         stub,
-        modality=modality,
+        modality="image_embeds",
+        mm_kwargs=None,
+        num_mm_embeds=42,
+    )
+
+    assert tower_tokens == 168
+    assert connector_tokens == 42
+
+
+def test_mm_lora_token_counts_modality_prefix_match_audio():
+    get_mm_lora_token_counts = _get_mm_lora_token_counts()
+    stub = _StubModel()
+
+    tower_tokens, connector_tokens = get_mm_lora_token_counts(
+        stub,
+        modality="audio_embeds",
         mm_kwargs=None,
         num_mm_embeds=42,
     )
