@@ -432,6 +432,7 @@ def run_ref_mamba_state_in_subprocess() -> None:
 def _run_ref_mamba_state_worker():
     try:
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        os.environ["VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN"] = "0"
         num_generated_tokens = 8000
         num_prompt_tokens = 500
         sampling_params = SamplingParams(
@@ -512,6 +513,8 @@ class TestConfig:
 
 def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # step_actions are hand-derived for BLOCK_SIZE; keep XPU from rounding it up.
+    monkeypatch.setenv("VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN", "0")
 
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
@@ -955,6 +958,8 @@ def _run_mamba_prefix_cache_mrv2(
     async_scheduling_mode = async_scheduling
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # step_actions are hand-derived for BLOCK_SIZE; keep XPU from rounding it up.
+    monkeypatch.setenv("VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN", "0")
     envs.disable_envs_cache()
 
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner

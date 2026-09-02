@@ -414,6 +414,9 @@ class XPUPlatform(Platform):
         if new_block_size == cache_config.block_size:
             return
 
+        if not envs.VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN:
+            return
+
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded

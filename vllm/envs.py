@@ -319,6 +319,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
+    VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN: bool = True
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -2150,6 +2151,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Force N-contiguous weight layout for all XPU unquantized linears.
     "VLLM_XPU_FORCE_N_CONTIG_WEIGHT": lambda: bool(
         int(os.getenv("VLLM_XPU_FORCE_N_CONTIG_WEIGHT", "0"))
+    ),
+    # Round the KV block size up to a multiple of 64 when a GDN attention layer
+    # is present, as the XPU GDN kernel requires.
+    "VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN": lambda: bool(
+        int(os.getenv("VLLM_XPU_ALIGN_BLOCK_SIZE_FOR_GDN", "1"))
     ),
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
