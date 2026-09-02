@@ -153,18 +153,22 @@ def test_paged_attention(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
-    seq_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    seq_lens[-1] = MAX_SEQ_LEN
-    max_seq_len = max(seq_lens)
-    seq_lens = torch.tensor(seq_lens, dtype=torch.int)
+    seq_lens_lst = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    seq_lens_lst[-1] = MAX_SEQ_LEN
+    max_seq_len = max(seq_lens_lst)
+    seq_lens = torch.tensor(seq_lens_lst, dtype=torch.int)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables_lst: list[list[int]] = []
-    for _ in range(num_seqs):
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
         block_table = [
-            random.randint(0, NUM_BLOCKS - 1) for _ in range(max_num_blocks_per_seq)
+            random.randint(num_seqs, NUM_BLOCKS - 1)
+            for _ in range(max_num_blocks_per_seq)
         ]
+        # Keep the last block private to this sequence so its padding can be
+        # poisoned without corrupting valid tokens from another sequence.
+        block_table[(seq_len - 1) // block_size] = seq_idx
         block_tables_lst.append(block_table)
 
     block_tables = torch.tensor(block_tables_lst, dtype=torch.int)
@@ -189,22 +193,14 @@ def test_paged_attention(
     v_scale = torch.tensor(v_scale_value, dtype=torch.float32, device=device)
 
     if kv_cache_dtype == "fp8":
-        # Fill unused slots in referenced blocks with FP8 E4M3 NaNs. The
-        # attention result must not depend on values beyond each sequence.
-        fp8_nan = 0x80 if current_platform.is_fp8_fnuz() else 0x7F
-        valid_offsets_by_block: dict[int, set[int]] = {}
-        for seq_idx, seq_len in enumerate(seq_lens.tolist()):
-            for token_idx in range(seq_len):
-                block_idx = block_tables_lst[seq_idx][token_idx // block_size]
-                valid_offsets_by_block.setdefault(block_idx, set()).add(
-                    token_idx % block_size
-                )
-        for block_idx, valid_offsets in valid_offsets_by_block.items():
-            padding_offsets = [
-                offset for offset in range(block_size) if offset not in valid_offsets
-            ]
-            if padding_offsets:
-                value_cache[block_idx, :, :, padding_offsets] = fp8_nan
+        padding_nan = 0x80 if current_platform.is_fp8_fnuz() else 0x7F
+    else:
+        padding_nan = torch.nan
+    for seq_idx, seq_len in enumerate(seq_lens_lst):
+        padding_start = seq_len % block_size
+        if padding_start:
+            last_block_idx = block_tables_lst[seq_idx][seq_len // block_size]
+            value_cache[last_block_idx, :, :, padding_start:] = padding_nan
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
