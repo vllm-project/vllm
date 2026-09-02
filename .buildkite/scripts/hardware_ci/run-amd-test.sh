@@ -728,7 +728,8 @@ upload_failure_diagnostics_artifact() {
       BUILDKITE_AGENT_TRACE_HTTP=false \
       BUILDKITE_AGENT_LOG_LEVEL=error \
       timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
-      "${agent_bin}" artifact upload "${upload_path}"
+      "${agent_bin}" artifact upload \
+        --literal --delimiter "" "./${upload_path}"
   ) >/dev/null 2>&1
 }
 
@@ -1049,8 +1050,10 @@ collect_rocm_failure_diagnostics() {
   fi
 
   # Buildkite keeps the supplied artifact path. Restrict the configurable
-  # directory to a simple relative path so direct upload receives one key.
-  if [[ ! "${amd_diagnostics_dir}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$ ]]; then
+  # directory to a checkout-relative path so the UI shows a clean artifact key.
+  if [[ -z "${amd_diagnostics_dir}" \
+    || "${amd_diagnostics_dir}" == /* \
+    || "${amd_diagnostics_dir}" == *".."* ]]; then
     echo "WARNING: ignoring unsafe VLLM_CI_DIAGNOSTICS_DIR"
     amd_diagnostics_dir="artifacts/amd-gpu-diagnostics"
   fi
