@@ -1617,7 +1617,7 @@ def preprocess_mamba(
         fused.src_col.copy_to_gpu(num_reqs)
         fused.token_bias.copy_to_gpu(num_reqs)
         if fused.ctx.replayssm is not None:
-            fused.ctx.replayssm.copy_reassigned_slots(
+            fused.ctx.replayssm.materialize_reassigned_slots(
                 idx_mapping=None,
                 src_cols=fused.src_col.gpu,
                 dst_cols=fused.state_idx.gpu,
@@ -1693,12 +1693,13 @@ def postprocess_mamba_align_gpu(
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
     run_prefix_state_migration: bool,
 ) -> None:
-    """GPU-side Mamba postprocess for fused align state maintenance.
+    """Run model-wide Mamba state maintenance after token acceptance.
 
     Lazily binds the fused-kernel context to the persistent block tables and
-    forward-context state pointers on the first call, runs the fused kernel,
-    and async-copies the per-request accepted-token counts back to the input
-    batch's CPU tensor for the next iteration's preprocess.
+    forward-context state pointers on the first call. Prefix modes run the
+    generic state-copy planner before committing ReplaySSM trackers; mode none
+    commits only the trackers. The accepted counts are then copied back for any
+    CPU-side consumer on the next iteration.
     """
     ctx = bufs.postprocess_align
     # The caller enables this context for spec-decode hybrid state copies or
@@ -1733,12 +1734,12 @@ def postprocess_mamba_align_gpu(
         )
         accepted_tokens_for_postprocess = ctx.num_accepted_tokens_out
     if ctx.replayssm is not None:
-        ctx.replayssm.postprocess_and_materialize(
+        ctx.replayssm.postprocess(
             idx_mapping=None,
             query_metadata=ctx.num_scheduled_tokens_buf.gpu,
-            query_is_cumulative=False,
+            query_metadata_is_cumulative=False,
             num_computed_tokens=ctx.num_computed_tokens_buf.gpu,
-            num_computed_is_after=False,
+            num_computed_is_post_step=False,
             num_accepted_tokens=accepted_tokens_for_postprocess,
             is_prefilling=ctx.is_prefilling_buf.gpu,
             live_cols=ctx.mamba_state_idx_buf.gpu,

@@ -1085,9 +1085,7 @@ class GPUModelRunner(
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # The postprocess sub-object is also the model-level owner of
         # FlashInfer ReplaySSM trackers, including STP.
-        assert (
-            self._needs_prefix_state_migration or self._use_flashinfer_replayssm
-        )
+        assert self._needs_prefix_state_migration or self._use_flashinfer_replayssm
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
@@ -1617,9 +1615,7 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        if (
-            self._needs_prefix_state_migration or self._use_flashinfer_replayssm
-        ):
+        if self._needs_prefix_state_migration or self._use_flashinfer_replayssm:
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
@@ -4481,9 +4477,7 @@ class GPUModelRunner(
                     num_reqs,
                     self.requests,
                     self.mamba_state_idx,
-                    fixed_live_col=(
-                        None if self._needs_prefix_state_migration else 0
-                    ),
+                    fixed_live_col=(None if self._needs_prefix_state_migration else 0),
                 )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0

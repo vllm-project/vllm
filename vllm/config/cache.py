@@ -202,10 +202,10 @@ class CacheConfig:
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
-    Supports mamba_cache_mode 'none', 'align', and 'all'; 'all' requires the
-    FlashInfer backend. Mamba2 speculative decode also requires FlashInfer.
-    Prefix-boundary flushes are most efficient when mamba_block_size is a
-    multiple of replayssm_buffer_len, but this is not required."""
+    Triton supports 'none' and 'align' on Model Runner V1. FlashInfer supports
+    'none', 'align', and 'all' on Model Runner V1 and V2. Mamba2 speculative
+    decoding requires FlashInfer. With prefix caching enabled, Triton supports
+    'align'; FlashInfer supports 'align' and 'all'."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 

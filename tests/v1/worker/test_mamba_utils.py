@@ -201,8 +201,8 @@ def test_preprocess_mamba_uses_modelwide_materializer_when_present(
     align_ctx.precopy_token_bias_buf = _MockCpuGpuBuffer(1, torch.int32, device)
     align_ctx.replayssm = MagicMock() if with_replayssm else None
     if align_ctx.replayssm is not None:
-        align_ctx.replayssm.copy_reassigned_slots.side_effect = lambda **kwargs: (
-            order.append("materialize")
+        align_ctx.replayssm.materialize_reassigned_slots.side_effect = (
+            lambda **kwargs: order.append("materialize")
         )
     align_ctx.run_fused_precopy.side_effect = lambda **kwargs: order.append("copy")
 
@@ -238,7 +238,7 @@ def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
     ctx.materialize_token_counts = torch.tensor([2], dtype=torch.int32)
     ctx.run_fused_postprocess.side_effect = lambda **kwargs: order.append("copy")
     ctx.replayssm = MagicMock()
-    ctx.replayssm.postprocess_and_materialize.side_effect = lambda **kwargs: (
+    ctx.replayssm.postprocess.side_effect = lambda **kwargs: (
         order.append("materialize")
     )
     block_table = MagicMock()
@@ -270,12 +270,8 @@ def test_postprocess_mamba_none_skips_prefix_copy():
     ctx.is_initialized = True
     ctx.mamba_group_ids = [0]
     ctx.mamba_state_idx_buf = MagicMock(gpu=torch.zeros(1, dtype=torch.int32))
-    ctx.num_scheduled_tokens_buf = MagicMock(
-        gpu=torch.tensor([4], dtype=torch.int32)
-    )
-    ctx.num_computed_tokens_buf = MagicMock(
-        gpu=torch.tensor([20], dtype=torch.int32)
-    )
+    ctx.num_scheduled_tokens_buf = MagicMock(gpu=torch.tensor([4], dtype=torch.int32))
+    ctx.num_computed_tokens_buf = MagicMock(gpu=torch.tensor([20], dtype=torch.int32))
     ctx.num_draft_tokens_buf = MagicMock(gpu=torch.tensor([3], dtype=torch.int32))
     ctx.is_prefilling_buf = MagicMock(gpu=torch.tensor([False]))
     ctx.materialize_src_cols = torch.full((1,), -1, dtype=torch.int32)
@@ -301,13 +297,8 @@ def test_postprocess_mamba_none_skips_prefix_copy():
     )
 
     ctx.run_fused_postprocess.assert_not_called()
-    assert ctx.replayssm.postprocess_and_materialize.call_count == 1
-    assert (
-        ctx.replayssm.postprocess_and_materialize.call_args.kwargs[
-            "num_accepted_tokens"
-        ]
-        is accepted
-    )
+    assert ctx.replayssm.postprocess.call_count == 1
+    assert ctx.replayssm.postprocess.call_args.kwargs["num_accepted_tokens"] is accepted
     assert accepted_cpu.tolist() == [2]
 
 

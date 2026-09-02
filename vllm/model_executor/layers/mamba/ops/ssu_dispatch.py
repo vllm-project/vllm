@@ -60,16 +60,28 @@ def _postprocess_replayssm_modelwide_kernel(
     LOGICAL_WINDOW: tl.constexpr,
     RING_BUFFER_LEN: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
-    QUERY_IS_CUMULATIVE: tl.constexpr,
-    NUM_COMPUTED_IS_AFTER: tl.constexpr,
+    QUERY_METADATA_IS_CUMULATIVE: tl.constexpr,
+    NUM_COMPUTED_IS_POST_STEP: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
 ) -> None:
-    """Plan materialization and commit all ReplaySSM trackers in one launch.
+    """Commit all ReplaySSM trackers and optionally plan materialization.
 
-    One CTA owns one ``(batch row, cache group)`` pair, and is therefore the
-    only writer of that group's tracker for the request. Group zero writes the
-    request-level ``ring_start``/``flush_count`` snapshot shared by every layer;
-    every group fills the layer rows belonging to its physical slot namespace.
+    Request vectors have shape ``[batch_capacity]``. Cumulative query metadata
+    has shape ``[batch_capacity + 1]``; non-cumulative metadata has shape
+    ``[batch_capacity]``. Group pointer/capacity tables have shape
+    ``[num_groups]``, group-layer offsets have shape ``[num_groups + 1]``, and
+    source/destination plans have shape ``[num_layers, batch_capacity]``.
+
+    One CTA owns one ``(request row, cache group)`` tracker transition. Every
+    group updates its distinct physical-slot namespace. Group zero alone writes
+    the request-level ``ring_start``/``flush_count`` plan consumed by the one
+    all-layer FlashInfer materializer call. Invalid and padded rows still write
+    sentinels so fixed-capacity plans cannot retain stale work.
+
+    The two metadata flags specialize runner input representation only; they do
+    not change recurrence semantics. Prefill has already produced canonical SSM
+    state, so this kernel only resets the affected ReplaySSM cursors and, when a
+    prefix snapshot is requested, emits ``flush_count=0`` for an exact copy.
     """
     batch_idx = tl.program_id(0)
     group_idx = tl.program_id(1)
@@ -151,7 +163,7 @@ def _postprocess_replayssm_modelwide_kernel(
         )
 
     prefilling = tl.load(is_prefilling + batch_idx, mask=active, other=1)
-    if QUERY_IS_CUMULATIVE:
+    if QUERY_METADATA_IS_CUMULATIVE:
         query_len = tl.load(
             query_metadata + batch_idx + 1, mask=active, other=0
         ) - tl.load(
@@ -165,7 +177,7 @@ def _postprocess_replayssm_modelwide_kernel(
     if valid_req & prefilling:
         computed = tl.load(num_computed_tokens + req_idx)
         computed_before = tl.where(
-            NUM_COMPUTED_IS_AFTER, computed - query_len, computed
+            NUM_COMPUTED_IS_POST_STEP, computed - query_len, computed
         )
         computed_after = computed_before + query_len
         first_col = tl.maximum(computed_before // MAMBA_BLOCK_SIZE, 0)
@@ -344,7 +356,12 @@ def _replayssm_specialization_key(mixer: Any) -> tuple[Any, ...]:
 
 @dataclass
 class ReplaySSMModelContext:
-    """Persistent all-layer tables for ReplaySSM post-step maintenance."""
+    """One model-wide owner for ReplaySSM trackers and materialization plans.
+
+    Layers in a cache group share tracker tensors; the first layer is only the
+    representative used to capture those shared addresses. Materialization
+    plans remain layer-shaped because FlashInfer receives one row per mixer.
+    """
 
     mixers: list[Any]
     group_layer_offsets: torch.Tensor
@@ -400,6 +417,16 @@ class ReplaySSMModelContext:
             )
         block_table_by_gid = dict(zip(mamba_group_ids, block_tables))
         replayssm_block_tables = [block_table_by_gid[gid] for gid, _ in grouped]
+        for block_table in replayssm_block_tables:
+            if (
+                block_table.ndim != 2
+                or block_table.dtype != torch.int32
+                or not block_table.is_cuda
+                or block_table.numel() == 0
+            ):
+                raise ValueError(
+                    "model-wide ReplaySSM requires non-empty 2D CUDA int32 block tables"
+                )
         cache_modes = set()
         for gid, _ in grouped:
             spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
@@ -417,8 +444,7 @@ class ReplaySSMModelContext:
         materialize_prefixes = next(iter(cache_modes)) in ("align", "all")
 
         mixers = [mixer for _, group_mixers in grouped for mixer in group_mixers]
-        if not _replayssm_materialize_ready(mixers):
-            return None
+        _validate_replayssm_cache(mixers)
         first = mixers[0]
         first_ssm = first.kv_cache[1]
         first_x = first.kv_cache[2]
@@ -440,7 +466,7 @@ class ReplaySSMModelContext:
             group_offsets[i + 1] - group_offsets[i]
             for i in range(len(group_offsets) - 1)
         )
-        tracker_owners = [group_mixers[0] for _, group_mixers in grouped]
+        tracker_representatives = [group_mixers[0] for _, group_mixers in grouped]
         strides = {int(block_table.stride(0)) for block_table in replayssm_block_tables}
         if len(strides) != 1:
             raise ValueError(
@@ -456,13 +482,13 @@ class ReplaySSMModelContext:
             ),
             block_table_ptrs=_cuda_i64_ptrs(replayssm_block_tables),
             tracker_ring_start_ptrs=_cuda_i64_ptrs(
-                [m._replayssm_ring_start for m in tracker_owners]
+                [m._replayssm_ring_start for m in tracker_representatives]
             ),
             tracker_num_committed_ptrs=_cuda_i64_ptrs(
-                [m._replayssm_prev_num_accepted for m in tracker_owners]
+                [m._replayssm_prev_num_accepted for m in tracker_representatives]
             ),
             tracker_capacities=torch.tensor(
-                [m._replayssm_ring_start.numel() for m in tracker_owners],
+                [m._replayssm_ring_start.numel() for m in tracker_representatives],
                 dtype=torch.int32,
                 device=device,
             ),
@@ -526,14 +552,14 @@ class ReplaySSMModelContext:
             materialize_prefixes=materialize_prefixes,
         )
 
-    def postprocess_and_materialize(
+    def postprocess(
         self,
         *,
         idx_mapping: torch.Tensor | None,
         query_metadata: torch.Tensor,
-        query_is_cumulative: bool,
+        query_metadata_is_cumulative: bool,
         num_computed_tokens: torch.Tensor,
-        num_computed_is_after: bool,
+        num_computed_is_post_step: bool,
         num_accepted_tokens: torch.Tensor,
         is_prefilling: torch.Tensor,
         live_cols: torch.Tensor,
@@ -543,7 +569,7 @@ class ReplaySSMModelContext:
         mamba_block_size: int,
         num_reqs: int,
     ) -> None:
-        """Commit lifecycle metadata, then materialize all layers once."""
+        """Commit trackers, then publish a prefix snapshot when configured."""
         if num_reqs == 0:
             return
         _postprocess_replayssm_modelwide_kernel[(self.max_num_reqs, self.num_groups)](
@@ -573,8 +599,8 @@ class ReplaySSMModelContext:
             LOGICAL_WINDOW=self.logical_window,
             RING_BUFFER_LEN=self.ring_buffer_len,
             PAD_SLOT_ID=NULL_BLOCK_ID,
-            QUERY_IS_CUMULATIVE=query_is_cumulative,
-            NUM_COMPUTED_IS_AFTER=num_computed_is_after,
+            QUERY_METADATA_IS_CUMULATIVE=query_metadata_is_cumulative,
+            NUM_COMPUTED_IS_POST_STEP=num_computed_is_post_step,
             HAS_IDX_MAPPING=idx_mapping is not None,
         )
 
@@ -586,7 +612,7 @@ class ReplaySSMModelContext:
                 self.plan_flush_count,
             )
 
-    def copy_reassigned_slots(
+    def materialize_reassigned_slots(
         self,
         *,
         idx_mapping: torch.Tensor | None,
@@ -1072,30 +1098,45 @@ def _load_replayssm_materialize() -> Callable[..., None]:
     return replayssm_materialize
 
 
-def _replayssm_materialize_ready(mixers: list[Any]) -> bool:
-    """False only before the caches are allocated; raises on a bad cache.
+def _validate_replayssm_cache(mixers: list[Any]) -> None:
+    """Validate the cache tensors required by model-wide tracker ownership."""
+    for layer_idx, mixer in enumerate(mixers):
+        cache_tensors = mixer.kv_cache[1:5]
+        if any(tensor.numel() == 0 for tensor in cache_tensors):
+            raise RuntimeError(
+                "FlashInfer ReplaySSM requires allocated SSM and replay-ring "
+                f"cache tensors for every layer; layer {layer_idx} is empty"
+            )
+        if any(not tensor.is_cuda for tensor in cache_tensors):
+            devices = [str(tensor.device) for tensor in cache_tensors]
+            raise RuntimeError(
+                "FlashInfer ReplaySSM requires CUDA cache tensors for every "
+                f"layer; layer {layer_idx} uses {devices}"
+            )
 
-    A skip here is not free: ``state_skip_postprocess`` has already told the
-    fused postprocess kernel not to copy this temporal state, so silently
-    doing nothing would leave the destination block holding stale SSM state.
-    The empty-cache case (profiling and other pre-allocation runs) is the one
-    legitimate no-op; anything else is a misconfiguration and must be loud.
-    """
-    ssm = mixers[0].kv_cache[1]
-    x_cache = mixers[0].kv_cache[2]
-    if ssm.numel() == 0:
-        return False
-    if not ssm.is_cuda:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM prefix materialization requires a CUDA SSM "
-            f"state cache; got device {ssm.device}"
-        )
-    if x_cache.numel() == 0 or mixers[0]._replayssm_ring_start.numel() == 0:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM prefix materialization requires allocated "
-            "replay ring buffers and ring trackers"
-        )
-    return True
+        ring_start = mixer._replayssm_ring_start
+        num_committed = mixer._replayssm_prev_num_accepted
+        if ring_start.numel() == 0 or num_committed.numel() == 0:
+            raise RuntimeError(
+                "FlashInfer ReplaySSM requires allocated ring trackers for "
+                f"every layer; layer {layer_idx} is empty"
+            )
+        if not ring_start.is_cuda or not num_committed.is_cuda:
+            raise RuntimeError(
+                "FlashInfer ReplaySSM requires CUDA ring trackers for every layer"
+            )
+        if (
+            ring_start.ndim != 1
+            or num_committed.ndim != 1
+            or ring_start.dtype != torch.int32
+            or num_committed.dtype != torch.int32
+        ):
+            raise ValueError("ReplaySSM ring trackers must be 1D int32 tensors")
+        if ring_start.numel() != num_committed.numel():
+            raise ValueError(
+                "ReplaySSM ring trackers must have equal capacities; got "
+                f"{ring_start.numel()} and {num_committed.numel()}"
+            )
 
 
 def initialize_mamba_ssu_backend(

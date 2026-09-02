@@ -271,7 +271,7 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
     finally:
         envs.disable_envs_cache()
 
-    assert any(len(token_ids) > 16 for token_ids, _ in replay)
+    assert any(len(output[0]) > 16 for output in replay)
     assert draft_count > 0
     check_logprobs_close(
         outputs_0_lst=baseline,

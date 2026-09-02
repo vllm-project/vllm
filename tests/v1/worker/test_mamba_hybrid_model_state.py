@@ -48,20 +48,14 @@ def test_flashinfer_replayssm_none_postprocess_skips_prefix_migration() -> None:
     state._use_flashinfer_replayssm = True
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
-    state._replayssm_live_cols_gpu = torch.zeros(
-        4, dtype=torch.int32, device="cuda"
-    )
+    state._replayssm_live_cols_gpu = torch.zeros(4, dtype=torch.int32, device="cuda")
     state._is_prefilling_gpu = torch.zeros(4, dtype=torch.bool, device="cuda")
     replayssm = Mock()
     ctx = Mock(
         is_initialized=True,
         replayssm=replayssm,
-        materialize_src_cols=torch.full(
-            (4,), -1, dtype=torch.int32, device="cuda"
-        ),
-        materialize_dst_cols=torch.full(
-            (4,), -1, dtype=torch.int32, device="cuda"
-        ),
+        materialize_src_cols=torch.full((4,), -1, dtype=torch.int32, device="cuda"),
+        materialize_dst_cols=torch.full((4,), -1, dtype=torch.int32, device="cuda"),
         materialize_token_counts=torch.zeros(4, dtype=torch.int32, device="cuda"),
         block_size=1024,
     )
@@ -78,8 +72,8 @@ def test_flashinfer_replayssm_none_postprocess_skips_prefix_migration() -> None:
     )
 
     ctx.run_fused_postprocess_align.assert_not_called()
-    assert replayssm.postprocess_and_materialize.call_count == 1
-    kwargs = replayssm.postprocess_and_materialize.call_args.kwargs
+    assert replayssm.postprocess.call_count == 1
+    kwargs = replayssm.postprocess.call_args.kwargs
     assert kwargs["num_accepted_tokens"] is state.num_accepted_tokens_gpu
     assert kwargs["live_cols"] is state._replayssm_live_cols_gpu
 

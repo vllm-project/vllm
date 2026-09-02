@@ -161,7 +161,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_spec = mamba_spec
         return self._mamba_group_ids, self._mamba_spec
 
-    def _ensure_align_ctx(
+    def _ensure_mamba_postprocess_ctx(
         self,
         kv_cache_config: KVCacheConfig,
         mamba_group_ids: list[int],
@@ -224,7 +224,9 @@ class MambaHybridModelState(DefaultModelState):
         if num_reqs == 0:
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
-        ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        ctx = self._ensure_mamba_postprocess_ctx(
+            kv_cache_config, mamba_group_ids, block_tables
+        )
 
         # The state-advance + pre-copy kernels run every step; they fast-exit per
         # request when src_col < 0 or src_col == dst_col, so no copy happens on
@@ -247,7 +249,7 @@ class MambaHybridModelState(DefaultModelState):
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
         if ctx.replayssm is not None:
-            ctx.replayssm.copy_reassigned_slots(
+            ctx.replayssm.materialize_reassigned_slots(
                 idx_mapping=input_batch.idx_mapping,
                 src_cols=self._mamba_src_col_gpu,
                 dst_cols=self._mamba_state_idx_gpu,
@@ -320,7 +322,9 @@ class MambaHybridModelState(DefaultModelState):
 
         if self._use_flashinfer_replayssm:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
-            self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+            self._ensure_mamba_postprocess_ctx(
+                kv_cache_config, mamba_group_ids, block_tables
+            )
 
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
@@ -331,7 +335,7 @@ class MambaHybridModelState(DefaultModelState):
                     if hasattr(builder, "mamba_aligned_state_indices"):
                         aligned_index_builders.append((group_idx, builder))
             if aligned_index_builders:
-                ctx = self._ensure_align_ctx(
+                ctx = self._ensure_mamba_postprocess_ctx(
                     kv_cache_config, mamba_group_ids, block_tables
                 )
                 all_group_indices = ctx.compute_aligned_state_indices(
@@ -446,12 +450,12 @@ class MambaHybridModelState(DefaultModelState):
             assert replayssm is not None
             if is_prefilling is None:
                 is_prefilling = self._is_prefilling_gpu[:num_reqs]
-            replayssm.postprocess_and_materialize(
+            replayssm.postprocess(
                 idx_mapping=idx_mapping,
                 query_metadata=query_start_loc,
-                query_is_cumulative=True,
+                query_metadata_is_cumulative=True,
                 num_computed_tokens=num_computed_tokens,
-                num_computed_is_after=True,
+                num_computed_is_post_step=True,
                 # Prefix migration can reset the live buffer to one for the
                 # next step; use its snapshot in that case. Mode none never
                 # runs the migration kernel, so the acceptance buffer is exact.
