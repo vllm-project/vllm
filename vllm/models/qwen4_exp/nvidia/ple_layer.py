@@ -106,9 +106,15 @@ class Qwen4ExpPLEFp8EmbeddingMethod(QuantizeMethodBase):
             input_size_per_partition,
             None,
             weight_loader,
-            scale_dtype=torch.bfloat16,
+            scale_dtype=torch.float32,
         )
         layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Reject FP8 PLE checkpoints without a global scale."""
+        sentinel = torch.finfo(torch.float32).min
+        if torch.any(layer.weight_scale == sentinel):
+            raise ValueError("FP8 PLE checkpoint is missing its global scale")
 
     def apply(
         self,
