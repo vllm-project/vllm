@@ -9,6 +9,8 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
+import torch
+import torch.distributed as dist
 from torch.distributed import TCPStore
 
 from vllm.config import set_current_vllm_config
@@ -179,8 +181,8 @@ class EngineCoreSentinel:
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         # Workers replay masks for the cumulative dead set.
         ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
-        self._reinit_groups(ft_request)
-        return self._dispatch_command(ft_request)
+        self._recover_and_vote(ft_request, terminal=False)
+        return self._mark_healthy(ft_request)
 
     def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         removed_set = set(ft_request.params["removed_dp_ranks"])
@@ -199,34 +201,22 @@ class EngineCoreSentinel:
                 f"dead_dp_ranks={sorted(self._dead_dp_ranks)})"
             )
 
-        new_dead = self._dead_dp_ranks | newly_dead
-        ft_request.params["dead_dp_ranks"] = sorted(new_dead)
+        # Removing the store master (the lowest alive rank) requires the new
+        # store location in the request.
         alive_before = sorted(set(range(self._initial_dp_size)) - self._dead_dp_ranks)
-        new_alive = sorted(set(range(self._initial_dp_size)) - new_dead)
-
-        master_ip = self.parallel_config.data_parallel_master_ip
-        # The lowest alive rank hosts the TCPStore master; rebuild the store
-        # if that rank was just removed.
-        if alive_before[0] in newly_dead:
-            dp_store_port = ft_request.params.get("dp_store_port")
-            new_master_ip = ft_request.params.get("dp_master_ip")
-            if dp_store_port is None or new_master_ip is None:
-                raise ValueError(
-                    "dp_store_port and dp_master_ip required when the store "
-                    f"master (rank {alive_before[0]}) is removed"
-                )
-            master_ip = new_master_ip
-            self._rebuild_dp_store(
-                master_ip,
-                dp_store_port,
-                is_master=(my_rank == new_alive[0]),
-                num_clients=len(new_alive),
+        if alive_before[0] in newly_dead and (
+            ft_request.params.get("dp_store_port") is None
+            or ft_request.params.get("dp_master_ip") is None
+        ):
+            raise ValueError(
+                "dp_store_port and dp_master_ip required when the store "
+                f"master (rank {alive_before[0]}) is removed"
             )
 
-        self._reinit_groups(ft_request, master_ip=master_ip, dead_ranks=new_dead)
-        result = self._dispatch_command(ft_request)
-        # Commit the dead set only after the full recovery (engine group
-        # reinit + worker dispatch) succeeded.
+        new_dead = self._dead_dp_ranks | newly_dead
+        ft_request.params["dead_dp_ranks"] = sorted(new_dead)
+        self._recover_and_vote(ft_request, terminal=True, dead_ranks=new_dead)
+        # Commit the dead set only after the full recovery succeeded.
         self._dead_dp_ranks = new_dead
         logger.info(
             "[FT] Engine %d scale_down complete: removed %s, "
@@ -235,7 +225,7 @@ class EngineCoreSentinel:
             sorted(newly_dead),
             sorted(new_dead),
         )
-        return result
+        return self._mark_healthy(ft_request)
 
     def _rebuild_dp_store(
         self,
@@ -258,21 +248,35 @@ class EngineCoreSentinel:
         )
 
     def _reinit_groups(
-        self,
-        ft_request: FaultToleranceRequest,
-        master_ip: str | None = None,
-        dead_ranks: set[int] | None = None,
+        self, ft_request: FaultToleranceRequest, dead_ranks: set[int] | None = None
     ) -> None:
-        """Fill worker params and reinit the engine DP group (dp>1 only)."""
+        """Fill worker params and reinit the engine DP group (dp>1 only).
+
+        For scale_down (dead_ranks given), the TCPStore is rebuilt first if
+        the store master was just removed.
+        """
         engine = self.engine
         params = ft_request.params
-        if master_ip is None:
-            master_ip = self.parallel_config.data_parallel_master_ip
         dead = self._dead_dp_ranks if dead_ranks is None else dead_ranks
         # The rebuilt gloo group contains only alive members; its internal
         # rank/size are dense over sorted(alive), while parallel_config keeps
         # the frozen original values.
         alive = sorted(set(range(self._initial_dp_size)) - dead)
+        master_ip = self.parallel_config.data_parallel_master_ip
+        if dead_ranks is not None:
+            # The lowest alive rank hosts the TCPStore master; rebuild the
+            # store if that rank was just removed.
+            alive_before = sorted(
+                set(range(self._initial_dp_size)) - self._dead_dp_ranks
+            )
+            if alive_before[0] in dead_ranks - self._dead_dp_ranks:
+                master_ip = params["dp_master_ip"]
+                self._rebuild_dp_store(
+                    master_ip,
+                    params["dp_store_port"],
+                    is_master=(self.parallel_config.data_parallel_rank == alive[0]),
+                    num_clients=len(alive),
+                )
         params["dp_master_ip"] = master_ip
         params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
         params["dp_group_size"] = len(alive)
@@ -298,16 +302,51 @@ class EngineCoreSentinel:
         # failed recovery leaves a consistent state that can be retried.
         self.parallel_config.data_parallel_master_ip = master_ip
 
-    def _dispatch_command(
-        self, ft_request: FaultToleranceRequest
-    ) -> FaultToleranceResult:
-        """Dispatch the command to workers, then mark the engine healthy."""
+    def _recover_and_vote(
+        self,
+        ft_request: FaultToleranceRequest,
+        terminal: bool,
+        dead_ranks: set[int] | None = None,
+    ) -> None:
+        """Reinit the engine groups, dispatch the command to workers, then
+        all surviving engines vote one success bit over the rebuilt DP group
+        so they commit or fail together. Any failure is terminal when
+        `terminal` is set; otherwise the engine stays UNHEALTHY, retryable."""
         engine = self.engine
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
-        engine.model_executor.collective_rpc("handle_ft_command", args=(ft_request,))
+        local_error: Exception | None = None
+        try:
+            self._reinit_groups(ft_request, dead_ranks=dead_ranks)
+            engine.model_executor.collective_rpc(
+                "handle_ft_command", args=(ft_request,)
+            )
+        except Exception as exc:
+            local_error = exc
 
+        success = torch.tensor([local_error is None], dtype=torch.int32)
+        if self._initial_dp_size > 1:
+            try:
+                dist.all_reduce(
+                    success,
+                    op=dist.ReduceOp.MIN,
+                    group=cast("DPEngineCoreProc", engine).dp_group,
+                )
+            except Exception:
+                success.zero_()
+        if success.item():
+            return
+
+        if terminal:
+            self.status_type = EngineStatusType.DEAD
+            self.fault_info = "Recovery failed; full restart required"
+            self._push_status()
+        if local_error is not None:
+            raise local_error
+        raise RuntimeError("[FT] Recovery vote failed")
+
+    def _mark_healthy(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         self.status_type = EngineStatusType.HEALTHY
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
