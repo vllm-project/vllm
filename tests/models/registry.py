@@ -1723,7 +1723,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
