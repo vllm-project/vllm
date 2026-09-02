@@ -50,7 +50,7 @@ SKINNY_GEMM_PASS_RATES = {
 }
 PRESHUFFLED_SHAPES = [
     (64, 4096, 8192),
-    (32, 8192, 8192),
+    (32, 7168, 8192),
 ]
 
 
@@ -413,7 +413,8 @@ def test_aiter_fp4_gemm_preshuffled_tuned_shapes(shape):
     M, K, N = shape
 
     assert M <= 64
-    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+    # The predicate takes K as packed bytes, matching `weight.shape[1]`.
+    assert rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K // 2)
 
     A = torch.randn(M, K, dtype=torch.bfloat16)
     B = torch.randn(N, K, dtype=torch.bfloat16)
