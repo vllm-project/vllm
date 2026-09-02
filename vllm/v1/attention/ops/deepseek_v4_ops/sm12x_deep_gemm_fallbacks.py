@@ -3,6 +3,7 @@
 """SM12x fallback implementations for DeepGEMM-only interfaces."""
 
 import os
+
 import torch
 
 from vllm.logger import init_logger
