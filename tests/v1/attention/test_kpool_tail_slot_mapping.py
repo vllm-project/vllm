@@ -215,9 +215,10 @@ def make_common_metadata(per_req_positions, own_blocks, with_positions=True):
     )
 
 
-def make_tail_builder(block_size=KPOOL):
+def make_tail_builder(block_size=KPOOL, max_num_batched_tokens=128):
     builder = object.__new__(KpoolTailMetadataBuilder)
     builder.kv_cache_spec = SimpleNamespace(block_size=block_size)
+    builder.slot_mapping_buffer = torch.empty(max_num_batched_tokens, dtype=torch.int64)
     return builder
 
 
@@ -247,6 +248,21 @@ def test_builder_build_falls_back_without_positions():
     cam = make_common_metadata(per_req, [5], with_positions=False)
     meta = KpoolTailMetadataBuilder.build(make_tail_builder(), 0, cam)
     assert meta.slot_mapping is cam.slot_mapping
+
+
+def test_builder_reuses_slot_mapping_storage():
+    builder = make_tail_builder()
+    first = make_common_metadata([list(range(10))], [5])
+    first_meta = KpoolTailMetadataBuilder.build(builder, 0, first)
+    data_ptr = first_meta.slot_mapping.data_ptr()
+
+    second = make_common_metadata([list(range(12))], [9])
+    second_meta = KpoolTailMetadataBuilder.build(builder, 0, second)
+
+    assert second_meta.slot_mapping.data_ptr() == data_ptr
+    assert second_meta.slot_mapping[:12].tolist() == [
+        9 * KPOOL + pos % KPOOL for pos in range(12)
+    ]
 
 
 # ---------------------------------------------------------------------------
