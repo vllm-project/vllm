@@ -44,9 +44,9 @@ The tensor bytes are **offloaded** from the ZMQ hot path, eliminating serializat
 
 - **PagedShmClient**  
   A lightweight client that connects to the server. It provides:
-  - `open_write` / `close_write` (write lock)
-  - `open_read` / `close_read` (read lock)
-  - High‑level helpers for writing/reading `bytes`, `numpy.ndarray`, and `torch.Tensor`.
+    - `open_write` / `close_write` (write lock)
+    - `open_read` / `close_read` (read lock)
+    - High‑level helpers for writing/reading `bytes`, `numpy.ndarray`, and `torch.Tensor`.
 
 **Typical Write Flow (API Server):**
 

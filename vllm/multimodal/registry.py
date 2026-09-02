@@ -11,7 +11,6 @@ from vllm.inputs import MultiModalInput
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
-from ..utils.torch_utils import PIN_MEMORY
 from .cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
