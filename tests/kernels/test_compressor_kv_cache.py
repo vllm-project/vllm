@@ -985,3 +985,115 @@ def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
     # RoPE (last 64): stored as bf16. The kernel recomputes the rotation, so it
     # is bf16-close to the reference rather than bit-exact (cf. test_cutedsl).
     torch.testing.assert_close(recovered[:, NOPE_DIM:], ref[:, NOPE_DIM:])
+
+
+# ── Test B2: CuTeDSL gather vs Triton across #42236 shapes and grid sizes ───
+
+
+def _random_k_cache(num_blocks: int, block_size: int, gen, device) -> torch.Tensor:
+    """Paged K cache with random finite fp8/bf16 payloads and ue8m0 scales."""
+    fp8_dim, bf16_dim, scale_dim = 448, 64, 8
+    data_dim = fp8_dim + bf16_dim * 2
+    head_bytes = data_dim + scale_dim
+    fp8 = torch.randint(0, 256, (num_blocks, block_size, fp8_dim), generator=gen)
+    fp8 = fp8.to(torch.uint8)
+    fp8[(fp8 & 0x7F) == 0x7F] &= 0x7E  # drop e4m3 NaN encodings
+    bf16 = torch.randn(num_blocks, block_size, bf16_dim, generator=gen) * 4
+    bf16 = bf16.to(torch.bfloat16).view(torch.uint8)
+    scales = torch.randint(119, 136, (num_blocks, block_size, scale_dim), generator=gen)
+    kc = torch.empty(num_blocks, block_size * head_bytes, dtype=torch.uint8)
+    kc[:, : block_size * data_dim] = torch.cat([fp8, bf16], dim=-1).reshape(
+        num_blocks, -1
+    )
+    kc[:, block_size * data_dim :] = scales.to(torch.uint8).reshape(num_blocks, -1)
+    return kc.view(num_blocks, block_size, head_bytes).to(device)
+
+
+# (seq_lens, gather_lens, offset): the shape set of vllm-project/vllm#42236 plus
+# the DSv4 decode shapes (compressed: ~1k rows/req; SWA: 128 rows/req).
+_CUTEDSL_GATHER_SHAPES = [
+    *[([n], None, 0) for n in (1, 8, 32, 128, 512, 2048, 8192, 16384, 32000, 262144)],
+    ([97, 1024, 8192, 16384], None, 0),
+    ([8192], [128], 262144),
+    ([8192], [512], 262144),
+    ([8192], [1024], 262144),
+    ([16384], [128], 262144),
+    ([16384], [512], 262144),
+    ([16384], [1024], 262144),
+    ([1048576], [1024], 262144),
+    ([97, 1024, 8192, 16384], [33, 128, 512, 1024], 262144),
+    ([0, 1, 63, 64, 65, 127, 129, 1000], None, 0),
+    ([50, 4150, 1, 4096, 4097, 300, 128, 129], [50, 0, 1, 128, 128, 1, 128, 128], 4096),
+    ([1038] * 64, None, 0),
+    ([4150] * 64, [128] * 64, 4096),
+]
+
+
+@pytest.mark.parametrize(
+    ("seq_lens_host", "gather_lens_host", "offset"), _CUTEDSL_GATHER_SHAPES
+)
+def test_dequantize_and_gather_k_cache_cutedsl_grid(
+    seq_lens_host: list[int],
+    gather_lens_host: list[int] | None,
+    offset: int,
+):
+    """CuTeDSL gather must be bitwise equal to the Triton gather -- including
+    untouched output rows -- for the auto-picked grid.y and for grid sizes that
+    force multi-pass or ragged row-to-warp assignment."""
+    pytest.importorskip("cutlass")
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        dequantize_and_gather_k_cache_triton,
+    )
+    from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
+        DequantGatherKCacheKernel,
+        dequantize_and_gather_k_cache_cutedsl,
+    )
+
+    device = "cuda"
+    block_size = 64
+    num_blocks = 2048
+    gen = torch.Generator().manual_seed(0)
+    k_cache = _random_k_cache(num_blocks, block_size, gen, device)
+
+    num_reqs = len(seq_lens_host)
+    max_rows = max(gather_lens_host or seq_lens_host)
+    max_blocks = max(1, math.ceil(max(seq_lens_host) / block_size))
+    # Pages sampled with replacement: only translation and bit-equality matter.
+    block_table = torch.randint(
+        0, num_blocks, (num_reqs, max_blocks), generator=gen, dtype=torch.int32
+    ).to(device)
+    seq_lens = torch.tensor(seq_lens_host, dtype=torch.int32, device=device)
+    gather_lens = (
+        torch.tensor(gather_lens_host, dtype=torch.int32, device=device)
+        if gather_lens_host is not None
+        else None
+    )
+
+    def sentinel_out():
+        out = torch.empty(
+            num_reqs, offset + max_rows, 512, dtype=torch.bfloat16, device=device
+        )
+        out.view(torch.int16).fill_(0x7777)
+        return out
+
+    ref = sentinel_out()
+    dequantize_and_gather_k_cache_triton(
+        ref, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+    got = sentinel_out()
+    dequantize_and_gather_k_cache_cutedsl(
+        got, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+    torch.accelerator.synchronize()
+    assert torch.equal(got, ref), "picked grid"
+
+    # Forced grids: the row -> CTA assignment must not change the result, from
+    # one CTA per request up to more CTAs than there are rows.
+    kernel = DequantGatherKCacheKernel.compile(
+        block_size=block_size, has_gather_lens=gather_lens is not None
+    )
+    for num_workers in (1, 3, 1024):
+        got = sentinel_out()
+        kernel(got, k_cache, seq_lens, gather_lens, block_table, offset, num_workers)
+        torch.accelerator.synchronize()
+        assert torch.equal(got, ref), f"num_workers={num_workers}"
