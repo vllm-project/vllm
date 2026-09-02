@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_KV_CACHE_DTYPE_REASON = "kv_cache_dtype not supported"
+_TURBOQUANT_LAYOUT_REASON = "no KV cache layout in common with TURBOQUANT"
+
 try:
     from amdsmi import (
         AmdSmiException,
@@ -513,14 +516,13 @@ def _shares_layout_with_turboquant(backend_class: type["AttentionBackend"]) -> b
     the whole worker, and get_supported_kv_cache_layouts() turns an empty
     intersection into a hard error at engine startup.
     """
-    from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
-
     layouts = backend_class.supported_kv_cache_layouts()
-    if layouts is None:
-        return True
-    return not set(layouts).isdisjoint(
-        TurboQuantAttentionBackend.supported_kv_cache_layouts()
+    turboquant_layouts = (
+        AttentionBackendEnum.TURBOQUANT.get_class().supported_kv_cache_layouts()
     )
+    if layouts is None or turboquant_layouts is None:
+        return True
+    return not set(layouts).isdisjoint(turboquant_layouts)
 
 
 def _get_invalid_reasons(
@@ -540,7 +542,7 @@ def _get_invalid_reasons(
         and is_turboquant_run
         and not _shares_layout_with_turboquant(backend_class)
     ):
-        invalid_reasons = ["no KV cache layout in common with TURBOQUANT"]
+        invalid_reasons = [_TURBOQUANT_LAYOUT_REASON]
     return invalid_reasons
 
 
@@ -703,7 +705,13 @@ class RocmPlatform(Platform):
             layer_is_turboquant = kv_dtype is not None and str(kv_dtype).startswith(
                 "turboquant"
             )
-            if not (is_turboquant_run or layer_is_turboquant):
+            is_turboquant_fallback = (
+                is_turboquant_run or layer_is_turboquant
+            ) and sel_invalid_reasons in (
+                [_KV_CACHE_DTYPE_REASON],
+                [_TURBOQUANT_LAYOUT_REASON],
+            )
+            if not is_turboquant_fallback:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
                     f"this configuration. Reason: {sel_invalid_reasons}"

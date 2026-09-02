@@ -35,6 +35,15 @@ def mock_get_cdna_version():
         yield
 
 
+@pytest.fixture
+def cleared_attention_selector_cache():
+    from vllm.v1.attention.selector import _cached_get_attn_backend
+
+    _cached_get_attn_backend.cache_clear()
+    yield
+    _cached_get_attn_backend.cache_clear()
+
+
 def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionBackend,
@@ -378,7 +387,86 @@ def turboquant_run_config():
         yield config
 
 
-@pytest.mark.parametrize("selected_backend", [None, "ROCM_ATTN", "ROCM_AITER_FA"])
+def test_turboquant_boundary_selection_is_not_cached_from_ordinary_run(
+    cleared_attention_selector_cache,
+):
+    from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
+    from vllm.v1.attention.selector import get_attn_backend
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    ordinary_config = VllmConfig(cache_config=CacheConfig(cache_dtype="auto"))
+    turboquant_config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype="turboquant_k8v4")
+    )
+
+    backend_priorities = [
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.TURBOQUANT,
+    ]
+    with patch(
+        "vllm.platforms.rocm._get_backend_priorities",
+        return_value=backend_priorities,
+    ):
+        with set_current_vllm_config(ordinary_config):
+            ordinary_backend = get_attn_backend(128, torch.float16, "auto")
+
+        with set_current_vllm_config(turboquant_config):
+            boundary_backend = get_attn_backend(128, torch.float16, "auto")
+            quantized_backend = get_attn_backend(128, torch.float16, "turboquant_k8v4")
+
+    assert ordinary_backend is AttentionBackendEnum.ROCM_ATTN.get_class()
+    assert quantized_backend is AttentionBackendEnum.TURBOQUANT.get_class()
+    assert get_supported_kv_cache_layouts([boundary_backend, quantized_backend]) == [
+        KVCacheLayout.LBNHC
+    ]
+
+
+def test_turboquant_run_does_not_mask_unsupported_selected_backend(
+    turboquant_run_config,
+):
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+    )
+
+    with (
+        patch("vllm.platforms.rocm.get_cdna_version", return_value=1),
+        pytest.raises(ValueError, match="compute capability not supported"),
+    ):
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
+            attn_selector_config=attn_selector_config,
+        )
+
+
+def test_turboquant_layout_check_respects_backend_override():
+    from vllm.platforms.rocm import _shares_layout_with_turboquant
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    boundary_backend = MagicMock()
+    boundary_backend.supported_kv_cache_layouts.return_value = (KVCacheLayout.LBHNC,)
+    turboquant_override = MagicMock()
+    turboquant_override.supported_kv_cache_layouts.return_value = (KVCacheLayout.LBHNC,)
+
+    with patch.object(
+        AttentionBackendEnum.TURBOQUANT,
+        "get_class",
+        return_value=turboquant_override,
+    ) as get_turboquant_class:
+        assert _shares_layout_with_turboquant(boundary_backend)
+    get_turboquant_class.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "selected_backend",
+    [None, "ROCM_ATTN", "ROCM_AITER_FA", "TURBOQUANT"],
+)
 def test_turboquant_boundary_layers_share_a_layout(
     selected_backend,
     turboquant_run_config,
