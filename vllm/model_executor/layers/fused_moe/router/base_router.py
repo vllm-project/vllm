@@ -5,7 +5,9 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -232,6 +234,33 @@ class BaseRouter(FusedMoERouter):
         assert topk_ids.dtype == indices_type or indices_type is None
         return topk_ids
 
+    def _handles_padding(self) -> bool:
+        return False
+
+    def _apply_padding_mask(
+        self, topk_weights: torch.Tensor, topk_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self._handles_padding()
+            or not envs.VLLM_MOE_SKIP_PADDING
+            or not is_forward_context_available()
+        ):
+            return topk_weights, topk_ids
+
+        is_padding = get_forward_context().is_padding
+        if is_padding is None:
+            return topk_weights, topk_ids
+
+        is_padding = is_padding[: topk_ids.shape[0]].unsqueeze(1)
+        topk_weights = torch.where(is_padding, 0.0, topk_weights)
+        if topk_ids.dtype == torch.uint32:
+            topk_ids = torch.where(is_padding, -1, topk_ids.to(torch.int64)).to(
+                torch.uint32
+            )
+        else:
+            topk_ids = torch.where(is_padding, -1, topk_ids)
+        return topk_weights, topk_ids
+
     @abstractmethod
     def _compute_routing(
         self,
@@ -291,6 +320,7 @@ class BaseRouter(FusedMoERouter):
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
+        topk_weights, topk_ids = self._apply_padding_mask(topk_weights, topk_ids)
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:

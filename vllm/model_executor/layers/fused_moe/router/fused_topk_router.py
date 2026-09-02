@@ -143,6 +143,9 @@ class FusedTopKRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
 
+    def _handles_padding(self) -> bool:
+        return not rocm_aiter_ops.is_fused_moe_enabled()
+
     @property
     def routing_method_type(self) -> RoutingMethodType:
         return get_routing_method_type(
