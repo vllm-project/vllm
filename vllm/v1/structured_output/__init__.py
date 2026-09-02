@@ -309,12 +309,27 @@ class StructuredOutputManager:
                         and reasoner is not None
                         and not apply_bitmask
                     ):
-                        if simulated_buf is None:
-                            history = list(request.all_token_ids)
-                            history_len = len(history)
-                            simulated_buf = history + list(req_tokens)
-                        simulated = simulated_buf[: history_len + i + 1]
-                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
+                        if getattr(reasoner, "reasoning_end_delta_only", False):
+                            # Delta-only reasoners never index input_ids, so
+                            # skip the full-sequence copy and per-position
+                            # slices (O(context) Python per spec token).
+                            reasoning_just_ended = (
+                                reasoner.is_reasoning_end_streaming(
+                                    request.all_token_ids, (token,)
+                                )
+                            )
+                        else:
+                            if simulated_buf is None:
+                                history = list(request.all_token_ids)
+                                history_len = len(history)
+                                simulated_buf = history + list(req_tokens)
+                            simulated = simulated_buf[: history_len + i + 1]
+                            reasoning_just_ended = (
+                                reasoner.is_reasoning_end_streaming(
+                                    simulated, [token]
+                                )
+                            )
+                        if reasoning_just_ended:
                             # Reasoning ended mid-window. Constrain the rest
                             # of the window via bitmask. Skip grammar advance
                             # through the marker (it is reasoning content);
