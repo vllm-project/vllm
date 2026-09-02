@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     LookupKeyClient,
+    resolve_store_job_block_size,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -81,6 +82,12 @@ class MooncakeStoreScheduler:
             self._hash_block_size,
             vllm_config.parallel_config.decode_context_parallel_size,
         )
+        self._store_job_block_size = resolve_store_job_block_size(
+            vllm_config,
+            kv_cache_config,
+            self._block_size,
+            self._hash_block_size,
+        )
         mamba_groups = {
             group_id: group.kv_cache_spec
             for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -90,6 +97,13 @@ class MooncakeStoreScheduler:
             spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
         ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
         self._boundary_state_group_ids = frozenset(mamba_groups)
+        if (
+            self.save_decode_cache
+            and mamba_groups
+            and kv_cache_config.prefix_cache_retention_interval == 0
+        ):
+            # Decode checkpoints become reusable Store boundaries.
+            kv_cache_config.prefix_cache_retention_interval = self._block_size
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -262,7 +276,8 @@ class MooncakeStoreScheduler:
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
-                self._block_size,
+                self._store_job_block_size,
+                event_block_size=self._block_size,
                 load_spec=load_spec,
                 # A consumer may write decode KV without becoming a prefill
                 # producer. Loads are still carried by the same metadata.
@@ -314,7 +329,8 @@ class MooncakeStoreScheduler:
 
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self._block_size,
+                        self._store_job_block_size,
+                        event_block_size=self._block_size,
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
@@ -355,7 +371,8 @@ class MooncakeStoreScheduler:
 
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
-                        self._block_size,
+                        self._store_job_block_size,
+                        event_block_size=self._block_size,
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
@@ -384,7 +401,8 @@ class MooncakeStoreScheduler:
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
-                    self._block_size,
+                    self._store_job_block_size,
+                    event_block_size=self._block_size,
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
@@ -396,7 +414,7 @@ class MooncakeStoreScheduler:
         if (
             block_state is not None
             and block_state.boundary_state_offloads
-            and not is_consumer
+            and can_process_cached
         ):
             self._handle_boundary_state_offloads(
                 block_state.boundary_state_offloads, meta
@@ -430,10 +448,8 @@ class MooncakeStoreScheduler:
         )
         for req_meta in save_metas:
             block_ids = block_state.block_ids.get(req_meta.req_id)
-            assert block_ids is not None, (
-                f"Missing current block table for store request {req_meta.req_id}"
-            )
-            req_meta.block_ids = block_ids
+            if block_ids is not None:
+                req_meta.block_ids = block_ids
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
@@ -560,12 +576,12 @@ class MooncakeStoreScheduler:
                 continue
             accepted: list[tuple[int, int, int]] = []
             for group_id, block_id, boundary_tokens in entries:
-                # Every other group stops saving at the end of this prefill, so
-                # a mamba-only key past it can never complete a joint hybrid
-                # hit. `prefill_end_tokens` — not the original prompt length —
-                # is the boundary: a resumed request re-prefills and re-saves
-                # its previously generated tokens for every group.
-                if boundary_tokens > tracker.prefill_end_tokens:
+                is_decode_boundary = boundary_tokens > tracker.prefill_end_tokens
+                if self.kv_role == "kv_consumer":
+                    # Store consumers save decode state only.
+                    if not is_decode_boundary:
+                        continue
+                elif is_decode_boundary and not self.save_decode_cache:
                     continue
                 if block_id == NULL_BLOCK_ID:
                     continue

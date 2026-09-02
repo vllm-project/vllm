@@ -174,13 +174,48 @@ remain unchanged. A decoder configured with `"save_decode_cache": true` uses
 the same Store TP for decode KV from every prefiller.
 
 The list may contain positive integer TP sizes. Sharing requires a Store TP that
-is at least the local TP and divisible by it, an LBHNC or LBNHC local KV cache,
-and the existing topology and KV-head constraints. The Store namespace includes
-the attention backend's selected layout. Different layouts use separate Store
-entries. Malformed lists and unsupported endpoints use an isolated rank-local
-key layout. When
-`enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect and
-the existing `store_tp_size` behavior is unchanged.
+is at least the local TP and divisible by it. LBHNC, LBNHC, BLHNC, BLNHC, LHBNC,
+and BHLNC local KV cache layouts are supported. The connector normalizes the
+four head-major layouts to one Store value order and the two token-major
+layouts to another. Physical layouts with the same value order can share
+entries.
+
+For hybrid cache allocations, a local attention block may contain several Store
+chunks, which are read and written through tensor-offset descriptors. Hybrid
+heterogeneous-TP sharing requires the same explicit `--prefix-match-unit` on
+every endpoint. The connector uses this prefix-hash boundary as the default
+Attention Store chunk size. A larger `store_chunk_size` can reduce Store object
+and metadata overhead:
+
+```json
+{
+    "kv_connector_extra_config": {
+        "store_tp_size": 8,
+        "store_chunk_size": 512
+    }
+}
+```
+
+The configured size applies to Attention Store objects. It must be a multiple
+of `prefix_match_unit`, divide every local Attention page, and align with each
+layer's stored states. Mamba and GDN convolution state layouts `DS` and `SD`
+are supported; sharing endpoints use the same layout.
+Completed Attention chunks can be stored before the next hybrid prefix
+boundary. Mamba and GDN entries remain complete state snapshots at their
+reusable prefix boundaries, and lookup exposes a prefix after all cache groups
+required at that boundary are present.
+
+Attention groups are planned from their per-layer cache specs, including specs
+wrapped by `UniformTypeKVCacheSpecs`. The Store TP and global head-slot count
+must divide one another; MQA and replicated GQA use the smaller head-slot count
+as the physical Store shard count. `MambaSpec` state segments map in complete
+state units; a replicated local unit can serve multiple Store shards. All
+endpoints use the same PP size and Store TP; PCP, DCP, and cross-layer blocks
+remain rank-local. Each group namespace records its Store value format and
+normalized value schema. Incompatible configurations use an isolated rank-local
+namespace.
+
+When `enable_store_tp_lcm` is absent or false, `prefill_tp_sizes` has no effect.
 
 **Proxy:**
 
@@ -278,7 +313,8 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
-- `store_tp_size` (int): Common Store TP for endpoints with different local TP sizes. It supports LBHNC and LBNHC local KV caches, with `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. The current topology is one full-attention cache group, PCP/DCP disabled, and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must be divisible by `store_tp_size`. Store shards contain fixed global KV-head ranges in the local layout. Shared endpoints use the same KV cache layout, pipeline-parallel size, and Store TP. The Store namespace includes the layout and PP size. Unsupported configurations use a topology-specific rank-local namespace.
+- `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
+  sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.
@@ -287,13 +323,10 @@ For example, with prefill TP 4, decode TP 2, and eight KV heads, set
 `store_tp_size` to 4 on both instances. Each decode rank reads and writes two
 of the four Store shards.
 
-MQA with one total KV head uses a replicated-head layout. For the supported
-prefill TP 4 to decode TP 2 case, every rank uses the
-same rank-0 key namespace. The four prefill replicas stripe block PUTs so each
-object is stored once, while both decode ranks GET every block into their local
-KV replica. `store_tp_size` does not appear in MQA keys, so identical MQA
-objects written at different store TP sizes share the same pool entry when PP
-sizes match.
+MQA with one total KV head uses one physical Store shard. For prefill TP 4 and
+decode TP 2, every rank uses the same shard key. Prefill replicas stripe block
+PUTs so each object is stored once, while both decode ranks GET every block into
+their local KV replica.
 
 Tensor-parallel collectives and low-precision arithmetic are not bitwise
 invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
