@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import cast
 
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
@@ -21,7 +21,10 @@ from vllm.inputs import (
     MultiModalInput,
     MultiModalPlaceholders,
 )
-from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsOptionalItems,
+)
 
 
 def merge_mm_kwargs_items(
@@ -37,7 +40,7 @@ def merge_mm_kwargs_items(
 
 
 def _encode_metadata_items(
-    items: list[MultiModalKwargsItem | None],
+    items: Sequence[MultiModalKwargsItem | None],
     *,
     declared: Collection[str],
 ) -> list[str | None]:
@@ -62,7 +65,7 @@ def _encode_metadata_items(
 
 
 def _encode_mm_kwargs_with_metadata(
-    raw_mm_kwargs: dict[str, list[MultiModalKwargsItem | None]],
+    raw_mm_kwargs: MultiModalKwargsOptionalItems,
     *,
     metadata_fields_for: Callable[[str], Collection[str]] | None = None,
 ) -> tuple[dict[str, list[str | None]], dict[str, list[str | None]] | None]:
@@ -72,8 +75,7 @@ def _encode_mm_kwargs_with_metadata(
 
     for modality, items in raw_mm_kwargs.items():
         kwargs_data[modality] = [
-            encode_mm_kwargs_item(item) if item is not None else None
-            for item in items
+            encode_mm_kwargs_item(item) if item is not None else None for item in items
         ]
 
         declared = (

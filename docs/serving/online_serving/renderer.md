@@ -110,3 +110,51 @@ print(prefill_response["choices"][0]["token_ids"])
 Single-process clients can keep passing the full render response to
 `/inference/v1/generate` unchanged; `mm_metadata` is optional and ignored
 when `kwargs_data` is present.
+
+### Payload shape
+
+#### Render response
+
+`/v1/chat/completions/render` returns both `kwargs_data` and `mm_metadata`.
+The arrays share the same per-modality item order. Base64 blobs are truncated
+below for readability.
+
+```json
+{
+  "token_ids": [151644, 872],
+  "features": {
+    "mm_hashes": {"image": ["abc123..."]},
+    "mm_placeholders": {"image": [{"offset": 0, "length": 256}]},
+    "kwargs_data": {
+      "image": ["<base64 MultiModalKwargsItem: pixel_values + image_grid_thw>"]
+    },
+    "mm_metadata": {
+      "image": ["<base64 MultiModalKwargsItem: image_grid_thw only>"]
+    }
+  }
+}
+```
+
+Forward `kwargs_data` to the encode worker. Keep `mm_metadata` for prefill.
+
+#### Prefill request
+
+Prefill omits `kwargs_data` and sends `mm_metadata` with
+`ec_transfer_params` from the encode response:
+
+```json
+{
+  "token_ids": [151644, 872],
+  "features": {
+    "mm_hashes": {"image": ["abc123..."]},
+    "mm_placeholders": {"image": [{"offset": 0, "length": 256}]},
+    "mm_metadata": {
+      "image": ["<base64 MultiModalKwargsItem: image_grid_thw only>"]
+    }
+  },
+  "ec_transfer_params": {
+    "ec_items": [{"mm_hash": "abc123...", "peer_host": "10.0.0.1"}]
+  },
+  "sampling_params": {"max_tokens": 64}
+}
+```
