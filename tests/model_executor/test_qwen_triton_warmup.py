@@ -13,6 +13,7 @@ from vllm.model_executor.warmup.qwen_triton_warmup import (
     _warm_batch_memcpy_kernel,
     _warm_causal_conv1d_fwd_kernel,
     _warm_fused_post_conv_kernel,
+    _warm_gated_rms_norm_kernel,
     _warm_mrope,
     _warm_vision,
     qwen_triton_warmup,
@@ -118,6 +119,21 @@ def test_qwen_gdn_warmup_config_keeps_bound_cache(monkeypatch) -> None:
     assert config.norm_activation == "silu"
 
 
+def test_qwen_gdn_warmup_config_norm_is_optional(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.mamba_utils.is_conv_state_dim_first",
+        lambda: True,
+    )
+    conv = torch.empty(8, 128, 3)
+    ssm = torch.empty(8, 4, 16, 16)
+    layer = _gdn_layer(kv_cache=(conv, ssm), include_state_api=False)
+    del layer.norm
+    config = _qwen_gdn_warmup_config({"layer": layer})
+    assert config is not None
+    assert config.norm_weight_dtype is None
+    assert config.conv_state.shape[0] == 8
+
+
 def test_qwen_triton_warmup_runs_prefill_kernels_for_pooling(monkeypatch) -> None:
     calls: list[str] = []
     _stub_qwen_warmup_helpers(monkeypatch, calls)
@@ -207,23 +223,16 @@ def test_qwen_triton_warmup_runs_vl_helpers_when_gdn_config_missing(
 
 
 def test_warm_gated_rms_norm_uses_production_m_shape(monkeypatch) -> None:
-    captured_m: list[int] = []
-    captured_kwargs: list[dict[str, object]] = []
+    captured: list[dict[str, object]] = []
 
-    def fake_warmup(*args, **kwargs):
-        captured_m.append(args[10])
-        captured_kwargs.append(kwargs)
+    def fake_warmup(**kwargs):
+        captured.append(kwargs)
 
     monkeypatch.setattr(
         "vllm.third_party.flash_linear_attention.ops.layernorm_guard"
-        ".calc_rows_per_block",
-        lambda M, device: 1,
+        ".warmup_layer_norm_fwd",
+        fake_warmup,
     )
-    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
-        layer_norm_fwd_kernel,
-    )
-
-    monkeypatch.setattr(layer_norm_fwd_kernel, "warmup", fake_warmup)
     from vllm.model_executor.warmup.qwen_triton_warmup import (
         _QwenGDNWarmupConfig,
         _warm_gated_rms_norm_kernel,
@@ -246,12 +255,45 @@ def test_warm_gated_rms_norm_uses_production_m_shape(monkeypatch) -> None:
         state_dtype=torch.float32,
     )
     _warm_gated_rms_norm_kernel(torch.device("cpu"), config, max_num_tokens=512)
-    assert captured_m
-    assert all(m % 32 == 0 for m in captured_m)
-    assert captured_kwargs[0]["HAS_Z"] is True
-    assert captured_kwargs[0]["IS_RMS_NORM"] is True
-    assert captured_kwargs[0]["NORM_BEFORE_GATE"] is True
-    assert captured_kwargs[0]["ACTIVATION"] == "silu"
+    assert captured
+    assert captured[0]["rows_per_token"] == 32
+    assert captured[0]["group_size"] == 128
+    assert captured[0]["is_rms_norm"] is True
+    assert captured[0]["norm_before_gate"] is True
+    assert captured[0]["activation"] == "silu"
+
+
+def test_warm_gated_rms_norm_skips_when_norm_missing(monkeypatch) -> None:
+    called: list[int] = []
+
+    def fail(*_args, **_kwargs):
+        called.append(1)
+
+    from vllm.model_executor.warmup.qwen_triton_warmup import _QwenGDNWarmupConfig
+
+    monkeypatch.setattr(
+        "vllm.third_party.flash_linear_attention.ops.layernorm_guard"
+        ".warmup_layer_norm_fwd",
+        fail,
+    )
+    config = _QwenGDNWarmupConfig(
+        h=2,
+        hv=32,
+        k=16,
+        v=128,
+        conv_kernel_size=4,
+        conv_state=torch.empty(1),
+        conv_dtype=torch.bfloat16,
+        norm_weight_dtype=None,
+        norm_before_gate=False,
+        norm_activation="",
+        a_log=torch.empty(1),
+        dt_bias=torch.empty(1),
+        state_stride_token=1,
+        state_dtype=torch.float32,
+    )
+    _warm_gated_rms_norm_kernel(torch.device("cpu"), config, max_num_tokens=512)
+    assert called == []
 
 
 def _cuda_gdn_config() -> object:

@@ -40,7 +40,7 @@ class _QwenGDNWarmupConfig:
     conv_kernel_size: int
     conv_state: torch.Tensor
     conv_dtype: torch.dtype
-    norm_weight_dtype: torch.dtype
+    norm_weight_dtype: torch.dtype | None
     norm_before_gate: bool
     norm_activation: str
     a_log: torch.Tensor
@@ -68,7 +68,6 @@ def _is_qwen_gdn_layer(module: object) -> bool:
             "conv_kernel_size",
             "tp_size",
             "kv_cache",
-            "norm",
             "A_log",
             "dt_bias",
         )
@@ -98,6 +97,16 @@ def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor]
     return None
 
 
+def _gdn_norm_fields(layer: object) -> tuple[torch.dtype | None, bool, str]:
+    norm = getattr(layer, "norm", None)
+    weight = getattr(norm, "weight", None)
+    if not _is_non_empty_tensor(weight):
+        return None, False, ""
+    if not hasattr(norm, "norm_before_gate") or not hasattr(norm, "activation"):
+        return None, False, ""
+    return weight.dtype, bool(norm.norm_before_gate), str(norm.activation)
+
+
 def _qwen_gdn_warmup_config(
     static_forward_context: object,
 ) -> _QwenGDNWarmupConfig | None:
@@ -119,7 +128,7 @@ def _qwen_gdn_warmup_config(
         tp_size = int(layer.tp_size)
         h = int(layer.num_k_heads) // tp_size
         hv = int(layer.num_v_heads) // tp_size
-        norm = layer.norm
+        norm_weight_dtype, norm_before_gate, norm_activation = _gdn_norm_fields(layer)
 
         return _QwenGDNWarmupConfig(
             h=h,
@@ -129,9 +138,9 @@ def _qwen_gdn_warmup_config(
             conv_kernel_size=int(layer.conv_kernel_size),
             conv_state=conv_state,
             conv_dtype=conv_state.dtype,
-            norm_weight_dtype=norm.weight.dtype,
-            norm_before_gate=bool(norm.norm_before_gate),
-            norm_activation=str(norm.activation),
+            norm_weight_dtype=norm_weight_dtype,
+            norm_before_gate=norm_before_gate,
+            norm_activation=norm_activation,
             a_log=layer.A_log,
             dt_bias=layer.dt_bias,
             state_stride_token=int(ssm_state.stride(0)),
@@ -149,12 +158,16 @@ def _warm_gated_rms_norm_kernel(
     device: torch.device,
     config: _QwenGDNWarmupConfig,
     max_num_tokens: int,
-    x_dtype: torch.dtype,
+    x_dtype: torch.dtype | None = None,
 ) -> None:
     from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
         warmup_layer_norm_fwd,
     )
 
+    if config.norm_weight_dtype is None or max_num_tokens < 1 or config.hv < 1:
+        return
+    if x_dtype is None:
+        x_dtype = config.conv_dtype
     warmup_layer_norm_fwd(
         max_num_tokens=max_num_tokens,
         rows_per_token=config.hv,
