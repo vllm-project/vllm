@@ -1102,6 +1102,32 @@ class TestServingDerenderStreamValidation:
         serving.online_derenderer.derender_chat_stream.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_oversized_prompt_token_ids_rejected(self):
+        """prompt_token_ids is caller supplied and otherwise unbounded. A
+        parser configured deployment rescans it in full on every chunk
+        (is_reasoning_end / adjust_initial_state_from_prompt), so it must be
+        bounded the same way output_token_ids is."""
+        from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            DerenderChatStreamRequest,
+        )
+
+        serving = self._make_serving(parser_configured=True, max_model_len=4)
+        request = DerenderChatStreamRequest(
+            stream=True,
+            model=MODEL_NAME,
+            generate_chunk=_make_stream_chunk([1]),
+            chat_request=_chat_request(),
+            prompt_token_ids=[1, 2, 3, 4, 5],
+        )
+        result = await serving.derender_chat_stream_response(request)
+        assert isinstance(result, ErrorResponse)
+        assert result.error.code == 400
+        assert "max_model_len" in result.error.message
+        serving.online_derenderer.derender_chat_stream.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_too_many_choices_rejected(self):
         """Each streamed chunk contains at most one choice (a single
         DerenderStreamState is threaded through every choice). The check

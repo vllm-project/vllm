@@ -299,6 +299,14 @@ class ServingDerender(BaseServing):
                 f"(got {num_choices})."
             )
 
+        # prompt_token_ids is folded in here too. It is caller supplied and
+        # otherwise unbounded. A parser configured deployment rescans it
+        # in full on every chunk (is_reasoning_end /
+        # adjust_initial_state_from_prompt, see abstract_parser.parse_delta)
+        # since parser state cannot be carried across calls.
+        prompt_len = (
+            len(request.prompt_token_ids) if request.prompt_token_ids is not None else 0
+        )
         prior_len = (
             len(request.stream_state.output_token_ids)
             if request.stream_state is not None
@@ -308,8 +316,9 @@ class ServingDerender(BaseServing):
             len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
         )
         max_model_len = self.model_config.max_model_len
-        if prior_len + delta_len > max_model_len:
+        if prompt_len + prior_len + delta_len > max_model_len:
             return self.create_error_response(
+                f"prompt_token_ids length ({prompt_len}) plus "
                 f"output_token_ids length ({prior_len}) plus delta "
                 f"({delta_len}) exceeds max_model_len ({max_model_len})."
             )

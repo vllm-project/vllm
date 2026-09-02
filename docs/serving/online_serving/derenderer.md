@@ -21,7 +21,7 @@ endpoints.
                         └─────────────── request + prompt_tokens ──┘
 ```
 
-The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need.
+The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need. The chat streaming path additionally needs `prompt_token_ids` (see [Streaming cost](#streaming-cost)) when a parser is configured.
 
 ## API Reference
 
@@ -60,11 +60,12 @@ Plain detokenization (no parser configured) carries only a small, bounded increm
 
 When a tool or reasoning parser is configured, parser internal state (buffered markup, reasoning/tool phase) can't be serialized. `stream_state` therefore instead carries the full `output_token_ids` seen so far and each chunk rebuilds a fresh parser and replays that history through `parse_delta` before processing the new tokens for real. For the parser path only, this means:
 
-- **Transport**: `output_token_ids` round-trips in full in both directions on every call. This means O(n) bytes per chunk, O(n²) bytes over a full generation. Bounded by `max_model_len`.
+- **Transport**: `output_token_ids` round-trips in full in both directions on every call. This means O(n) bytes per chunk, O(n²) bytes over a full generation. Bounded by `max_model_len`. `prompt_token_ids` is sent in full on every call too and it isn't trimmed as `output_token_ids` grows. This means that for most of a stream it dominates the per chunk payload. A 100k token prompt with 1k tokens of output means `prompt_token_ids` is ~99% of the request body on every chunk.
 - **Compute**: replay is O(n) `parse_delta` calls per chunk (O(n²) per generation). `parse_delta` itself is O(n) for parsers that re-scan accumulated text (e.g. Hermes tool-call JSON, DeepSeek-R1 reasoning). The per-generation cost is O(n³) character work, not O(n²). This is a deliberately minimal first implementation with no caching layer.
+- The parser path also requires `prompt_token_ids` so `parse_delta` can settle whether the prompt left reasoning open or not. Since parser state can't be carried across calls, it re-scans the full prompt once per chunk.
 - Replay runs off the event loop on the renderer's executor (`renderer_num_workers`, default `1`). Size it for the expected number of concurrent parser configured streams.
 
-Both are bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
+`output_token_ids` and `prompt_token_ids` are both bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
 
 ## Example
 
@@ -117,4 +118,4 @@ with httpx.Client(timeout=60.0) as client:
 print(response["choices"][0]["message"]["content"])
 ```
 
-Passing `chat_request` lets the derenderer run the configured tool and reasoning parsers. This means `response["choices"][0]["message"]` carries the same `content` / `reasoning` / `tool_calls` split a `vllm serve` server would produce. Omit `chat_request` for plain detokenization only.
+Passing `chat_request` lets the derenderer run the configured tool and reasoning parsers. This means `response["choices"][0]["message"]` carries the same `content` / `reasoning` / `tool_calls` split a `vllm serve` server would produce. `chat_request` can only be omitted for a model with no tool or reasoning parser configured. A  parser configured model rejects a missing `chat_request` with a 400 rather than silently falling back to plain detokenization.
