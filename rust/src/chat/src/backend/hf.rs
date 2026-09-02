@@ -20,6 +20,7 @@ use crate::output::{
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
+    InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -56,6 +57,7 @@ impl HfChatBackend {
                     processor_config: files.processor_config_path.as_deref(),
                 },
                 tokenizer.clone(),
+                options.limit_mm_per_prompt.clone(),
             )?
         };
         let multimodal_render_info = resolve_multimodal_render_info(multimodal_model_info.as_ref());
@@ -71,6 +73,8 @@ impl HfChatBackend {
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
+            RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
+            RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(tokenizer.clone())),
         };
 
         info!(
@@ -125,8 +129,11 @@ pub(super) async fn load_model_backends(
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
     let files = ResolvedModelFiles::new(model_id).await?;
-    let text_backend =
-        HfTextBackend::from_resolved_model_files(files.clone(), model_id.to_string())?;
+    let text_backend = HfTextBackend::from_resolved_model_files(
+        files.clone(),
+        model_id.to_string(),
+        options.generation_config,
+    )?;
     let tokenizer = text_backend.tokenizer();
     let text_backend: DynTextBackend = Arc::new(text_backend);
 
@@ -151,6 +158,7 @@ fn resolve_multimodal_render_info(
     info.map(|info| MultimodalRenderInfo {
         image_token: info.placeholder_token(Modality::Image).map(str::to_string),
         video_token: info.placeholder_token(Modality::Video).map(str::to_string),
+        audio_token: info.placeholder_token(Modality::Audio).map(str::to_string),
     })
 }
 
@@ -222,11 +230,13 @@ mod tests {
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
+                generation_config: Default::default(),
                 renderer,
                 language_model_only: false,
                 chat_template_content_format: Default::default(),
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
+                limit_mm_per_prompt: HashMap::new(),
             },
             test_tokenizer(),
         )

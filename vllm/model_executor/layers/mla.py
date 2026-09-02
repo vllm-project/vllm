@@ -8,6 +8,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -27,6 +28,7 @@ class MLAModules:
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
+    g_proj: torch.nn.Module | None = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -65,6 +67,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -87,12 +91,17 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.g_proj = mla_modules.g_proj
 
         # Whether to skip top-k token selection computation in this layer.
         # When True, the indexer will not be called, and the layer will reuse
         # the topk_tokens buffer written by a previous layer in the same pass.
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
         self.skip_topk = skip_topk
+        # qrep is active when the query projection is a DCP-group-sharded layer
+        # that materializes the full group head set locally.
+        q_proj_layer = self.q_b_proj if self.q_lora_rank is not None else self.q_proj
+        self.dcp_q_replicate = getattr(q_proj_layer, "qrep_active", False)
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -110,11 +119,32 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
+            dcp_q_replicate=self.dcp_q_replicate,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
-
+        indexer_op = getattr(self.indexer, "indexer_op", None)
+        if indexer_op is not None and hasattr(
+            indexer_op, "dense_mha_metadata_layer_name"
+        ):
+            enable_short_prefill_scoring_skip = (
+                allow_short_prefill_indexer_scoring_skip
+                and not self.skip_topk
+                and not getattr(indexer_op, "use_pcp", False)
+                and current_platform.is_cuda()
+            )
+            # The indexer and main MLA use independent decode thresholds and
+            # may classify the same short extend differently. Bind the main
+            # MLA layer name so the eager indexer op can check whether the
+            # batch's top-k indices will be consumed.
+            # PCP is excluded because indexer cache/scoring ownership differs
+            # across ranks and the no-consumer invariant has not been
+            # established there.
+            indexer_op.dense_mha_metadata_layer_name = (
+                self.mla_attn.layer_name if enable_short_prefill_scoring_skip else ""
+            )
         self.prefix = prefix
 
     def forward(
@@ -143,7 +173,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
+            q_proj_layer = self.q_b_proj
+            q_proj_input = q_c
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -152,14 +183,19 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 "q_proj is required when q_lora_rank is None"
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            q = self.q_proj(hidden_states)[0]
+            q_proj_layer = self.q_proj
+            q_proj_input = hidden_states
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
-
-        q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
+
+        q = q_proj_layer(q_proj_input)[0]
+        heads = self.num_heads
+        if self.dcp_q_replicate:
+            heads *= q_proj_layer.group_size
+        q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
@@ -172,11 +208,19 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
+        q_dcp_replicated = None
+        if self.dcp_q_replicate:
+            q_dcp_replicated, q = q, q_proj_layer._local_view(q)
+
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            q_dcp_replicated=q_dcp_replicated,
         )
+
+        if self.g_proj is not None:
+            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
 
         return self.o_proj(attn_out)[0]

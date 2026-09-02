@@ -16,7 +16,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-pytestmark = pytest.mark.cpu_test
+# Not cpu_test: InputBatch allocates pinned (UVA) memory, which requires a
+# CUDA device even though the batch tensors live on the CPU.
 
 
 @pytest.fixture
@@ -28,6 +29,7 @@ def mock_model_runner_with_input_batch():
     runner.requests = {}
     runner.max_num_reqs = 10
     runner.max_model_len = 1024
+    runner.late_interaction_runner = Mock()
 
     # Create a real InputBatch for e2e testing
     runner.input_batch = InputBatch(

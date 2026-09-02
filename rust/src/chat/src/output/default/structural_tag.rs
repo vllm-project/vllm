@@ -7,7 +7,8 @@ use thiserror_ext::AsReport;
 use vllm_engine_core_client::protocol::structured_outputs::{
     StructuredOutputBackend, StructuredOutputsParams,
 };
-use vllm_parser::tool::StructuralTagModel;
+use vllm_parser::tool::StructuralTagBuilder;
+use xgrammar_structural_tag::builders::StructuralTagOptions;
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice as StructuralTagToolChoice, ToolParam,
     build_structural_tag,
@@ -20,9 +21,9 @@ use crate::{Error, Result as ChatResult};
 /// support and the request's tool choice.
 pub(super) fn apply_structural_tag_constraint(
     request: &mut ChatRequest,
-    model: Option<StructuralTagModel>,
+    builder: Option<&dyn StructuralTagBuilder>,
 ) -> ChatResult<()> {
-    let Some(model) = model else {
+    let Some(builder) = builder else {
         return Ok(());
     };
     let Some(tool_choice) = structural_tag_tool_choice(request) else {
@@ -30,7 +31,7 @@ pub(super) fn apply_structural_tag_constraint(
     };
 
     let tools = request
-        .tools
+        .tools()
         .iter()
         .map(|tool| {
             ToolParam::Function(FunctionToolParam::new(FunctionDefinition {
@@ -42,11 +43,16 @@ pub(super) fn apply_structural_tag_constraint(
         })
         .collect::<Vec<_>>();
 
-    let structural_tag = build_structural_tag(model, &tools, tool_choice, false)
-        .and_then(|tag| tag.to_json_string())
-        .map_err(|error| Error::StructuralTag {
-            message: error.to_report_string(),
-        })?;
+    let structural_tag = build_structural_tag(
+        builder,
+        &tools,
+        tool_choice,
+        StructuralTagOptions::default().with_reasoning(false),
+    )
+    .and_then(|tag| tag.to_json_string())
+    .map_err(|error| Error::StructuralTag {
+        message: error.to_report_string(),
+    })?;
 
     // Overwrite any existing structured output settings with the structural tag constraint.
     request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
@@ -61,13 +67,13 @@ pub(super) fn apply_structural_tag_constraint(
 ///
 /// Returns `None` if no structural tag constraints should be applied.
 fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagToolChoice> {
-    if request.tools.is_empty() {
+    if request.tools().is_empty() {
         return None;
     }
 
-    match &request.tool_choice {
+    match request.tool_choice() {
         // For `Auto`, only apply the structural tag if there's at least one strict tool.
-        ChatToolChoice::Auto if request.tools.iter().any(|tool| tool.strict == Some(true)) => {
+        ChatToolChoice::Auto if request.tools().iter().any(|tool| tool.strict == Some(true)) => {
             Some(StructuralTagToolChoice::auto())
         }
         ChatToolChoice::Auto | ChatToolChoice::None => None,
@@ -86,6 +92,7 @@ mod tests {
     use vllm_parser::tool::{Qwen3CoderToolParser, Tool, ToolParser};
 
     use super::*;
+    use crate::request::{ChatMessage, ResolvedToolContext};
 
     fn chat_tool(name: &str, strict: Option<bool>) -> Tool {
         Tool {
@@ -108,8 +115,8 @@ mod tests {
 
     fn request(tool_choice: ChatToolChoice, tools: Vec<Tool>) -> ChatRequest {
         ChatRequest {
-            tool_choice,
-            tools,
+            tool_context: ResolvedToolContext::new(&[], tools, Some(tool_choice), true)
+                .expect("tool context should resolve"),
             ..ChatRequest::for_test()
         }
     }
@@ -139,9 +146,9 @@ mod tests {
     #[test]
     fn auto_strict_tool_choice_builds_structural_tag() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", Some(true))]);
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -150,11 +157,62 @@ mod tests {
     }
 
     #[test]
+    fn required_dynamic_tool_builds_structural_tag_from_effective_tools() {
+        let messages = vec![ChatMessage::developer(
+            "",
+            Some(vec![chat_tool("lookup", None)]),
+        )];
+        let tool_context =
+            ResolvedToolContext::new(&messages, Vec::new(), Some(ChatToolChoice::Required), true)
+                .expect("dynamic tool context should resolve");
+        let mut request = ChatRequest {
+            messages,
+            tool_context,
+            ..ChatRequest::for_test()
+        };
+        let parser = qwen3_coder_parser(request.tools());
+
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
+            .expect("structural tag should build");
+
+        let tag = structural_tag_value(&request);
+        assert!(tag.to_string().contains("lookup"));
+    }
+
+    #[test]
+    fn required_initial_and_dynamic_tools_build_one_structural_tag() {
+        let messages = vec![ChatMessage::developer(
+            "",
+            Some(vec![chat_tool("lookup", None)]),
+        )];
+        let tool_context = ResolvedToolContext::new(
+            &messages,
+            vec![chat_tool("search", None)],
+            Some(ChatToolChoice::Required),
+            true,
+        )
+        .expect("tool context should resolve");
+        let mut request = ChatRequest {
+            messages,
+            tool_context,
+            ..ChatRequest::for_test()
+        };
+        let parser = qwen3_coder_parser(request.tools());
+
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
+            .expect("structural tag should build");
+
+        let tag = structural_tag_value(&request).to_string();
+        assert!(tag.contains("search"));
+        assert!(tag.contains("lookup"));
+    }
+
+    #[test]
     fn auto_non_strict_tool_choice_skips_structural_tag() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
@@ -167,9 +225,9 @@ mod tests {
             backend: StructuredOutputBackend::Xgrammar,
             ..StructuredOutputsParams::json(json!({"type": "object"}))
         });
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag should build");
 
         let params = structured_outputs(&request);
@@ -182,9 +240,9 @@ mod tests {
     #[test]
     fn required_tool_choice_builds_structural_tag_without_strict_tools() {
         let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -199,9 +257,9 @@ mod tests {
             backend: StructuredOutputBackend::Xgrammar,
             ..StructuredOutputsParams::json_object()
         });
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag should build");
 
         let params = structured_outputs(&request);
@@ -219,9 +277,9 @@ mod tests {
             },
             vec![chat_tool("search", None), chat_tool("lookup", None)],
         );
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request).to_string();
@@ -232,9 +290,9 @@ mod tests {
     #[test]
     fn none_tool_choice_skips_structural_tag() {
         let mut request = request(ChatToolChoice::None, vec![chat_tool("search", Some(true))]);
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
@@ -247,9 +305,9 @@ mod tests {
             backend: StructuredOutputBackend::Xgrammar,
             ..StructuredOutputsParams::json_object()
         });
-        let parser = qwen3_coder_parser(&request.tools);
+        let parser = qwen3_coder_parser(request.tools());
 
-        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
             .expect("structural tag decision should succeed");
 
         let params = structured_outputs(&request);

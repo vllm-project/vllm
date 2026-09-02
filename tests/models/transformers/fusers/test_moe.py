@@ -29,8 +29,48 @@ class TopKRouter(nn.Module):
         return logits, value, index
 
 
+class ScaledRouter(TopKRouter):
+    """Greedy router scaling its top-k weights (DeepSeek `routed_scaling_factor`)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value * 16.0
+        return logits, value, index
+
+
+class Fp32Router(TopKRouter):
+    """Router that computes its logits in fp32 (DeepSeek/GLM style)."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(
+            hidden_states.type(torch.float32), self.weight.type(torch.float32)
+        )
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        return logits, value.to(hidden_states.dtype), index
+
+
+class GroupedRouter(TopKRouter):
+    """Group-limited router (DeepSeek `group_limited_greedy`), scaled weights."""
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = F.softmax(logits, dim=-1)
+        group_scores = scores.view(-1, 4, 2).max(dim=-1).values
+        group_idx = torch.topk(group_scores, k=2, dim=-1)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = group_mask.unsqueeze(-1).expand(-1, 4, 2).reshape(-1, 8)
+        scores = scores.masked_fill(~score_mask.bool(), 0.0)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value * 16.0
+        return logits, value, index
+
+
 class CorrectionRouter(nn.Module):
-    """Grouped router with a score-correction bias buffer (DeepSeek-V3) -> declined."""
+    """Router with a score-correction bias buffer (DeepSeek-V3 noaux) -> matched."""
 
     def __init__(self, num_experts=8, hidden=16):
         super().__init__()
@@ -228,6 +268,44 @@ def test_moe_fuser_detects_router(sigmoid):
     assert fuser.shared_name is None and fuser.shared_gate_name is None
 
 
+def test_moe_fuser_matches_scaled_router():
+    """Weight scaling after the top-k (DeepSeek style) does not break matching."""
+    with torch.device("meta"):
+        block = MoEBlock(ScaledRouter)
+    assert isinstance(MoEBlockFuser.match(block, "experts"), MoEBlockFuser)
+
+
+def test_moe_fuser_matches_grouped_router():
+    """Group masking between the score and the routing top-k still matches: the
+    scorer is anchored on the routing (last) top-k, not the group one."""
+    with torch.device("meta"):
+        block = MoEBlock(GroupedRouter)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.scoring_func == "softmax"
+
+
+def test_moe_fuser_matches_correction_router():
+    """A score-correction bias buffer (DeepSeek-V3 noaux) is allowed; the
+    rebuilt gate carries it in fp32 for FusedMoE's biased routers."""
+    with torch.device("meta"):
+        block = MoEBlock(CorrectionRouter)
+    fuser = MoEBlockFuser.match(block, "experts")
+    assert isinstance(fuser, MoEBlockFuser)
+    assert fuser.scoring_func == "sigmoid"
+
+
+def test_moe_fuser_reads_router_dtype_from_the_gate():
+    """A router that computes its logits in fp32 must keep routing in fp32 when
+    rebuilt, even though no config field names the dtype. The cast back to the
+    activation dtype after the top-k must not be mistaken for the routing dtype."""
+    with torch.device("meta"):
+        fp32 = MoEBlockFuser.match(MoEBlock(Fp32Router), "experts")
+        default = MoEBlockFuser.match(MoEBlock(TopKRouter), "experts")
+    assert fp32.router_dtype == torch.float32
+    assert default.router_dtype is None
+
+
 def test_moe_fuser_detects_shared_experts():
     with torch.device("meta"):
         block = MoEBlockShared()
@@ -269,8 +347,7 @@ def test_moe_fuser_detects_non_glu_shared_expert():
 @pytest.mark.parametrize(
     "block_cls",
     [
-        lambda: MoEBlock(CorrectionRouter),  # score-correction buffer (grouped)
-        lambda: MoEBlock(BiasedRouter),  # router not weight-only (extra param)
+        lambda: MoEBlock(BiasedRouter),  # router with an unrecognized extra param
         MoEBlockTuple,  # tuple-returning block (e.g. gpt-oss)
         MoEBlockTupleVar,  # tuple returned via a name binding, not a literal
         MoEBlockUnaccounted,  # weight-bearing child outside the fused dataflow

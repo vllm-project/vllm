@@ -845,3 +845,13 @@ def selective_scan_fn(
         return delta  # output written inplace to delta
     else:
         return z  # output written inplace to z
+
+
+from vllm.platforms import current_platform  # noqa: E402
+
+if current_platform.is_cpu():
+    from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+        selective_state_update as selective_state_update_cpu,
+    )
+
+    selective_state_update = selective_state_update_cpu  # type: ignore

@@ -9,6 +9,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -145,7 +146,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> list[tuple[str, int]]:
+    ) -> "list[Request]":
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
@@ -159,8 +160,8 @@ class SchedulerInterface(ABC):
             finished_status: The finished status of the given requests.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            List of requests that were aborted. Will not include any that were
+            already finished.
         """
         raise NotImplementedError
 
@@ -234,6 +235,10 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def get_kv_cache_usage(self) -> float:
+        """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
+        return 0.0
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
@@ -251,4 +256,7 @@ class SchedulerInterface(ABC):
         return None
 
     def get_ec_connector(self) -> "ECConnectorBase | None":
+        return None
+
+    def get_kv_event_publisher_config(self) -> "KVEventsConfig | None":
         return None

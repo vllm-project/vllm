@@ -29,8 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # NOTE: This is currently targeting nv-dev branch due to sm120 support
-  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
+  # Pinned to the tip of the nv_dev branch (SM120 support).
+  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -68,6 +68,9 @@ endif()
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
     list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0f")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+      list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.7f")
+    endif()
   else()
     list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
   endif()

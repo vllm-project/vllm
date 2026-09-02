@@ -29,7 +29,7 @@ if [[ -z "${DEVICE_AFFINITY_ENV:-}" ]]; then
 fi
 
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"   # wait_for_server timeout
 
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
 

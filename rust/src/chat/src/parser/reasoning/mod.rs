@@ -23,9 +23,13 @@ pub mod names {
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GEMMA4: &str = "gemma4";
+    pub const INKLING: &str = "inkling";
     pub const GLM45: &str = "glm45";
+    pub const HY_V3: &str = "hy_v3";
+    pub const HY_V4: &str = "hy_v4";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
+    pub const KIMI_K3: &str = "kimi_k3";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
@@ -63,9 +67,13 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
             .register_unified_dummy(names::GEMMA4)
+            .register_unified_dummy(names::INKLING)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
+            .register_unified_dummy(names::HY_V3)
+            .register_unified_dummy(names::HY_V4)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
+            .register_unified_dummy(names::KIMI_K3)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
@@ -81,11 +89,14 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("gemma4", names::GEMMA4)
-            .register_pattern("qwen", names::QWEN3)
+            .register_pattern("qwq", names::DEEPSEEK_R1)
+            .register_pattern("qwen3", names::QWEN3)
             .register_pattern("glm-5", names::GLM45)
             .register_pattern("glm-4.7", names::GLM45)
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
+            .register_pattern("hy3", names::HY_V3)
+            .register_pattern("hy4", names::HY_V4)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
             // step3p5 patterns must precede `step3`: substring matching would

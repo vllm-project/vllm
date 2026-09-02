@@ -7,14 +7,17 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
     MultiModalCache,
+    MultiModalCacheMissError,
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
+    MultiModalProcessorOnlyCache,
     MultiModalProcessorSenderCache,
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
@@ -90,7 +93,7 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
@@ -144,10 +147,11 @@ def _compare_caches(
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
-        MultiModalHasher.hash_kwargs(item=item.get_data()) for item in all_items
+        MultiModalHasher.hash_kwargs("blake3", item=item.get_data())
+        for item in all_items
     ]
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
@@ -229,6 +233,133 @@ def test_ipc_enable_disable_consistency(is_cached_calls_per_iter):
         vllm_config_ipc_enabled,
         is_cached_calls_per_iter=is_cached_calls_per_iter,
     )
+
+
+class _StubModelConfig:
+    """Minimal model-config stand-in: the cache classes only call
+    get_multimodal_config(), so this lets us construct them directly without a
+    real model, keeping this unit test free of any Hugging Face / network lookup.
+    """
+
+    def __init__(self, mm_processor_cache_gb: float) -> None:
+        self._mm_config = MultiModalConfig(mm_processor_cache_gb=mm_processor_cache_gb)
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self._mm_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_oversized_item_is_served_uncached():
+    """Items larger than the processor cache must not crash insert.
+
+    cachetools.LRUCache raises ValueError("value too large") when a single
+    item exceeds maxsize. Engine profiling uses a max-size dummy item, so this
+    used to abort EngineCore startup (vllm-project/vllm#52835). Skip the
+    insert and serve the item uncached instead.
+    """
+    # 1 KiB cache; a 4 KiB item cannot fit even if the cache is empty.
+    model_config = _StubModelConfig(mm_processor_cache_gb=1024 / GiB_bytes)
+    item = MultiModalKwargsItem.dummy(nbytes=4096)
+    small = MultiModalKwargsItem.dummy(nbytes=64)
+
+    p0_only = MultiModalProcessorOnlyCache(model_config)  # type: ignore[arg-type]
+    assert p0_only.get_and_update_item((item, []), "big")[0] is item
+    assert not p0_only.is_cached_item("big")
+    assert p0_only.get_and_update_item((small, []), "small")[0] is small
+    assert p0_only.is_cached_item("small")
+
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    assert p0.get_and_update_item((item, []), "big")[0] is item
+    assert not p0.is_cached_item("big")
+    assert p1.get_and_update_item(item, "big") is item
+    assert "big" not in p1._cache
+
+
+def test_mm_cache_miss_raises_and_recovers():
+    """A P0/P1 multimodal cache drift must be recoverable, not a hard crash.
+
+    Reproduces the production failure: the P0 sender cache believes an item is
+    cached on P1 (so it sends ``data=None``), but the P1 receiver cache does not
+    have it. The receiver must raise ``MultiModalCacheMissError`` (carrying the
+    hash) instead of asserting; ``P0.invalidate()`` must drop the stale shadow
+    entry; and resending the item with data must repopulate both caches.
+
+    Caches are built directly (not via the registry) so the test needs no real
+    model or network.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p0 = MultiModalProcessorSenderCache(model_config)  # type: ignore[arg-type]
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    # Drift: the item reaches P1 with no data (P0 would have sent data=None on a
+    # stale HIT) but P1 does not have it. Must raise a typed, retryable error
+    # carrying the hash -- not assert.
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_item(None, mm_hash)
+    assert exc_info.value.mm_hashes == [mm_hash]
+
+    # Give P0 a (now stale) shadow entry for the hash.
+    miss = p0.get_and_update_item((item, []), mm_hash)
+    assert miss[0] is item  # MISS path returns the data to forward to P1
+    assert p0.is_cached_item(mm_hash)
+    # On the next request P0 short-circuits to data=None -- the drift bug when
+    # P1 lacks the item.
+    hit = p0.get_and_update_item((item, []), mm_hash)
+    assert hit[0] is None
+
+    # Recovery: drop the stale P0 entry so the client's resend-with-data takes
+    # the MISS path again and repopulates P1.
+    p0.invalidate(mm_hash)
+    assert not p0.is_cached_item(mm_hash)
+
+    resent = p0.get_and_update_item((item, []), mm_hash)
+    assert resent[0] is item  # MISS again -> data is resent
+    assert p1.get_and_update_item(item, mm_hash) == item  # P1 now caches it
+    # A subsequent uuid-only request now succeeds on P1.
+    assert p1.get_and_update_item(None, mm_hash) == item
+
+
+def test_mm_cache_miss_batches_all_drifted_hashes():
+    """All hashes drifted within one request must surface in a single error.
+
+    Otherwise a request with k drifted items needs k client retries (each resend
+    un-shadows only the one reported hash). get_and_update_features collects every
+    miss and raises once, so a single retry recovers the whole request -- while the
+    non-drifted items in the same request are still ingested.
+    """
+    model_config = _StubModelConfig(mm_processor_cache_gb=1)
+    p1 = MultiModalReceiverCache(model_config)  # type: ignore[arg-type]
+    item = MultiModalKwargsItem.dummy(nbytes=64)
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=1),
+            mm_hash=mm_hash,
+        )
+
+    # A and C carry data; B, D, E arrive data=None (stale P0 shadow HITs) but P1
+    # has none of them -- all three must be reported together, in order.
+    features = [
+        _feature("A", item),
+        _feature("B", None),
+        _feature("C", item),
+        _feature("D", None),
+        _feature("E", None),
+    ]
+    with pytest.raises(MultiModalCacheMissError) as exc_info:
+        p1.get_and_update_features(features)
+    assert exc_info.value.mm_hashes == ["B", "D", "E"]
+    # The non-drifted items were still ingested into P1 before the raise.
+    assert "A" in p1._cache and "C" in p1._cache
 
 
 def _run_test_cache_eviction_lru(
