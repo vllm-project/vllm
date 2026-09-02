@@ -35,10 +35,15 @@ sampling_params = SamplingParams(temperature=0.0)
 
 
 def main():
-    # Create an LLM without prefix caching as a baseline.
-    regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
+    # Create an LLM with prefix caching disabled as a baseline.
+    # APC is on by default, so disable it explicitly with False.
+    regular_llm = LLM(
+        model="facebook/opt-125m",
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.4,
+    )
 
-    print("Results without `enable_prefix_caching`")
+    print("Results with `enable_prefix_caching=False`")
 
     # ruff: noqa: E501
     # Generate texts from the prompts. The output is a list of RequestOutput objects
@@ -59,7 +64,7 @@ def main():
     del regular_llm
     cleanup_dist_env_and_memory()
 
-    # Create an LLM with prefix caching enabled.
+    # Create an LLM with prefix caching enabled (True is also the default).
     prefix_cached_llm = LLM(
         model="facebook/opt-125m",
         enable_prefix_caching=True,
@@ -72,7 +77,7 @@ def main():
     # Generate with prefix caching.
     outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
 
-    print("Results with `enable_prefix_caching`")
+    print("Results with `enable_prefix_caching=True`")
 
     cached_generated_texts = []
     # Print the outputs. You should see the same outputs as before.
