@@ -3933,7 +3933,7 @@ steps:
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
-- label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance Nightly" # TBD
+- label: ":amd: (MI355) Spec Decode AL MTP + Other Acceptance" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
