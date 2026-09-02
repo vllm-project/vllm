@@ -397,6 +397,7 @@ WORKDIR /workspace
 
 COPY pyproject.toml setup.py CMakeLists.txt ./
 COPY tools/build_rust.py tools/build_rust.py
+COPY tools/vllm tools/vllm
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
