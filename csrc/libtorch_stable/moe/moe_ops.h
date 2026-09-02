@@ -79,15 +79,3 @@ int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
 void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   const torch::stable::Tensor& dst2src_map,
                   torch::stable::Tensor& output_tensor);
-
-#ifndef USE_ROCM
-// DeepSeek V3 optimized router GEMM kernel for SM90+
-// Computes output = mat_a @ mat_b.T where:
-//   mat_a: [num_tokens, hidden_dim] in bf16
-//   mat_b: [num_experts, hidden_dim] in bf16
-//   output: [num_tokens, num_experts] in bf16 or fp32
-// Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
-void dsv3_router_gemm(torch::stable::Tensor& output,
-                      const torch::stable::Tensor& mat_a,
-                      const torch::stable::Tensor& mat_b);
-#endif
