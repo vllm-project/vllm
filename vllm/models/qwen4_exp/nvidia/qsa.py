@@ -124,6 +124,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
+        logical_positions: torch.Tensor,
+        seq_lens: torch.Tensor,
+        compress_ratio: int,
+        max_query_len: int,
+        max_decode_query_len: int,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -160,6 +165,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             logical_indices,
             attn_metadata.block_table,
             token_to_req,
+            logical_positions[:num_tokens],
+            seq_lens,
+            compress_ratio,
+            max_query_len,
+            max_decode_query_len,
             output[:num_tokens],
         )
         return output
@@ -209,6 +219,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.total_num_heads % tp_size:
             raise ValueError("QSA attention heads must be divisible by TP size")
         self.num_heads = self.total_num_heads // tp_size
+        # Decode/verify batches have at most 1 + num_spec query tokens per
+        # request; the sparse-attention config table splits its top region
+        # on this (long_query = max_query_len > _max_decode_query_len).
+        self._max_decode_query_len = 1 + vllm_config.num_speculative_tokens
         self.total_num_kv_heads = int(config.num_key_value_heads)
         if self.total_num_kv_heads >= tp_size:
             if self.total_num_kv_heads % tp_size:
@@ -382,6 +396,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
+        # The kernel derives each row's loop bound in-kernel from the
+        # side-cache metadata; nothing pairs with the persistent
+        # topk_indices_buffer across steps. On MTP skip_topk steps the
+        # metadata describes the current step while the indices are frozen
+        # from step 0 — safe because positions and seq lens only advance, so
+        # the derived bound stays a superset of the frozen rows' extent.
+        compressed_metadata = cast(
+            QSAForwardMetadata,
+            metadata[self.indexer.compressed_key_cache.prefix],
+        )
         impl.forward_qsa(
             self,
             query,
@@ -391,6 +415,11 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
+            logical_positions=compressed_metadata.logical_positions,
+            seq_lens=compressed_metadata.seq_lens,
+            compress_ratio=self.indexer.compress_ratio,
+            max_query_len=main_metadata.max_query_len,
+            max_decode_query_len=self._max_decode_query_len,
         )
 
     def forward(

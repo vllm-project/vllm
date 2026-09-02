@@ -813,7 +813,14 @@ def test_qsa_sparse_paged_attention_correctness(
         dtype=torch.int32,
     )
 
-    context_length = num_pages_per_request * page_size - 1
+    # Request 1 is short-context: its positions sit within the first few
+    # selection tiles, so the clip bound lands on a small tile boundary and
+    # an off-by-one there moves those rows far outside the tolerance.
+    context_lengths = torch.tensor(
+        [num_pages_per_request * page_size - 1, rows_per_request + 8],
+        device="cuda",
+        dtype=torch.int32,
+    )
     block_topk = indexer_budget // indexer_compress_ratio
     compressed_blocks_per_page = page_size // indexer_compress_ratio
     selection = torch.arange(block_topk, device="cuda")
@@ -827,11 +834,11 @@ def test_qsa_sparse_paged_attention_correctness(
     )
     rows_within_request = row_indices % rows_per_request
     query_positions = (
-        context_length - request_row_counts[token_to_req.long()] + rows_within_request
+        context_lengths[token_to_req.long()]
+        - request_row_counts[token_to_req.long()]
+        + rows_within_request
     ).to(torch.int64)
-    sequence_lengths = torch.full(
-        (num_requests,), context_length, device="cuda", dtype=torch.int32
-    )
+    sequence_lengths = context_lengths
     visible_blocks = torch.minimum(
         (query_positions + 1) // indexer_compress_ratio,
         sequence_lengths.index_select(0, token_to_req.long()) // indexer_compress_ratio,
@@ -850,6 +857,11 @@ def test_qsa_sparse_paged_attention_correctness(
     assert logical_indices.shape == (num_rows, selection_width)
     scale = q.shape[-1] ** -0.5
 
+    # The loop always runs to each row's valid extent, derived in-kernel from
+    # the same positions and sequence lengths the metadata builder consumed.
+    # Request 0 saturates the selection budget (bound is exact at saturation);
+    # request 1's short context puts the bound on a small tile boundary, so an
+    # off-by-one there fails loudly.
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
@@ -857,6 +869,11 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_indices,
         block_table,
         token_to_req,
+        logical_positions=query_positions,
+        seq_lens=sequence_lengths,
+        compress_ratio=indexer_compress_ratio,
+        max_query_len=16,
+        max_decode_query_len=1,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
