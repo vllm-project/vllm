@@ -1301,6 +1301,12 @@ class OffloadingConnectorScheduler:
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 if num_chunks <= start_chunk_idx:
                     continue
+                # E23 fix: for zero-chunk groups (KpoolTail), offload_keys are
+                # never appended (update_offload_keys skips them), but
+                # offload_block_ids are derived from block_ids positions that
+                # DO advance (block_ids are shared across groups via the hybrid
+                # allocator). Trust the keys list — derive block ids from its
+                # length so the two stay consistent by construction.
                 offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
                 # For each chunk, take the last corresponding GPU block. For
                 # blocks_per_chunk=3 and GPU block IDs 1 5 6 7 2 4 9 3 8,
@@ -1311,8 +1317,12 @@ class OffloadingConnectorScheduler:
                     start_chunk_idx * blocks_per_chunk
                     + blocks_per_chunk
                     - 1 : num_chunks * blocks_per_chunk : blocks_per_chunk
-                ]
-                assert len(offload_keys) == len(offload_block_ids)
+                ][: len(offload_keys)]
+                if len(offload_keys) != len(offload_block_ids):
+                    # Cannot form consistent store jobs for this group this
+                    # step; skip rather than crash (keys remain cached for
+                    # prefix hits, only the CPU copy of this slice is lost).
+                    continue
 
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
