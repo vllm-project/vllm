@@ -1,28 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
-from unittest.mock import patch
+from collections.abc import Generator, Iterable
+from typing import cast
 
 import pytest
+import torch
+import torch.nn as nn
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
-from vllm import LLM
-from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import (
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
+from vllm import EngineArgs
+from vllm.config import AttentionConfig, ModelConfig, VllmConfig
+from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.logger import init_logger
+from vllm.model_executor.model_loader.base_loader import _has_online_quant
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.utils import (
+    initialize_model,
+    process_weights_after_loading,
+    validate_weights_loading,
 )
-from vllm.v1.engine.core import EngineCore as V1EngineCore
+from vllm.renderers import ChatParams, renderer_from_config
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
-from ..utils import create_new_process_for_each_test, requires_spawn_multiprocessing
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
     HF_EXAMPLE_MODELS,
     HfExampleModels,
 )
-from .utils import dummy_hf_overrides
+from .utils import initialize_dummy_model
+
+logger = init_logger(__name__)
 
 # This minimal list of model architectures is smaller than the total list of
 # supported models. The intention is that in the "typical" regression testing
@@ -53,18 +63,92 @@ OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
 )
 
 
-@create_new_process_for_each_test()
-def can_initialize(
-    model_arch: str, monkeypatch: pytest.MonkeyPatch, EXAMPLE_MODELS: HfExampleModels
-):
-    """The reason for using create_new_process_for_each_test is to avoid
-    the WARNING:
-        "We must use the 'spawn' multiprocessing start method. Overriding
-        VLLM_WORKER_MULTIPROC_METHOD to 'spawn'."
-    The spawn process causes the _initialize_kv_caches_v1 function below to
-    become ineffective.
-    """
+class _SkipValidation(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
 
+        self.reason = reason
+
+
+def _get_weights_iterator(
+    source: DefaultModelLoader.Source,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    metadata = get_safetensors_params_metadata(
+        source.model_or_path,
+        revision=source.revision,
+    )
+    if not metadata:
+        raise _SkipValidation("Missing safetensors metadata")
+
+    for name, info in metadata.items():
+        if "dtype" not in info:
+            raise _SkipValidation(f"Missing safetensors dtype metadata for {name=}")
+
+        dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(info["dtype"])
+        if dtype is None:
+            raise _SkipValidation(
+                f"Unrecognized safetensors dtype for {name=}: {info['dtype']}"
+            )
+
+        weight = torch.empty(info["shape"], dtype=dtype)
+
+        yield name, weight
+
+
+def _get_dummy_weights(model: nn.Module, model_config: ModelConfig):
+    primary_weights = DefaultModelLoader.Source(
+        model_config.model,
+        model_config.revision,
+        prefix="",
+        fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
+        allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
+    )
+    yield from _get_weights_iterator(primary_weights)
+
+    secondary_weights = cast(
+        Iterable[DefaultModelLoader.Source],
+        getattr(model, "secondary_weights", ()),
+    )
+    for source in secondary_weights:
+        yield from _get_weights_iterator(source)
+
+
+def _load_dummy_weights(vllm_config: VllmConfig):
+    """
+    Imitate `DefaultModelLoader.load_weights` so we can use dummy weights
+    to validate the weight mapping.
+    """
+    device_config = vllm_config.device_config
+    load_config = vllm_config.load_config
+    load_device = (
+        device_config.device if load_config.device is None else load_config.device
+    )
+    target_device = torch.device(load_device)
+    model_config = vllm_config.model_config
+
+    with torch.device("meta"):
+        model = initialize_model(
+            vllm_config=vllm_config,
+            model_config=model_config,
+            prefix="",
+        )
+
+        weights_it = _get_dummy_weights(model, model_config)
+        loaded_weights = model.load_weights(weights_it)
+        validate_weights_loading(model, loaded_weights)
+
+        if _has_online_quant(model):
+            finalize_layerwise_processing(model, model_config)
+
+        process_weights_after_loading(model, model_config, target_device)
+
+    return model
+
+
+def can_initialize(model_arch: str, EXAMPLE_MODELS: HfExampleModels):
+    """
+    create_new_process_for_each_test can avoid CUDA re-initialization error.
+    """
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -72,38 +156,6 @@ def can_initialize(
         check_max_version=False,
         check_version_reason="vllm",
     )
-
-    hf_overrides_fn = partial(
-        dummy_hf_overrides,
-        model_arch=model_arch,
-        exist_overrides=model_info.hf_overrides,
-        use_original_num_layers=getattr(model_info, "use_original_num_layers", False),
-    )
-
-    # Avoid calling model.forward()
-    def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        layout = resolve_kv_cache_layout(
-            vllm_config,
-            self.model_executor.get_supported_kv_cache_layouts(),
-            [spec for worker_specs in kv_cache_specs for spec in worker_specs.values()],
-        )
-        self.model_executor.set_kv_cache_layout(layout.name)
-        kv_cache_configs = get_kv_cache_configs(
-            vllm_config,
-            kv_cache_specs,
-            [10 * GiB_bytes],
-        )
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
-        if kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
-            )
-
-        vllm_config.validate_block_size()
-        return scheduler_kv_cache_config
 
     if model_arch == "MoonshotKimiaForCausalLM":
         pytest.skip(
@@ -132,81 +184,78 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
-    with (
-        patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
-        monkeypatch.context() as m,
-    ):
-        if requires_spawn_multiprocessing():
-            # The EngineCore subprocess re-imports the class and does not
-            # inherit the KV-cache patch above, so it OOMs. Run in-process
-            # so the patch applies.
-            m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
+    # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
+    # L4 supports FA3.
+    # Step1ForCausalLM requires TRITON_ATTN for use_alibi_sqrt support.
+    attention_config = (
+        AttentionConfig(backend="TRITON_ATTN")
+        if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
+        else AttentionConfig()
+    )
 
-        # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
-        # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
-        # L4 supports FA3.
-        # Step1ForCausalLM requires TRITON_ATTN for use_alibi_sqrt support.
-        attention_config = (
-            {"backend": "TRITON_ATTN"}
-            if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
-            else None
-        )
-        if model_arch == "WhisperForConditionalGeneration":
-            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    engine_args = EngineArgs(
+        model=model_info.default,
+        tokenizer=model_info.tokenizer,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        enforce_eager=model_info.enforce_eager,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        dtype=model_info.dtype,
+        speculative_config={
+            "model": model_info.speculative_model,
+            "method": model_info.speculative_method,
+            "num_speculative_tokens": 1,
+        }
+        if model_info.speculative_model
+        else None,
+        trust_remote_code=model_info.trust_remote_code,
+        enable_prefix_caching=model_info.enable_prefix_caching,
+        max_model_len=model_info.max_model_len,
+        max_num_batched_tokens=model_info.max_num_batched_tokens,
+        load_format="dummy",
+        model_impl="transformers"
+        if model_arch in _TRANSFORMERS_BACKEND_MODELS
+        else "vllm",
+        hf_overrides=model_info.hf_overrides,
+        max_num_seqs=model_info.max_num_seqs,
+        attention_config=attention_config,
+    )
+    vllm_config = engine_args.create_engine_config()
 
-        kwargs = {}
-        if not model_info.enable_prefix_caching:
-            kwargs["enable_prefix_caching"] = False
+    renderer = renderer_from_config(vllm_config)
+    renderer.warmup(ChatParams(chat_template=load_chat_template(None)))
 
-        LLM(
-            model_info.default,
-            tokenizer=model_info.tokenizer,
-            tokenizer_mode=model_info.tokenizer_mode,
-            revision=model_info.revision,
-            enforce_eager=model_info.enforce_eager,
-            skip_tokenizer_init=model_info.require_embed_inputs,
-            enable_prompt_embeds=model_info.require_embed_inputs,
-            enable_mm_embeds=model_info.require_embed_inputs,
-            dtype=model_info.dtype,
-            speculative_config={
-                "model": model_info.speculative_model,
-                "method": model_info.speculative_method,
-                "num_speculative_tokens": 1,
-            }
-            if model_info.speculative_model
-            else None,
-            trust_remote_code=model_info.trust_remote_code,
-            max_model_len=model_info.max_model_len,
-            max_num_batched_tokens=model_info.max_num_batched_tokens,
-            # these tests seem to produce leftover memory
-            gpu_memory_utilization=0.80,
-            load_format="dummy",
-            model_impl="transformers"
-            if model_arch in _TRANSFORMERS_BACKEND_MODELS
-            else "vllm",
-            hf_overrides=hf_overrides_fn,
-            max_num_seqs=model_info.max_num_seqs,
-            attention_config=attention_config,
-            **kwargs,
+    try:
+        # TODO: Handle speculative model
+        with initialize_dummy_model(_load_dummy_weights, vllm_config):
+            pass
+    except _SkipValidation as e:
+        logger.warning(
+            "Skipping validation when loading dummy weights for %s. Reason: %s",
+            vllm_config.model_config.model,
+            e.reason,
         )
 
 
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
-def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+def test_can_initialize_small_subset(model_arch: str):
     """Test initializing small subset of supported models"""
-    can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
+    can_initialize(model_arch, HF_EXAMPLE_MODELS)
 
 
 @pytest.mark.parametrize("model_arch", OTHER_MODEL_ARCH_LIST)
-def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+def test_can_initialize_large_subset(model_arch: str):
     """Test initializing large subset of supported models
 
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
-    can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
+    can_initialize(model_arch, HF_EXAMPLE_MODELS)
 
 
 @pytest.mark.parametrize("model_arch", AUTO_EXAMPLE_MODELS.get_supported_archs())
-def test_implicit_converted_models(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    can_initialize(model_arch, monkeypatch, AUTO_EXAMPLE_MODELS)
+def test_implicit_converted_models(model_arch: str):
+    can_initialize(model_arch, AUTO_EXAMPLE_MODELS)

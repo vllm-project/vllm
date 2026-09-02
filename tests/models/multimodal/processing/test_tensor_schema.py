@@ -1,29 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import tempfile
+
 from collections.abc import Iterable
-from contextlib import contextmanager
 from functools import partial
 from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
 from PIL import Image
 
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
-from vllm.config.cache import CacheConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
     ImageDummyOptions,
     VideoDummyOptions,
-)
-from vllm.distributed import (
-    cleanup_dist_env_and_memory,
-    init_distributed_environment,
-    initialize_model_parallel,
 )
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
@@ -32,11 +23,10 @@ from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
-from ...utils import dummy_hf_overrides
+from ...utils import dummy_hf_overrides, initialize_dummy_model
 from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
@@ -122,37 +112,6 @@ def create_batched_mm_kwargs(
             for item in mm_kwargs[modality]
         ]
     )
-
-
-# TODO(Isotr0py): Don't initialize model during test
-@contextmanager
-def initialize_dummy_model(
-    model_cls: type[nn.Module],
-    model_config: ModelConfig,
-):
-    temp_file = tempfile.mkstemp()[1]
-    current_device = torch.get_default_device()
-    vllm_config = VllmConfig(
-        model_config=model_config, cache_config=CacheConfig(block_size=16)
-    )
-    with set_current_vllm_config(vllm_config=vllm_config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(tensor_model_parallel_size=1)
-
-        with set_default_torch_dtype(model_config.dtype):
-            torch.set_default_device(current_platform.device_type)
-            model = model_cls(vllm_config=vllm_config)
-            torch.set_default_device(current_device)
-        yield model
-
-    del model
-    cleanup_dist_env_and_memory()
 
 
 @create_new_process_for_each_test()
@@ -245,7 +204,13 @@ def test_model_tensor_schema(model_id: str):
     }
     processor = factories.build_processor(ctx, cache=None)
 
-    with initialize_dummy_model(model_cls, model_config) as model:
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(block_size=16),
+    )
+
+    # TODO(Isotr0py): Don't initialize model during test
+    with initialize_dummy_model(model_cls, vllm_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):
             for method_name in inputs_parse_methods:
                 print(
