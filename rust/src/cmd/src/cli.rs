@@ -143,10 +143,45 @@ pub struct RenderArgs {
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// The file path to the SSL key file. When omitted, the key is read from `--ssl-certfile` (combined PEM).
+    #[arg(long)]
+    ssl_keyfile: Option<String>,
+    /// The file path to the SSL cert file. Enables TLS when set.
+    #[arg(long)]
+    ssl_certfile: Option<String>,
+    /// The CA certificates file used to verify client certificates (mTLS).
+    #[arg(long)]
+    ssl_ca_certs: Option<String>,
+    /// Whether a client certificate is required: 0 = none, 1 = optional,
+    /// 2 = required (mirrors Python's `ssl.CERT_*`).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=2))]
+    ssl_cert_reqs: i32,
+    /// OpenSSL cipher string for HTTPS (TLS 1.2 and below).
+    #[arg(long)]
+    ssl_ciphers: Option<String>,
 }
 
 impl RenderArgs {
-    pub(super) fn into_config(self) -> RenderConfig {
+    /// Build the TLS config: `Some` when any `ssl_*` argument is set, else `None` (plaintext).
+    // The combination is validated in [`RenderConfig::validate`].
+    fn tls_config(&mut self) -> Option<TlsConfig> {
+        let tls_requested = self.ssl_certfile.is_some()
+            || self.ssl_keyfile.is_some()
+            || self.ssl_ca_certs.is_some()
+            || self.ssl_cert_reqs != 0
+            || self.ssl_ciphers.is_some();
+        tls_requested.then(|| TlsConfig {
+            cert_file: self.ssl_certfile.take(),
+            key_file: self.ssl_keyfile.take(),
+            ca_certs: self.ssl_ca_certs.take(),
+            cert_reqs: self.ssl_cert_reqs,
+            ciphers: self.ssl_ciphers.take(),
+        })
+    }
+
+    pub(super) fn into_config(mut self) -> RenderConfig {
+        let tls = self.tls_config();
+
         RenderConfig {
             model: self.model,
             served_model_name: self.served_model_name,
@@ -160,6 +195,7 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            tls,
         }
     }
 }

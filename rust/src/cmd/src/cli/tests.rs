@@ -30,7 +30,7 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
 }
 
 #[test]
-fn render_args_build_supported_config() {
+fn render_args_build_config_without_tls() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "render",
@@ -62,6 +62,76 @@ fn render_args_build_supported_config() {
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_build_config_with_tls() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    let tls = config.tls.expect("TLS should be enabled");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+}
+
+#[test]
+fn render_args_reject_tls_without_certificate() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-certfile is required"));
+}
+
+#[test]
+fn render_args_reject_client_cert_verification_without_ca() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-ca-certs is required"));
 }
 
 #[test]
