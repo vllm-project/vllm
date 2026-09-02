@@ -1,0 +1,83 @@
+# Allowlist for tools/pre_commit/check_test_tethering.py
+#
+# Every path below is a test file that is currently collected by NO job in
+# .buildkite/test_areas/ - it exists but never runs in CI. These are
+# pre-existing gaps, captured when the check was first added so that the gate
+# could start green. The list is meant to only ever shrink.
+#
+# Rules:
+#   * Do not add a new entry to unblock a PR without a real justification and a
+#     comment saying why the test cannot be wired into a job.
+#   * To remove an entry: add the test to a job's `commands` (and matching
+#     `source_file_dependencies`) in .buildkite/test_areas/, then delete the line.
+#   * The nightly `check_test_tethering.py --all` run reports entries here that
+#     have since become tethered, and entries whose file no longer exists.
+#
+# Tracking: https://github.com/vllm-project/vllm/issues/53944
+
+# tests/distributed/ - multi-GPU / multi-node suites, many launched via torchrun
+# or custom runners rather than a directory-level pytest invocation.
+tests/distributed/test_dcp_a2a.py
+tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+tests/distributed/test_eplb_events.py
+tests/distributed/test_eplb_fused_moe_layer.py
+tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py
+tests/distributed/test_eplb_quant_scale_consistency.py
+tests/distributed/test_expert_parallel.py
+tests/distributed/test_expert_placement.py
+tests/distributed/test_file_store.py
+tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py
+tests/distributed/test_kimi_linear_context_parallel.py
+tests/distributed/test_kv_cache_events.py
+tests/distributed/test_kvlayout.py
+tests/distributed/test_mq_connect_ip.py
+tests/distributed/test_pipeline_partition.py
+tests/distributed/test_quick_all_reduce.py
+tests/distributed/test_rocm_aiter_custom_ar.py
+tests/distributed/test_rocm_quick_reduce.py
+tests/distributed/test_split_group.py
+tests/distributed/test_weight_transfer_nccl_uid.py
+
+# tests/kernels/ - explicitly --ignore'd in kernels.yaml with no follow-up job.
+tests/kernels/test_shuffle_rows.py
+
+# tests/lora/ - explicitly --ignore'd from the sharded LoRA run with no
+# dedicated *_tp job (unlike the other ignored *_tp tests).
+tests/lora/test_deepseekv2_tp.py
+tests/lora/test_qwen3moe_tp.py
+
+# tests/models/
+tests/models/deepseek_v32/test_sequence_parallel.py
+tests/models/test_deepseek_v4_fi_moe_ep.py
+tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+tests/models/test_dspark_mla.py
+tests/models/test_language_model_cache_is_weak.py
+tests/models/test_qwen3_5_mtp_config.py
+tests/models/transformers/test_layer_registry.py
+
+# tests/ root-level - misc.yaml runs a hand-picked set of these by name
+# (test_regression.py, test_envs.py, test_outputs.py, test_pooling_params.py);
+# the rest are unreferenced.
+tests/test_access_log_filter.py
+tests/test_attention_backend_registry.py
+tests/test_audio_media_size_precheck.py
+tests/test_cmake_utils.py
+tests/test_connections.py
+tests/test_embedded_commit.py
+tests/test_force_first_config.py
+tests/test_fxgraphcache_pickle_patch.py
+tests/test_logprobs.py
+tests/test_quantization_revision_pin.py
+tests/test_ray_env_utils.py
+tests/test_request_input_bounds.py
+tests/test_scalartype.py
+tests/test_tensorizer_revision_pin.py
+tests/test_triton_utils.py
+tests/test_version.py
+tests/test_zen_cpu_platform_detection.py
+
+# tests/tools/
+tests/tools/test_config_validator.py
+
+# tests/platforms/ - CPU-only unit test in a dir no job targets.
+tests/platforms/test_cpu.py
