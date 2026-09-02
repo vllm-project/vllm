@@ -218,9 +218,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
         Returns:
             The matching method class, or None when ``spec`` has no weight
             quantization.
-
-        Raises:
-            ValueError: If the weight or activation quantization is unsupported.
         """
         if spec is None or spec.weight is None:
             return None
