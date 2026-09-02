@@ -869,7 +869,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
-        "allendou/Fun-ASR-Nano-2512-vllm",
+        "FunAudioLLM/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
         max_transformers_version="5.1",
         transformers_version_reason={
