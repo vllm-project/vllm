@@ -38,6 +38,8 @@ class SharedAdmissionStats:
             )
         if counters is None:
             counters = [0] * self.num_counters(1)
+            client_count = 1
+            client_index = 0
         self._counters = counters
         self._client_count = client_count
         self._slot_offset = client_index * self.COUNTERS_PER_SLOT
