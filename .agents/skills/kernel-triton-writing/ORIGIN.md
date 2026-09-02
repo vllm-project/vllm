@@ -9,9 +9,12 @@ This skill was copied from NVIDIA's TensorRT-LLM repository:
 - License: Apache License 2.0
 
 The NVIDIA copyright and Apache-2.0 SPDX notices are preserved in the copied
-reference and script files. The vLLM copy adds explicit source comments,
-removes unsupported skill metadata, replaces unsafe cache-removal examples,
-keeps upstream Markdown tables/code blocks with targeted lint suppressions,
-and adapts paths and Python commands to vLLM's `.venv/bin/python` and `uv`
-workflow. The benchmark helper uses vLLM's accelerator-neutral synchronization
-API.
+reference files. The vLLM copy adds explicit source comments, removes
+unsupported skill metadata, replaces unsafe cache-removal examples, and keeps
+upstream Markdown tables/code blocks with targeted lint suppressions.
+
+The upstream standalone verification and benchmark scripts are omitted. vLLM
+uses its existing parametrized kernel pytest suites for correctness and the
+`kernel-microbenchmark` skill and `benchmarks/kernels/` for performance work.
+The associated fixed-name export contract and workflow sections are adapted to
+those vLLM conventions.

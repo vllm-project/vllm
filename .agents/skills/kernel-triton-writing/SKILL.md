@@ -6,7 +6,7 @@ description: >
   The user's request must involve Triton explicitly. Covers Triton-specific
   patterns: fused elementwise, reductions (softmax, LayerNorm, RMSNorm),
   tiled GEMM with triton.autotune, and flash attention. Workflow:
-  design, write, verify (with fast-path for explicit requests).
+  route, design, implement, and validate in vLLM.
 license: Apache-2.0
 metadata:
   author: NVIDIA Corporation
@@ -30,8 +30,10 @@ licensed under Apache-2.0. See ORIGIN.md for the source and local changes.
 
 1. Never benchmark before verification passes.
 2. Always mask loads and stores for non-divisible shapes.
-3. Include `kernel_fn`, `reference_fn`, and `get_inputs()` exports for companion scripts.
-4. Always run `scripts/verify_kernel.py` to validate against the reference.
+3. Validate the public wrapper against a PyTorch reference in the nearest
+   existing pytest suite.
+4. Cover the relevant shapes, dtypes, strides, and boundary conditions with
+   explicit tolerances.
 
 ### FP16/BF16 Precision Rules (LOW FREEDOM -- follow exactly)
 
@@ -53,7 +55,7 @@ Additional precision constraints:
 - `tl.sigmoid()` is unavailable in some Triton versions. Use `1.0 / (1.0 + tl.exp(-x_fp32))`.
 - Always cast back to `x.dtype` before `tl.store` -- mismatches cause "Type mismatch, store Float32 to Float16".
 - Unlike PyTorch, Triton does NOT auto-promote fp16/bf16 to fp32 for accumulation. Always use `tl.float32` accumulators for `tl.dot`.
-- **TF32 for matmul:** On Ampere+/Hopper, `tl.dot` uses TF32 by default for fp32 inputs (same as `torch.mm`). Do NOT add `input_precision="ieee"` — it is 3-8x slower. TF32 is the correct default. If verification fails due to TF32 precision (~0.01-0.1 abs diff), ensure `reference_fn` also uses TF32 (plain `torch.mm`, no `allow_tf32=False`).
+- **TF32 for matmul:** On Ampere+/Hopper, `tl.dot` uses TF32 by default for fp32 inputs (same as `torch.mm`). Do NOT add `input_precision="ieee"` — it is 3-8x slower. TF32 is the correct default. If verification fails due to TF32 precision (~0.01-0.1 abs diff), ensure the PyTorch reference also uses TF32 (plain `torch.mm`, no `allow_tf32=False`).
 
 ### CPU-GPU Sync Avoidance (LOW FREEDOM)
 
@@ -196,17 +198,12 @@ def matmul_kernel(
 
 ### Phase 3: Write the Kernel
 
-Create an output directory, then write the kernel file to `{output_dir}/kernel.py`.
-
-The kernel file MUST include:
+Implement the kernel in the appropriate vLLM module and match nearby public
+interfaces and style. The implementation should include:
 
 - `@triton.jit` decorated kernel function
 - `@triton.autotune` for production kernels (see [references/api-core.md](references/api-core.md))
 - Python wrapper function (descriptive name for external import)
-- **Fixed contract exports** (companion scripts rely on these exact names):
-    - `kernel_fn` — alias to the wrapper function
-    - `reference_fn(*args)` — PyTorch reference with identical signature
-    - `get_inputs()` — returns `list` of fresh CUDA tensors for testing/benchmarking
 
 Concise example (fused GELU + dropout):
 
@@ -248,41 +245,25 @@ def fused_gelu_dropout_triton(x: torch.Tensor, p: float = 0.1) -> torch.Tensor:
     seed = (x.data_ptr() % (2**31)) ^ n_elements  # sync-free seed
     fused_gelu_dropout_kernel[grid](x, out, n_elements, p, seed)
     return out
-
-
-# --- Fixed contract (companion scripts rely on these names) ---
-kernel_fn = fused_gelu_dropout_triton
-
-def reference_fn(x, p=0.1):
-    torch.manual_seed((x.data_ptr() % (2**31)) ^ x.numel())
-    return torch.nn.functional.dropout(
-        torch.nn.functional.gelu(x), p, training=True
-    )
-
-def get_inputs():
-    return [torch.randn(128 * 1024 * 1024, device="cuda")]
 ```
 
 For more patterns (SiLU+mul, RMSNorm, linear+GELU, add+LayerNorm), see [references/patterns-fusion.md](references/patterns-fusion.md). For GEMM patterns, see [references/patterns-gemm.md](references/patterns-gemm.md).
 
 ### Phase 4: Verify Correctness
 
-Run the companion verification script:
+Extend the nearest existing pytest suite under `tests/kernels/`. Compare the
+public wrapper against a PyTorch reference and use the smallest cases that
+cover the intended shapes, dtypes, strides, non-divisible boundaries, and any
+in-place behavior. Keep tolerances explicit.
+
+Run the focused test file:
 
 ```bash
-.venv/bin/python \
-    .agents/skills/kernel-triton-writing/scripts/verify_kernel.py \
-    {output_dir}/kernel.py \
-    --rtol 1e-3 --atol 1e-3
+.venv/bin/python -m pytest {test_path} -v
 ```
 
-Output:
-
-```json
-{"correct": true, "max_abs_diff": 1.2e-7, "max_rel_diff": 3.4e-6, "details": "..."}
-```
-
-**Stop if `correct: false`.** Fix the kernel before benchmarking.
+Stop and fix the kernel if correctness fails. Do not use benchmark agreement
+as a substitute for a pytest regression test.
 
 **Tolerance guide:**
 
@@ -297,17 +278,9 @@ Output:
 
 Only benchmark if the user explicitly requests performance numbers. Skip this phase for correctness-focused requests.
 
-```bash
-.venv/bin/python \
-    .agents/skills/kernel-triton-writing/scripts/benchmark_kernel.py \
-    {output_dir}/kernel.py
-```
-
-Output:
-
-```json
-{"kernel_time_ms": 0.45, "reference_time_ms": 1.23, "speedup": 2.73, "warmup_iters": 10, "benchmark_iters": 40}
-```
+Use `$kernel-microbenchmark` for benchmark design and interpretation. Put
+persistent kernel performance work in `benchmarks/kernels/` and follow its
+CUPTI timing, cold-L2, CUDA graph, throughput, and reproducibility guidance.
 
 ## References (consult only when stuck)
 
@@ -339,7 +312,7 @@ Only consult `references/` when:
 | `BLOCK_SIZE is not a constexpr` | Block size passed as runtime value | Add `: tl.constexpr` annotation |
 | `shape mismatch` in binary op | Tensor shapes don't broadcast | Check with `tl.static_print`; use `[:, None]` / `[None, :]` |
 | Large diffs everywhere | Wrong dtype in `tl.load` | Check load dtype matches input |
-| Matmul 3-8x slower than expected | `input_precision="ieee"` on `tl.dot` | Remove it; use TF32 default. Ensure `reference_fn` also uses TF32 |
+| Matmul 3-8x slower than expected | `input_precision="ieee"` on `tl.dot` | Remove it; use TF32 default. Ensure the PyTorch reference also uses TF32 |
 | Matmul ~0.01-0.1 abs diff vs reference | TF32 vs IEEE mismatch | Use same precision in both kernel and reference (TF32 for both) |
 | Diffs at boundaries | Missing mask | Add mask to all load/store ops |
 | Random diffs | Race condition | Check atomics and ordering |
