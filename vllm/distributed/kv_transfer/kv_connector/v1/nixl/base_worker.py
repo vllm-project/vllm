@@ -177,9 +177,7 @@ class NixlBaseConnectorWorker:
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
                 ssm_region_ids = (
-                    np.arange(
-                        num_ssm_regions, num_ssm_regions + 1, dtype=np.int32
-                    )
+                    np.arange(num_ssm_regions, num_ssm_regions + 1, dtype=np.int32)
                     if i == self._ple_group_index
                     else np.arange(num_ssm_regions, dtype=np.int32)
                 )[:, None]
