@@ -212,12 +212,21 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber | None):
     if subscriber is not None:
         subscriber.get_new_cpu_stored_events()
 
-    # Pad prompt so its token count is a multiple of cpu_block_size.
-    # Use the tokenizer directly to avoid expensive llm.generate() calls.
+    # Align the reusable prefix; the final token must be recomputed for logits.
     tokenizer = llm.get_tokenizer()
-    prompt = "Let's count to 10. One, two, three, four,"
-    while len(tokenizer.encode(prompt)) % cpu_block_size != 0:
-        prompt = ". " + prompt
+    prompt_token_ids = tokenizer.encode("Let's count to 10. One, two, three, four,")
+    reusable_prefix = prompt_token_ids[:-1]
+    final_token = prompt_token_ids[-1:]
+
+    [padding_token_id] = tokenizer.encode(".", add_special_tokens=False)
+    padding = [padding_token_id] * (-len(reusable_prefix) % cpu_block_size)
+    insert_at = int(reusable_prefix[0] == tokenizer.bos_token_id)
+    reusable_prefix[insert_at:insert_at] = padding
+    assert len(reusable_prefix) % cpu_block_size == 0
+
+    prompt = TokensPrompt(
+        prompt_token_ids=reusable_prefix + final_token,
+    )
 
     # Seed the CPU cache with the prompt.
     llm.generate(prompt, sampling_params, use_tqdm=False)
@@ -574,7 +583,15 @@ def test_mamba_cpu_offload_boundary(
     )
 
     _PROMPT_SIZE: int = block_size * 2
-    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+    # Cold prefill and offload-resume are not bit-exact (selective_scan_fn over
+    # the whole prompt vs selective_state_update for the recomputed token), so
+    # exact-text equality only holds while the rounding difference never flips a
+    # greedy argmax. Use a long, highly predictable prompt: it needs no "...."
+    # padding and keeps top-1 ahead of top-2 by >2.8 logprobs at every step.
+    _PROMPT_TEXT = (
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+        "The cat sat on the mat. The cat sat on the mat. The cat sat on the mat. "
+    )
 
     # build prompt ids to match prompt_size
     tokenizer = llm.get_tokenizer()

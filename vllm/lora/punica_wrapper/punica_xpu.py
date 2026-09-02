@@ -44,7 +44,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
-        torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
+        torch._dynamo.mark_dynamic(self._embeddings_indices, 0)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
         self.lora_config = kwargs["lora_config"]

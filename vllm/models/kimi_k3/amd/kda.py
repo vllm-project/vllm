@@ -313,7 +313,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw[self.prefix]
+        attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        if attn_metadata_narrowed is None:
+            return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         m = attn_metadata_narrowed
         has_initial_state = m.has_initial_state

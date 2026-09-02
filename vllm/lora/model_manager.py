@@ -201,8 +201,8 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         # First, determine if the model supports tower connector LoRA.
-        self.supports_tower_connector_lora = self.supports_mm and hasattr(
-            self.model, "get_num_mm_encoder_tokens"
+        self.supports_tower_connector_lora = (
+            self.supports_mm and self.model.supports_tower_connector_lora
         )
 
         # Then, handle the case where the feature is disabled in the config.

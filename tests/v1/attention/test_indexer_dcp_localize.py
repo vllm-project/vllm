@@ -642,7 +642,10 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
+@pytest.mark.parametrize("block_stride_rows", [None, 12])
+def test_dcp_filter_compacts_valid_slots_for_sparse_kernel(
+    block_stride_rows: int | None,
+):
     block_size = 4
     num_topk = 128
     dcp_size = 2
@@ -658,6 +661,7 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
         dcp_size=dcp_size,
         dcp_rank=0,
         BLOCK_SIZE=block_size,
+        BLOCK_STRIDE_ROWS=block_stride_rows,
         NUM_TOPK_TOKENS=num_topk,
         return_valid_counts=True,
     )
@@ -668,7 +672,11 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
     assert (out[0, valid:] == -1).all()
     # In-kernel compaction packs valid slots to the front; prefix order is
     # unspecified, so compare as a set.
-    assert set(out[0, :valid].cpu().tolist()) == {40, 41, 42, 43}
+    block_stride_rows = block_stride_rows or block_size
+    expected_base = 10 * block_stride_rows
+    assert set(out[0, :valid].cpu().tolist()) == set(
+        range(expected_base, expected_base + block_size)
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

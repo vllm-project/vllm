@@ -947,11 +947,12 @@ def _make_deepseek_v4_weights_mapper(
     # When shared experts are fused into the routed MXFP4 grouped GEMM, the
     # shared_experts tensors are redirected to routed expert slots ; leave
     # their names untouched here.
-    substr_map = (
+    orig_to_new_substr: dict[str, str | None] = (
         {}
         if fuse_shared_experts
         else {".shared_experts.w2": ".shared_experts.down_proj"}
     )
+    orig_to_new_substr["mtp."] = None
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
@@ -967,7 +968,7 @@ def _make_deepseek_v4_weights_mapper(
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
             ".input_scale": ".input_scale_2",
         },
-        orig_to_new_substr=substr_map,
+        orig_to_new_substr=orig_to_new_substr,
     )
 
 
@@ -1038,16 +1039,23 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
+        fused_compressor_layers = 0
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                fused_compressor_layers += module.prepare_compressor_gemm_fusion()
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+        if fused_compressor_layers:
+            logger.info(
+                "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
+                fused_compressor_layers,
+            )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

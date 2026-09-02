@@ -54,11 +54,10 @@ def test_text_only_model_mm_data_maps_to_bad_request():
 
     with pytest.raises(ValueError, match="text-only") as exc_info:
         renderer._process_multimodal(
-            prompt="What is in this image?",
+            prompt=[1],
             mm_data={"image": [cherry_pil_image]},
             mm_uuids=None,
             mm_processor_kwargs=None,
-            tokenization_kwargs=None,
         )
 
     error_response = create_error_response(exc_info.value)

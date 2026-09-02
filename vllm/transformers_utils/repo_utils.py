@@ -95,10 +95,23 @@ def with_retry(
     log_msg: str,
     max_retries: int = 2,
     retry_delay: int = 2,
+    fatal_errors: tuple[type[Exception], ...] = (),
 ) -> _R:
+    """Call `func`, retrying transient failures.
+
+    Args:
+        func: The call to make.
+        log_msg: Prefix for the message logged when a call fails.
+        max_retries: How many times to call `func` before giving up.
+        retry_delay: Seconds to wait after the first failure, doubled each time.
+        fatal_errors: Exceptions that are a definitive answer rather than a
+            transient failure. These are raised immediately, without logging.
+    """
     for attempt in range(max_retries):
         try:
             return func()
+        except fatal_errors:
+            raise
         except Exception as e:
             if attempt == max_retries - 1:
                 logger.error("%s: %s", log_msg, e)

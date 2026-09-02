@@ -211,6 +211,9 @@ class BaseLlavaNextMultiModalProcessor(BaseLlavaMultiModalProcessor[_I]):
 
 
 class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -231,6 +234,7 @@ class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
 class LlavaNextForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
+    supports_tower_connector_lora = True
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
