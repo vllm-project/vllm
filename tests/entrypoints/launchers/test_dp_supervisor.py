@@ -328,6 +328,7 @@ async def test_fault_tolerant_keeps_survivors_on_child_exit(
     supervisor = DPSupervisor(
         _make_unit_args(enable_fault_tolerance=True, dp_supervisor_probe_interval_s=0.0)
     )
+    supervisor._was_ready = True
     survivor_alive = iter([True, True, False])
     supervisor._processes = [
         SimpleNamespace(
@@ -355,7 +356,7 @@ async def test_fault_tolerant_waits_while_recovering(
         _make_unit_args(enable_fault_tolerance=True, dp_supervisor_probe_interval_s=0.0)
     )
     supervisor.child_ports = [8000]
-    probe_results = iter([True, False, False])
+    probe_results = iter([True])
     states = iter(["recovering", "gone"])
     ready_seen: list[bool] = []
 
