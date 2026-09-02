@@ -11,8 +11,10 @@ from typing import Any
 import numpy as np
 import pytest
 
+from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
 
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
@@ -140,6 +142,50 @@ def test_processor_multi_video(
         )
 
 
+# Qwen3-VL / Qwen3.8 "Long Video Understanding" pixel budget from the
+# model card. Used to check --mm-processor-kwargs scoping (#52834).
+_LONG_VIDEO_SIZE = {"longest_edge": 469762048, "shortest_edge": 4096}
+
+
+def _probe_mm_token_budgets(
+    model_id: str, mm_processor_kwargs: dict[str, Any] | None
+) -> tuple[int, int]:
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+    video = info.get_max_video_tokens(
+        seq_len=500000, mm_counts={"video": 1, "image": 1}
+    )
+    return video, info.get_max_image_tokens()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
+    model_id: str,
+) -> None:
+    """``videos_kwargs.size`` must raise only the video token budget.
+
+    A flat ``size`` override still applies to both modalities (the previous
+    shared-namespace behavior). Regression for #52834.
+    """
+    stock_video, stock_image = _probe_mm_token_budgets(model_id, None)
+    scoped_video, scoped_image = _probe_mm_token_budgets(
+        model_id, {"videos_kwargs": {"size": _LONG_VIDEO_SIZE}}
+    )
+    flat_video, flat_image = _probe_mm_token_budgets(
+        model_id, {"size": _LONG_VIDEO_SIZE}
+    )
+
+    assert scoped_video == flat_video
+    assert scoped_video > stock_video
+    assert scoped_image == stock_image
+    assert flat_image > stock_image
+
+
 @pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize(
     "hf_mm_kwargs",
@@ -184,6 +230,89 @@ def test_processor_multi_video_list_kwargs(
     assert len(video_phs) == 2, (
         f"Expected exactly 2 video placeholders, got {len(video_phs)}"
     )
+
+
+def _build_video_embeds_mm_data(
+    hidden_size: int,
+    grid_thw: tuple[int, int, int] = (2, 4, 4),
+) -> dict[str, Any]:
+    """Create an embeds-only video item as an EPD consumer receives it:
+    pre-computed embeddings plus the metadata published by the encoder."""
+    import torch
+
+    t, h, w = grid_thw
+    num_tokens = t * h * w // 4  # spatial_merge_size ** 2
+    return {
+        "video": {
+            "video_embeds": torch.zeros(num_tokens, hidden_size),
+            "video_grid_thw": torch.tensor([grid_thw]),
+            "timestamps": torch.tensor([[float(i) for i in range(t)]]),
+        }
+    }
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_video_embeds_with_timestamps(model_id: str) -> None:
+    """Embeds-only video input must size the placeholder range from the
+    grid and the real timestamps published by the encoder (EC consumer
+    path); synthesized or missing timestamps would change the token count
+    and break embedding merging downstream."""
+    # `build_model_context` forces enable_mm_embeds off, so build the
+    # config directly; keep the same online-availability skip behavior.
+    HF_EXAMPLE_MODELS.find_hf_info(model_id).check_available_online(on_fail="skip")
+    model_config = ModelConfig(
+        model_id,
+        runner="generate",
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        enable_mm_embeds=True,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    tokenizer = processor.info.get_tokenizer()
+
+    grid_thw = (2, 4, 4)
+    mm_data = _build_video_embeds_mm_data(
+        model_config.get_inputs_embeds_size(), grid_thw
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+
+    video_phs = processed["mm_placeholders"].get("video", [])
+    assert len(video_phs) == 1, (
+        f"Expected exactly 1 video placeholder, got {len(video_phs)}"
+    )
+
+    t, h, w = grid_thw
+    tokens_per_frame = h * w // 4
+    timestamp_tokens = sum(
+        len(tokenizer.encode(f"<{float(i):.1f} seconds>", add_special_tokens=False))
+        for i in range(t)
+    )
+    # per frame: timestamp tokens + vision_start + video tokens + vision_end
+    expected_len = timestamp_tokens + t * (tokens_per_frame + 2)
+    assert video_phs[0].length == expected_len
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_video_embeds_missing_timestamps(model_id: str) -> None:
+    """Timestamps are required metadata for video embeds: they size the
+    placeholder range, so omitting them must fail loudly at parse time
+    instead of silently producing a wrong prompt."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    mm_data = _build_video_embeds_mm_data(ctx.model_config.get_inputs_embeds_size())
+    del mm_data["video"]["timestamps"]
+
+    with pytest.raises(ValueError, match="timestamps"):
+        processor.info.parse_mm_data(mm_data)
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])

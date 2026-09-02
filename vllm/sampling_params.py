@@ -707,6 +707,17 @@ class SamplingParams(
                     text=prompt, add_special_tokens=False
                 )
 
+                if not prompt_token_ids:
+                    if not add_prefix_space:
+                        raise VLLMValidationError(
+                            "bad_words entries must tokenize to at least one token.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
+                    # The unprefixed form is still enforceable when only the
+                    # optional space-prefixed form tokenizes to nothing.
+                    continue
+
                 # If no space at the beginning
                 # or if prefix space produces a new word token
                 if (not add_prefix_space) or (
