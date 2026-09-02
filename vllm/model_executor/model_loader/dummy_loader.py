@@ -74,7 +74,7 @@ class DummyModelLoader(BaseModelLoader):
                 raise _SkipValidation(f"Missing safetensors dtype metadata for {name=}")
 
             dtype = info["dtype"]
-            if _SAFETENSORS_TO_TORCH_DTYPE not in dtype:
+            if dtype not in _SAFETENSORS_TO_TORCH_DTYPE:
                 raise _SkipValidation(
                     f"Unrecognized safetensors dtype metadata for {name=}: {dtype=}"
                 )
