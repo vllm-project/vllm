@@ -134,8 +134,9 @@ class MambaHybridModelState(DefaultModelState):
             # Seed the running state block from the resumed/prefilled position.
             state_block_size = self.cache_config.block_size
             if self.cache_config.mamba_cache_mode == "all":
-                state_block_size = self.cache_config.mamba_block_size
-                assert state_block_size is not None
+                mamba_block_size = self.cache_config.mamba_block_size
+                assert mamba_block_size is not None
+                state_block_size = mamba_block_size
             self._mamba_state_idx_gpu[req_index].fill_(
                 (new_req_data.num_computed_tokens - 1) // state_block_size
             )

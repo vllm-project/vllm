@@ -487,7 +487,7 @@ def test_modelwide_replayssm_postprocess_commits_checkpoint_boundary(monkeypatch
         mamba_block_size=4,
         num_reqs=1,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert kernel.call_count == 1
     assert ctx.plan_ring_start.tolist() == [15, 0]
@@ -532,7 +532,7 @@ def test_modelwide_replayssm_postprocess_resets_prefill_slot(monkeypatch):
         mamba_block_size=4,
         num_reqs=1,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert kernel.call_count == 1
     assert ctx.plan_flush_count.tolist() == [-1, -1]
@@ -565,7 +565,7 @@ def test_modelwide_replayssm_copies_reassigned_live_slot_once(monkeypatch):
         dst_cols=torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
         num_reqs=1,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert kernel.call_count == 1
     assert ctx.precopy_ring_start.tolist() == [2, 0]
@@ -603,7 +603,7 @@ def test_modelwide_replayssm_copies_only_reassigned_cache_group(monkeypatch):
         dst_cols=torch.tensor([1, 0], dtype=torch.int32, device="cuda"),
         num_reqs=1,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert kernel.call_count == 1
     assert ctx.precopy_ring_start.tolist() == [2, 0]
