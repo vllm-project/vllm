@@ -168,36 +168,107 @@ def _gdn_attention_core_xpu_impl(
         self.conv1d.weight.size(0), self.conv1d.weight.size(2)
     )
 
-    torch.ops._xpu_C.gdn_attention(
+    def _invoke(out, out_z, qkvz, ba, **metadata_kwargs) -> None:
+        torch.ops._xpu_C.gdn_attention(
+            out,
+            out_z,
+            qkvz,
+            ba,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            conv_state=self.kv_cache[0],
+            ssm_state=self.kv_cache[1],
+            conv_weights=conv_weights,
+            conv_bias=self.conv1d.bias,
+            activation=self.activation,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            tp_size=self.tp_size,
+            reorder_input=not self.gqa_interleaved_layout,
+            **metadata_kwargs,
+        )
+
+    if num_spec_decodes > 0 and (num_prefills > 0 or num_decodes > 0):
+        # The XPU kernel handles either the spec path or the non-spec path per
+        # invocation, so mixed batches are gathered into two disjoint sub-batches
+        # and scattered back, mirroring the CPU implementation.
+        assert non_spec_token_indx is not None and spec_token_indx is not None
+        non_spec_indx = non_spec_token_indx.to(torch.long)
+        spec_indx = spec_token_indx.to(torch.long)
+        num_non_spec_tokens = non_spec_indx.size(0)
+        num_spec_tokens = spec_indx.size(0)
+
+        non_spec_out = torch.zeros_like(core_attn_out[:num_non_spec_tokens])
+        non_spec_z = torch.empty_like(z[:num_non_spec_tokens])
+        _invoke(
+            non_spec_out,
+            non_spec_z,
+            projected_states_qkvz.index_select(0, non_spec_indx),
+            projected_states_ba.index_select(0, non_spec_indx),
+            num_prefills=num_prefills,
+            num_decodes=num_decodes,
+            num_spec_decodes=0,
+            has_initial_state=has_initial_state,
+            non_spec_query_start_loc=non_spec_query_start_loc,
+            non_spec_token_indx=None,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            spec_query_start_loc=None,
+            spec_token_indx=None,
+            spec_state_indices_tensor=None,
+            num_accepted_tokens=None,
+            num_actual_tokens=num_non_spec_tokens,
+        )
+
+        spec_out = torch.zeros_like(core_attn_out[:num_spec_tokens])
+        spec_z = torch.empty_like(z[:num_spec_tokens])
+        _invoke(
+            spec_out,
+            spec_z,
+            projected_states_qkvz.index_select(0, spec_indx),
+            projected_states_ba.index_select(0, spec_indx),
+            num_prefills=0,
+            num_decodes=0,
+            num_spec_decodes=num_spec_decodes,
+            has_initial_state=None,
+            non_spec_query_start_loc=None,
+            non_spec_token_indx=torch.empty(
+                0, dtype=torch.int32, device=core_attn_out.device
+            ),
+            non_spec_state_indices_tensor=None,
+            spec_query_start_loc=spec_query_start_loc,
+            spec_token_indx=torch.arange(
+                num_spec_tokens, dtype=torch.int32, device=core_attn_out.device
+            ),
+            spec_state_indices_tensor=spec_state_indices_tensor,
+            num_accepted_tokens=num_accepted_tokens,
+            num_actual_tokens=num_spec_tokens,
+        )
+
+        core_attn_out.index_copy_(0, non_spec_indx, non_spec_out)
+        core_attn_out.index_copy_(0, spec_indx, spec_out)
+        z.index_copy_(0, non_spec_indx, non_spec_z)
+        z.index_copy_(0, spec_indx, spec_z)
+        return
+
+    _invoke(
         core_attn_out,
         z,
         projected_states_qkvz,
         projected_states_ba,
-        self.num_k_heads,
-        self.num_v_heads,
-        self.head_k_dim,
-        self.head_v_dim,
-        conv_state=self.kv_cache[0],
-        ssm_state=self.kv_cache[1],
-        conv_weights=conv_weights,
-        conv_bias=self.conv1d.bias,
-        activation=self.activation,
-        A_log=self.A_log,
-        dt_bias=self.dt_bias,
-        num_prefills=num_prefills,  # type: ignore[attr-defined]
-        num_decodes=num_decodes,  # type: ignore[attr-defined]
-        num_spec_decodes=num_spec_decodes,  # type: ignore[attr-defined]
-        has_initial_state=has_initial_state,  # type: ignore[attr-defined]
-        non_spec_query_start_loc=non_spec_query_start_loc,  # type: ignore[attr-defined]
-        non_spec_token_indx=non_spec_token_indx,  # type: ignore[attr-defined]
-        non_spec_state_indices_tensor=non_spec_state_indices_tensor,  # type: ignore[attr-defined]
-        spec_query_start_loc=spec_query_start_loc,  # type: ignore[attr-defined]
-        spec_token_indx=spec_token_indx,  # type: ignore[attr-defined]
+        num_prefills=num_prefills,
+        num_decodes=num_decodes,
+        num_spec_decodes=num_spec_decodes,
+        has_initial_state=has_initial_state,
+        non_spec_query_start_loc=non_spec_query_start_loc,
+        non_spec_token_indx=non_spec_token_indx,
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+        spec_query_start_loc=spec_query_start_loc,
+        spec_token_indx=spec_token_indx,
         spec_state_indices_tensor=spec_state_indices_tensor,
-        num_accepted_tokens=num_accepted_tokens,  # type: ignore[attr-defined]
-        num_actual_tokens=num_actual_tokens,  # type: ignore[attr-defined]
-        tp_size=self.tp_size,
-        reorder_input=not self.gqa_interleaved_layout,
+        num_accepted_tokens=num_accepted_tokens,
+        num_actual_tokens=num_actual_tokens,
     )
 
 
