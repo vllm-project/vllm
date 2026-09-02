@@ -162,6 +162,40 @@ def test_bad_word_tokenization_limit_can_be_overridden(monkeypatch):
     assert tokenizer.calls == 3
 
 
+class EmptyBaseEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [216] if text.startswith(" ") else []
+
+
+def test_bad_word_rejects_empty_base_tokenization():
+    params = SamplingParams(bad_words=["\x16"])
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="must tokenize to at least one token",
+    ) as exc_info:
+        params.update_from_tokenizer(EmptyBaseEncodingTokenizer())
+
+    assert exc_info.value.parameter == "bad_words"
+
+
+class EmptyPrefixedEncodingTokenizer:
+    max_token_id = 1024
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [] if text.startswith(" ") else [321]
+
+
+def test_bad_word_skips_empty_optional_prefixed_tokenization():
+    params = SamplingParams(bad_words=["word"])
+
+    params.update_from_tokenizer(EmptyPrefixedEncodingTokenizer())
+
+    assert params.bad_words_token_ids == [[321]]
+
+
 # --- Beam search: beam width / n honor the sequence cap --------------------
 
 

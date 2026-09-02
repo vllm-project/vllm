@@ -52,6 +52,21 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+_ST_POOLING_MODULE_TYPES = {
+    "sentence_transformers.models.Pooling",
+    "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+}
+_ST_NORMALIZE_MODULE_TYPES = {
+    "sentence_transformers.models.Normalize",
+    "sentence_transformers.base.modules.normalize.Normalize",
+    "sentence_transformers.sentence_transformer.modules.normalize.Normalize",
+}
+_DENSE_MODULE_TYPES = {
+    "sentence_transformers.models.Dense",
+    "sentence_transformers.base.modules.dense.Dense",
+    "pylate.models.Dense.Dense",
+}
+
 if Version(version("transformers")) < Version("5.0.0"):
     raise ImportError(
         "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
@@ -91,6 +106,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     granite4_vision="Granite4VisionConfig",
     hyperclovax="HyperCLOVAXConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
@@ -124,6 +140,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen4_exp="Qwen4ExpConfig",
+    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -849,11 +867,7 @@ def get_pooling_config(
     logger.info("Found sentence-transformers modules configuration.")
 
     pooling = next(
-        (
-            item
-            for item in modules_dict
-            if item["type"] == "sentence_transformers.models.Pooling"
-        ),
+        (item for item in modules_dict if item["type"] in _ST_POOLING_MODULE_TYPES),
         None,
     )
     normalize = bool(
@@ -861,7 +875,7 @@ def get_pooling_config(
             (
                 item
                 for item in modules_dict
-                if item["type"] == "sentence_transformers.models.Normalize"
+                if item["type"] in _ST_NORMALIZE_MODULE_TYPES
             ),
             False,
         )
@@ -877,14 +891,28 @@ def get_pooling_config(
 
         config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
-            if val is True:
-                pooling_type = parse_pooling_type(key)
-                if pooling_type in SEQ_POOLING_TYPES:
-                    config["seq_pooling_type"] = pooling_type
-                elif pooling_type in TOK_POOLING_TYPES:
-                    config["tok_pooling_type"] = pooling_type
-                else:
-                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_name = val
+            elif val is True:
+                pooling_name = key
+            else:
+                continue
+
+            pooling_type = parse_pooling_type(pooling_name)
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
+            else:
+                logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        if not {"seq_pooling_type", "tok_pooling_type"} & config.keys():
+            logger.warning(
+                "Unable to determine Sentence Transformers pooling type from %s; "
+                "unless configured explicitly, vLLM will fall back to the model "
+                "architecture default.",
+                pooling_file_name,
+            )
 
         return config
 
@@ -1148,10 +1176,6 @@ def try_get_dense_modules(
         if isinstance(modules, dict):
             modules = modules.get("modules", [])
 
-        _DENSE_MODULE_TYPES = {
-            "sentence_transformers.models.Dense",
-            "pylate.models.Dense.Dense",
-        }
         dense_modules = [m for m in modules if m.get("type") in _DENSE_MODULE_TYPES]
         if not dense_modules:
             return None

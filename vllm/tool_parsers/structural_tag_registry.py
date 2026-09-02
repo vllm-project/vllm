@@ -49,6 +49,7 @@ StructuralTagBuilder: TypeAlias = Callable[
         list[BuiltinToolParam],
         SimplifiedToolChoice,
         bool,
+        str,
     ],
     StructuralTag,
 ]
@@ -70,7 +71,9 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "inkling", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
+    {"hermes", "hy_v4", "inkling", "kimi_k3"}
+)
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -78,7 +81,9 @@ SUPPORTED_STRUCTURAL_TAG_MODELS = (
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 
 
-def register_vllm_structural_tag(model: str):
+def register_vllm_structural_tag(
+    model: str,
+) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
     """Register a vLLM-owned structural tag builder."""
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
@@ -104,6 +109,7 @@ def get_model_structural_tag(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
     tool_choice: ToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
 
@@ -126,11 +132,18 @@ def get_model_structural_tag(
             builtin_tools,
             simplified_tool_choice,
             reasoning,
+            token_suffix,
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
+
+    if token_suffix:
+        raise ValueError(
+            f"Structural tag model {model!r} is an xgrammar builtin with fixed "
+            f"tokens and cannot apply token_suffix={token_suffix!r}"
+        )
 
     return get_xgrammar_model_structural_tag(
         model=model,
@@ -244,8 +257,9 @@ def get_hermes_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_trigger = "<tool_call>"
 
@@ -293,8 +307,9 @@ def get_minimax_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_begin = "<minimax:tool_call>\n"
     tool_call_end = "</minimax:tool_call>"
@@ -586,36 +601,19 @@ def _k3_tools_channel(tools: list[FunctionToolParam]) -> TagFormat:
 # --- Inkling -------------------------------------------------------------------
 # Wire format (vllm/parser/inkling.py):
 #   tool call: <|message_model|><|content_invoke_tool_json|>
-#              {"name": "get_weather", "args": {"city": "SF"}}<|end_message|>
+#              {"name": .., "args": ..}<|end_message|>
 #   text:      <|message_model|><|content_text|>...<|end_message|>
 #
-# Inkling wraps its tool JSON in content markers, which is exactly why a BARE
-# JSON-schema constraint is wrong for it -- Dynamo's prepost.py gates that
-# fallback off for this parser because forcing raw JSON conflicts with the wire
-# format and can crash EngineCore under speculative decoding. The structural tag
-# constrains markers AND payload together, which is the whole point.
-#
-# The tag constrains the GENERATED SUFFIX, so it begins at the content-kind
-# marker, NOT at `<|message_model|>`. Inkling's chat template prefills the role
-# marker into the generation prompt -- it ends
-# `...<|end_message|><|message_model|>` -- so generation resumes inside the
-# model message and never re-emits it. Anchoring the tag at `<|message_model|>`
-# forces a DUPLICATE role marker: verified with xgrammar, that grammar rejects
-# the correct suffix and accepts only the doubled form. It appears to work
-# because the parser absorbs the duplicate, but it manufactures exactly the
-# unconsumed-control-marker residue that dynamo#12510 exists to strip.
+# The tag constrains the generated suffix. It starts at the content-kind marker,
+# not at <|message_model|>. The chat template prefills that role marker, so the
+# model never emits it again. An anchor there forces a duplicate marker.
 _INKLING_CONTENT_TEXT = "<|content_text|>"
 _INKLING_TOOL_JSON = "<|content_invoke_tool_json|>"
 _INKLING_END_MESSAGE = "<|end_message|>"
 _INKLING_END_SAMPLING = "<|content_model_end_sampling|>"
 _INKLING_TOOL_OPEN = _INKLING_TOOL_JSON
 _INKLING_TEXT_OPEN = _INKLING_CONTENT_TEXT
-# BOTH terminators, because the parser treats them as co-equal: it documents
-# that "sampling may also end a block with the standalone
-# <|content_model_end_sampling|> token", `is_reasoning_end` returns True on it,
-# and `count_reasoning_tokens` closes a reasoning block on either. Permitting
-# only <|end_message|> would mask a valid natural terminator -- and would remove
-# one of the two paths that flip is_reasoning_end.
+# Both terminators are valid: the parser ends a block on either one.
 _INKLING_ENDS = [_INKLING_END_MESSAGE, _INKLING_END_SAMPLING]
 
 
@@ -667,11 +665,11 @@ def get_inkling_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    # `reasoning` is deliberately unused: an Inkling thinking block is a separate
-    # <|content_thinking|> message that precedes this one, and constraining it here
-    # would forbid the model from thinking before it calls a tool.
-    del builtin_tools, reasoning
+    # `reasoning` is unused: the thinking block is a separate, earlier message.
+    # Inkling's markers are fixed, so `token_suffix` does not apply.
+    del builtin_tools, reasoning, token_suffix
 
     if not tools:
         return StructuralTag(format=_inkling_text_block())
@@ -684,13 +682,9 @@ def get_inkling_structural_tag(
             )
         )
     if tool_choice == "forced":
-        # A named tool_choice. normalize_tool_choice() has ALREADY filtered
-        # `tools` to the named one, so tools[:1] IS that tool.
-        # Use the same CONTAINER format as the required branch, never a bare
-        # call tag: a bare TagFormat at the root is a TRIGGERED constraint
-        # (xgrammar only enforces after `begin` matches), so it never anchors
-        # and the model stays free to call a different tool. kimi_k3 wraps
-        # forced the same way, for the same reason.
+        # normalize_tool_choice() already filtered `tools` to the named one.
+        # Keep the container format: a bare tag at the root only triggers after
+        # `begin` matches, so it does not anchor. kimi_k3 wraps forced the same way.
         return StructuralTag(format=_inkling_tool_calls(tools[:1]))
     # required: at least one call from the offered set, no text alternative.
     return StructuralTag(format=_inkling_tool_calls(tools))
@@ -702,8 +696,9 @@ def get_kimi_k3_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
 
@@ -724,3 +719,142 @@ def get_kimi_k3_structural_tag(
     return StructuralTag(
         format=SequenceFormat(elements=[*_k3_response_prefix(), tools_part, trailer])
     )
+
+
+# ---------------------------------------------------------------------------
+# HYV4 (<tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tokens)
+# ---------------------------------------------------------------------------
+# HYV4 assistant output after the reasoning gate (``</think:SUF>``):
+#   <tool_calls:SUF>
+#     <tool_call:SUF>NAME
+#       <arg_key:SUF>K</arg_key:SUF><arg_value:SUF>V</arg_value:SUF>
+#     </tool_call:SUF>
+#   </tool_calls:SUF>
+# Adjacent <tool_call> blocks have no separator, and argument values are emitted
+# verbatim (no surrounding quotes), so the value body cannot be described by
+# JSONSchemaFormat. Only the skeleton (tool names, argument keys, tag order) is
+# constrained; each <arg_value> body stays free text.
+
+
+def _hy_v4_argument_keys(parameters: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Split a tool's argument keys into ``(required, optional)``.
+
+    Both lists keep declaration order. Required keys missing from
+    ``properties`` are still treated as required.
+    """
+    properties = parameters.get("properties") or {}
+    required = parameters.get("required") or []
+    required_set = set(required)
+    required_keys = [k for k in properties if k in required_set]
+    required_keys += [k for k in required if k not in properties]
+    optional_keys = [k for k in properties if k not in required_set]
+    return required_keys, optional_keys
+
+
+@register_vllm_structural_tag("hy_v4")
+def get_hy_v4_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build HYV4 <tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tags.
+
+    Args:
+        tools: Normalized function tools the model may call.
+        builtin_tools: Unused; HYV4 has no builtin tools.
+        tool_choice: Simplified tool choice.
+        reasoning: Whether the grammar also covers the reasoning phase.
+        token_suffix: Per-checkpoint structural-token suffix including the
+            leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
+            uses unsuffixed tokens. The HYV4 tool parser reads it off the
+            tokenizer vocab and passes it to ``get_model_structural_tag``.
+    """
+    del builtin_tools
+
+    think_end = f"</think{token_suffix}>"
+    tool_calls_begin = f"<tool_calls{token_suffix}>"
+    tool_calls_end = f"</tool_calls{token_suffix}>"
+    tool_call_begin = f"<tool_call{token_suffix}>"
+    tool_call_end = f"</tool_call{token_suffix}>"
+    arg_key_begin = f"<arg_key{token_suffix}>"
+    arg_key_end = f"</arg_key{token_suffix}>"
+    arg_value_begin = f"<arg_value{token_suffix}>"
+    arg_value_end = f"</arg_value{token_suffix}>"
+
+    def arg_pair(key: str) -> SequenceFormat:
+        return SequenceFormat(
+            elements=[
+                ConstStringFormat(value=arg_key_begin),
+                ConstStringFormat(value=key),
+                ConstStringFormat(value=arg_key_end),
+                ConstStringFormat(value=arg_value_begin),
+                AnyTextFormat(),
+                ConstStringFormat(value=arg_value_end),
+            ]
+        )
+
+    def single_tool_call(tool: FunctionToolParam) -> TagFormat:
+        function = tool.function
+        parameters = (
+            function.parameters if isinstance(function.parameters, dict) else {}
+        )
+        required_keys, optional_keys = _hy_v4_argument_keys(parameters)
+        elements: list[Any] = [arg_pair(k) for k in required_keys]
+        if optional_keys:
+            # Optional keys may appear in any order, or not at all.
+            optional_pairs = [arg_pair(k) for k in optional_keys]
+            elements.append(
+                StarFormat(
+                    content=optional_pairs[0]
+                    if len(optional_pairs) == 1
+                    else OrFormat(elements=optional_pairs)
+                )
+            )
+        content: Any = (
+            SequenceFormat(elements=elements) if elements else AnyTextFormat()
+        )
+        return TagFormat(
+            begin=tool_call_begin + function.name,
+            content=content,
+            end=tool_call_end,
+        )
+
+    tags = [single_tool_call(tool) for tool in tools]
+
+    if tool_choice == "auto":
+        block = TagFormat(
+            begin=tool_calls_begin,
+            content=TagsWithSeparatorFormat(
+                tags=tags,
+                separator="",
+                at_least_one=True,
+            ),
+            end=tool_calls_end,
+        )
+        suffix_tag: Any = TriggeredTagsFormat(triggers=[tool_calls_begin], tags=[block])
+    else:
+        # HYV4 places tool_call blocks back-to-back with no separator. "forced"
+        # has already been filtered down to the single named tool and must emit
+        # exactly one block.
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value=tool_calls_begin),
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                    stop_after_first=tool_choice == "forced",
+                ),
+                ConstStringFormat(value=tool_calls_end),
+            ]
+        )
+
+    if not reasoning:
+        return StructuralTag(format=suffix_tag)
+
+    # The reasoning phase is constrained too, so the tag must explicitly skip
+    # the ``<think>...</think:SUF>`` prefix.
+    prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_end)
+    return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
