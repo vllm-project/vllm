@@ -130,12 +130,10 @@ def test_sampling_mask_lists_slice_and_merge_single_position():
     assert all(chunk.offsets is None for chunk in chunks)
     assert [chunk.token_ids.tolist() for chunk in chunks] == [[1, 2], [], [3, 4]]
 
-    merged = SamplingMaskLists.merge(
-        chunks + [SamplingMaskLists(np.array([5, 6]), np.array([0, 1, 2]))]
-    )
+    merged = SamplingMaskLists.merge(chunks)
 
-    assert merged.to_nested_list() == [[1, 2], [], [3, 4], [5], [6]]
-    assert merged.offsets.tolist() == [0, 2, 2, 4, 5, 6]
+    assert merged.to_nested_list() == [[1, 2], [], [3, 4]]
+    assert merged.offsets.tolist() == [0, 2, 2, 4]
 
 
 def test_sampling_mask_tensors_from_logits():

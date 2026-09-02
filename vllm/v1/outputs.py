@@ -54,10 +54,9 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    """CSR sampling masks: ``token_ids[offsets[i]:offsets[i + 1]]`` is the
-    support of generated position ``i``. ``offsets is None`` is the compact
-    single-position form used per request per step, where all ``token_ids``
-    belong to one position."""
+    """Sampling masks in CSR form: ``token_ids[offsets[i]:offsets[i + 1]]`` is
+    the support of generated position ``i``. A per-request step slice holds a
+    single position and carries ``offsets=None``."""
 
     # [num_kept_tokens]
     token_ids: np.ndarray
@@ -67,23 +66,15 @@ class SamplingMaskLists(NamedTuple):
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        assert self.offsets is not None
-        if self.cu_num_generated_tokens is None:
-            start_idx = req_idx
-        else:
-            start_idx = self.cu_num_generated_tokens[req_idx]
-        end_idx = start_idx + num_positions
-        flat_start = int(self.offsets[start_idx])
-        flat_end = int(self.offsets[end_idx])
-        token_ids = self.token_ids[flat_start:flat_end]
-        if num_positions == 1:
-            return SamplingMaskLists(token_ids)
+        assert num_positions == 1 and self.offsets is not None
+        start = req_idx
+        if self.cu_num_generated_tokens is not None:
+            start = self.cu_num_generated_tokens[req_idx]
         return SamplingMaskLists(
-            token_ids, self.offsets[start_idx : end_idx + 1] - flat_start
+            self.token_ids[self.offsets[start] : self.offsets[start + 1]]
         )
 
     def to_nested_list(self) -> list[list[int]]:
-        """Convert CSR representation to ``list[list[int]]``."""
         token_ids = self.token_ids.tolist()
         if self.offsets is None:
             return [token_ids]
@@ -92,26 +83,12 @@ class SamplingMaskLists(NamedTuple):
 
     @staticmethod
     def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
-        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
-        if all(chunk.offsets is None for chunk in chunks):
-            counts = np.fromiter(
-                (len(chunk.token_ids) for chunk in chunks),
-                dtype=np.int64,
-                count=len(chunks),
-            )
-        else:
-            counts = np.concatenate(
-                [
-                    np.diff(chunk.offsets)
-                    if chunk.offsets is not None
-                    else np.array([len(chunk.token_ids)], dtype=np.int64)
-                    for chunk in chunks
-                ]
-            )
-        offsets = np.empty(len(counts) + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
-        return SamplingMaskLists(token_ids, offsets)
+        """Stack single-position step slices into one CSR mask."""
+        offsets = np.zeros(len(chunks) + 1, dtype=np.int64)
+        np.cumsum([len(chunk.token_ids) for chunk in chunks], out=offsets[1:])
+        return SamplingMaskLists(
+            np.concatenate([chunk.token_ids for chunk in chunks]), offsets
+        )
 
 
 class LogprobsTensors(NamedTuple):

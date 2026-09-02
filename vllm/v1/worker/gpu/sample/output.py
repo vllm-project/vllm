@@ -105,19 +105,17 @@ class SamplingMaskTensors(NamedTuple):
         num_sampled_tokens: torch.Tensor,
         max_num_kept: int,
     ) -> SamplingMaskTensors:
-        """Capture the finite-logit support for requests that sampled tokens.
+        """Capture the finite-logit support of every row that sampled a token.
 
         Args:
             logits: Post-processed logits, ``-inf`` outside the support.
-            num_sampled_tokens: Per-request sampled token count; rows with
-                zero are skipped.
-            max_num_kept: Expected upper bound on the support size, normally
-                the largest ``top_k`` in the batch; clamped to
-                ``MAX_COMPACT_SUPPORT``. Rows exceeding it still round-trip
-                exactly through the bitmask.
+            num_sampled_tokens: Per-request sampled token count; zero skips
+                the row.
+            max_num_kept: Compact row width, normally the largest ``top_k``
+                in the batch; clamped to ``MAX_COMPACT_SUPPORT``.
         """
         num_reqs, vocab_size = logits.shape
-        max_num_kept = max(1, min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT))
+        max_num_kept = min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT)
         device = logits.device
 
         token_ids = torch.empty(
@@ -176,7 +174,5 @@ class SamplingMaskTensors(NamedTuple):
         return SamplingMaskLists(
             token_ids=np.concatenate(supports or [np.empty(0, dtype=np.int32)]),
             offsets=offsets,
-            cu_num_generated_tokens=np.cumsum(
-                np.concatenate(([0], num_sampled_tokens))
-            ).tolist(),
+            cu_num_generated_tokens=[0, *np.cumsum(num_sampled_tokens).tolist()],
         )
