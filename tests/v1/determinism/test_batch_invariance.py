@@ -692,7 +692,19 @@ def test_decode_logprobs_match_prefill_logprobs(
 
     This ensures that the logprobs from decode are consistent with what
     we would get if we ran prefill on each prefix.
+
+    Skipped for GDN/Qwen3.5 models: GDN prefill uses the chunked delta
+    rule while GDN decode uses a recurrent state update — two distinct
+    algorithms whose floating-point outputs are not expected to match
+    bitwise.
     """
+    from utils import config as _test_cfg
+
+    if getattr(_test_cfg, "model_type", "") == "qwen3_5":
+        pytest.skip(
+            "GDN recurrent decode and chunked-prefill use different "
+            "algorithms; bitwise logprob match is not expected."
+        )
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
