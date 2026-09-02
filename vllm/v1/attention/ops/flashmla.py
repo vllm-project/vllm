@@ -109,6 +109,8 @@ if _use_triton_sparse_mla():
     # entry points still require the native extension and keep raising.
     from vllm.v1.attention.backends.mla.sm12x_sparse_mla_attn import (  # noqa: F401
         flash_mla_sparse_fwd_triton as flash_mla_sparse_fwd,
+    )
+    from vllm.v1.attention.backends.mla.sm12x_sparse_mla_attn import (
         flash_mla_with_kvcache_triton as flash_mla_with_kvcache,
     )
 
