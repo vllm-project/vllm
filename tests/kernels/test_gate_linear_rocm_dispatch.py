@@ -28,7 +28,7 @@ def _make_gate(
     out_dtype: torch.dtype | None = torch.float32,
     input_size: int = 2048,
     output_size: int = 64,
-    device_capability: tuple[int, int] | None = None,
+    on_gfx950: bool = False,
     parallel_world_size: int = 1,
 ) -> GateLinear:
     """Build a GateLinear with platform predicates mocked, no GPU needed."""
@@ -48,12 +48,12 @@ def _make_gate(
     platform = gate_linear_mod.current_platform
     monkeypatch.setattr(platform, "is_cuda", lambda: is_cuda)
     monkeypatch.setattr(platform, "is_rocm", lambda: is_rocm)
-    monkeypatch.setattr(
-        platform,
-        "is_device_capability",
-        lambda capability: capability == device_capability,
-    )
+    monkeypatch.setattr(platform, "is_device_capability", lambda *a, **k: False)
     monkeypatch.setattr(platform, "is_device_capability_family", lambda *a, **k: False)
+    if is_rocm:
+        import vllm.platforms.rocm as rocm_platform
+
+        monkeypatch.setattr(rocm_platform, "on_gfx950", lambda: on_gfx950)
 
     return GateLinear(
         input_size=input_size,
@@ -118,7 +118,7 @@ def test_rocm_gfx950_enables_fp32_router_gemm(
         params_dtype=torch.float32,
         input_size=input_size,
         output_size=output_size,
-        device_capability=(9, 5),
+        on_gfx950=True,
     )
     assert gate.allow_fp32_router_gemm
     assert not gate.allow_cublas_router_gemm
@@ -134,7 +134,7 @@ def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
         params_dtype=torch.float32,
         input_size=6144,
         output_size=128,
-        device_capability=(9, 5),
+        on_gfx950=True,
         parallel_world_size=ep_size,
     )
     assert gate.weight.shape == (128, 6144)
@@ -142,12 +142,12 @@ def test_rocm_fp32_router_gemm_is_replicated_across_ep_sizes(
 
 
 @pytest.mark.parametrize(
-    ("input_size", "output_size", "params_dtype", "bias", "capability"),
+    ("input_size", "output_size", "params_dtype", "bias", "on_gfx950"),
     [
-        pytest.param(6144, 128, torch.float32, False, (9, 4), id="gfx942"),
-        pytest.param(2048, 64, torch.float32, False, (9, 5), id="shape"),
-        pytest.param(6144, 128, torch.bfloat16, False, (9, 5), id="bf16-weight"),
-        pytest.param(6144, 128, torch.float32, True, (9, 5), id="bias"),
+        pytest.param(6144, 128, torch.float32, False, False, id="gfx942"),
+        pytest.param(2048, 64, torch.float32, False, True, id="shape"),
+        pytest.param(6144, 128, torch.bfloat16, False, True, id="bf16-weight"),
+        pytest.param(6144, 128, torch.float32, True, True, id="bias"),
     ],
 )
 def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
@@ -156,7 +156,7 @@ def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
     output_size: int,
     params_dtype: torch.dtype,
     bias: bool,
-    capability: tuple[int, int],
+    on_gfx950: bool,
 ) -> None:
     gate = _make_gate(
         monkeypatch,
@@ -165,6 +165,6 @@ def test_rocm_fp32_router_gemm_rejects_unsupported_configs(
         bias=bias,
         input_size=input_size,
         output_size=output_size,
-        device_capability=capability,
+        on_gfx950=on_gfx950,
     )
     assert not gate.allow_fp32_router_gemm

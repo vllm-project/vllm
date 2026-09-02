@@ -5,11 +5,11 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.router.fp32_router_gemm_rocm import (
-    fp32_router_gemm_rocm,
-)
 from vllm.model_executor.layers.fused_moe.router.gate_linear import (
     fp32_router_gemm_dispatch_impl,
+)
+from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+    rocm_fp32_router_gemm,
 )
 from vllm.platforms import current_platform
 
@@ -37,7 +37,7 @@ def _on_gfx950() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _on_gfx950(), reason="fp32_router_gemm_rocm requires ROCm gfx950"
+    not _on_gfx950(), reason="rocm_fp32_router_gemm requires ROCm gfx950"
 )
 
 
@@ -49,7 +49,7 @@ def _reference(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
 @pytest.mark.parametrize("num_tokens", range(MAX_TOKENS + 1))
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_matches_reference(
+def test_rocm_fp32_router_gemm_matches_reference(
     num_tokens: int,
     hidden_size: int,
     num_experts: int,
@@ -60,7 +60,7 @@ def test_fp32_router_gemm_rocm_matches_reference(
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
 
-    output = fp32_router_gemm_rocm(x, weight)
+    output = rocm_fp32_router_gemm(x, weight)
     expected = _reference(x, weight)
 
     assert output.shape == (num_tokens, num_experts)
@@ -72,7 +72,7 @@ def test_fp32_router_gemm_rocm_matches_reference(
 @pytest.mark.parametrize("num_tokens", [1, 4, 16, 24, 32])
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_preserves_topk(
+def test_rocm_fp32_router_gemm_preserves_topk(
     num_tokens: int, hidden_size: int, num_experts: int
 ) -> None:
     torch.manual_seed(1000 + num_tokens + hidden_size + num_experts)
@@ -81,7 +81,7 @@ def test_fp32_router_gemm_rocm_preserves_topk(
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
 
     top_k = 2 if (hidden_size, num_experts) == (4096, 8) else 8
-    actual = fp32_router_gemm_rocm(x, weight).topk(top_k, dim=-1).indices
+    actual = rocm_fp32_router_gemm(x, weight).topk(top_k, dim=-1).indices
     reference = _reference(x, weight)
     reference_values, expected = reference.topk(top_k, dim=-1)
     for token in range(num_tokens):
@@ -96,14 +96,14 @@ def test_fp32_router_gemm_rocm_preserves_topk(
 
 
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_rejects_invalid_inputs() -> None:
+def test_rocm_fp32_router_gemm_rejects_invalid_inputs() -> None:
     device = torch.device("cuda")
     hidden_size, num_experts = 6144, 128
     x = torch.randn(4, hidden_size, dtype=torch.bfloat16, device=device)
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
 
     with pytest.raises(ValueError, match="num_tokens"):
-        fp32_router_gemm_rocm(
+        rocm_fp32_router_gemm(
             torch.randn(
                 MAX_TOKENS + 1,
                 hidden_size,
@@ -114,33 +114,33 @@ def test_fp32_router_gemm_rocm_rejects_invalid_inputs() -> None:
         )
 
     with pytest.raises(ValueError, match="shape"):
-        fp32_router_gemm_rocm(x[:, :2048].contiguous(), weight[:, :2048].contiguous())
+        rocm_fp32_router_gemm(x[:, :2048].contiguous(), weight[:, :2048].contiguous())
 
     with pytest.raises(ValueError, match="contiguous"):
         wide_x = torch.randn(4, hidden_size * 2, dtype=torch.bfloat16, device=device)
-        fp32_router_gemm_rocm(wide_x[:, ::2], weight)
+        rocm_fp32_router_gemm(wide_x[:, ::2], weight)
 
     with pytest.raises(ValueError, match="float32"):
-        fp32_router_gemm_rocm(x, weight.to(torch.bfloat16))
+        rocm_fp32_router_gemm(x, weight.to(torch.bfloat16))
 
     with pytest.raises(ValueError, match="bfloat16 or float32"):
-        fp32_router_gemm_rocm(x.to(torch.float16), weight)
+        rocm_fp32_router_gemm(x.to(torch.float16), weight)
 
 
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_cuda_graph_observes_input_mutation() -> None:
+def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
     torch.manual_seed(2026)
     device = torch.device("cuda")
     hidden_size, num_experts = 6144, 128
     static_x = torch.randn(16, hidden_size, dtype=torch.bfloat16, device=device)
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
 
-    fp32_router_gemm_rocm(static_x, weight)
+    rocm_fp32_router_gemm(static_x, weight)
     torch.accelerator.synchronize()
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured_output = fp32_router_gemm_rocm(static_x, weight)
+        captured_output = rocm_fp32_router_gemm(static_x, weight)
     torch.accelerator.synchronize()
 
     first_input = torch.randn_like(static_x)
@@ -167,7 +167,7 @@ def test_fp32_router_gemm_rocm_cuda_graph_observes_input_mutation() -> None:
 @pytest.mark.parametrize("num_tokens", [4, 32, 33])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_custom_op_dispatch(
+def test_rocm_fp32_router_gemm_custom_op_dispatch(
     num_tokens: int, dtype: torch.dtype
 ) -> None:
     torch.manual_seed(3100 + num_tokens)
@@ -184,7 +184,9 @@ def test_fp32_router_gemm_rocm_custom_op_dispatch(
 
 
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_dispatch_accepts_noncontiguous_input() -> None:
+def test_rocm_fp32_router_gemm_dispatch_accepts_noncontiguous_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     torch.manual_seed(4100)
     device = torch.device("cuda")
     hidden_size, num_experts = 6144, 128
@@ -193,13 +195,19 @@ def test_fp32_router_gemm_rocm_dispatch_accepts_noncontiguous_input() -> None:
     weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device=device)
     assert not x.is_contiguous()
 
+    expected = _reference(x, weight)
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("noncontiguous low-M input used the linear fallback")
+
+    monkeypatch.setattr(torch.nn.functional, "linear", fail_fallback)
     output = torch.ops.vllm.fp32_router_gemm_dispatch(x, weight, False)
 
-    torch.testing.assert_close(output, _reference(x, weight), atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(output, expected, atol=ATOL, rtol=RTOL)
 
 
 @torch.inference_mode()
-def test_fp32_router_gemm_rocm_dynamic_compile_dispatch() -> None:
+def test_rocm_fp32_router_gemm_dynamic_compile_dispatch() -> None:
     torch.manual_seed(5100)
     device = torch.device("cuda")
     hidden_size, num_experts = 6144, 128

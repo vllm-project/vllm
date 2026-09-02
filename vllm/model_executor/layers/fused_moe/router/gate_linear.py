@@ -48,19 +48,21 @@ class GateLinear(ReplicatedLinear):
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
         is_blackwell = current_platform.is_device_capability_family(100)
-        is_gfx950 = current_platform.is_rocm() and (
-            current_platform.is_device_capability((9, 5))
-        )
+        is_gfx950 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            is_gfx950 = on_gfx950()
         is_rocm_fp32_shape = False
         if is_gfx950:
-            from vllm.model_executor.layers.fused_moe.router.fp32_router_gemm_rocm import (  # noqa: E501
-                FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES,
+            from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+                ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES,
             )
 
             is_rocm_fp32_shape = (
                 input_size,
                 output_size,
-            ) in FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES
+            ) in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
         can_use_specialized_kernels = (
             current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
@@ -236,13 +238,14 @@ def fp32_router_gemm_dispatch_impl(
     """
     if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
         if current_platform.is_rocm():
-            from vllm.model_executor.layers.fused_moe.router.fp32_router_gemm_rocm import (  # noqa: E501
-                can_use_fp32_router_gemm_rocm,
-                fp32_router_gemm_rocm,
+            from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
+                can_use_rocm_fp32_router_gemm,
+                rocm_fp32_router_gemm,
             )
 
-            if can_use_fp32_router_gemm_rocm(x, weight):
-                return fp32_router_gemm_rocm(x, weight)
+            x = x.contiguous()
+            if can_use_rocm_fp32_router_gemm(x, weight):
+                return rocm_fp32_router_gemm(x, weight)
             return torch.nn.functional.linear(x.float(), weight)
         return ops.fp32_router_gemm(x, weight)
 

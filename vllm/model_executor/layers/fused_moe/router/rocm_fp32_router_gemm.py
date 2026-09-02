@@ -5,10 +5,11 @@
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 _MAX_TOKENS = 32
-FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES = frozenset(
+ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES = frozenset(
     {
         (3072, 256),
         (4096, 8),
@@ -20,11 +21,11 @@ FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES = frozenset(
 
 
 @triton.jit
-def _fp32_router_gemm_rocm_kernel(
+def _rocm_fp32_router_gemm_kernel(
     hidden_states_ptr,
     router_weight_ptr,
     output_ptr,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
     N: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -61,51 +62,38 @@ def _launch_config(
     hidden_size: int,
     num_experts: int,
     num_tokens: int,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int]:
     if (hidden_size, num_experts) == (4096, 8):
-        return 1, 1024, 4, 1
+        return 1, 1024, 4
 
     if num_tokens <= 4:
-        return 1, 1024, 8, 1
+        return 1, 1024, 8
     if num_tokens <= 16:
         block_m = 8 if (hidden_size, num_experts) == (6144, 256) else 4
-        return block_m, 1024, 8, 1
+        return block_m, 1024, 8
     if (hidden_size, num_experts) == (3072, 256):
-        return 8, 1024, 8, 1
-    return 4, 2048, 8, 1
+        return 8, 1024, 8
+    return 4, 2048, 8
 
 
-def can_use_fp32_router_gemm_rocm(
+def can_use_rocm_fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> bool:
     """Return whether the tensors match the tuned gfx950 fast path."""
-    return (
-        current_platform.is_rocm()
-        and current_platform.is_device_capability((9, 5))
-        and hidden_states.dim() == 2
-        and router_weight.dim() == 2
-        and 0 <= hidden_states.shape[0] <= _MAX_TOKENS
-        and (hidden_states.shape[1], router_weight.shape[0])
-        in FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES
-        and router_weight.shape[1] == hidden_states.shape[1]
-        and hidden_states.dtype in (torch.bfloat16, torch.float32)
-        and router_weight.dtype == torch.float32
-        and hidden_states.device.type == "cuda"
-        and router_weight.device == hidden_states.device
-        and hidden_states.is_contiguous()
-        and router_weight.is_contiguous()
-    )
+    try:
+        _validate_inputs(hidden_states, router_weight)
+    except (RuntimeError, ValueError):
+        return False
+    return True
 
 
 def _validate_inputs(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> None:
-    if not (
-        current_platform.is_rocm() and current_platform.is_device_capability((9, 5))
-    ):
-        raise RuntimeError("fp32_router_gemm_rocm requires ROCm gfx950")
+    if not current_platform.is_rocm() or not on_gfx950():
+        raise RuntimeError("rocm_fp32_router_gemm requires ROCm gfx950")
     if hidden_states.dim() != 2 or router_weight.dim() != 2:
         raise ValueError("hidden_states and router_weight must be 2D tensors")
     if hidden_states.dtype not in (torch.bfloat16, torch.float32):
@@ -120,7 +108,7 @@ def _validate_inputs(
         raise ValueError("hidden_states and router_weight must be contiguous")
     shape = (hidden_states.shape[1], router_weight.shape[0])
     if (
-        shape not in FP32_ROUTER_GEMM_ROCM_SUPPORTED_SHAPES
+        shape not in ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES
         or router_weight.shape[1] != shape[0]
     ):
         raise ValueError(
@@ -132,7 +120,7 @@ def _validate_inputs(
         raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
 
 
-def fp32_router_gemm_rocm(
+def rocm_fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
 ) -> torch.Tensor:
@@ -145,11 +133,9 @@ def fp32_router_gemm_rocm(
     if num_tokens == 0:
         return output
 
-    block_m, block_k, num_warps, waves_per_eu = _launch_config(
-        hidden_size, num_experts, num_tokens
-    )
+    block_m, block_k, num_warps = _launch_config(hidden_size, num_experts, num_tokens)
     grid = (triton.cdiv(num_tokens, block_m) * num_experts,)
-    _fp32_router_gemm_rocm_kernel[grid](
+    _rocm_fp32_router_gemm_kernel[grid](
         hidden_states,
         router_weight,
         output,
@@ -160,6 +146,5 @@ def fp32_router_gemm_rocm(
         BLOCK_K=block_k,
         num_warps=num_warps,
         num_stages=1,
-        waves_per_eu=waves_per_eu,
     )
     return output
