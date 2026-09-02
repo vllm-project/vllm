@@ -36,7 +36,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
     ResolvedPromptUpdate,
-    _seq2text,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -59,6 +59,7 @@ from .minicpmv import (
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
     MiniCPMVVideoEmbeddingItems,
+    _image_kwargs_from_video,
 )
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
@@ -97,7 +98,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         ds = mm_kwargs.get("downsample_mode")
         if ds is not None:
             return str(ds)
-        return self.info._get_downsample_mode()
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info._get_downsample_mode()
 
     def get_image_prompt_texts(
         self,
@@ -105,7 +108,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_idx: int = 0,
         downsample_mode: str | None = None,
     ) -> str:
-        return self.info.get_slice_image_placeholder(
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
             downsample_mode=downsample_mode,
@@ -127,6 +132,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # which one is used. Using image_token for video silently produces
         # garbage descriptions.
         info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
         grids, source_tokens, patch_tokens = info._compute_visual_tokens(
             image_size,
             max_slice_nums=info.get_video_max_slice_num(),
@@ -328,7 +334,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         additional_placeholders = []
         for modality, pattern in placeholders:
             sub_pattern = tokenizer.decode(
-                tokenizer.encode(pattern, add_special_tokens=False)
+                cached_encode(tokenizer, pattern, add_special_tokens=False)
             )
             if sub_pattern != pattern:
                 additional_placeholders.append((modality, sub_pattern))
@@ -338,6 +344,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # than `<unk>`, so use those tokens as the embedding selector.
         image_embed_text = getattr(tokenizer, "image_token", "<|image_pad|>")
         video_embed_text = getattr(tokenizer, "video_token", "<|video_pad|>")
+        vocab = tokenizer.get_vocab()
+        image_embed_ids = [vocab[image_embed_text]]
+        video_embed_ids = [vocab[video_embed_text]]
 
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
@@ -345,13 +354,17 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                 (MiniCPMVImageEmbeddingItems, ImageProcessorItems),
             )
             image_size = images.get_image_size(item_idx)
-            return PromptUpdateDetails.select_text(
-                self.get_image_prompt_texts(
-                    image_size,
-                    item_idx,
-                    downsample_mode=ds_mode,
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_image_prompt_texts(
+                        image_size,
+                        item_idx,
+                        downsample_mode=ds_mode,
+                    ),
+                    add_special_tokens=False,
                 ),
-                image_embed_text,
+                image_embed_ids,
             )
 
         def get_video_replacement(item_idx: int):
@@ -370,14 +383,18 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         width=int(image_sizes[0, 0].item()),
                         height=int(image_sizes[0, 1].item()),
                     )
-                    return PromptUpdateDetails.select_text(
-                        self.get_video_prompt_texts(
-                            frame_size,
-                            num_frames,
-                            downsample_mode=ds_mode,
-                            video_idx=item_idx,
+                    return PromptUpdateDetails.select_token_ids(
+                        cached_encode(
+                            tokenizer,
+                            self.get_video_prompt_texts(
+                                frame_size,
+                                num_frames,
+                                downsample_mode=ds_mode,
+                                video_idx=item_idx,
+                            ),
+                            add_special_tokens=False,
                         ),
-                        video_embed_text,
+                        video_embed_ids,
                     )
 
             videos = mm_items.get_items(
@@ -386,14 +403,18 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             )
             frame_size = videos.get_frame_size(item_idx)
             num_frames = videos.get_num_frames(item_idx)
-            return PromptUpdateDetails.select_text(
-                self.get_video_prompt_texts(
-                    frame_size,
-                    num_frames,
-                    downsample_mode=ds_mode,
-                    video_idx=item_idx,
+            return PromptUpdateDetails.select_token_ids(
+                cached_encode(
+                    tokenizer,
+                    self.get_video_prompt_texts(
+                        frame_size,
+                        num_frames,
+                        downsample_mode=ds_mode,
+                        video_idx=item_idx,
+                    ),
+                    add_special_tokens=False,
                 ),
-                video_embed_text,
+                video_embed_ids,
             )
 
         get_replacement = {
@@ -404,7 +425,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         return [
             PromptReplacement(
                 modality=modality,
-                target=pattern,
+                target=cached_encode(tokenizer, pattern, add_special_tokens=False),
                 replacement=get_replacement[modality],
             )
             for modality, pattern in placeholders
@@ -424,17 +445,21 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             id_end = getattr(tokenizer, "image_id_end_token", "</image_id>")
             video_token = getattr(tokenizer, "video_token", "<|video_pad|>")
 
-            text = _seq2text(tokenizer, cached_update.content.full)
+            text = tokenizer.decode(cached_update.content.full)
             prev_item_idx = cached_update.item_idx
 
             new_update = new_update.with_content(
-                PromptUpdateDetails.select_text(
-                    text.replace(
-                        f"{id_start}{prev_item_idx}{id_end}",
-                        f"{id_start}{new_item_idx}{id_end}",
-                        1,
+                PromptUpdateDetails.select_token_ids(
+                    cached_encode(
+                        tokenizer,
+                        text.replace(
+                            f"{id_start}{prev_item_idx}{id_end}",
+                            f"{id_start}{new_item_idx}{id_end}",
+                            1,
+                        ),
+                        add_special_tokens=False,
                     ),
-                    video_token,
+                    cached_encode(tokenizer, video_token, add_special_tokens=False),
                 )
             )
         return new_update
@@ -996,6 +1021,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         config: MiniCPMV4_6Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -1058,6 +1084,7 @@ class MiniCPMV4_6ForConditionalGeneration(
                 image_embeds=image_embeds,
             )
 
+        assert isinstance(pixel_values, torch.Tensor | list)
         tgt_sizes = kwargs.pop("tgt_sizes")
         num_slices_flat = torch.tensor([len(ps) for ps in pixel_values])
         pixel_values_flat = flatten_bn(pixel_values)
@@ -1181,18 +1208,12 @@ class MiniCPMV4_6ForConditionalGeneration(
                     for t in use_vit_merger_tensors
                 )
 
-        # Split kwargs into image / video buckets (videos are processed via
-        # the same vision pipeline; their fields just carry a ``video_`` prefix).
         image_kwargs = {
             k: v
             for k, v in kwargs.items()
             if k in ("pixel_values", "image_embeds", "tgt_sizes")
         }
-        video_kwargs = {
-            k.removeprefix("video_"): v
-            for k, v in kwargs.items()
-            if k.startswith("video_")
-        }
+        video_kwargs = _image_kwargs_from_video(kwargs)
 
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 

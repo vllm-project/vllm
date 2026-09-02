@@ -287,27 +287,34 @@ class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessing
 class DeepseekOCRMultiModalProcessor(
     BaseMultiModalProcessor[DeepseekOCRProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+
         if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                mm_kwargs,
+            processed_data = self.info.ctx.call_hf_processor(
+                self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                dict(prompt=prompt_text, **mm_data),
+                hf_processor_mm_kwargs,
             )
 
         else:
             tokenizer = self.info.get_tokenizer()
             assert isinstance(tokenizer, HfTokenizer)
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
+            processed_data = tokenizer(
+                prompt_text, add_special_tokens=True, return_tensors="pt"
             )
 
-        return processed_outputs
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_mm_fields_config(
         self,

@@ -93,7 +93,7 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
@@ -151,7 +151,7 @@ def _compare_caches(
         for item in all_items
     ]
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
+    prompt_update = PromptInsertion("dummy", [0], [1]).resolve(0)
 
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)

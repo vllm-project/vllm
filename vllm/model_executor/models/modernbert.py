@@ -13,7 +13,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
@@ -22,6 +26,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -68,6 +73,7 @@ class ModernBertAttention(nn.Module):
         layer_id: int | None = None,
         prefix: str = "",
         dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -85,6 +91,7 @@ class ModernBertAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             bias=config.attention_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wqkv",
         )
 
@@ -128,6 +135,7 @@ class ModernBertAttention(nn.Module):
             config.hidden_size,
             config.hidden_size,
             bias=config.attention_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wo",
         )
 
@@ -146,22 +154,33 @@ class ModernBertAttention(nn.Module):
 
 
 class ModernBertMLP(nn.Module):
-    def __init__(self, config: ModernBertConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: ModernBertConfig,
+        prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
+    ):
         super().__init__()
         self.config = config
-        self.Wi = nn.Linear(
-            config.hidden_size, int(config.intermediate_size) * 2, bias=config.mlp_bias
+        self.Wi = MergedColumnParallelLinear(
+            config.hidden_size,
+            [int(config.intermediate_size)] * 2,
+            bias=config.mlp_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.Wi",
         )
         self.act = ACT2FN[config.hidden_activation]
         self.Wo = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=config.mlp_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wo",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input, gate = self.Wi(hidden_states).chunk(2, dim=-1)
+        input_gate, _ = self.Wi(hidden_states)
+        input, gate = input_gate.chunk(2, dim=-1)
         return self.Wo(self.act(input) * gate)[0]
 
 
@@ -172,6 +191,7 @@ class ModernBertLayer(nn.Module):
         prefix: str = "",
         layer_id: int | None = None,
         dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -186,11 +206,16 @@ class ModernBertLayer(nn.Module):
             layer_id=layer_id,
             prefix=f"{prefix}.attn",
             dtype=dtype,
+            quant_config=quant_config,
         )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
-        self.mlp = ModernBertMLP(config, prefix=f"{prefix}.mlp")
+        self.mlp = ModernBertMLP(
+            config,
+            prefix=f"{prefix}.mlp",
+            quant_config=quant_config,
+        )
 
     def forward(
         self,
@@ -211,6 +236,7 @@ class ModernBertEncoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         dtype = vllm_config.model_config.dtype
+        quant_config = vllm_config.quant_config
         self.layers = nn.ModuleList(
             [
                 ModernBertLayer(
@@ -218,6 +244,7 @@ class ModernBertEncoderLayer(nn.Module):
                     layer_id=layer_id,
                     prefix=f"{prefix}.layers.{layer_id}",
                     dtype=dtype,
+                    quant_config=quant_config,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]

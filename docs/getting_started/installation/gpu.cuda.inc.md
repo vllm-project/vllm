@@ -354,8 +354,9 @@ DOCKER_BUILDKIT=1 docker build . \
 
 !!! note
     By default vLLM will build for all GPU types for widest distribution. If you are just building for the
-    current GPU type the machine is running on, you can add the argument `--build-arg torch_cuda_arch_list=""`
-    for vLLM to find the current GPU type and build for that.
+    current GPU type, you can add `--build-arg torch_cuda_arch_list=""` to delegate architecture selection
+    to PyTorch. This requires the GPU to be visible to the container build; standard Docker BuildKit builds
+    do not expose it and PyTorch instead falls back to its common architecture list.
 
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
@@ -421,6 +422,86 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
     ```
 
     After setting up QEMU, you can use the `--platform "linux/arm64"` flag in your `docker build` command.
+
+#### [Preview] Building vLLM's Docker Image from Source for NVIDIA Rubin GPU Architecture
+
+At this time, the Rubin preview is available only to NVIDIA engineers and
+partners with access to NVIDIA's internal prerequisites. Set
+`INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path. It requires a
+`requirements/rubin-prerelease.txt` file containing pointers to NVIDIA's
+internal prerelease packages, plus NVIDIA-internal CUDA 13.4 or CUDA 13.5
+development images for `BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`.
+
+Triton must currently be installed from source for Rubin compatibility.
+Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty
+`TRITON_INSTALL_FROM_SOURCE_REVISION` selects the repository's latest `main`,
+while a commit, branch, or tag selects that revision. The tested revision
+lowers SM107 through LLVM's SM100 target and uses the final CUDA image's
+version-matched `ptxas` for SM107 assembly. This enables vLLM's default compiled
+mode on VR200 and R100.
+
+BuildKit does not automatically invalidate cached layers when a mutable Git
+ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
+branch, or tag revision.
+
+Use `ARCH=arm64` on VR200 or `ARCH=amd64` on R100:
+
+??? console "CUDA 13.4 command"
+
+    ```bash
+    ARCH=arm64
+    docker buildx build --progress=plain --load \
+      --file docker/Dockerfile \
+      --target vllm-openai \
+      --platform "linux/${ARCH}" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-${ARCH}" \
+      --build-arg max_jobs="$(nproc)" \
+      --build-arg nvcc_threads=2 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      --build-arg INSTALL_RUBIN_PRERELEASE=true \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+      --build-arg CUDA_VERSION=13.4.1 \
+      --build-arg BUILD_BASE_IMAGE="<cuda-13.4-manylinux-devel-image-${ARCH}>" \
+      --build-arg FINAL_BASE_IMAGE="<cuda-13.4-ubuntu24.04-devel-image-${ARCH}>" \
+      .
+    ```
+
+??? console "CUDA 13.5 command"
+
+    ```bash
+    ARCH=arm64
+    docker buildx build --progress=plain --load \
+      --file docker/Dockerfile \
+      --target vllm-openai \
+      --platform "linux/${ARCH}" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu135-${ARCH}" \
+      --build-arg max_jobs="$(nproc)" \
+      --build-arg nvcc_threads=2 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      --build-arg INSTALL_RUBIN_PRERELEASE=true \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+      --build-arg CUDA_VERSION=13.5.0 \
+      --build-arg BUILD_BASE_IMAGE="<cuda-13.5-manylinux-devel-image-${ARCH}>" \
+      --build-arg FINAL_BASE_IMAGE="<cuda-13.5-ubuntu24.04-devel-image-${ARCH}>" \
+      .
+    ```
+
+CUDA 13.5 compiled-mode qualification passed with NVIDIA driver versions
+615.62.03 and 620.05. Driver 610.47.04 failed the tested compiled CUDA 13.5
+kernel. Validate the exact driver version on the target system.
+
+!!! note
+    Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
+    cannot inspect the host GPU. R100 and VR200 report compute capability 10.7,
+    for which the generic `10.0` target provides family-compatible kernels.
+    The Ubuntu `devel` final image is also required: the corresponding `base`
+    image lacks the CUDA runtime/JIT package closure used by vLLM and the
+    prerelease PyTorch wheel.
+
+    `RUN_WHEEL_CHECK=false` disables only the PyPI publication-size guard for
+    this private staging image.
 
 #### Use the custom-built vLLM Docker image**
 

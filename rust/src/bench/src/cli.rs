@@ -682,7 +682,7 @@ impl BenchServeArgs {
             BackendKind::OpenaiEmbeddings | BackendKind::OpenaiEmbeddingsChat => {
                 "/v1/embeddings".to_string()
             }
-            BackendKind::VllmPooling => "/v1/pooling".to_string(),
+            BackendKind::VllmPooling => "/pooling".to_string(),
             BackendKind::VllmRerank => "/v1/rerank".to_string(),
         }
     }

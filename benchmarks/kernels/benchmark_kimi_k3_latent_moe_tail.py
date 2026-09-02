@@ -21,6 +21,10 @@ Examples:
     torchrun --nproc-per-node=8 \
       benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail
 
+    torchrun --nproc-per-node=8 \
+      benchmarks/kernels/benchmark_kimi_k3_latent_moe_tail.py whole-tail \
+      --backend fused --routed-input both
+
 For multi-node runs, launch one ``torchrun`` agent per node and use a shared
 rendezvous endpoint.
 """
@@ -50,6 +54,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
     set_custom_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.models.kimi_k3.nvidia.ops import latent_moe_tail
 from vllm.models.kimi_k3.nvidia.ops.cute_dsl.latent_moe_tail import (
@@ -164,6 +169,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         nargs="+",
         default=[1, 5, 8, 16],
+    )
+    whole_tail.add_argument(
+        "--routed-input",
+        choices=("finalized", "deferred", "both"),
+        default="finalized",
+        help="Select whether the fused tail performs the top-k finalize step.",
+    )
+    whole_tail.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Expert count used by the synthetic deferred-finalize input.",
     )
     whole_tail.add_argument("--warmup-replays", type=int, default=20)
     whole_tail.add_argument("--samples", type=int, default=51)
@@ -586,6 +603,36 @@ def make_inputs(
     return routed, shared
 
 
+def make_deferred_input(
+    routed: torch.Tensor,
+    top_k: int,
+) -> UnfinalizedMoEOutput:
+    num_tokens = routed.shape[0]
+    gemm2_permuted = (
+        routed[:, None, :]
+        .expand(num_tokens, top_k, LATENT_SIZE)
+        .contiguous()
+        .view(num_tokens * top_k, LATENT_SIZE)
+    )
+    expert_weights = torch.zeros(
+        num_tokens,
+        top_k,
+        dtype=routed.dtype,
+        device=routed.device,
+    )
+    expert_weights[:, 0] = 1
+    expanded_idx = torch.arange(
+        num_tokens * top_k,
+        dtype=torch.int32,
+        device=routed.device,
+    ).view(num_tokens, top_k)
+    return UnfinalizedMoEOutput(
+        gemm2_permuted=gemm2_permuted,
+        expert_weights=expert_weights,
+        expanded_idx_to_permuted_idx=expanded_idx,
+    )
+
+
 def make_reference(
     routed: torch.Tensor,
     shared: torch.Tensor,
@@ -628,6 +675,8 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
         raise ValueError("--num-tokens values must be in [1, 16]")
     if args.warmup_replays < 0 or args.samples <= 0:
         raise ValueError("warmup replays must be nonnegative and samples positive")
+    if args.top_k <= 0:
+        raise ValueError("--top-k must be positive")
     if args.skinny_max_num_tokens is not None and any(
         not 0 <= cutoff <= 8 for cutoff in args.skinny_max_num_tokens
     ):
@@ -672,6 +721,11 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
 
     use_reference = args.backend in ("reference", "both")
     use_fused = args.backend in ("fused", "both")
+    routed_input_modes = (
+        ("finalized", "deferred")
+        if args.routed_input == "both"
+        else (args.routed_input,)
+    )
     fused_ops = []
     if use_fused:
         production_config_for_m = fused_add_multicast_skinny_gemm.config_for_m
@@ -690,23 +744,33 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
         for cutoff in cutoffs:
             latent_moe_tail._SKINNY_MAX_NUM_TOKENS = cutoff
             latent_moe_tail.KimiK3LatentMoETailOp._instances.clear()
-            fused_ops.append(
-                (
-                    cutoff,
-                    latent_moe_tail.KimiK3LatentMoETailOp.initialize(
-                        hidden_size=HIDDEN_SIZE,
-                        latent_size=LATENT_SIZE,
-                        dtype=torch.bfloat16,
-                        device=device,
-                        rms_eps=RMS_EPS,
-                    ),
+            for routed_input_mode in routed_input_modes:
+                fused_ops.append(
+                    (
+                        cutoff,
+                        routed_input_mode,
+                        latent_moe_tail.KimiK3LatentMoETailOp.initialize(
+                            hidden_size=HIDDEN_SIZE,
+                            latent_size=LATENT_SIZE,
+                            dtype=torch.bfloat16,
+                            device=device,
+                            rms_eps=RMS_EPS,
+                            experts_per_token=(
+                                args.top_k if routed_input_mode == "deferred" else 0
+                            ),
+                        ),
+                    )
                 )
-            )
         cutedsl_warmup()
 
     results = []
     for num_tokens in args.num_tokens:
         routed, shared = make_inputs(num_tokens, rank, device)
+        routed_inputs: dict[str, torch.Tensor | UnfinalizedMoEOutput] = {
+            "finalized": routed
+        }
+        if "deferred" in routed_input_modes:
+            routed_inputs["deferred"] = make_deferred_input(routed, args.top_k)
         reference = make_reference(
             routed,
             shared,
@@ -724,17 +788,23 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
                 device_group=device_group,
                 cpu_group=cpu_group,
             )
-        for cutoff, fused_op in fused_ops:
+        for cutoff, routed_input_mode, fused_op in fused_ops:
+            routed_input = routed_inputs[routed_input_mode]
 
             def fused(
-                routed: torch.Tensor = routed,
+                routed_input: torch.Tensor | UnfinalizedMoEOutput = routed_input,
                 shared: torch.Tensor = shared,
                 fused_op: latent_moe_tail.KimiK3LatentMoETailOp = fused_op,
             ) -> torch.Tensor:
-                return fused_op(routed, shared, rms_weight, up_weight)
+                return fused_op(routed_input, shared, rms_weight, up_weight)
 
             fused_graph, fused_output = capture_tail_graph(fused, cpu_group)
-            fused_key = "fused" if len(fused_ops) == 1 else f"fused_skinny_max_{cutoff}"
+            fused_key_parts = ["fused"]
+            if routed_input_mode != "finalized" or len(routed_input_modes) > 1:
+                fused_key_parts.append(routed_input_mode)
+            if len(cutoffs) > 1:
+                fused_key_parts.extend(("skinny", "max", str(cutoff)))
+            fused_key = "_".join(fused_key_parts)
             result[fused_key] = benchmark_tail_graph(
                 fused_graph,
                 warmup_replays=args.warmup_replays,
@@ -747,7 +817,7 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
                 speedup = (
                     result["reference"]["median_us"] / result[fused_key]["median_us"]
                 )
-                if len(fused_ops) == 1:
+                if fused_key == "fused":
                     result["speedup"] = speedup
                 else:
                     result[f"{fused_key}_speedup"] = speedup
@@ -763,7 +833,9 @@ def benchmark_whole_tail(args: argparse.Namespace) -> None:
         "cuda_version": torch.version.cuda,
         "warmup_replays": args.warmup_replays,
         "samples": args.samples,
-        "skinny_max_num_tokens": [cutoff for cutoff, _ in fused_ops],
+        "routed_input": args.routed_input,
+        "top_k": args.top_k,
+        "skinny_max_num_tokens": sorted({cutoff for cutoff, _, _ in fused_ops}),
         "skinny_configs": {
             str(num_tokens): asdict(config)
             for num_tokens, config in skinny_configs.items()
