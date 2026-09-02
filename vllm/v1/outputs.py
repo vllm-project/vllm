@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -182,11 +183,18 @@ class LogprobsTensors(NamedTuple):
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
-            (num_positions, num_tokens_per_position), dtype=torch.int32, device="cpu"
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
-        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
-        selected_token_ranks = torch.empty(
-            num_positions, dtype=torch.int32, device="cpu"
+        logprobs = logprob_token_ids.new_empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.float32,
+            pin_memory=PIN_MEMORY,
+        )
+        selected_token_ranks = logprob_token_ids.new_empty(
+            num_positions, pin_memory=PIN_MEMORY
         )
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids,
