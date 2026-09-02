@@ -38,6 +38,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # completed migration to the new internal MK interface.
         return self.moe_kernel is not None
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # Fail closed: every MoE method builds `moe_kernel` during
+        # process_weights_after_loading, and `apply` asserts on it. A method
+        # without an override cannot recover it from the exported tensors, and
+        # skipping it would only surface as an assert on the first forward.
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot load weights from a weight cache "
+            "daemon: its MoE kernel is built during "
+            "process_weights_after_loading and is not recoverable from the "
+            "exported tensors."
+        )
+
     @property
     def mk_can_overlap_shared_experts(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
