@@ -141,12 +141,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         self.spec_sequence_masks = torch.empty(
             (self.decode_cudagraph_max_bs,), dtype=torch.bool, device=device
         )
-        self.spec_token_indx = torch.empty(
-            (self.decode_cudagraph_max_tokens,), dtype=torch.int32, device=device
-        )
-        self.non_spec_token_indx = torch.empty(
-            (self.decode_cudagraph_max_tokens,), dtype=torch.int32, device=device
-        )
         self.spec_query_start_loc = torch.empty(
             (self.decode_cudagraph_max_bs + 1,), dtype=torch.int32, device=device
         )
