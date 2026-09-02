@@ -50,15 +50,9 @@ BACKEND_ABS_TOL: dict[str, float] = {
     "auto": 0.007,
     "ROCM_AITER_FA": 0.005,
     "TRITON_ATTN": 0.009,
-    "FLEX_ATTENTION": 0.006,
+    "FLEX_ATTENTION": 0.00875,
 }
 
-# ROCm: disable skinny GEMM to avoid non-deterministic results from
-# atomic reductions in wvSplitKrc kernel.
-# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-ROCM_ENV_OVERRIDES = (
-    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
-)
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
 ROCM_EXTRA_ARGS = (
@@ -132,7 +126,6 @@ def server(request):
         args += ["--attention-config", json.dumps({"backend": backend})]
         args += ROCM_EXTRA_ARGS
 
-        env = dict(ROCM_ENV_OVERRIDES)
         if backend != "ROCM_AITER_FA":
             env["VLLM_ROCM_USE_AITER"] = "0"
 

@@ -16,7 +16,6 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use self::value::{TemplateValue, to_template_value};
 use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
@@ -28,7 +27,6 @@ mod error;
 mod format;
 mod template;
 mod tojson;
-mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -181,7 +179,7 @@ impl HfChatRenderer {
             None
         };
 
-        let tools = request.tool_parsing_enabled().then(|| to_template_tools(&request.tools));
+        let tools = request.tool_parsing_enabled().then(|| to_template_tools(request.tools()));
         trace!(
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
@@ -277,7 +275,7 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: TemplateValue,
+    arguments: JsonValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,7 +289,8 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: TemplateValue,
+    parameters: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
 }
 
@@ -384,8 +383,6 @@ fn to_template_tool_calls(
                 error.as_report()
             ))
         })?;
-        let arguments = to_template_value(arguments);
-
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
@@ -564,7 +561,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: to_template_value(tool.parameters.clone()),
+                parameters: tool.parameters.clone(),
                 strict: tool.strict,
             },
         })
@@ -583,7 +580,7 @@ mod tests {
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
-        GenerationPromptMode, ReasoningEffort,
+        GenerationPromptMode, ReasoningEffort, ResolvedToolContext,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -591,11 +588,46 @@ mod tests {
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
         ChatRequest {
             messages,
+            tool_context,
             request_id: "render-test".to_string(),
             ..ChatRequest::for_test()
         }
+    }
+
+    #[test]
+    fn dynamic_tools_are_exposed_as_effective_template_tools() {
+        let messages = vec![
+            ChatMessage::developer(
+                "",
+                Some(vec![ChatTool {
+                    name: "lookup".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                    strict: None,
+                }]),
+            ),
+            ChatMessage::user("hello"),
+        ];
+        let tool_context = ResolvedToolContext::new(&messages, Vec::new(), None, true).unwrap();
+        let request = ChatRequest {
+            messages,
+            tool_context,
+            request_id: "render-test".to_string(),
+            ..ChatRequest::for_test()
+        };
+
+        let rendered = render(
+            Some("{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "2:developer:lookup:lookup");
+        assert_eq!(request.tool_choice(), &ChatToolChoice::Auto);
+        assert_eq!(request.tools().len(), 1);
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
@@ -901,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_template_exposes_developer_tools() {
+    fn chat_template_preserves_developer_tools() {
         let request = sample_request(vec![ChatMessage::developer(
             "policy",
             Some(vec![ChatTool {
@@ -1008,7 +1040,7 @@ mod tests {
         .apply_chat_template(&request)
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|True".to_string()));
     }
 
     #[test]
@@ -1093,7 +1125,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
+        assert_eq!(rendered, Prompt::Text("True|x".to_string()));
     }
 
     #[test]
@@ -1146,7 +1178,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("none|True".to_string()));
         assert_eq!(
             rendered.effective_template_kwargs.get("reasoning_effort"),
             Some(&Value::String("none".to_string()))
@@ -1222,7 +1254,7 @@ mod tests {
     #[test]
     fn chat_template_exposes_tools_to_templates_when_auto_enabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.tools = vec![ChatTool {
+        let tools = vec![ChatTool {
             name: "get_weather".to_string(),
             description: Some("Get weather".to_string()),
             parameters: serde_json::json!({
@@ -1232,7 +1264,13 @@ mod tests {
             }),
             strict: None,
         }];
-        request.tool_choice = ChatToolChoice::Auto;
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
 
         let rendered = render(
             Some("{{ tools[0].function.name }}|{{ tools[0].function.parameters.required[0] }}"),
@@ -1241,6 +1279,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_preserves_openai_tool_field_order() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+        }];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some("{% for key, value in tools[0].function.items() %}{{ key }}|{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "name|description|parameters|");
+    }
+
+    #[test]
+    fn chat_template_preserves_python_optional_tool_fields() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![
+            ChatTool {
+                name: "without_strict".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+            },
+            ChatTool {
+                name: "with_strict".to_string(),
+                description: Some("description".to_string()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(false),
+            },
+        ];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some(
+                "{% for tool in tools %}{% for key, value in tool.function.items() %}{{ key }}={{ value|tojson }}|{% endfor %};{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;"
+        );
     }
 
     #[test]

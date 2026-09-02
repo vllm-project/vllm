@@ -229,6 +229,10 @@ class CudaPlatformBase(Platform):
         with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
 
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):
@@ -382,8 +386,11 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except ImportError:
-                invalid_reasons_i = ["ImportError"]
+            except (ImportError, OSError) as e:
+                logger.debug(
+                    "Attention backend %s is unavailable", backend.name, exc_info=True
+                )
+                invalid_reasons_i = [f"{type(e).__name__}: {e}"]
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
@@ -411,8 +418,11 @@ class CudaPlatformBase(Platform):
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
-            except ImportError:
-                invalid_reasons = ["ImportError"]
+            except (ImportError, OSError) as e:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: [{type(e).__name__}: {e}]"
+                ) from e
             if invalid_reasons:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
@@ -741,12 +751,16 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @with_nvml_context
     def has_device_capability(
         cls,
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
+        # No @with_nvml_context here: the base implementation only reads
+        # get_device_capability(), which is cached and brings its own NVML
+        # context. Wrapping this method as well cost an nvmlInit()/
+        # nvmlShutdown() pair on every call, including calls made per attention
+        # layer per step from the Triton reshape-and-cache path.
         try:
             return super().has_device_capability(capability, device_id)
         except RuntimeError:

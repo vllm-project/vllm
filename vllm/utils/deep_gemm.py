@@ -84,9 +84,20 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
-        """Return the pre-initialized oracle decision"""
+        """Return the oracle decision, initializing it on first use.
+
+        The cache is normally populated by ``_lazy_init()`` (e.g. during
+        engine startup), but standalone consumers such as ``QuantFP8`` with an
+        explicit ``use_ue8m0=True`` can reach this before any DeepGEMM kernel
+        wrapper has run. Resolve the DeepGEMM symbols and initialize the
+        decision here instead of asserting; without DeepGEMM this yields
+        FLOAT32, matching ``is_deep_gemm_e8m0_used()``.
+        """
         cached = getattr(cls, "_oracle_cache", None)
-        assert cached is not None, "DeepGemmQuantScaleFMT oracle cache not initialized"
+        if cached is None:
+            _lazy_init()
+            cls.init_oracle_cache()
+            cached = cls._oracle_cache  # type: ignore[attr-defined]
         return cached
 
 
@@ -541,25 +552,57 @@ def fp8_fp4_mqa_logits(
     )
 
 
+def native_next_n_supported(next_n: int) -> bool:
+    """Whether the paged MQA logits kernel takes `next_n` Q rows per request.
+
+    SM90 implements only {1, 2, 4}; SM100 and SM120 schedule any `next_n` via
+    multi-atom tiles. Unsupported values must be flattened to one row per query.
+    """
+    if current_platform.is_device_capability_family(90):
+        return next_n in (1, 2, 4)
+    return True
+
+
+def _paged_mqa_logits_schedule_slots(num_sms: int, next_n: int) -> int:
+    """Scheduler tasks the paged MQA logits kernel launches.
+
+    SM90 `next_n=4` runs one task per 2-CTA multicast cluster rather than per
+    SM, and `fp8_fp4_paged_mqa_logits` asserts its metadata is sized to match.
+    """
+    num_kv_multicast = (
+        2 if next_n == 4 and current_platform.is_device_capability_family(90) else 1
+    )
+    return num_sms // num_kv_multicast
+
+
 def get_paged_mqa_logits_metadata(
-    context_lens: torch.Tensor, block_size: int, num_sms: int
+    context_lens: torch.Tensor,
+    block_size: int,
+    num_sms: int,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
     Args:
-        context_lens: Tensor of shape [B], dtype int32; effective context length
-            per batch element.
+        context_lens: Tensor of shape [B, next_n], dtype int32; effective
+            context length per Q row.
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs available. 132 for Hopper
+        indices: Optional request index for each varlen row.
 
     Returns:
-        Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
-        schedule work across SMs.
+        Tensor of shape [slots + 1, 2] consumed by `fp8_fp4_paged_mqa_logits`
+        to schedule work across SMs.
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
+    next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
+    num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
+    kwargs = {} if indices is None else {"indices": indices}
+    return _get_paged_mqa_logits_metadata_impl(
+        context_lens, block_size, num_slots, **kwargs
+    )
 
 
 def fp8_fp4_paged_mqa_logits(
@@ -571,6 +614,7 @@ def fp8_fp4_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     clean_logits: bool,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -595,6 +639,7 @@ def fp8_fp4_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        indices: Optional request index for each varlen row.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -603,6 +648,7 @@ def fp8_fp4_paged_mqa_logits(
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    kwargs = {} if indices is None else {"indices": indices}
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
@@ -612,6 +658,7 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+        **kwargs,
     )
 
 
@@ -730,6 +777,7 @@ __all__ = [
     "fp8_fp4_mqa_logits",
     "fp8_fp4_paged_mqa_logits",
     "get_paged_mqa_logits_metadata",
+    "native_next_n_supported",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",

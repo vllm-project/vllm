@@ -11,8 +11,10 @@ import torch
 
 from tests.utils import multi_gpu_marks
 from vllm import LLM, SamplingParams
+from vllm.config import CompilationConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.reader import Metric
@@ -59,7 +61,7 @@ INLINE_CONFIGS = [
         pp_size=2,
         skip_reason=(
             "DeepSeek MTP pipeline-parallel support is in flight upstream; "
-            "see https://github.com/vllm-project/vllm/pull/38104"
+            "see https://github.com/vllm-project/vllm/pull/44698"
         ),
     ),
 ]
@@ -109,7 +111,11 @@ def _generate_token_ids_inline(llm: LLM) -> tuple[int, ...]:
         SamplingParams(temperature=0.0, max_tokens=MAX_TOKENS, ignore_eos=True),
     )
     assert outputs and outputs[0].outputs, "expected one completion"
-    return tuple(outputs[0].outputs[0].token_ids)
+    token_ids = tuple(outputs[0].outputs[0].token_ids)
+    assert len(token_ids) == MAX_TOKENS, (
+        f"expected {MAX_TOKENS} generated tokens, got {len(token_ids)}: {token_ids}"
+    )
+    return token_ids
 
 
 def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
@@ -119,6 +125,16 @@ def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
         "spec_decode_num_drafts metric missing; check disable_log_stats=False"
     )
     return int(counter.value)
+
+
+def _enable_batch_invariance(monkeypatch: pytest.MonkeyPatch) -> None:
+    # This test exercises DeepSeek MLA prefill. ROCm's upstream FlashAttention
+    # varlen API lacks the num_splits argument used by batch invariance, so
+    # explicitly override any ambient setting on that path.
+    if current_platform.is_cuda():
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    else:
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
 
 
 @pytest.mark.parametrize(
@@ -131,6 +147,7 @@ def _spec_decode_num_drafts(metrics: list[Metric]) -> int:
 def test_deepseek_mtp_load_inline(
     monkeypatch: pytest.MonkeyPatch,
     config: InlineConfig,
+    vllm_runner,
 ):
     """MTP loads and drafts under TP/EP/EPLB; spec output matches no-spec greedy."""
     if config.skip_reason is not None:
@@ -138,24 +155,30 @@ def test_deepseek_mtp_load_inline(
 
     # Reduces run-to-run nondeterminism so spec / no-spec stay close;
     # see tests/v1/distributed/test_eagle_dp.py for the same pattern.
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    _enable_batch_invariance(monkeypatch)
 
-    spec_llm = LLM(**_inline_kwargs(config, with_spec=True))
-    try:
-        spec_tokens = _generate_token_ids_inline(spec_llm)
-        n_drafts = _spec_decode_num_drafts(spec_llm.get_metrics())
-    finally:
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
+    spec_kwargs = _inline_kwargs(config, with_spec=True)
+    spec_model = spec_kwargs.pop("model")
+    with vllm_runner(
+        spec_model,
+        block_size=None,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        **spec_kwargs,
+    ) as spec_runner:
+        spec_tokens = _generate_token_ids_inline(spec_runner.llm)
+        n_drafts = _spec_decode_num_drafts(spec_runner.llm.get_metrics())
 
-    no_spec_llm = LLM(**_inline_kwargs(config, with_spec=False))
-    try:
-        no_spec_tokens = _generate_token_ids_inline(no_spec_llm)
-    finally:
-        del no_spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
+    no_spec_kwargs = _inline_kwargs(config, with_spec=False)
+    no_spec_model = no_spec_kwargs.pop("model")
+    with vllm_runner(
+        no_spec_model,
+        block_size=None,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
+        **no_spec_kwargs,
+    ) as no_spec_runner:
+        no_spec_tokens = _generate_token_ids_inline(no_spec_runner.llm)
 
     # Non-vacuity: a silently-broken MTP drafter that falls back to
     # verifier-only decoding would still produce matching output below.
@@ -185,7 +208,7 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
     if torch.accelerator.device_count() < dp_size:
         pytest.skip(f"dp{dp_size} requires at least {dp_size} GPUs")
 
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    _enable_batch_invariance(monkeypatch)
 
     base_args = AsyncEngineArgs(
         model=DEEPSEEK_MTP_MAIN_RANDOM,
@@ -225,7 +248,10 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch, dp_size: in
                     sampling_params=sampling_params,
                 ):
                     token_ids = tuple(out.outputs[0].token_ids)
-                    assert len(token_ids) == MAX_TOKENS
+                    assert len(token_ids) == MAX_TOKENS, (
+                        f"{request_id}: expected {MAX_TOKENS} generated tokens, "
+                        f"got {len(token_ids)}: {token_ids}"
+                    )
                     return token_ids
             raise AssertionError("AsyncLLM produced no output")
         finally:

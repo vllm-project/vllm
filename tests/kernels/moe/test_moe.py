@@ -16,6 +16,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 
 import vllm.model_executor.layers.fused_moe  # noqa
+import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
@@ -26,6 +27,11 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
+)
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    apply_moe_activation,
+    apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -61,6 +67,46 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
+    captured: dict[str, torch.Tensor] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["a_scale"] = args[4]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    a_scale = torch.tensor(0.5)
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=a_scale,
+        B_scale=torch.ones(1),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=True,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+    )
+
+    captured_scale = captured["a_scale"]
+    assert a_scale.ndim == 0
+    assert captured_scale.shape == (1,)
+    assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
 def iterative_moe(
@@ -413,6 +459,50 @@ def test_fused_moe(
         )
 
 
+def test_fused_shared_expert_alignment(workspace_init):
+    set_random_seed(7)
+    m, n, k = 4, 64, 128
+    routed_experts = 8
+    physical_experts = routed_experts + 1
+    dtype = torch.bfloat16
+
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((physical_experts, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((physical_experts, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    topk_ids = torch.tensor(
+        [[0, 8], [1, 8], [2, 8], [3, 8]], device=DEVICE_TYPE, dtype=torch.int32
+    )
+    topk_weights = torch.tensor(
+        [[0.5, 1.0]] * m, device=DEVICE_TYPE, dtype=torch.float32
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=physical_experts,
+        experts_per_token=2,
+        hidden_dim=k,
+        intermediate_size=n,
+        in_dtype=dtype,
+        max_num_tokens=m,
+    )
+    modular_moe = modular_triton_fused_moe(moe_config, FUSED_MOE_UNQUANTIZED_CONFIG)
+
+    with set_current_vllm_config(vllm_config):
+        expected = torch_experts(a, w1, w2, topk_weights, topk_ids)
+        actual = modular_moe.apply(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=routed_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+
 def test_fused_moe_int64_overflow(workspace_init):
     """Regression test for int32 overflow in stride*offset products.
 
@@ -570,6 +660,10 @@ def test_naive_block_assignment_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="MoE WNA16 Triton kernels require CUDA/ROCm or XPU.",
+)
 def test_fused_moe_wn16(
     m: int,
     n: int,
@@ -582,10 +676,10 @@ def test_fused_moe_wn16(
     has_zp: bool,
     weight_bits: int,
 ):
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    a = torch.randn((m, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=DEVICE_TYPE, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=DEVICE_TYPE, dtype=dtype) / 10
+    score = torch.randn((m, e), device=DEVICE_TYPE, dtype=dtype)
 
     if weight_bits == 4:
         pack_factor = 2
@@ -597,16 +691,22 @@ def test_fused_moe_wn16(
     w1_ref = w1.clone()
     w2_ref = w2.clone()
     w1_qweight = torch.empty(
-        (e, 2 * n, k // pack_factor), device="cuda", dtype=torch.uint8
+        (e, 2 * n, k // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
     )
-    w2_qweight = torch.empty((e, k, n // pack_factor), device="cuda", dtype=torch.uint8)
-    w1_scales = torch.empty((e, 2 * n, k // group_size), device="cuda", dtype=dtype)
-    w2_scales = torch.empty((e, k, n // group_size), device="cuda", dtype=dtype)
+    w2_qweight = torch.empty(
+        (e, k, n // pack_factor), device=DEVICE_TYPE, dtype=torch.uint8
+    )
+    w1_scales = torch.empty(
+        (e, 2 * n, k // group_size), device=DEVICE_TYPE, dtype=dtype
+    )
+    w2_scales = torch.empty((e, k, n // group_size), device=DEVICE_TYPE, dtype=dtype)
     w1_qzeros = torch.empty(
-        (e, 2 * n // pack_factor, k // group_size), device="cuda", dtype=torch.uint8
+        (e, 2 * n // pack_factor, k // group_size),
+        device=DEVICE_TYPE,
+        dtype=torch.uint8,
     )
     w2_qzeros = torch.empty(
-        (e, k // pack_factor, n // group_size), device="cuda", dtype=torch.uint8
+        (e, k // pack_factor, n // group_size), device=DEVICE_TYPE, dtype=torch.uint8
     )
 
     for i in range(e * 2):
@@ -648,9 +748,9 @@ def test_fused_moe_wn16(
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.randint(0, e, (local_e,), device="cuda", dtype=torch.int32)
-        e_map = torch.full((e,), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
+        e_ids = torch.randint(0, e, (local_e,), device=DEVICE_TYPE, dtype=torch.int32)
+        e_map = torch.full((e,), -1, device=DEVICE_TYPE, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=DEVICE_TYPE, dtype=torch.int32)
         w1_ref = w1_ref[e_ids]
         w2_ref = w2_ref[e_ids]
         w1_qweight = w1_qweight[e_ids]
@@ -996,6 +1096,23 @@ def test_fused_marlin_moe(
             per_act_token_quant=True,
         )
 
+    def instance_activation(
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
+    ) -> None:
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_config=ApplyMoEActivationConfig(),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -1021,6 +1138,7 @@ def test_fused_marlin_moe(
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
         is_k_full=is_k_full,
+        activation_func=instance_activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=4e-2, rtol=0)
@@ -1242,11 +1360,315 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     layer.intermediate_size_per_partition = intermediate_size
     quant_config = humming_utils.get_humming_moe_quant_config(layer)
     experts = HummingIndexedExperts(
-        layer,
-        moe_config,
-        quant_config,
+        moe_config=moe_config,
+        quant_config=quant_config,
     )
-    return experts
+    return experts, layer
+
+
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_humming_activation_metadata_tracks_shared_apply(activation: MoEActivation):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    assert HummingExpertsBase._supports_activation(
+        activation
+    ) == apply_moe_activation_supported(activation)
+
+
+@pytest.mark.parametrize(
+    ("env_override", "use_ep", "expected"),
+    [
+        (None, False, "indexed"),
+        (None, True, "grouped_contiguous"),
+        ("auto", True, "grouped_contiguous"),
+        ("indexed", True, "indexed"),
+        ("grouped", False, "grouped_contiguous"),
+    ],
+)
+def test_humming_selects_gemm_from_parallelism_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+    env_override: str | None,
+    use_ep: bool,
+    expected: str,
+):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        get_humming_moe_gemm_type,
+    )
+
+    if env_override is None:
+        monkeypatch.delenv("VLLM_HUMMING_MOE_GEMM_TYPE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_HUMMING_MOE_GEMM_TYPE", env_override)
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_parallel_config.use_ep = use_ep
+
+    assert get_humming_moe_gemm_type(moe_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("dp_token_counts", "topk_shape", "expected"),
+    [
+        pytest.param(None, (7, 3), 21, id="runtime-layout"),
+        pytest.param([3, 5], (48, 1), 48, id="expanded-dp-layout"),
+    ],
+)
+def test_humming_global_valid_shape_m(
+    monkeypatch: pytest.MonkeyPatch,
+    dp_token_counts: list[int] | None,
+    topk_shape: tuple[int, int],
+    expected: int,
+):
+    from types import SimpleNamespace
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    dp_metadata = (
+        None
+        if dp_token_counts is None
+        else SimpleNamespace(
+            num_tokens_across_dp_cpu=torch.tensor(dp_token_counts, dtype=torch.int32)
+        )
+    )
+    monkeypatch.setattr(
+        humming,
+        "get_forward_context",
+        lambda: SimpleNamespace(dp_metadata=dp_metadata),
+    )
+    experts = SimpleNamespace(moe_config=make_dummy_moe_config(experts_per_token=6))
+    topk_ids = torch.empty(topk_shape, dtype=torch.int64)
+
+    result = humming.HummingExpertsBase.get_global_valid_shape_m(experts, topk_ids)
+
+    assert result == expected
+
+
+def test_humming_permute_scratch_is_keyed_by_runtime_topk(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+
+    scratch_topk6 = Mock()
+    scratch_topk1 = Mock()
+    scratch_type = Mock(side_effect=[scratch_topk6, scratch_topk1])
+    monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
+    monkeypatch.setattr(humming, "MoEPermuteScratch", scratch_type)
+    moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
+    moe_config.moe_parallel_config.dp_size = 2
+    experts = SimpleNamespace(_permute_scratch={}, moe_config=moe_config)
+
+    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
+    assert humming.HummingExpertsBase._get_permute_scratch(experts, 1) is scratch_topk1
+    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
+
+    assert scratch_type.call_count == 2
+    first_call, second_call = scratch_type.call_args_list
+    assert first_call.kwargs["max_num_tokens"] == 1024
+    assert first_call.kwargs["topk"] == 6
+    assert second_call.kwargs["max_num_tokens"] == 6144
+    assert second_call.kwargs["topk"] == 1
+
+
+def test_humming_delegates_to_instance_activation():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+
+    activation_func = Mock()
+    activation_config = ApplyMoEActivationConfig(
+        clamp_limit=7.0,
+        alpha=1.5,
+        beta=0.25,
+        activation_situ_beta=2.0,
+        activation_situ_linear_beta=3.0,
+    )
+    experts = SimpleNamespace(
+        activation=activation_func,
+        activation_config=activation_config,
+    )
+    input = torch.empty(1, 2)
+    output = torch.empty(1, 1)
+
+    HummingExpertsBase.apply_activation(
+        experts, MoEActivation.SWIGLUOAI_UNINTERLEAVE, output, input
+    )
+
+    activation_func.assert_called_once_with(
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        input=input,
+        output=output,
+    )
+
+
+def test_humming_grouped_apply_forwards_valid_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import MethodType, SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+        HummingGroupedExperts,
+    )
+
+    activation_func = Mock()
+    buffers = {
+        "gate_up_output": torch.empty(6, 4),
+        "activation_output": torch.empty(6, 2),
+        "down_output": torch.empty(6, 4),
+    }
+    experts = SimpleNamespace(
+        activation=activation_func,
+        num_experts=2,
+        estimate_local_valid_shape_m=lambda _: 6,
+        prepare_buffers=lambda *_: buffers,
+        _get_permute_scratch=lambda _: None,
+        quantize_input=lambda _, *, inputs, input_scale=None, quanted_input: (
+            inputs,
+            input_scale,
+        ),
+        humming_forward=Mock(),
+        compute_config_str="",
+        w13_tuning_config_str="",
+        w2_tuning_config_str="",
+    )
+    experts.apply_activation = MethodType(HummingExpertsBase.apply_activation, experts)
+
+    hidden_states = torch.empty(3, 4)
+    output = torch.empty_like(hidden_states)
+    topk_ids = torch.zeros((3, 2), dtype=torch.int64)
+    topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
+    expected_counts = torch.tensor([4], dtype=torch.int32)
+    expert_offsets = torch.tensor([0, 2, 4], dtype=torch.int64)
+    monkeypatch.setattr(
+        humming,
+        "moe_permute",
+        lambda **_: (
+            torch.empty(6, 4),
+            None,
+            expert_offsets,
+            torch.arange(6),
+            None,
+        ),
+    )
+    monkeypatch.setattr(humming, "moe_unpermute", lambda **_: None)
+
+    HummingGroupedExperts.apply(
+        experts,
+        output=output,
+        hidden_states=hidden_states,
+        w1=torch.empty(0),
+        w2=torch.empty(0),
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=MoEActivation.SITU,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    activation_func.assert_called_once()
+    call_kwargs = activation_func.call_args.kwargs
+    assert call_kwargs["activation"] == MoEActivation.SITU
+    assert call_kwargs["input"].shape == (6, 4)
+    assert call_kwargs["output"].shape == (6, 2)
+    torch.testing.assert_close(call_kwargs["valid_token_counts"], expected_counts)
+
+
+def test_batched_marlin_activation_uses_expert_token_counts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import vllm.model_executor.layers.fused_moe.experts.marlin_moe as marlin
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        BatchedMarlinExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        ExpertTokensMetadata,
+    )
+
+    activation_func = Mock()
+    experts = SimpleNamespace(
+        activation=activation_func,
+        w1_bias=None,
+        w2_bias=None,
+        w1_scale=None,
+        w2_scale=None,
+        quant_type_id=0,
+        a1_gscale=None,
+        a2_gscale=None,
+        w13_g_idx=None,
+        w2_g_idx=None,
+        w13_g_idx_sort_indices=None,
+        w2_g_idx_sort_indices=None,
+        w1_zp=None,
+        w2_zp=None,
+        input_dtype=None,
+        is_k_full=True,
+        activation_config=ApplyMoEActivationConfig(
+            clamp_limit=3.0, alpha=1.3, beta=0.5
+        ),
+    )
+    hidden_states = torch.empty(2, 3, 4)
+    expert_num_tokens = torch.tensor([1, 2], dtype=torch.int32)
+    topk_ids = torch.zeros((2, 3), dtype=torch.int64)
+    expert_map = torch.arange(2, dtype=torch.int32)
+
+    def fake_batched_fused_marlin_moe(**kwargs):
+        kwargs["activation_func"](
+            kwargs["activation"],
+            torch.empty(6, 4),
+            torch.empty(6, 8),
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+        return kwargs["output"]
+
+    monkeypatch.setattr(
+        marlin, "batched_fused_marlin_moe", fake_batched_fused_marlin_moe
+    )
+    output = torch.empty_like(hidden_states)
+
+    BatchedMarlinExperts.apply(
+        experts,
+        output=output,
+        hidden_states=hidden_states,
+        w1=torch.empty(0),
+        w2=torch.empty(0),
+        topk_weights=torch.ones_like(topk_ids, dtype=torch.float32),
+        topk_ids=topk_ids,
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        global_num_experts=2,
+        expert_map=expert_map,
+        a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=ExpertTokensMetadata(expert_num_tokens, None),
+        apply_router_weight_on_input=False,
+    )
+
+    activation_func.assert_called_once()
+    call = activation_func.call_args
+    assert call.args[0] == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+    assert call.args[1].shape == (2, 3, 4)
+    assert call.args[2].shape == (2, 3, 8)
+    torch.testing.assert_close(call.kwargs["valid_token_counts"], expert_num_tokens)
 
 
 @pytest.mark.parametrize(
@@ -1260,8 +1682,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
 def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
     from vllm.utils import humming
 
-    experts = _make_humming_indexed_experts(activation)
-    layer = experts.layer
+    experts, layer = _make_humming_indexed_experts(activation)
     moe_config = experts.moe_config
     top_k = moe_config.experts_per_token
     num_experts = moe_config.num_experts
@@ -1269,7 +1690,7 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
     intermediate_size = moe_config.intermediate_size
     gate_up_size = intermediate_size * 2 if activation.is_gated else intermediate_size
 
-    w13_meta, w2_meta = (layer.humming_metas[name] for name in ("w13", "w2"))
+    w13_meta, w2_meta = (experts.humming_configs[name] for name in ("w13", "w2"))
     for meta in (w13_meta, w2_meta):
         assert meta.a_dtype == humming.dtypes.bfloat16
         assert meta.b_dtype == humming.dtypes.float4e2m1
@@ -1296,7 +1717,7 @@ def test_humming_indexed_writes_supplied_output_buffer():
     from vllm.forward_context import set_forward_context
 
     activation = MoEActivation.SILU
-    experts = _make_humming_indexed_experts(activation)
+    experts, layer = _make_humming_indexed_experts(activation)
     moe_config = experts.moe_config
     num_tokens = 1
     top_k = moe_config.experts_per_token
@@ -1314,7 +1735,7 @@ def test_humming_indexed_writes_supplied_output_buffer():
     )
 
     device = torch.device("cuda")
-    dtype = experts.layer.params_dtype
+    dtype = layer.params_dtype
     workspace13 = torch.empty(workspace13_shape, dtype=dtype, device=device)
     workspace2 = torch.empty(workspace2_shape, dtype=dtype, device=device)
     hidden_states = torch.ones((num_tokens, hidden_size), dtype=dtype, device=device)
@@ -1326,14 +1747,12 @@ def test_humming_indexed_writes_supplied_output_buffer():
         device=device,
     )
     topk_ids = torch.arange(top_k, dtype=torch.int32, device=device).unsqueeze(0)
-    unused = torch.empty((num_experts, 0), device=device)
-
     with set_forward_context(None, vllm_config, num_tokens=num_tokens):
         experts.apply(
             output=output,
             hidden_states=hidden_states,
-            w1=unused,
-            w2=unused,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,

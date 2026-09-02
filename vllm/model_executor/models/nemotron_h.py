@@ -136,7 +136,6 @@ class NemotronHMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
@@ -165,11 +164,6 @@ class NemotronHMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if config.n_shared_experts is None or config.n_shared_experts == 0:
             self.shared_experts = None
@@ -714,7 +708,7 @@ class NemotronHForCausalLM(
     is_non_gated_moe: bool = True
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"backbone": "model"},
+        orig_to_new_prefix={"backbone": "model", "mtp": None},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
@@ -753,7 +747,8 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, vllm_config.model_config.dtype
+                base_dtype,
+                vllm_config.model_config.dtype,
             )
         return base_dtype
 
@@ -790,10 +785,11 @@ class NemotronHForCausalLM(
         )
         if cache_config.use_replayssm:
             return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shape,
-                hf_config.n_groups,
-                parallel_config.tensor_parallel_size,
-                cache_config.replayssm_buffer_len,
+                base_shapes=base_shape,
+                n_groups=hf_config.n_groups,
+                tp_world_size=parallel_config.tensor_parallel_size,
+                logical_window=cache_config.replayssm_buffer_len,
+                backend=vllm_config.mamba_config.backend,
             )
         return base_shape
 
@@ -893,5 +889,5 @@ class NemotronHForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["mtp"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

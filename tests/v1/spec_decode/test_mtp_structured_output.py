@@ -189,7 +189,7 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
-def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
+def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend, caplog):
     """Post-marker drafts predate the bitmask and may be grammar-invalid;
     grammar_bitmask must skip the grammar advance instead of asserting.
     """
@@ -235,6 +235,7 @@ def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
     assert not (bitmask[2] == -1).all()
     # Grammar must not have advanced through the unvalidated draft.
     assert not grammar.is_terminated()
+    assert "Failed to advance FSM" not in caplog.text
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
@@ -260,6 +261,54 @@ def test_validate_tokens_then_bitmask_round_trip(backend):
     assert bitmask is not None
     assert bitmask.shape[0] == len(padded) + 1
     assert not grammar.is_terminated()
+
+
+def test_xgrammar_accept_tokens_stops_at_termination(capfd):
+    """Tokens after a terminating EOS do not reach the matcher."""
+    tokenizer, _, request, prompt = _make_manager_and_request("xgrammar")
+    grammar = request.structured_output_request.grammar
+
+    assert grammar.accept_tokens(request.request_id, prompt)
+
+    eos = tokenizer.eos_token_id
+    trailing = tokenizer.encode("\n")[0]
+    processed_before = grammar.num_processed_tokens
+
+    assert grammar.accept_tokens(request.request_id, [eos, trailing])
+    assert grammar.is_terminated()
+    assert grammar.num_processed_tokens == processed_before + 1
+    assert "trying to accept new token" not in capfd.readouterr().err
+
+    processed_after_eos = grammar.num_processed_tokens
+    assert grammar.accept_tokens(request.request_id, [trailing])
+    assert grammar.num_processed_tokens == processed_after_eos
+    assert "trying to accept new token" not in capfd.readouterr().err
+
+    grammar.reset()
+    assert not grammar.is_terminated()
+    assert grammar.num_processed_tokens == 0
+
+
+def test_xgrammar_validate_tokens_stops_at_termination(capfd):
+    """Validation rolls back after reaching a terminating EOS."""
+    tokenizer, _, request, prompt = _make_manager_and_request("xgrammar")
+    grammar = request.structured_output_request.grammar
+
+    assert grammar.accept_tokens(request.request_id, prompt)
+
+    eos = tokenizer.eos_token_id
+    trailing = tokenizer.encode("\n")[0]
+
+    assert grammar.validate_tokens([eos, trailing]) == [eos]
+    assert "trying to accept new token" not in capfd.readouterr().err
+    # Check matcher state directly to verify validation rolled it back.
+    assert not grammar.matcher.is_terminated()
+
+    assert grammar.accept_tokens(request.request_id, [eos])
+    assert grammar.is_terminated()
+
+    assert grammar.validate_tokens([trailing]) == []
+    assert "trying to accept new token" not in capfd.readouterr().err
 
 
 class _MarkerReasoner:

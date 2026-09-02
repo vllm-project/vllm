@@ -28,6 +28,13 @@ BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
 
 
+# num_stages=4 is excluded. The `u` loop has a trip count of 2 (V / BV), and a
+# 4-stage pipeline over it emits a third, consumer-less async copy into LDS that
+# the `w` loop then reuses; at num_warps=4 that races on gfx950 and `u` comes
+# back with non-deterministic O(1e38) garbage once a batch reaches 4096 tokens.
+_RECOMPUTE_W_U_NUM_STAGES = [2, 3]
+
+
 @triton.heuristics(
     {
         "STORE_QG": lambda args: args["qg"] is not None,
@@ -39,7 +46,7 @@ NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _RECOMPUTE_W_U_NUM_STAGES
     ],
     key=["H", "K", "V", "BT", "BK", "BV", "IS_VARLEN"],
 )
@@ -594,6 +601,7 @@ def _chunk_kda_fwd_with_cumulative_g(
     output_final_state: bool,
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     chunk_size: int = FLA_CHUNK_SIZE,
     safe_gate: bool = False,
 ):
@@ -631,6 +639,7 @@ def _chunk_kda_fwd_with_cumulative_g(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         use_exp2=True,
     )
     del w, u, kg
@@ -704,13 +713,15 @@ def chunk_kda_with_fused_gate_fwd(
     output_final_state: bool,
     lower_bound: float | None = None,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
 ):
     chunk_size = FLA_CHUNK_SIZE
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
-    )
+    # Building chunk metadata from a device `cu_seqlens` costs a blocking
+    # device->host copy. Callers that already hold it, i.e. the attention
+    # metadata builder, should pass it in.
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     g, beta = fused_kda_gate_chunk_cumsum(
         raw_g,
         raw_beta=raw_beta,
@@ -732,6 +743,7 @@ def chunk_kda_with_fused_gate_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
         chunk_size=chunk_size,
         safe_gate=lower_bound is not None,
     )
@@ -785,6 +797,8 @@ def chunk_kda_with_fused_gate(
     lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     **kwargs,
 ):
     """Run chunk KDA from raw gate and beta projections."""
@@ -808,6 +822,8 @@ def chunk_kda_with_fused_gate(
         output_final_state=output_final_state,
         lower_bound=lower_bound,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
     )
     return o, final_state
 

@@ -110,7 +110,7 @@ def compute_topk_scores(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
-    cu_num_logits: list[int] | None = None,
+    cu_num_logits: list[int] | torch.Tensor | None = None,
     logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
@@ -177,11 +177,13 @@ def compute_topk_scores(
         vocab_size,
         BLOCK_SIZE=8192,  # type: ignore
     )
+    is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
         logprobs=scores,
         selected_token_ranks=token_ranks,
-        cu_num_generated_tokens=cu_num_logits,
+        cu_num_generated_tokens=None if is_tensor else cu_num_logits,
+        cu_num_generated_tokens_tensor=cu_num_logits if is_tensor else None,
     )
 
 
