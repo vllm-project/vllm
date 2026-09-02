@@ -3,7 +3,7 @@
 
 from typing import Annotated, Any
 
-from pydantic import Field, GetPydanticSchema, ValidationInfo, field_validator
+from pydantic import Field, GetPydanticSchema, ValidationInfo, field_validator, model_validator
 from pydantic_core import core_schema
 
 from vllm.config.utils import config
@@ -94,6 +94,34 @@ class QuantizationConfigArgs:
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for."""
 
+    online: dict[str, QuantSpec | str] = Field(default_factory=dict)
+    """Per-layer online quantization configuration mapping layer patterns to QuantSpec or shorthand string."""
+
+    @field_validator("online", mode="before")
+    @classmethod
+    def _coerce_online(cls, v: Any) -> Any:
+        if not isinstance(v, dict):
+            return v
+        coerced = {}
+        for pattern, spec in v.items():
+            if pattern.startswith("re:"):
+                import re
+                try:
+                    re.compile(pattern[3:])
+                except re.error as e:
+                    raise ValueError(f"Invalid regex pattern in quantization online key {pattern!r}: {e}")
+            if isinstance(spec, str):
+                if spec in _ONLINE_SHORTHANDS:
+                    spec_val = _ONLINE_SHORTHANDS[spec].linear or _ONLINE_SHORTHANDS[spec].moe
+                    if spec_val is None:
+                        raise ValueError(f"online shorthand {spec!r} does not define a valid spec")
+                    coerced[pattern] = spec_val
+                else:
+                    coerced[pattern] = QuantSpec(weight=_coerce_quant_key(spec))
+            else:
+                coerced[pattern] = spec
+        return coerced
+
     @field_validator("linear", "moe", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
@@ -109,6 +137,18 @@ class QuantizationConfigArgs:
                 )
             return spec
         return QuantSpec(weight=_coerce_quant_key(v))
+
+    @model_validator(mode="after")
+    def _check_online_ignore_collision(self) -> "QuantizationConfigArgs":
+        if self.online and self.ignore:
+            colliding = set(self.online.keys()) & set(self.ignore)
+            if colliding:
+                raise ValueError(
+                    f"quantization_config.online and quantization_config.ignore collide on keys: {sorted(colliding)}"
+                )
+        return self
+
+
 
 
 # CLI shorthands accepted by `--quantization`. Each desugars to a full
@@ -191,4 +231,6 @@ def resolve_quantization_config(
         linear=quantization_config.linear or base.linear,
         moe=quantization_config.moe or base.moe,
         ignore=quantization_config.ignore or base.ignore,
+        online={**(base.online if base else {}), **(quantization_config.online if quantization_config else {})},
     )
+
