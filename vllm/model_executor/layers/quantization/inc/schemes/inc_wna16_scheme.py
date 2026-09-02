@@ -20,9 +20,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 XPU_WNA16_SUPPORTED_BITS = {2, 4}
-# On CUDA the Marlin/GPTQ/AWQ kernels only cover 4/8-bit; 2/3-bit have no CUDA
-# kernel there, so they are dispatched to the humming kernel instead.
-CUDA_HUMMING_SUPPORTED_BITS = {2, 3}
+# On CUDA the Marlin/GPTQ/AWQ kernels only cover 4/8-bit. The remaining
+# widths (2/3/5/6/7) have no dedicated CUDA kernel, so they are dispatched to
+# the humming kernel instead. This mirrors compressed-tensors WNA16, whose
+# 5/6/7-bit biased scalar types also fall back to humming at kernel selection.
+CUDA_HUMMING_SUPPORTED_BITS = {2, 3, 5, 6, 7}
 
 
 class INCWna16Scheme(INCScheme):
@@ -87,8 +89,9 @@ class INCWna16Scheme(INCScheme):
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 
-        # CUDA low-bit (2/3): no Marlin/GPTQ/AWQ kernel, route to humming so a
-        # single model can mix 4/8-bit (Marlin) and 2/3-bit (humming) layers.
+        # CUDA low-bit (2/3/5/6/7): no Marlin/GPTQ/AWQ kernel, route to humming
+        # so a single model can mix 4/8-bit (Marlin) and 2/3/5/6/7-bit (humming)
+        # layers.
         if (
             current_platform.is_cuda()
             and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
@@ -114,7 +117,7 @@ class INCWna16Scheme(INCScheme):
             )
 
             return UnquantizedFusedMoEMethod(layer.moe_config)
-        # CUDA low-bit (2/3): route to the humming MoE kernel (see above).
+        # CUDA low-bit (2/3/5/6/7): route to the humming MoE kernel (see above).
         if (
             current_platform.is_cuda()
             and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
