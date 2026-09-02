@@ -360,10 +360,18 @@ def _iter_job_steps(yaml_doc: dict):
 
 def load_selections() -> list[Selection]:
     """Parse every ``.buildkite/test_areas/*.yaml`` into the full list of
-    selections - the CI's complete picture of which test files it runs."""
+    selections - the CI's complete picture of which test files it runs.
+
+    A yaml that doesn't parse is fatal: silently skipping it would drop whatever
+    coverage it defines and produce false "untethered" reports.
+    """
     selections: list[Selection] = []
     for yaml_path in sorted(TEST_AREAS_DIR.glob("*.yaml")):
-        yaml_doc = yaml.safe_load(yaml_path.read_text()) or {}
+        try:
+            yaml_doc = yaml.safe_load(yaml_path.read_text()) or {}
+        except yaml.YAMLError as e:
+            rel = yaml_path.relative_to(REPO_ROOT)
+            raise SystemExit(f"error: {rel} is not valid YAML: {e}") from None
         for step in _iter_job_steps(yaml_doc):
             commands = list(step.get("commands") or [])
             if step.get("command"):  # some steps use the singular form
