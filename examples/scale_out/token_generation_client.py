@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Call a token-in/token-out server started with:
+
+VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 vllm serve Qwen/Qwen3-0.6B
+"""
+
 import httpx
 from transformers import AutoTokenizer
 

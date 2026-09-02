@@ -409,6 +409,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_spec_decodes = 0
             else:
                 num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+                if num_spec_decodes == 0:
+                    spec_sequence_masks_cpu = None
 
         spec_request_indices = None
         if num_spec_decodes == 0:

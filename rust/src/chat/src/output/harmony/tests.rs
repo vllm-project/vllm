@@ -6,7 +6,9 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use futures::{TryStreamExt as _, stream};
 use openai_harmony::chat::{Message, Role};
-use vllm_text::output::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, Finished};
+use vllm_text::output::{
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedText, DecodedTextEvent, Finished, SampledDelta,
+};
 
 use super::*;
 use crate::output::ChatOutputProcessor;
@@ -59,6 +61,21 @@ fn finished() -> Finished {
     }
 }
 
+fn decoded_tokens(
+    token_ids: Vec<u32>,
+    logprobs: Option<DecodedLogprobs>,
+    finished: Option<Finished>,
+) -> DecodedTextEvent {
+    DecodedTextEvent::TextDelta {
+        decoded: DecodedText::default(),
+        sampled: SampledDelta {
+            token_ids,
+            logprobs,
+        },
+        finished: finished.map(Box::new),
+    }
+}
+
 async fn collect_events(
     processor: HarmonyChatOutputProcessor,
     events: Vec<DecodedTextEvent>,
@@ -96,12 +113,7 @@ fn interrupted_final_message_is_preserved() {
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens[..tokens.len() - 1].to_vec(),
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens[..tokens.len() - 1].to_vec(), None, Some(finished())),
         ],
     ));
 
@@ -135,12 +147,7 @@ fn eos_flush_preserves_trailing_replacement_text() {
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens,
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens, None, Some(finished())),
         ],
     ));
 
@@ -157,12 +164,7 @@ fn interrupted_analysis_message_is_preserved() {
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens[..tokens.len() - 1].to_vec(),
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens[..tokens.len() - 1].to_vec(), None, Some(finished())),
         ],
     ));
 
@@ -196,12 +198,7 @@ fn commentary_preamble_is_visible_but_commentary_tool_payload_is_not() {
         HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens,
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens, None, Some(finished())),
         ],
     ));
 
@@ -225,12 +222,7 @@ fn multiple_messages_get_newline_separators() {
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens,
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens, None, Some(finished())),
         ],
     ));
 
@@ -256,18 +248,8 @@ fn tool_calls_stream_arguments_and_finish_with_local_id_shape() {
         HarmonyChatOutputProcessor::new(&request_with_tools()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens[..midpoint].to_vec(),
-                logprobs: None,
-                finished: None,
-            },
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens[midpoint..].to_vec(),
-                logprobs: None,
-                finished: Some(finished()),
-            },
+            decoded_tokens(tokens[..midpoint].to_vec(), None, None),
+            decoded_tokens(tokens[midpoint..].to_vec(), None, Some(finished())),
         ],
     ));
 
@@ -303,14 +285,13 @@ fn semantic_events_precede_same_update_logprobs() {
         HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap(),
         vec![
             decoded_start(),
-            DecodedTextEvent::TextDelta {
-                delta: String::new(),
-                token_ids: tokens,
-                logprobs: Some(DecodedLogprobs {
+            decoded_tokens(
+                tokens,
+                Some(DecodedLogprobs {
                     positions: vec![DecodedPositionLogprobs { entries: vec![] }],
                 }),
-                finished: Some(finished()),
-            },
+                Some(finished()),
+            ),
         ],
     ));
 

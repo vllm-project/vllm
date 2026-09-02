@@ -14,7 +14,7 @@ use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
 use vllm_llm::current_unix_timestamp_secs;
-use vllm_text::{DecodedTextEvent, Prompt, TextOutputStreamExt as _, TextRequest};
+use vllm_text::{DecodedTextEvent, Prompt, SampledDelta, TextOutputStreamExt as _, TextRequest};
 
 use super::convert::{self, ResponseOpts};
 use super::{InferenceServer, pb};
@@ -264,17 +264,20 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
                             })
                         }
                         Ok(DecodedTextEvent::TextDelta {
-                            delta,
-                            token_ids,
-                            logprobs,
+                            decoded,
+                            sampled:
+                                SampledDelta {
+                                    token_ids,
+                                    logprobs,
+                                },
                             finished,
                         }) => Ok(pb::GenerateResponse {
                             prompt_info: None,
                             outputs: Some(convert::to_sequence_output(
-                                &delta,
+                                &decoded.text,
                                 &token_ids,
                                 logprobs.as_ref(),
-                                finished.as_ref(),
+                                finished.as_deref(),
                                 &response_opts,
                             )),
                         }),

@@ -71,6 +71,7 @@ def server():
     env_dict = {
         "VLLM_CPU_KVCACHE_SPACE": "1",
         "VLLM_ENABLE_COHERE_API": "1",
+        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1",
     }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:

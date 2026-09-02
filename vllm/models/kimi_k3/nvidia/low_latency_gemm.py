@@ -35,11 +35,31 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.platforms import current_platform
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 
 Backend = Literal["cute", "dsv3_fused_a"]
 # A resolved per-token-count call: the backend plus its CuTe config (None for
 # dsv3, which needs no config).
 ResolvedCall = tuple[Backend, SkinnyGemmConfig | None]
+
+# TP8 KDA projection split, measured together under CUDA graph capture on B300.
+# Q/K/V/G stay on the graph's main stream while F_A/beta and F_B run on the
+# model's auxiliary stream.
+KDA_M1_QKVG_CONFIG = SkinnyGemmConfig(1, 64, 4, 2, 8)
+KDA_M1_FAB_CONFIG = SkinnyGemmConfig(1, 224, 1, 2, 8)
+KDA_QKVG_CONFIGS = {
+    1: KDA_M1_QKVG_CONFIG,
+    2: SkinnyGemmConfig(2, 64, 3, 2, 8),
+}
+# The captured end-to-end projection sweep wins through M=14 and regresses at
+# M=15 and M=16, where the original packed projection remains selected.
+KDA_PROJECTION_OVERLAP_MAX_TOKENS = 14
+KDA_SKINNY_N_MAX_TOKENS = KDA_PROJECTION_OVERLAP_MAX_TOKENS
+KDA_SKINNY_K_MAX_TOKENS = KDA_PROJECTION_OVERLAP_MAX_TOKENS
+_KDA_QKVG_SIZE = 4 * 1536
+_KDA_FAB_SIZE = 128 + 12
+_KDA_PACKED_SIZE = 6288
+_KDA_TP_SIZE = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,6 +703,137 @@ def _run_plan(
     return output
 
 
+def run_kda_projection_overlap(
+    hidden_states: torch.Tensor,
+    packed_weight: torch.Tensor,
+    f_b_weight: torch.Tensor,
+    aux_stream: torch.cuda.Stream,
+    events: tuple[torch.cuda.Event, torch.cuda.Event],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the TP8 KDA decode projection branches concurrently.
+
+    Args:
+        hidden_states: Packed BF16 input with shape ``[M, 7168]``.
+        packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape
+            ``[6288, 7168]``.
+        f_b_weight: F_B weight with shape ``[1536, 128]``.
+        aux_stream: Stream for the F_A/beta then F_B branch.
+        events: Start and completion events for the stream fork and join.
+
+    Returns:
+        The Q/K/V/G projection, F_B output, and beta projection.
+    """
+    num_tokens = hidden_states.shape[0]
+    qkvg_weight = packed_weight[:_KDA_QKVG_SIZE]
+
+    def run_qkvg() -> torch.Tensor:
+        if config := KDA_QKVG_CONFIGS.get(num_tokens):
+            return shape_dynamic_skinny_gemm(
+                hidden_states,
+                qkvg_weight,
+                config,
+                None,
+            )
+        if num_tokens <= KDA_PROJECTION_OVERLAP_MAX_TOKENS:
+            from flashinfer.gemm import mm_bf16
+
+            return mm_bf16(
+                hidden_states,
+                qkvg_weight.t(),
+                pdl=True,
+                backend="cute-dsl",
+            )
+        return torch.mm(hidden_states, qkvg_weight.t())
+
+    def run_fab_fb() -> tuple[torch.Tensor, torch.Tensor]:
+        if num_tokens == 1:
+            projected_fab = shape_dynamic_skinny_gemm(
+                hidden_states,
+                packed_weight[_KDA_QKVG_SIZE : _KDA_QKVG_SIZE + _KDA_FAB_SIZE],
+                KDA_M1_FAB_CONFIG,
+                None,
+            )
+            f_a, beta = projected_fab.split([128, 12], dim=-1)
+            f_a = f_a.as_strided((1, 128), (128, 1))
+            g1 = torch.empty(
+                (1, 1536), dtype=hidden_states.dtype, device=hidden_states.device
+            )
+            ops.dsv3_fused_a_gemm(g1, f_a, f_b_weight.t(), enable_pdl=True)
+        else:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.kda_skinny_gemm import (
+                kda_skinny_gemm,
+            )
+
+            if num_tokens <= KDA_SKINNY_N_MAX_TOKENS:
+                projected_fab = kda_skinny_gemm.run_n(
+                    hidden_states,
+                    packed_weight[_KDA_QKVG_SIZE:],
+                )
+            else:
+                projected_fab = torch.mm(
+                    hidden_states,
+                    packed_weight[_KDA_QKVG_SIZE:].t(),
+                )
+            beta = projected_fab[:, 128:140]
+            if num_tokens <= KDA_SKINNY_K_MAX_TOKENS:
+                g1 = kda_skinny_gemm.run_k(projected_fab, f_b_weight)
+            else:
+                g1 = torch.mm(projected_fab[:, :128], f_b_weight.t())
+        return g1, beta
+
+    projected_qkvg, (g1, beta) = maybe_execute_in_parallel(
+        run_qkvg,
+        run_fab_fb,
+        events[0],
+        events[1],
+        aux_stream,
+    )
+    return projected_qkvg, g1, beta
+
+
+def autotune_kda_qkvg(model: nn.Module) -> None:
+    """Autotune the FlashInfer QKVG GEMM before CUDA graph capture."""
+    from flashinfer.gemm import mm_bf16
+
+    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+
+    children: list[KimiK3DeltaAttention] = []
+    weights_by_shape: dict[
+        tuple[int, int, int, torch.dtype, torch.device], torch.Tensor
+    ] = {}
+    for child in model.modules():
+        if not isinstance(child, KimiK3DeltaAttention):
+            continue
+        if child._projection_overlap_max_tokens <= 0:
+            continue
+        children.append(child)
+        qkvg_weight = child.in_proj_qkvgfab.weight[:_KDA_QKVG_SIZE]
+        shape = (
+            KDA_PROJECTION_OVERLAP_MAX_TOKENS,
+            qkvg_weight.shape[0],
+            qkvg_weight.shape[1],
+            qkvg_weight.dtype,
+            qkvg_weight.device,
+        )
+        weights_by_shape.setdefault(shape, qkvg_weight)
+
+    for shape, qkvg_weight in weights_by_shape.items():
+        num_tokens = shape[0]
+        hidden_states = torch.empty(
+            (num_tokens, qkvg_weight.shape[1]),
+            dtype=qkvg_weight.dtype,
+            device=qkvg_weight.device,
+        )
+        mm_bf16(
+            hidden_states,
+            qkvg_weight.t(),
+            pdl=True,
+            backend="cute-dsl",
+        )
+    for child in children:
+        child._projection_overlap_max_tokens = KDA_PROJECTION_OVERLAP_MAX_TOKENS
+
+
 def _run_residual_plan(
     residual_plan: dict[int, SkinnyGemmConfig],
     x: torch.Tensor,
@@ -777,6 +928,40 @@ class KimiK3LowLatencyEmbeddingMethod(
     pass
 
 
+def _enable_kda_projection_overlap(module: nn.Module) -> bool:
+    from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+
+    enabled = False
+    for child in module.modules():
+        if not isinstance(child, KimiK3DeltaAttention):
+            continue
+        if child.tp_size != _KDA_TP_SIZE:
+            continue
+        packed_weight = child.in_proj_qkvgfab.weight
+        f_b_weight = child.f_b_proj.weight
+        if (
+            type(child.in_proj_qkvgfab.quant_method) is not KimiK3LowLatencyLinearMethod
+            or type(child.f_b_proj.quant_method) is not KimiK3LowLatencyLinearMethod
+            or child._projection_aux_stream is None
+            or child._projection_events is None
+            or packed_weight.shape != (_KDA_PACKED_SIZE, 7168)
+            or f_b_weight.shape != (1536, 128)
+            or packed_weight.dtype != torch.bfloat16
+            or f_b_weight.dtype != torch.bfloat16
+            or not packed_weight.is_cuda
+            or not f_b_weight.is_cuda
+            or not packed_weight.is_contiguous()
+            or not f_b_weight.is_contiguous()
+        ):
+            continue
+        child._projection_overlap_max_tokens = max(KDA_QKVG_CONFIGS)
+        enabled = True
+    return enabled
+
+
 def enable_kimi_k3_low_latency_gemm(
     module: nn.Module,
     dtype: torch.dtype,
@@ -825,6 +1010,16 @@ def enable_kimi_k3_low_latency_gemm(
         # TP8 deployment does not compile TP4 configs and vice versa.
         warmup_configs.update(config for _, config in spec.cute_configs)
         residual_warmup_configs.update(config for _, config in spec.residual_configs)
+    if _enable_kda_projection_overlap(module):
+        from vllm.models.kimi_k3.nvidia.ops.cute_dsl.kda_skinny_gemm import (
+            kda_skinny_gemm,
+        )
+
+        warmup_configs.update((*KDA_QKVG_CONFIGS.values(), KDA_M1_FAB_CONFIG))
+        kda_skinny_gemm.request_warmup(
+            set(range(2, KDA_SKINNY_N_MAX_TOKENS + 1)),
+            set(range(2, KDA_SKINNY_K_MAX_TOKENS + 1)),
+        )
 
     if shape_dynamic_skinny_gemm.is_available():
         if warmup_configs:

@@ -1084,6 +1084,56 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
 
 
 @torch.inference_mode()
+def test_flashkda_near_collinear_keys_remain_finite():
+    """Guard against unstable inversion of near-collinear key blocks."""
+    lower_bound = -5.0
+    if not is_flashkda_supported(128, torch.bfloat16, lower_bound):
+        pytest.skip("FlashKDA is not supported on this platform")
+
+    import vllm._flashkda_C  # noqa: F401
+
+    T, H, D = 16384, 1, 128
+    torch.manual_seed(0)
+    key = torch.randn(1, 1, H, D, dtype=torch.bfloat16, device=DEVICE)
+    qk = key.expand(1, T, H, D).contiguous()
+    value_block = torch.randn(1, 16, H, D, dtype=torch.bfloat16, device=DEVICE)
+    value = value_block.repeat(1, T // 16, 1, 1)
+    raw_gate = torch.full_like(qk, -12.0)
+    raw_beta = torch.full((1, T, H), 8.0, dtype=qk.dtype, device=DEVICE)
+    A_log = torch.zeros(H, dtype=torch.float32, device=DEVICE)
+    dt_bias = torch.zeros(H, D, dtype=torch.float32, device=DEVICE)
+    initial_state = torch.zeros(1, H, D, D, dtype=torch.float32, device=DEVICE)
+    final_state = torch.empty_like(initial_state)
+    output = torch.empty_like(value)
+    cu_seqlens = torch.tensor([0, T], dtype=torch.int32, device=DEVICE)
+    workspace = torch.empty(
+        torch.ops._flashkda_C.get_workspace_size(T, H, 1),
+        dtype=torch.uint8,
+        device=DEVICE,
+    )
+
+    torch.ops._flashkda_C.fwd(
+        qk,
+        qk,
+        value,
+        raw_gate,
+        raw_beta,
+        D**-0.5,
+        output,
+        workspace,
+        A_log,
+        dt_bias,
+        lower_bound,
+        initial_state,
+        final_state,
+        cu_seqlens,
+    )
+
+    assert torch.isfinite(output).all()
+    assert torch.isfinite(final_state).all()
+
+
+@torch.inference_mode()
 def test_flashkda_correctness():
     if not is_flashkda_supported(128, torch.bfloat16, -3.0):
         pytest.skip("FlashKDA is not supported on this platform")

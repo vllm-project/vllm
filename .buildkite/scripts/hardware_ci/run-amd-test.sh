@@ -58,6 +58,7 @@ amd_diagnostics_collected=0
 amd_diagnostics_memory_events_path=""
 amd_diagnostics_probe_budget_seconds=25
 amd_diagnostics_command_timeout_seconds=5
+amd_diagnostics_upload_timeout_seconds=20
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -705,6 +706,46 @@ run_failure_diagnostic() {
   return 0
 }
 
+upload_failure_diagnostics_artifact() {
+  local upload_root=$1 upload_path=$2 agent_bin=""
+  local agent_upload_help=""
+  local -a upload_options=()
+
+  if [[ -n "${BUILDKITE_BIN_PATH:-}" \
+    && -x "${BUILDKITE_BIN_PATH}/buildkite-agent" ]]; then
+    agent_bin="${BUILDKITE_BIN_PATH}/buildkite-agent"
+  else
+    agent_bin=$(command -v buildkite-agent 2>/dev/null || true)
+  fi
+  if [[ -z "${agent_bin}" && -x /workspace/buildkite-agent ]]; then
+    agent_bin=/workspace/buildkite-agent
+  fi
+  [[ -n "${agent_bin}" && -n "${BUILDKITE_JOB_ID:-}" ]] || return 1
+  command -v timeout >/dev/null 2>&1 || return 1
+
+  # Older AMD runners predate the literal upload options. A restricted path
+  # has no glob or delimiter characters, so it is safe with either agent.
+  if [[ ! "${upload_path}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$ ]]; then
+    agent_upload_help=$("${agent_bin}" artifact upload --help 2>&1 || true)
+    if [[ "${agent_upload_help}" != *"--literal"* \
+      || "${agent_upload_help}" != *"--delimiter"* ]]; then
+      return 1
+    fi
+    upload_options=(--literal --delimiter "")
+  fi
+
+  (
+    cd "${upload_root}" || exit 1
+    BUILDKITE_AGENT_DEBUG=false \
+      BUILDKITE_AGENT_DEBUG_HTTP=false \
+      BUILDKITE_AGENT_TRACE_HTTP=false \
+      BUILDKITE_AGENT_LOG_LEVEL=error \
+      timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
+      "${agent_bin}" artifact upload \
+        "${upload_options[@]}" "./${upload_path}"
+  ) >/dev/null 2>&1
+}
+
 append_failure_diagnostic_file() {
   local log_file=$1
   local label=$2
@@ -970,6 +1011,9 @@ collect_rocm_failure_diagnostics() {
   local diagnostics_relative_path=""
   local diagnostics_path=""
   local diagnostics_parent=""
+  local diagnostics_fallback_root=""
+  local diagnostics_storage="checkout"
+  local diagnostics_artifact_summary=""
   local checkout_real=""
   local diagnostics_parent_real=""
   local exit_signal=""
@@ -1037,6 +1081,23 @@ collect_rocm_failure_diagnostics() {
     || ! mkdir -p "${diagnostics_parent}" \
     || [[ -L "${diagnostics_path}" ]] \
     || ! (set -o noclobber; : > "${diagnostics_path}") 2>/dev/null; then
+    echo "WARNING: unable to create AMD CI diagnostics in the checkout; using temporary storage."
+    diagnostics_path=""
+    if diagnostics_fallback_root=$(mktemp -d -t \
+      vllm-amd-diagnostics.XXXXXX 2>/dev/null); then
+      diagnostics_path="${diagnostics_fallback_root}/${diagnostics_relative_path}"
+      diagnostics_parent=$(dirname "${diagnostics_path}")
+      if (umask 077; mkdir -p "${diagnostics_parent}" \
+        && (set -o noclobber; : > "${diagnostics_path}")) 2>/dev/null; then
+        diagnostics_storage="temporary-fallback"
+      else
+        rm -rf -- "${diagnostics_fallback_root}" || true
+        diagnostics_fallback_root=""
+        diagnostics_path=""
+      fi
+    fi
+  fi
+  if [[ -z "${diagnostics_path}" ]]; then
     echo "WARNING: unable to create AMD CI diagnostics at ${diagnostics_relative_path}."
     printf '\nAMD CI failure summary\n'
     printf '%-22s | %s\n' \
@@ -1068,6 +1129,7 @@ collect_rocm_failure_diagnostics() {
     echo "expected_gpu_count=${amd_diagnostics_expected_gpu_count}"
     echo "probe_budget_seconds=${amd_diagnostics_probe_budget_seconds}"
     echo "command_timeout_seconds=${amd_diagnostics_command_timeout_seconds}"
+    echo "diagnostics_storage=${diagnostics_storage}"
     echo "agent_name=${BUILDKITE_AGENT_NAME:-unknown}"
     echo "container_hostname=${HOSTNAME:-unknown}"
     echo "k8s_pod=${k8s_pod}"
@@ -1182,7 +1244,22 @@ collect_rocm_failure_diagnostics() {
   if [[ -n "${oom_kill_count}" ]]; then
     summary_rows+=("Cgroup OOM kills" "${oom_kill_count}")
   fi
-  summary_rows+=("Diagnostics artifact" "${diagnostics_relative_path}")
+  diagnostics_artifact_summary="${diagnostics_relative_path}"
+  if [[ -n "${diagnostics_fallback_root}" ]]; then
+    if upload_failure_diagnostics_artifact \
+      "${diagnostics_fallback_root}" "${diagnostics_relative_path}"; then
+      echo "Uploaded AMD CI diagnostics artifact from temporary storage: ${diagnostics_relative_path}"
+      diagnostics_artifact_summary="${diagnostics_relative_path} (direct upload)"
+    else
+      echo "WARNING: failed to upload temporary AMD CI diagnostics artifact: ${diagnostics_relative_path}"
+      echo "--- AMD CI diagnostics (artifact upload failed)"
+      cat "${diagnostics_path}" || true
+      diagnostics_artifact_summary="job log only: direct upload failed"
+    fi
+    rm -rf -- "${diagnostics_fallback_root}" || \
+      echo "WARNING: unable to remove temporary AMD CI diagnostics storage."
+  fi
+  summary_rows+=("Diagnostics artifact" "${diagnostics_artifact_summary}")
 
   printf '\nAMD CI failure summary\n'
   printf '%-22s | %s\n' "${summary_rows[@]}"

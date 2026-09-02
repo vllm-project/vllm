@@ -54,7 +54,11 @@ FORCE_WEATHER_TOOL = {"type": "function", "function": {"name": "get_weather"}}
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer(MODEL, ARGS) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL,
+        ARGS,
+        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+    ) as remote_server:
         yield remote_server
 
 
