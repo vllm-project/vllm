@@ -14,7 +14,7 @@ from __future__ import annotations
 from . import build_map, hardware
 from .claim import Claim
 from .state import RepoState, _graph_known
-from .step_refs import _source_dep_steps
+from .step_refs import _source_dep_steps, _source_dep_steps_ungated
 
 # Only the rules that are certain nothing runs are exempt: a doc cannot break a
 # build, and dead hardware runs nothing. release-ci is NOT here, because a
@@ -41,7 +41,12 @@ def _apply_declarer_union(state: RepoState, path: str, claim: Claim) -> Claim:
     # small slice of the pipeline, so they could not have covered an unknown
     # edge anyway. What is left is the warning, the fail-open on the site file,
     # and the check going red.
-    if _graph_known(state, path):
+    if claim.rule == "release-ci":
+        # This claim says nothing runs, and a declarer is the evidence that
+        # the file is still tested, so the switch must not silence it.
+        declarers = _source_dep_steps_ungated(state, path)
+        omitted = 0
+    elif _graph_known(state, path):
         declarers = _source_dep_steps(state, path, specific_only=True)
         omitted = len(_source_dep_steps(state, path) - declarers)
     else:

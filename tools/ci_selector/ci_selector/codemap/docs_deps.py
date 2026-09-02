@@ -90,7 +90,8 @@ _SNIPPET_RE = re.compile(r'--8<--\s*"([^"]+)"')
 # ](target) link to a repo file, relative only. Matches broadly; _rel_if_file
 # keeps only the ones that are real files.
 _PYLINK_RE = re.compile(r"\]\((?!(?:https?|ftp)://|#)([^)\s#]+)")
-# ::: module.path mkdocstrings directive (none today; guarded by a tripwire).
+# ::: module.path mkdocstrings directive. None today; a test fires if one
+# appears.
 MKDOCSTRINGS_RE = re.compile(r"^:::\s")
 
 

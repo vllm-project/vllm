@@ -56,6 +56,7 @@ RULES = frozenset(
         "requirements",
         "target-coverage",
         "package-data",
+        "native-tests",
         "declared-deps",
         "fail-open",
     }

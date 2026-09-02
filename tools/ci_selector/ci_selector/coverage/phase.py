@@ -9,11 +9,11 @@ import the file". That is true of nearly everything, and it is why the drop
 side refuses two thirds of its decisions.
 
 Requiring a real call frame instead is `PhaseMode`. It lives in its own module
-because the keep rung and `look_up` re-make the same match one rung apart:
+because the keep check and `look_up` re-make the same match one check apart:
 changing one alone moves zero decisions and reads as "the stricter mode buys
 nothing". Both import from here so they cannot drift.
 
-The predicate takes a `FileQuery`, never the whole `Query`. The keep rung reads
+The predicate takes a `FileQuery`, never the whole `Query`. The keep check reads
 the whole diff and `look_up` reads a scoped subset, so a predicate that depends
 only on per-file state keeps the two in agreement and one that depends on the
 query would not.

@@ -177,7 +177,7 @@ class Table:
         rule itself: no completeness check, no caller walk, no file-level
         fallback. This is the reading those are built on.
 
-        `mode` must be whatever the keep rung in `rules.py` used. The match
+        `mode` must be whatever the keep check in `rules.py` used. The match
         below is the same one it makes, so the two disagreeing means one of
         them decides nothing."""
         if not self.available:

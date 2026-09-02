@@ -263,7 +263,7 @@ def test_a_dropped_guard_widens_never_narrows(tmp_path):
     )
 
 
-# --- the knob --------------------------------------------------------------
+# --- the switch ------------------------------------------------------------
 
 
 def test_mode_defaults_on_and_rejects_typos(monkeypatch):
@@ -392,15 +392,24 @@ def test_csrc_data_readers_keep_their_steps(vllm_repo, state, live_map):
 # --- the narrowing, through the real select() ------------------------------
 
 
+def _positive_bound(state, path):
+    """What may survive outside the mapped families: CI's own declarers plus
+    the steps running the file's op tests, which exist on every pipeline."""
+    from ci_selector.codemap.classify import _classify_native_tests
+
+    native = _classify_native_tests(state, path)
+    return _source_dep_steps(state, path) | (native.step_ids if native else set())
+
+
 def test_a_cuda_only_tu_sheds_the_other_families_steps(state):
-    """Only a step naming csrc/ in its own source deps may survive outside
-    the mapped families, since that is CI's own trigger."""
+    """Only a declarer or a step running the file's op tests may survive
+    outside the mapped families."""
     sel = select(state, [CUDA_TU])
     per, union, nonfamily = state.family_partition()
     picked = set(sel.selected)
-    declared = _source_dep_steps(state, CUDA_TU)
-    assert picked & per["xpu"] <= declared, sorted(picked & per["xpu"] - declared)[:5]
-    assert picked & per["amd"] <= declared, sorted(picked & per["amd"] - declared)[:5]
+    allowed = _positive_bound(state, CUDA_TU)
+    assert picked & per["xpu"] <= allowed, sorted(picked & per["xpu"] - allowed)[:5]
+    assert picked & per["amd"] <= allowed, sorted(picked & per["amd"] - allowed)[:5]
     assert len(picked & nonfamily) > 100  # the main-image world stays
 
 
@@ -408,9 +417,9 @@ def test_a_shared_cuda_amd_tu_keeps_the_amd_leg(state):
     sel = select(state, [SHARED_TU])
     per, _union, nonfamily = state.family_partition()
     picked = set(sel.selected)
-    declared = _source_dep_steps(state, SHARED_TU)
+    allowed = _positive_bound(state, SHARED_TU)
     assert picked & per["amd"]
-    assert picked & per["xpu"] <= declared, sorted(picked & per["xpu"] - declared)[:5]
+    assert picked & per["xpu"] <= allowed, sorted(picked & per["xpu"] - allowed)[:5]
     assert len(picked & nonfamily) > 100
 
 
@@ -425,13 +434,13 @@ def test_an_unmapped_csrc_path_keeps_the_full_union(state, monkeypatch):
     assert on == off
 
 
-def test_the_knob_off_restores_the_blanket(state, monkeypatch):
+def test_the_switch_off_restores_the_wider_answer(state, monkeypatch):
     on = select(state, [CUDA_TU]).selected
     monkeypatch.setenv(ENV_VAR, "off")
     off = select(state, [CUDA_TU]).selected
     assert set(on) < set(off)
     per, _union, _nonfamily = state.family_partition()
-    assert set(off) & per["xpu"]  # the blanket reaches intel again
+    assert set(off) & per["xpu"]  # unnarrowed, it reaches intel again
 
 
 def test_the_clause_stands_down_on_unmapped_devices(state, monkeypatch):

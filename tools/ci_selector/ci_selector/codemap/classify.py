@@ -14,7 +14,7 @@ claims, then per file the first matching claim wins:
   a closure that has gone hub-like)
   added-file family -> renamed-or-copied -> rust -> requirements-file ->
   release-ci -> exclusive-family scoped fail-open -> target-coverage ->
-  package-data -> declared-deps -> terminal fail-open run-all.
+  package-data -> native-tests -> declared-deps -> terminal fail-open run-all.
 
 Then `unions.py` adds what every path owes, then preflight escalations.
 
@@ -39,8 +39,9 @@ from ..handwritten import (
     REQUIREMENTS_BUILD_VALIDATED,
     RUST_GATE_ENV_VARS,
     RUST_PYO3_BRIDGE_FILE,
+    RUST_TOOLCHAIN_FILES,
 )
-from . import build_map, colocation, hardware, native_ops, registry_diff
+from . import build_map, colocation, hardware, native_ops, registry_diff, step_refs
 from .claim import (
     Claim,
     classify_world,
@@ -51,6 +52,7 @@ from .externals import DOCKER_DIR
 from .graph.model_registry import resolve_module_name
 from .pipeline.buildkite import CI_DIR
 from .pipeline.step import PipelineConfig
+from .pipeline.targets import working_dir_to_repo_rel
 from .repo import is_test_basename, is_test_file
 from .selection import (
     Selection,
@@ -70,8 +72,13 @@ from .step_refs import (
     _direct_step_refs,
     _hardware_family_steps,
     _source_dep_steps,
+    _source_dep_steps_ungated,
 )
-from .unions import _apply_declarer_union, _apply_image_input_union
+from .unions import (
+    _apply_declarer_union,
+    _apply_image_input_union,
+    _build_map_allowed,
+)
 from .worktree import full_graph_for
 
 PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
@@ -84,12 +91,12 @@ def select(
     base: str | None = None,
     head: str | None = None,
 ) -> Selection:
-    # Read once and discarded, so a typo in CI_SELECTOR_COLOCATION,
-    # CI_SELECTOR_BUILD_MAP or CI_SELECTOR_CSRC_OPS kills the run instead of
-    # changing behaviour on whichever diff first hits the rule.
+    # Read once and discarded, so a typo in any CI_SELECTOR_* switch kills the
+    # run instead of changing behaviour on whichever diff first hits a rule.
     colocation.mode()
     build_map.mode()
     native_ops.mode()
+    step_refs.mode()
     sel = Selection()
     sel.docs_affected, sel.docs_reasons = state.docs_deps.docs_affected(paths)
     if docs_only(paths):
@@ -180,15 +187,17 @@ def _classify_rust(state: RepoState, path: str) -> Claim:
 
     Three legs replace the docker-image widening, which this rule opts out of
     because that widening borrows whole-context images and balloons the answer.
-    The legs are steps opting into the binary via the gate env vars; steps on
-    images that COPY the file in by name; and, for files reaching the PyO3
-    cdylib, the bridge file's whole claim, since that parser is imported with
-    no env gate. Declarers arrive from the declarer union. Never droppable: a
-    coverage row names Python functions and a .rs change is invisible to it.
+    The legs are steps opting into the binary via the gate env vars; steps
+    naming a workspace path in their own commands or scripts; steps on images
+    that COPY the file in by name; and, for files reaching the PyO3 cdylib,
+    the bridge file's whole claim, since that parser is imported with no env
+    gate. Never droppable: a coverage row names Python functions and a .rs
+    change is invisible to it.
     """
     ws = state.rust_workspace
     bucket = ws.bucket_of(path) or "root"
     gate_steps = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
+    gate_steps |= state.keys.steps_naming_raw({"rust/", *RUST_TOOLCHAIN_FILES})
     gate_steps &= state.auto_step_ids
     image_steps: set[str] = set()
     for df in state.artifacts.explicit_images_of(path):
@@ -223,7 +232,10 @@ def _classify_requirements(state: RepoState, path: str) -> Claim | None:
     opts out of that widening. The manual-only fall-through applies there too.
     """
     if path in REQUIREMENTS_BUILD_VALIDATED:
-        declarers = _source_dep_steps(state, path)
+        # Ignores the switch: this rule picks steps from declarations by
+        # design. Silencing it sends the family-less files to run-all and
+        # leaves the rest with nothing.
+        declarers = _source_dep_steps_ungated(state, path)
         if declarers & state.auto_step_ids:
             return Claim(
                 "requirements",
@@ -234,7 +246,7 @@ def _classify_requirements(state: RepoState, path: str) -> Claim | None:
         return None
     family = hardware.requirements_family_of_path(path)
     fam_steps = state.family_steps(family) if family else set()
-    step_ids = _source_dep_steps(state, path) | fam_steps
+    step_ids = _source_dep_steps_ungated(state, path) | fam_steps
     if step_ids & state.auto_step_ids:
         return Claim(
             "requirements",
@@ -292,11 +304,58 @@ def _classify_declared_deps(state: RepoState, path: str) -> Claim | None:
     return Claim("declared-deps", detail, step_ids=step_ids)
 
 
+def _classify_native_tests(state: RepoState, path: str) -> Claim | None:
+    """A kernel file routed by its own ops instead of by a declaration: the
+    steps running the tests that name its ops, plus direct references, plus
+    its device family. Declines without derived evidence, so a file with no
+    ops keeps the fall-through below.
+
+    This reaches everything the declared lists reached, except where the build
+    map proves the file cannot compile into that step's family."""
+    # The switch means "the op parse is not to be trusted"; routing must stand
+    # down with it, same as the drop pass, or selection rides disarmed
+    # evidence with no declared fallback behind it.
+    if not state.native_ops.owns(path) or native_ops.mode() != "on":
+        return None
+    tests = state.native_ops.test_files_for(path)
+    core: set[str] = set(_direct_step_refs(state, path))
+    for tf in tests:
+        core |= _steps_targeting(state, tf)
+    if not core & state.auto_step_ids:
+        return None
+    step_ids = set(core)
+    detail = (
+        f"{path}: routed by its op joints ({len(tests)} op-referencing test "
+        f"files -> {len(core)} steps)"
+    )
+    family = hardware.family_of_path(path)
+    if family:
+        step_ids |= state.family_steps(family)
+        detail += f" + {family} device family ({len(step_ids - core)} more steps)"
+    return Claim("native-tests", detail, step_ids=step_ids)
+
+
+def _workdir_affinity_steps(state: RepoState, path: str) -> set[str]:
+    """Steps whose declared working_dir covers `path`, meaning the whole tree
+    is that job's. The Examples step spells its commands relative to the
+    examples tree, so an example it does not invoke is still its business.
+    Package roots and the default tests workdir are excluded."""
+    out: set[str] = set()
+    for p in state.pipelines:
+        for s in p.steps:
+            cwd = working_dir_to_repo_rel(s.working_dir)
+            if not cwd or cwd + "/" in _ROOT_PREFIXES:
+                continue
+            if path.startswith(cwd + "/"):
+                out.add(s.step_id)
+    return out
+
+
 def _steps_targeting(state: RepoState, path: str) -> set[str]:
-    """Steps whose targets cover a tests-side file, four ways: a directory
+    """Steps whose targets cover a tests-side file, five ways: a directory
     target holding it, a .py target sitting beside it, a direct data or script
-    reference, and for a conftest or __init__ any target under its directory,
-    since those affect everything below them."""
+    reference, workdir affinity, and for a conftest or __init__ any target
+    under its directory, since those affect everything below them."""
     covering: set[str] = set()
     base = path.rsplit("/", 1)[-1]
     subtree = base in ("conftest.py", "__init__.py")
@@ -326,7 +385,7 @@ def _steps_targeting(state: RepoState, path: str) -> set[str]:
                     ):
                         covering.add(sid)
                         break
-    return covering
+    return covering | _workdir_affinity_steps(state, path)
 
 
 def _classify_testside(
@@ -340,9 +399,8 @@ def _classify_testside(
     point. For tests and benchmarks, no covering step IS the answer: those
     trees exist to be run by a step. The Examples step names each example as a
     file target with no directory target, so the directory leg can never fire
-    for them, and most of that tree would come back as a zero claim purely
-    because of how that step spells its commands. An uncovered examples path
-    falls through to the rules below instead.
+    for them. The step's working_dir covers that tree instead, and a path even
+    that cannot reach falls through to the rules below rather than zeroing.
     """
     if not path.startswith(("tests/", "benchmarks/", "examples/")):
         return None
@@ -350,12 +408,19 @@ def _classify_testside(
         return None
     covering = _steps_targeting(state, path) | set(ride_along)
     if covering & state.auto_step_ids:
-        return Claim(
-            "target-coverage",
+        step_ids = set(covering)
+        detail = (
             f"{path} is a tests-side file outside the import graph; "
-            f"{len(covering)} steps' targets cover its directory",
-            step_ids=covering,
+            f"{len(covering)} steps' targets cover its directory"
         )
+        if path.startswith("examples/"):
+            # A device-named example keeps its family, as the declared route
+            # gave it.
+            family = hardware.family_of_path(path)
+            if family:
+                step_ids |= state.family_steps(family)
+                detail += f" + {family} device family"
+        return Claim("target-coverage", detail, step_ids=step_ids)
     if covering:
         return Claim(
             "target-coverage",
@@ -569,7 +634,9 @@ def _apply_csrc_droppability(state: RepoState, path: str, claim: Claim) -> Claim
     proxies = state.native_ops.proxies_for(path)
     if not proxies:
         return claim
-    held: set[str] = set(_source_dep_steps(state, path))
+    # Ignores the switch: this can only keep a step, never pick or narrow one,
+    # and a step CI itself triggers from a declaration is real.
+    held: set[str] = set(_source_dep_steps_ungated(state, path))
     held |= {s for ss in state.artifacts.producers_of.values() for s in ss}
     held |= {s for ss in state.artifacts.self_builders.values() for s in ss}
     for test_file in state.native_ops.test_files_for(path):
@@ -762,7 +829,9 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     # scoped fail-open, which would otherwise read its name as a device family.
     # A live-step declarer turns this off, since the file rejoined the tests.
     if path in state.release_refs and not (
-        _source_dep_steps(state, path) & state.auto_step_ids
+        # Ignores the switch: this only ever says "the file is still tested",
+        # so silencing it would invent empty answers.
+        _source_dep_steps_ungated(state, path) & state.auto_step_ids
     ):
         return Claim(
             "release-ci",
@@ -788,17 +857,30 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
             if not hardware.device_excluded_for_path(path, s.device, s)
             or _directly_collects(p.targets.get(s.step_id), path)
         }
-        return Claim(
-            "fail-open",
-            f"{path} is unclaimed; running its device family (scoped fail-open)",
-            step_ids=step_ids,
-        )
+        detail = f"{path} is unclaimed; running its device family (scoped fail-open)"
+        # The complement keeps every GPU suite carrying no device name, but a
+        # source cannot break a suite whose build never compiles it. Steps that
+        # invoke the file directly are kept either way.
+        fams = state.build_map.families.get(path)
+        if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+            direct = {
+                sid
+                for p in state.pipelines
+                for sid, st in p.targets.items()
+                if _directly_collects(st, path)
+            }
+            step_ids = (step_ids & _build_map_allowed(state, fams)) | direct
+            detail += f"; build-map scoped to {sorted(fams)}"
+        return Claim("fail-open", detail, step_ids=step_ids)
     testside = _classify_testside(state, path)
     if testside is not None:
         return testside
     pkg_data = _classify_package_data(state, path)
     if pkg_data is not None:
         return pkg_data
+    native = _classify_native_tests(state, path)
+    if native is not None:
+        return native
     declared = _classify_declared_deps(state, path)
     if declared is not None:
         return declared
@@ -975,14 +1057,17 @@ def _classify_graph(state: RepoState, path: str) -> Claim | None:
     dep_steps = _source_dep_steps(state, path, specific_only=True)
     if dep_steps:
         detail += f"; {len(dep_steps)} steps declare it as a source dep"
+    # An examples script no step invokes still belongs to its tree's job.
+    # Not droppable, like the step it replaces.
+    affinity = _workdir_affinity_steps(state, path)
     claim = Claim(
         "graph",
         detail,
         test_files=test_files | script_files,
-        step_ids=direct_steps | key_steps | dep_steps,
+        step_ids=direct_steps | key_steps | dep_steps | affinity,
         # hw_steps is subtracted, not just left out: it stands for compiled
         # reach nothing records, so a step it holds stays held.
-        droppable_step_ids=(inferred_steps | dep_steps) - hw_steps,
+        droppable_step_ids=(inferred_steps | dep_steps) - hw_steps - affinity,
         droppable_test_files=True,
     )
     # Here and not earlier, so _nothing_auto_runs claims (rule "graph" but
@@ -1207,7 +1292,9 @@ def _classify_lint_only(state: RepoState, path: str) -> Claim | None:
         return None
     if _direct_step_refs(state, path) or path in state.docker_inputs:
         return None
-    if _source_dep_steps(state, path):
+    # Ignores the switch: a declared hook script must never be silenced into
+    # "nothing to run".
+    if _source_dep_steps_ungated(state, path):
         return None
     # If a step runs pre-commit itself, the config and its hooks belong to
     # that step and not to nothing.

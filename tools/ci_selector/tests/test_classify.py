@@ -29,7 +29,7 @@ def test_docs_only_short_circuit(state):
     assert sel.docs_only and not sel.selected
 
 
-def test_shared_build_inputs_reach_every_platform(state):
+def test_shared_build_inputs_reach_every_platform(state, declared_deps_on):
     """The guard for the two pipelines nothing else watches.
 
     The shared build inputs reach the AMD and Intel steps only through the
@@ -84,6 +84,7 @@ def test_shared_build_inputs_reach_every_platform(state):
                 f"{name} than a rocm-only requirements file does"
             )
 
+    from ci_selector.codemap import classify
     from ci_selector.codemap.step_refs import _source_dep_steps
 
     shared_tu = "csrc/libtorch_stable/cache_kernels.cu"
@@ -99,13 +100,15 @@ def test_shared_build_inputs_reach_every_platform(state):
     # And the narrowing is live. Without this the test cannot tell if the
     # wider answer came back.
     declared = _source_dep_steps(state, shared_tu)
-    assert picked & per["xpu"] <= declared, (
-        f"{shared_tu} reaches intel steps beyond its declarers; the family "
-        "scoping stopped applying"
+    native = classify._classify_native_tests(state, shared_tu)
+    derived_core = native.step_ids if native else set()
+    assert picked & per["xpu"] <= declared | derived_core, (
+        f"{shared_tu} reaches intel steps beyond its declarers and its own "
+        "op-test joints; the family scoping stopped applying"
     )
 
 
-def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state):
+def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state, declared_deps_on):
     """csrc/cpu/ is cpu-exclusive and unclaimed: route via the blanket csrc/
     declarers plus the cpu family, not the bare complement (GPU jobs can't run it)."""
     sel = select(state, ["csrc/cpu/cpu_attn.cpp"])
@@ -189,9 +192,13 @@ def test_no_vllm_file_imports_tests(state):
     assert not leaks, leaks[:5]
 
 
-def test_engine_gate_on_worker_file_keeps_catching_job(state):
+def test_engine_gate_on_worker_file_keeps_catching_job(state, declared_deps_on):
     """#49364: the engine-starting gate trims non-engine tests reached through a
-    boot edge, but the catching job (V1 Sample + Logits) must survive."""
+    boot edge, but the catching job (V1 Sample + Logits) must survive.
+
+    DECLARED-DEPS ONLY: rides a declaration the derived default gives up, so
+    by default this file alone does not select the catching job. A derived
+    route is queued in todo."""
     sel = select(state, ["vllm/v1/worker/gpu/cudagraph_utils.py"])
     assert "vllm_ci" not in sel.run_all
     labels = {
@@ -202,9 +209,13 @@ def test_engine_gate_on_worker_file_keeps_catching_job(state):
     )
 
 
-def test_gpu_worker_namespace_reaches_cpu_jobs(state):
+def test_gpu_worker_namespace_reaches_cpu_jobs(state, declared_deps_on):
     """cpu_worker.py subclasses gpu_worker.Worker, so gpu-namespace changes must reach
-    intel_cpu jobs (the old subtractive rule under-selected)."""
+    intel_cpu jobs (the old subtractive rule under-selected).
+
+    DECLARED-DEPS ONLY: rides a declaration the derived default gives up. CPU
+    steps cannot record, so the add side cannot restore them either. A derived
+    route is queued in todo."""
     sel = select(state, ["vllm/v1/worker/gpu_worker.py"])
     cpu_selected = {
         s.label
@@ -355,7 +366,7 @@ def test_model_named_in_step_env_var(state):
     assert any("Invariance" in lbl for lbl in labels), sorted(labels)[:10]
 
 
-def test_lm_eval_routes_by_declared_deps(state):
+def test_lm_eval_routes_by_declared_deps(state, declared_deps_on):
     """lm-eval steps route by source_file_dependencies, not the import graph, so a
     quant file and a base-model file select different lm-eval jobs."""
     quant = set(
@@ -369,7 +380,7 @@ def test_lm_eval_routes_by_declared_deps(state):
     assert "vllm_ci:lm-eval-small-models-amd:amd" in model
 
 
-def test_no_classifier_drops_declared_source_deps(state):
+def test_no_classifier_drops_declared_source_deps(state, declared_deps_on):
     """A step declaring a path in source_file_dependencies must survive into that path's
     claim; dropping it is under-selection. Probes a deep new-subpackage file under every
     declared dir plus every declared file. Exempts run-all and authoritative-nothing
@@ -458,7 +469,7 @@ def test_negated_dep_carves_out_of_a_broader_positive(state):
     assert live, "no negated deps in the live config any more: specimen drifted"
 
 
-def test_catch_all_declarers_omitted_on_graph_known_leaf(state):
+def test_catch_all_declarers_omitted_on_graph_known_leaf(state, declared_deps_on):
     """On a graph-known leaf the graph is authoritative, so a step declaring only
     bare `vllm/` is omitted (graph closure plus SPECIFIC declarers, not CI blanket)."""
     from ci_selector.codemap.classify import _source_dep_steps
@@ -1004,9 +1015,12 @@ def test_package_init_routes_to_package_steps(state):
     assert any("basic-correctness" in s for s in _selected(sel))
 
 
-def test_boot_edge_reaches_conftest_server_suites(state):
+def test_boot_edge_reaches_conftest_server_suites(state, declared_deps_on):
     """A boot-edge diff must select suites whose engine boot happens in a
-    conftest server fixture, not just direct entrypoint importers."""
+    conftest server fixture, not just direct entrypoint importers.
+
+    DECLARED-DEPS ONLY: rides a declaration the derived default gives up. A
+    derived route is queued in todo."""
     sel = select(state, ["vllm/v1/worker/gpu_model_runner.py"])
     assert "vllm_ci" not in sel.run_all
     assert any("metrics-tracing" in s for s in _selected(sel))
@@ -1370,17 +1384,19 @@ def test_eagle_config_selects_examples_steps(state):
     assert "vllm_ci:examples" in sel.selected
 
 
-def test_examples_testside_is_non_terminal(state):
-    """`_classify_testside` accepts examples/ but must not be terminal there.
+def test_examples_route_by_workdir_affinity_not_zero_claims(state):
+    """Every examples file reaches its tree's steps, never a zero claim.
 
-    For tests/ and benchmarks/ a covering-step miss IS the answer: those trees
-    exist to be run by a step. Examples are different. The Examples step
-    invokes `python3 <file>.py` per example, so it declares FILE targets and no
-    directory target, and the directory leg of `_steps_targeting` can
-    never fire for them. Returning a zero claim on that miss would silently
-    unroute the chat templates, which is a worse trade than the hand list.
+    The Examples step invokes each example by name, so it declares file
+    targets and no directory target and the directory leg cannot fire. Its
+    working_dir carries the tree instead. The floor below checks that leg is
+    alive, since without it the tree falls back to the declarations.
     """
-    from ci_selector.codemap.classify import _classify_testside, _steps_targeting
+    from ci_selector.codemap.classify import (
+        _classify_testside,
+        _steps_targeting,
+        _workdir_affinity_steps,
+    )
 
     examples = sorted(
         f.relative_to(state.repo).as_posix()
@@ -1388,14 +1404,16 @@ def test_examples_testside_is_non_terminal(state):
         if f.is_file()
     )
     assert len(examples) > 100, "examples tree collapsed; refresh the fixture"
-    uncovered = [f for f in examples if not _steps_targeting(state, f)]
-    # Floor: if every example were covered this would pass against any behaviour.
-    assert uncovered, "no uncovered examples file left; the guard is vacuous"
-    for path in uncovered:
-        assert _classify_testside(state, path) is None, (
-            f"{path} got a terminal target-coverage claim; an uncovered "
-            "examples path must fall through to the rules below"
-        )
+    affinity = _workdir_affinity_steps(state, examples[0])
+    assert affinity & state.auto_step_ids, (
+        "no auto step declares an examples working_dir; the tree would fall "
+        "back to the declarations"
+    )
+    for path in examples[:200]:
+        covering = _steps_targeting(state, path)
+        assert covering & state.auto_step_ids, f"{path} lost its tree's steps"
+        claim = _classify_testside(state, path)
+        assert claim is not None and claim.step_ids & state.auto_step_ids
 
 
 def test_no_examples_file_reaches_the_terminal_fail_open(state):
@@ -1445,7 +1463,9 @@ def test_rust_toolchain_routes_to_cargo_steps(state):
     assert "vllm_ci:rust-frontend-cargo-tests" in sel.selected
 
 
-def test_cmake_cpu_extension_routes_to_declarers_plus_cpu_family(state):
+def test_cmake_cpu_extension_routes_to_declarers_plus_cpu_family(
+    state, declared_deps_on
+):
     """Real CI's route (the declaring steps) plus the CPU family whose suites compile
     the extension in-step without declaring it (previously excluded, then run-all)."""
     sel = select(state, ["cmake/cpu_extension.cmake"])
@@ -1472,7 +1492,7 @@ def test_undeclared_oddball_still_fails_open(state):
     assert set(sel.run_all) == {"vllm_ci", "vllm_intel_ci", "vllm_rocm_ci"}
 
 
-def test_all_manual_declarers_fall_open(state):
+def test_all_manual_declarers_fall_open(state, declared_deps_on):
     """Direction guard: with no auto-run declarer the rule must not silently
     select nothing. cmake/cpu_extension.cmake is graph-blind and declared only
     by steps this test strips from `auto_step_ids`, so it reaches the terminal
@@ -1489,7 +1509,7 @@ def test_all_manual_declarers_fall_open(state):
     assert claim.rule == "fail-open" and claim.run_all
 
 
-def test_requirements_all_manual_declarers_fall_open(state):
+def test_requirements_all_manual_declarers_fall_open(state, declared_deps_on):
     import dataclasses
 
     from ci_selector.codemap.classify import _classify, _source_dep_steps
@@ -1502,7 +1522,7 @@ def test_requirements_all_manual_declarers_fall_open(state):
     assert claim.rule == "fail-open" and claim.run_all
 
 
-def test_hipify_also_selects_declaring_abi_step(state):
+def test_hipify_also_selects_declaring_abi_step(state, declared_deps_on):
     """`cmake/hipify.py` was a rocm-only run_all match, but vllm_ci's
     torch-abi audit declares cmake/: real CI runs it, so must we. Derived, the
     declarer route is what carries it now that the sweep is gone."""
@@ -1520,7 +1540,7 @@ def test_family_exclusive_no_declarers_keeps_complement(state):
     assert claim.rule == "fail-open" and not claim.run_all and claim.step_ids
 
 
-def test_family_exclusive_inside_roots_keeps_complement(state):
+def test_family_exclusive_inside_roots_keeps_complement(state, declared_deps_on):
     """The roots gate holds inside the scoped consult: a cpu-exclusive vllm asset with
     blanket vllm/ declarers keeps the complement, not the (narrowing) declarers."""
     from ci_selector.codemap.classify import _classify, _source_dep_steps
@@ -1590,7 +1610,7 @@ def test_manual_only_script_ref_selects_nothing_with_manual_hits(state):
     assert sel.manual_hits
 
 
-def test_added_init_under_covered_tests_dir_routes(state):
+def test_added_init_under_covered_tests_dir_routes(state, declared_deps_on):
     """#50330 shape: an added tests __init__ under a directory a step targets
     routes to that step (not run-all)."""
     from ci_selector.codemap.classify import _classify
@@ -2711,7 +2731,7 @@ def test_requirements_cuda_keeps_unlabeled_consumers(state):
     assert "vllm_ci:kernels-attention-test" in sel.selected
 
 
-def test_build_validated_manual_only_declarers_fall_open(state):
+def test_build_validated_manual_only_declarers_fall_open(state, declared_deps_on):
     """Same guarantee as the plain requirements rule: if every declarer is
     manual-only the floor would select nothing real, so fall open."""
     import dataclasses

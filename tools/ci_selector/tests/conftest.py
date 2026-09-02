@@ -80,3 +80,11 @@ def full(state):
     Nothing in select or preflight mutates it. A test that needs a graph built
     at a specific commit, or that times a cold build, must build its own."""
     return state.full
+
+
+@pytest.fixture
+def declared_deps_on(monkeypatch):
+    """Let the hand-written declared lists pick steps again, for tests of
+    behaviour that only exists then: declarer-union rules, declared-deps
+    routes, and the few reaches the derived default gives up."""
+    monkeypatch.setenv("CI_SELECTOR_DECLARED_DEPS", "on")

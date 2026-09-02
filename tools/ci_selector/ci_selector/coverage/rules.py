@@ -9,7 +9,7 @@ concluded. Ungated, because one observation proves presence.
 
 DROP: a row showing a step ran none of them removes it, but only once every
 gate below agrees. Proving ABSENCE needs the recorder to have been watching the
-right file, during a run that finished, on code that still exists. Every rung
+right file, during a run that finished, on code that still exists. Every check
 resolves toward keeping.
 """
 
@@ -276,7 +276,7 @@ def read_pr(
         # What counts as "runs" is `mode`. Under OFF an import counts as use: a
         # step that imports a file it never otherwise touches can still break
         # when that file changes. The stricter modes require a call frame.
-        # `look_up` re-makes this exact match one rung lower, so both read the
+        # `look_up` re-makes this exact match further down, so both read the
         # same predicate or neither moves.
         row = table.row(key)
         if row is not None and any(
@@ -288,7 +288,7 @@ def read_pr(
 
         # The row describes the step as it was at the table's commit. If the
         # step's tests or its definition moved since, it describes a step that
-        # no longer exists. Below the positive rung because both outcomes keep,
+        # no longer exists. Below the positive check because both outcomes keep,
         # so the order only decides which counter gets the credit.
         if step_id in stale:
             reading.kept.append(step_id)

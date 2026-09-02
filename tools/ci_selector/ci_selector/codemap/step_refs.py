@@ -9,12 +9,31 @@ rule and the co-location rule need all three and neither owns them.
 
 from __future__ import annotations
 
+import os
+
 from . import hardware
 from .claim import step_declares
 from .state import RepoState
 
+ENV_VAR = "CI_SELECTOR_DECLARED_DEPS"
+MODES = ("on", "off")
 
-def _source_dep_steps(
+
+def mode() -> str:
+    """Whether the hand-written `source_file_dependencies` lists pick steps.
+    Unset means "off": everything is derived from the code. "on" adds the
+    declared steps back on top. An unrecognized value raises rather than
+    defaulting, since a swallowed typo looks exactly like the switch doing
+    nothing."""
+    raw = os.environ.get(ENV_VAR)
+    if raw is None or raw == "":
+        return "off"
+    if raw in MODES:
+        return raw
+    raise ValueError(f"{ENV_VAR}={raw!r}, expected one of: {', '.join(MODES)}")
+
+
+def _source_dep_steps_ungated(
     state: RepoState, path: str, specific_only: bool = False
 ) -> set[str]:
     """Steps that declare `path` in their source_file_dependencies. For a file
@@ -25,13 +44,29 @@ def _source_dep_steps(
     catch-all prefix matches. On a file the graph knows, the graph is the
     better answer and a blanket `vllm/` adds only the CI config's
     over-declaration, which would cap the saving at zero. Graph-blind files
-    always take the full union, since the declaration is all they have."""
+    always take the full union, since the declaration is all they have.
+
+    Ignores the switch, for three callers: the requirements rule, which picks
+    steps from declarations by design, and the two places where a declaration
+    only ever says "this file is still tested". Silencing those would make the
+    switch invent empty answers. Everything that picks steps by declaration
+    goes through `_source_dep_steps` instead."""
     return {
         s.step_id
         for p in state.pipelines
         for s in p.steps
         if step_declares(s.source_file_dependencies, path, specific_only)
     }
+
+
+def _source_dep_steps(
+    state: RepoState, path: str, specific_only: bool = False
+) -> set[str]:
+    """The one place the switch acts: every read that picks steps from the
+    declared lists comes through here."""
+    if mode() == "off":
+        return set()
+    return _source_dep_steps_ungated(state, path, specific_only)
 
 
 def _direct_step_refs(state: RepoState, path: str) -> set[str]:

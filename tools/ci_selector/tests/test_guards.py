@@ -320,7 +320,7 @@ def test_preflight_clean_at_head(state):
 
     The exception: the two Ascend NPU steps run tests from the vllm-ascend
     image, so no checkout can map them. That is permanent, not degradation, and
-    letting it flip `clean` to False forever would blind this tripwire."""
+    letting it flip `clean` to False forever would blind this detector."""
     pf = state.preflight
     degraded = drift_message(
         "Preflight is no longer quiet against the live checkout.",

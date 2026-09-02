@@ -381,7 +381,7 @@ def phase_table_path(tmp_path: Path, tmp_repo: Repo) -> Path:
 class TestPhaseInLookUp:
     """`look_up` is the second of the two sites reading a phase mode.
 
-    It re-makes the keep rung's match one rung lower, so it needs its own
+    It re-makes the keep check's match further down, so it needs its own
     coverage at every mode. `rules.py` pins that the two sites agree; this pins
     what the answer actually is.
     """

@@ -227,7 +227,9 @@ def test_bamba_removal_direction(vllm_repo, bamba_shas):
     assert n < 120, f"expected scoped selection, got {n} (file-level was 170)"
 
 
-def test_table_claim_carries_specific_declarers(vllm_repo, bamba_shas):
+def test_table_claim_carries_specific_declarers(
+    vllm_repo, bamba_shas, declared_deps_on
+):
     """The table-diff claim is built outside _classify, so it used to skip the
     declarer union: a step naming the registry file specifically, but
     running tests elsewhere, was dropped."""

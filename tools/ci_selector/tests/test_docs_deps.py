@@ -191,7 +191,7 @@ def test_real_reexports_are_not_broken(vllm_repo, full):
         assert symbol_status(module, symbol, vllm_repo) != "BROKEN", target
 
 
-# --- completeness tripwires (self-adapting) ---------------------------------
+# --- completeness detectors (self-adapting) ---------------------------------
 
 
 def test_no_unhandled_mkdocstrings_directives(vllm_repo):

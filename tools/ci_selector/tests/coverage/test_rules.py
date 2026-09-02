@@ -187,7 +187,7 @@ class TestFreshnessGate:
     """A row may only drop a step it still describes.
 
     The gate itself lives in `freshness.py` and has its own tests; this pins the
-    rung inside `read_pr` that consumes it, which had no test at all -- nothing
+    check inside `read_pr` that consumes it, which had no test at all -- nothing
     anywhere passed `stale`.
     """
 
@@ -624,11 +624,11 @@ class TestPhaseModes:
     def test_both_predicate_sites_move_together(self, table):
         """The trap this whole design exists to prevent.
 
-        `look_up` re-makes the keep rung's match one rung lower. Swap only the
-        rung and `look_up` keeps the step anyway; swap only `look_up` and the
-        rung never reaches it. Both halves read as "the mode buys nothing", so
+        `look_up` re-makes the keep check's match further down. Swap only the
+        check and `look_up` keeps the step anyway; swap only `look_up` and the
+        check never reaches it. Both halves read as "the mode buys nothing", so
         assert the drop AND the vanished reason: the first fails if `look_up`
-        was missed, the second if the rung was.
+        was missed, the second if the check was.
         """
         reading = read(
             table, self._mixed(), "vllm_ci:runs-method", mode=PhaseMode.CARVED
@@ -852,7 +852,7 @@ class TestProxyEvidence:
             ],
         )
 
-    def test_the_positive_rung_reads_proxy_wrappers(self, table):
+    def test_the_positive_check_reads_proxy_wrappers(self, table):
         reading = read(table, self._proxy_query("plain"), "vllm_ci:runs-plain")
         assert "vllm_ci:runs-plain" in reading.kept
         assert reading.reasons["row-executes-a-changed-function"] == 1

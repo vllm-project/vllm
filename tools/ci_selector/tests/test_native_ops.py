@@ -260,11 +260,13 @@ def test_direct_caller_test_steps_stay_non_droppable(state):
     assert not claim.droppable_step_ids & held
 
 
-def test_the_knob_off_leaves_selection_identical_and_grants_nothing(state, monkeypatch):
+def test_the_switch_off_disarms_both_routing_and_droppability(state, monkeypatch):
+    """Off means the op parse is not trusted: nothing becomes droppable and
+    the routing rule declines, so the answer can only get wider."""
     on = select(state, [NVFP4])
     monkeypatch.setenv(ENV_VAR, "off")
     off = select(state, [NVFP4])
-    assert on.selected.keys() == off.selected.keys()
+    assert set(on.selected) <= set(off.selected) or off.run_all
     assert not any(c.droppable_step_ids for c in off.claims)
     assert any(c.droppable_step_ids for c in on.claims)
 
