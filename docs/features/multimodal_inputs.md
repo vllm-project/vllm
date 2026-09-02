@@ -844,20 +844,19 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 #### Video Decoding Backend
 
-vLLM decodes video bytes into frames using a selectable decoding backend. Five
+vLLM decodes video bytes into frames using a selectable decoding backend. Four
 backends are supported:
 
 | Backend | Device | Description |
 | --- | --- | --- |
 | `opencv` (default) | CPU | OpenCV-based decoder |
-| `pyav` | CPU | PyAV decoder |
 | `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
 | `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
 | `deepstream` | GPU | NVIDIA DeepStream decoder |
 
-The three CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
-choose which FFmpeg version is used while `opencv` and `pyav` rely on whichever
-FFmpeg build they were linked against.
+The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
+choose which FFmpeg version is used while `opencv` relies on whichever
+FFmpeg build it was linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -1365,6 +1364,13 @@ Just like with offline inference, you can skip sending media if you expect cache
             "type": "image_pil",
             "image_pil": None,
             "uuid": image_uuid,
+        },
+
+        # video_url:
+        {
+            "type": "video_url",
+            "video_url": {},
+            "uuid": video_uuid,
         },
 
     ```
