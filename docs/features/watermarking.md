@@ -20,6 +20,16 @@ vllm serve MODEL \
 Watermarking is disabled when `--watermark-config` is omitted. Gumbel is the
 default algorithm within an enabled `WatermarkConfig`.
 
+Requests can opt out without changing the engine-level algorithm or key:
+
+```python
+from vllm import SamplingParams
+
+sampling_params = SamplingParams(watermarking=False)
+```
+
+The OpenAI-compatible APIs accept the same `watermarking: false` request field.
+
 `context_width` controls how many prior output tokens seed each watermark
 decision and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
