@@ -209,7 +209,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             refines_row_mirrors = bool(
                 async_speculative
                 and speculative_config is not None
-                and speculative_config.use_multi_module_mtp()
+                and speculative_config.uses_draft_kv_cache()
             )
             self.connector_scheduler = HiSparseConnectorScheduler(
                 coordinator,
@@ -236,10 +236,14 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.finish_forward()
 
     def stage_host_mirror_mapping(
-        self, slot_mappings: torch.Tensor, num_tokens: int
+        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
     ) -> None:
         assert self.connector_worker is not None
         self.connector_worker.stage_row_mirror_mapping(slot_mappings, num_tokens)
+
+    def finish_host_mirror_forward(self) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.finish_staged_mirror_forward()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None

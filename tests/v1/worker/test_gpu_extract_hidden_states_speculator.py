@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -64,6 +65,8 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     speculator.hidden_states = torch.zeros(4, 2, 3)
     speculator.draft_attn_layer_names = {layer_name}
     speculator.model = _RecordingModel()
+    speculator.slot_mapping_observer = Mock()
+    speculator.host_mirror_forward_observer = Mock()
 
     input_batch = cast(
         Any,
@@ -107,6 +110,8 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     assert kwargs["num_tokens"] == 4
     assert set(kwargs["slot_mapping"]) == {layer_name}
     assert torch.equal(kwargs["slot_mapping"][layer_name], slot_mappings[layer_name])
+    speculator.slot_mapping_observer.assert_called_once()
+    speculator.host_mirror_forward_observer.assert_called_once_with()
 
 
 def test_propose_requires_aux_hidden_states():

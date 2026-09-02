@@ -41,8 +41,11 @@ class KVConnector:
         pass
 
     def stage_host_mirror_mapping(
-        self, slot_mappings: torch.Tensor, num_tokens: int
+        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
     ) -> None:
+        pass
+
+    def finish_host_mirror_forward(self) -> None:
         pass
 
     def post_forward(
@@ -134,10 +137,14 @@ class ActiveKVConnector(KVConnector):
             self.kv_connector.finish_forward()
 
     def stage_host_mirror_mapping(
-        self, slot_mappings: torch.Tensor, num_tokens: int
+        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
     ) -> None:
         if not self._disabled:
             self.kv_connector.stage_host_mirror_mapping(slot_mappings, num_tokens)
+
+    def finish_host_mirror_forward(self) -> None:
+        if not self._disabled:
+            self.kv_connector.finish_host_mirror_forward()
 
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()

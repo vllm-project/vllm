@@ -437,6 +437,15 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
+
+        context_slot_mappings_by_layer = {
+            layer_name: self._context_slot_mappings[group_index][:num_target_tokens]
+            for group_index, group_id in enumerate(self.draft_kv_cache_group_ids)
+            for layer_name in self.kv_cache_config.kv_cache_groups[group_id].layer_names
+        }
+        context_mirror_staged = self.stage_draft_host_mirror(
+            context_slot_mappings_by_layer, num_target_tokens, dummy_run
+        )
         self.model.precompute_and_store_context_kv(
             self.hidden_states[:num_target_tokens],
             self.context_positions[:num_target_tokens],
@@ -479,6 +488,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.block_tables.slot_mappings[:, :num_tokens_padded],
             self.kv_cache_config,
         )
+        query_mirror_staged = self.stage_draft_host_mirror(
+            draft_slot_mappings_by_layer, num_tokens_padded, dummy_run
+        )
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
@@ -496,6 +508,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+
+        self.finish_draft_host_mirror(context_mirror_staged or query_mirror_staged)
 
         return self.draft_tokens[:num_reqs]
 

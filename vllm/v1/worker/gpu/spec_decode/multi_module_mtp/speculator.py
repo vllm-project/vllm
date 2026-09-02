@@ -223,8 +223,6 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.last_token_indices[:num_reqs],
                 num_reqs,
             )
-            if not dummy_run and self.slot_mapping_observer is not None:
-                self.slot_mapping_observer(slot_mappings_tensor, batch_desc.num_tokens)
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )
@@ -238,6 +236,10 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             )
             assert draft_attn_metadata is not None
             attn_metadata = draft_attn_metadata
+
+        mirror_staged = self.stage_draft_host_mirror(
+            slot_mappings, batch_desc.num_tokens, dummy_run
+        )
 
         self._prepare_eplb_forward(num_tokens)
 
@@ -253,6 +255,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
+        self.finish_draft_host_mirror(mirror_staged)
         return self.draft_tokens[:num_reqs]
 
     @torch.inference_mode()

@@ -1052,6 +1052,6 @@ def create_hisparse_cache_handle(
     handle.mirror_from_resident = bool(
         vllm_config.scheduler_config.async_scheduling
         and speculative_config is not None
-        and speculative_config.use_multi_module_mtp()
+        and speculative_config.uses_draft_kv_cache()
     )
     return handle
