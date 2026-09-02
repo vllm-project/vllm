@@ -91,6 +91,40 @@ def test_spec_decode_preemption_rebuilds_proposal(async_scheduling):
     assert request.spec_recovery_size == 0
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_batch_invariant_spec_decode_defers_partial_proposals(
+    async_scheduling,
+):
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_seqs=2,
+        max_num_batched_tokens=11,
+        max_model_len=32,
+        block_size=1,
+        parallel_drafting=True,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+    )
+    scheduler.enable_spec_recovery = True
+    scheduler.max_num_scheduled_tokens = 6
+    requests = create_requests(num_requests=2, num_tokens=1, block_size=1)
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill = scheduler.schedule()
+    _model_output(scheduler, prefill, [[10], [20]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(
+            [request.request_id for request in requests],
+            [[1, 2], [4, 5, 6]],
+        )
+    )
+
+    first_verify = scheduler.schedule()
+    assert first_verify.num_scheduled_tokens == {requests[0].request_id: 3}
+    assert requests[1].spec_token_ids == [4, 5, 6]
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

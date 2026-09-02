@@ -621,9 +621,16 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            requested_num_new_tokens = num_new_tokens
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
+            if self.enable_spec_recovery and request.spec_token_ids:
+                num_new_tokens = min(
+                    requested_num_new_tokens,
+                    self.max_num_scheduled_tokens,
+                    self.scheduler_config.max_num_batched_tokens - draft_slots,
+                )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -666,6 +673,13 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._limit_spec_recovery_replay(
                 request, request.num_computed_tokens, num_new_tokens
             )
+
+            if (
+                num_new_tokens > token_budget
+                or num_new_tokens + draft_slots > input_budget
+            ):
+                req_index += 1
+                continue
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -724,7 +738,9 @@ class Scheduler(SchedulerInterface):
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_req.spec_token_ids = (
+                                scheduled_spec_decode_tokens.pop(preempted_req_id, [])
+                            )
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
