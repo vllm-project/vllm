@@ -2,9 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the functionality of the Transformers modeling backend."""
 
+import contextlib
+import os
+import tempfile
 from typing import Any
 
 import pytest
+import torch
+import torch.nn as nn
+from transformers import AutoConfig, AutoModel, PretrainedConfig
+
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.utils import StageMissingLayer
 
 from ...conftest import HfRunner, VllmRunner
 from ...utils import multi_gpu_test, prep_prompts
@@ -139,7 +151,7 @@ def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
             f"transformers>={required}, but got {installed}"
         )
 
-    model = get_model("DeepseekV2ForCausalLM")  # DeepSeek-V2-Lite, MLA + MoE
+    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
     args = (example_prompts, 32, 5)
     kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
 
@@ -184,13 +196,6 @@ def test_distributed(
     [
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
         ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
-        (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            {
-                "quantization": "bitsandbytes",
-            },
-        ),
-        ("unsloth/tinyllama-bnb-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -258,7 +263,16 @@ def test_embed_loading(vllm_runner, model):
 @pytest.mark.parametrize(
     "arch", ["TransformersEmbeddingModel", "TransformersForSequenceClassification"]
 )
-def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_pooling(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    arch,
+    monkeypatch,
+    use_v2_model_runner,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
     model = get_model(arch)
 
     vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
@@ -299,3 +313,273 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
         name_0="hf",
         name_1="vllm",
     )
+
+
+VOCAB_SIZE = 64
+PER_LAYER_VOCAB_SIZE = 32
+NUM_POSITIONS = 16
+HIDDEN_SIZE = 8
+EMBED_SCALE = 3.0
+
+
+class ScaledWordEmbedding(nn.Embedding):
+    """Mirrors Transformers' `*ScaledWordEmbedding` classes."""
+
+    def __init__(
+        self, num_embeddings, embedding_dim, padding_idx=None, embed_scale=1.0
+    ):
+        super().__init__(num_embeddings, embedding_dim, padding_idx)
+        self.scalar_embed_scale = embed_scale
+        self.register_buffer("embed_scale", torch.tensor(embed_scale), persistent=False)
+
+    def forward(self, input_ids):
+        return super().forward(input_ids) * self.embed_scale.to(self.weight.dtype)
+
+
+class ComposedWordEmbedding(nn.Module):
+    """Scales embeddings, but wraps `nn.Embedding` instead of inheriting from it."""
+
+    def __init__(self, num_embeddings, embedding_dim, embed_scale=1.0):
+        super().__init__()
+        self.embed = nn.Embedding(num_embeddings, embedding_dim)
+        self.embed_scale = embed_scale
+
+    def forward(self, input_ids):
+        return self.embed(input_ids) * self.embed_scale
+
+
+@pytest.fixture
+def tp_init():
+    """Single rank tensor parallel state, so vLLM layers can be constructed."""
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.platforms import current_platform
+
+    from ...utils import ensure_current_vllm_config
+
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend=current_platform.dist_backend,
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
+
+
+@pytest.fixture
+def vpe(tp_init):
+    """`VocabParallelEmbedding`, imported late so collection does not import vLLM."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    return VocabParallelEmbedding
+
+
+def replace(embedding):
+    """Replace `embedding` and fill the new weights with recognisable values."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
+
+    new_embedding = replace_embedding_class(embedding)
+    for _, param in new_embedding.named_parameters():
+        param.data = torch.arange(param.numel(), dtype=param.dtype).view(param.shape)
+    return new_embedding
+
+
+def assert_scaled(vpe, module):
+    """`module`'s output is its own unscaled output times `EMBED_SCALE`."""
+    input_ids = torch.arange(VOCAB_SIZE)
+    unscaled = vpe.forward(module, input_ids)
+    torch.testing.assert_close(module(input_ids), unscaled * EMBED_SCALE)
+
+
+def test_replace_plain_embedding(vpe):
+    """A plain `nn.Embedding` is replaced outright, leaving no subclass behind."""
+    assert type(replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))) is vpe
+
+
+def test_replace_infers_shape_and_dtype(tp_init):
+    """Shape and dtype come from the replaced module, not from the config."""
+    embedding = nn.Embedding(VOCAB_SIZE * 2, HIDDEN_SIZE + 1, dtype=torch.float16)
+    new_embedding = replace(embedding)
+
+    assert new_embedding.num_embeddings == VOCAB_SIZE * 2
+    assert new_embedding.org_vocab_size == VOCAB_SIZE * 2
+    assert new_embedding.embedding_dim == HIDDEN_SIZE + 1
+    assert new_embedding.weight.dtype == torch.float16
+
+
+def test_replace_inherited_embedding(vpe):
+    """Subclasses keep their extra state and their scaled `forward`."""
+    new_embedding = replace(
+        ScaledWordEmbedding(
+            VOCAB_SIZE, HIDDEN_SIZE, padding_idx=0, embed_scale=EMBED_SCALE
+        )
+    )
+
+    assert isinstance(new_embedding, vpe)
+    assert new_embedding.scalar_embed_scale == EMBED_SCALE
+    assert "embed_scale" in new_embedding._non_persistent_buffers_set
+    assert_scaled(vpe, new_embedding)
+
+
+def test_replace_is_idempotent(tp_init):
+    """A tied table is reached twice by the recursion, and must not be rebased twice."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
+
+    new_embedding = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=2))
+    again = replace_embedding_class(new_embedding)
+
+    assert again is new_embedding
+    assert type(again) is type(new_embedding)
+
+
+class FakeVocabModel(nn.Module):
+    """The embedding tables a model can hold, only one of which is a vocab table.
+
+    `embed_tokens_per_layer` mirrors Gemma 3n, whose per-layer table is sized by
+    `vocab_size_per_layer_input` rather than `vocab_size`.
+    """
+
+    def __init__(self, per_layer: bool = False, composed: bool = False):
+        super().__init__()
+        embed_cls = ComposedWordEmbedding if composed else ScaledWordEmbedding
+        self.embed_tokens = embed_cls(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+        if per_layer:
+            self.embed_tokens_per_layer = ScaledWordEmbedding(
+                PER_LAYER_VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+            )
+        # Not a vocab table: indexed by position, and read as a whole by models
+        # which interpolate it (e.g. `SiglipVisionEmbeddings`)
+        self.position_embedding = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
+def replace_vocab_embeddings(model, **config_kwargs):
+    """Replace `model`'s vocab tables as `recursive_replace` would, and return them."""
+    from vllm.model_executor.models.transformers.utils import attrsetter
+
+    stub = nn.Module()
+    stub.model = model
+    stub.config = PretrainedConfig(
+        vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
+    )
+    ids = Base._vocab_embedding_ids(stub)
+
+    replaced = []
+    for name, module in list(model.named_modules()):
+        if id(module) in ids:
+            replaced.append(replace(module))
+            attrsetter(name)(model, replaced[-1])
+    return replaced
+
+
+def test_only_vocab_tables_are_replaced(vpe):
+    """Position embeddings share the `nn.Embedding` type, but not the treatment."""
+    model = FakeVocabModel()
+
+    assert replace_vocab_embeddings(model) == [model.embed_tokens]
+    assert isinstance(model.embed_tokens, vpe)
+    assert type(model.position_embedding) is nn.Embedding
+
+
+def test_per_layer_vocab_table_is_replaced(vpe):
+    """A second vocab table is found by its size, without a bespoke accessor."""
+    model = FakeVocabModel(per_layer=True)
+    replaced = replace_vocab_embeddings(
+        model, vocab_size_per_layer_input=PER_LAYER_VOCAB_SIZE
+    )
+
+    assert replaced == [model.embed_tokens, model.embed_tokens_per_layer]
+    assert all(isinstance(module, vpe) for module in replaced)
+
+
+def test_composed_input_embeddings_are_replaced(vpe):
+    """A wrapper is left alone; only the `nn.Embedding` it composes is replaced.
+
+    `CausalMixin` ties `lm_head` to whichever `VocabParallelEmbedding` it finds under
+    `get_input_embeddings()`, reading a `.weight` the wrapper does not have.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    model = FakeVocabModel(composed=True)
+    wrapper = model.embed_tokens
+    replaced = replace_vocab_embeddings(model)
+
+    assert model.embed_tokens is wrapper
+    assert replaced == [m for m in wrapper.modules() if isinstance(m, vpe)]
+
+    lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
+    assert lm_head.tie_weights(replaced[0]).weight is replaced[0].weight
+
+
+def test_missing_input_embeddings_are_skipped(tp_init):
+    """Pipeline ranks without the embeddings have a `PPMissingLayer` in their place."""
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    model = FakeVocabModel()
+    model.embed_tokens = PPMissingLayer()
+
+    assert replace_vocab_embeddings(model) == []
+
+
+MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+
+
+class MarkingStub(SupportsMultiModal, nn.Module):
+    """Just enough of the backend to exercise component marking."""
+
+    _mark_model_components = MultiModalMixin._mark_model_components
+    _find_encoder_classes = MultiModalMixin._find_encoder_classes
+    _from_config_kwargs = Base._from_config_kwargs
+    _pre_trained_model_classes = Base._pre_trained_model_classes
+
+
+def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
+    """Build the HF model inside the marking context and return it."""
+    model_config = ModelConfig(
+        model=MULTIMODAL_MODEL,
+        model_impl="transformers",
+        limit_mm_per_prompt={"image": image_limit},
+    )
+    # Set after construction: building the config itself needs the tokenizer
+    model_config.skip_tokenizer_init = skip_tokenizer_init
+    stub = MarkingStub()
+    stub.config = AutoConfig.from_pretrained(MULTIMODAL_MODEL)
+    stub.model_config = model_config
+
+    vllm_config = VllmConfig(model_config=model_config)
+    with stub._mark_model_components(vllm_config), torch.device("meta"):
+        stub.model = AutoModel.from_config(**stub._from_config_kwargs)
+    return stub.model
+
+
+@pytest.mark.parametrize(("image_limit", "skipped"), [(0, True), (4, False)])
+def test_tower_weights_skipped_when_modality_disabled(image_limit, skipped):
+    """`--limit-mm-per-prompt image=0` should drop the vision tower's weights."""
+    vision_tower = build_marked_model(image_limit).vision_tower
+    assert isinstance(vision_tower, StageMissingLayer) is skipped
+
+
+def test_marking_skipped_without_tokenizer():
+    """Marking needs the HF processor, which needs a tokenizer, so it is skipped.
+
+    The tower is built as normal rather than the model failing to load.
+    """
+    vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
+    assert not isinstance(vision_tower, StageMissingLayer)

@@ -16,7 +16,6 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
-from vllm.platforms import current_platform
 
 
 def _generate_random_text(word_count: int) -> str:
@@ -224,10 +223,6 @@ def server_with_chunked_processing():
         "--gpu-memory-utilization",
         "0.8",
     ]
-
-    # ROCm: Use Flex Attention to support encoder-only self-attention.
-    if current_platform.is_rocm():
-        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

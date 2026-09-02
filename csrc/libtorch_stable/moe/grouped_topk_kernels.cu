@@ -232,50 +232,6 @@ class WarpSort {
     }
   }
 
-  // load and merge k sorted values
-  __device__ void load_sorted(T const* __restrict__ in,
-                              idxT const* __restrict__ in_idx, idxT start) {
-    idxT idx = start + WARP_SIZE - 1 - lane_;
-    for (int i = max_arr_len_ - 1; i >= 0; --i, idx += WARP_SIZE) {
-      if (idx < start + k_) {
-        T t = in[idx];
-        bool is_better;
-        if constexpr (is_stable) {
-          is_better =
-              is_better_than<greater>(t, val_arr_[i], in_idx[idx], idx_arr_[i]);
-        } else {
-          is_better = is_better_than<greater>(t, val_arr_[i]);
-        }
-        if (is_better) {
-          val_arr_[i] = t;
-          idx_arr_[i] = in_idx[idx];
-        }
-      }
-    }
-
-    BitonicMerge<capacity, greater, !greater, T, idxT, is_stable>::merge(
-        val_arr_, idx_arr_);
-  }
-
-  __device__ void dump(T* __restrict__ out, idxT* __restrict__ out_idx) const {
-    for (int i = 0; i < max_arr_len_; ++i) {
-      idxT out_i = i * WARP_SIZE + lane_;
-      if (out_i < k_) {
-        out[out_i] = val_arr_[i];
-        out_idx[out_i] = idx_arr_[i];
-      }
-    }
-  }
-
-  __device__ void dumpIdx(idxT* __restrict__ out_idx) const {
-    for (int i = 0; i < max_arr_len_; ++i) {
-      idxT out_i = i * WARP_SIZE + lane_;
-      if (out_i < k_) {
-        out_idx[out_i] = idx_arr_[i];
-      }
-    }
-  }
-
   // Accessors for per-lane selected value/index.
   // NOTE: For the common case `capacity == WARP_SIZE`, `max_arr_len_ == 1`
   // and callers should use `i == 0`.

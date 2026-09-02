@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
@@ -145,11 +146,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
         replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
         replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
-
-        # AITER backend requires weights to be marked as shuffled.
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
 
         if not is_weight_update:
             # Setup moe kernel only on the first call. For the unquantized
@@ -304,7 +300,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(

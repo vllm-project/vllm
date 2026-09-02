@@ -21,6 +21,8 @@ from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 DEVICE_TYPE = current_platform.device_type
 
 # (num_query_heads, num_kv_heads): MHA, GQA, and the num_kv_heads==1

@@ -621,7 +621,9 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 
 def serialize_extra_artifacts(
-    tensorizer_args: TensorizerArgs, served_model_name: str | list[str] | None
+    tensorizer_args: TensorizerArgs,
+    served_model_name: str | list[str] | None,
+    revision: str | None = None,
 ) -> None:
     if not isinstance(served_model_name, str):
         raise ValueError(
@@ -632,6 +634,7 @@ def serialize_extra_artifacts(
     with tempfile.TemporaryDirectory() as tmpdir:
         hf_api().snapshot_download(
             served_model_name,
+            revision=revision,
             local_dir=tmpdir,
             ignore_patterns=[
                 "*.pt",
@@ -693,7 +696,11 @@ def serialize_vllm_model(
         serializer.write_module(model)
         serializer.close()
 
-    serialize_extra_artifacts(tensorizer_args, model_config.served_model_name)
+    serialize_extra_artifacts(
+        tensorizer_args,
+        model_config.served_model_name,
+        revision=model_config.revision,
+    )
 
     logger.info("Successfully serialized model to %s", str(output_file))
     return model

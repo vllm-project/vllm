@@ -8,6 +8,8 @@ import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 from vllm.config import CUDAGraphMode
+from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
@@ -45,7 +47,14 @@ def make_mla_metadata(*, use_dense_mha: bool = True, num_decode_tokens: int = 0)
 
 @pytest.mark.parametrize(
     "batch_kind",
-    ["short", "threshold_mismatch", "force_mqa", "mla_decode", "capture", "full"],
+    [
+        "short",
+        "threshold_mismatch",
+        "force_mqa",
+        "mla_decode",
+        "capture",
+        "full",
+    ],
 )
 def test_short_prefill_updates_k_cache_before_scoring_decision(
     monkeypatch: pytest.MonkeyPatch,
@@ -132,6 +141,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     topk_indices = torch.full((7, 2048), 17, dtype=torch.int32)
 
     def run_indexer():
+        assert DeepseekV32Attention.supports_dense_mha_prefill
         return sparse_indexer.sparse_attn_indexer(
             hidden_states,
             INDEXER_LAYER,
@@ -163,3 +173,120 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     # K cache is always updated before the scoring decision.
     torch.testing.assert_close(observed["k"], k[: slot_mapping.numel()])
     assert observed["slots"] is slot_mapping
+
+
+def test_skipped_k_cache_insert_accepts_no_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    indexer_metadata = make_indexer_metadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        slot_mapping=torch.empty(0, dtype=torch.long),
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={INDEXER_LAYER: indexer_metadata},
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        ),
+    )
+    monkeypatch.setattr(
+        sparse_indexer.current_platform, "fp8_dtype", lambda: torch.float16
+    )
+
+    topk_indices = torch.full((1, 2048), 17, dtype=torch.int32)
+    result = sparse_indexer.sparse_attn_indexer(
+        torch.empty(1, 1),
+        INDEXER_LAYER,
+        torch.empty(1),
+        torch.empty(1, 1),
+        None,
+        None,
+        torch.empty(1, 1),
+        128,
+        "ue8m0",
+        2048,
+        4,
+        4096,
+        4096,
+        topk_indices,
+        True,
+        False,
+        "",
+    )
+
+    assert result is topk_indices
+    assert torch.all(topk_indices == -1)
+
+
+@pytest.mark.parametrize("fp8_query", [False, True])
+def test_deepseek_v32_dispatches_selected_mha(
+    monkeypatch: pytest.MonkeyPatch,
+    fp8_query: bool,
+) -> None:
+    attn_metadata = SimpleNamespace(num_actual_tokens=2)
+    kv_cache = torch.empty(1)
+    monkeypatch.setattr(
+        deepseek_v32_attention,
+        "get_attention_context",
+        lambda _: (attn_metadata, None, kv_cache, None),
+    )
+
+    observed = {}
+
+    def record_forward_impl(*args):
+        observed["args"] = args
+
+    layer = SimpleNamespace(
+        indexer=None,
+        skip_topk=False,
+        layer_name=MLA_LAYER,
+        use_pcp=False,
+        _fp8_query=fp8_query,
+        _use_sparse_mha=lambda _: True,
+        rotary_emb=lambda _positions, q: (q + 1, None),
+        forward_impl=record_forward_impl,
+    )
+    q_nope = torch.randn(2, 1, 2)
+    q_pe = torch.randn(2, 1, 2)
+    mqa_q = torch.randn(2, 1, 2)
+    mha_q = torch.cat((q_nope, q_pe + 1 if fp8_query else mqa_q), dim=-1)
+    kv_c = torch.empty(2, 2)
+    k_pe = torch.empty(2, 2)
+    output = torch.empty(2, 2)
+
+    DeepseekV32Attention._sparse_indexer_and_attn(
+        layer,
+        torch.arange(2),
+        torch.empty(2, 2),
+        q_nope,
+        q_pe,
+        None,
+        None,
+        None,
+        kv_c,
+        k_pe,
+        torch.empty(2, 1, 2),
+        mqa_q,
+        output,
+    )
+
+    expected_args = (
+        mha_q,
+        kv_c,
+        kv_cache,
+        attn_metadata,
+        output,
+    )
+    actual_args = observed["args"]
+    torch.testing.assert_close(actual_args[0], mha_q)
+    assert actual_args[2].shape == (2, 1, 2)
+    assert actual_args[2].data_ptr() == k_pe.data_ptr()
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            actual_args[1:2] + actual_args[3:],
+            expected_args[1:],
+        )
+    )

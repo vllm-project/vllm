@@ -17,6 +17,7 @@ hf-hub.workspace = true
 image.workspace = true
 indicatif.workspace = true
 mimalloc.workspace = true
+parquet.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
@@ -34,6 +35,7 @@ tokio-stream.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+vllm-build-info.workspace = true
 vllm-tracing.workspace = true
 
 [lints]
