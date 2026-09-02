@@ -238,6 +238,14 @@ class ParallelConfig:
     Defaults to True when async scheduling is enabled, False otherwise.
     """
 
+    enable_dp_execution_contract: bool = False
+    """Enable rank-identical target execution contracts for DP+EP serving.
+
+    This experimental path lets locally idle ranks execute a sentinel row when
+    peers have work. It is currently limited to the validated Model Runner V2
+    and one-sided FlashInfer configuration.
+    """
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
