@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
-use vllm_text::{DynTextBackend, TextBackend};
+use vllm_text::{DynTextBackend, GenerationConfigMode, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::MultimodalModelInfo;
+use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -61,6 +61,8 @@ pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 /// Frontend-side chat backend loading options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadModelBackendsOptions {
+    /// Which generation-config sampling defaults to inherit.
+    pub generation_config: GenerationConfigMode,
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
     /// Disable frontend-side multimodal preprocessing and render the model as
@@ -74,6 +76,9 @@ pub struct LoadModelBackendsOptions {
     /// Optional server-default keyword arguments merged into every
     /// chat-template render before request-level `chat_template_kwargs`.
     pub default_chat_template_kwargs: HashMap<String, Value>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    /// Unspecified modalities are unlimited.
+    pub limit_mm_per_prompt: MmLimitPerPrompt,
 }
 
 /// Shared backends loaded from a model id.

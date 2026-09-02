@@ -10,7 +10,7 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
-use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
+use vllm_tokenizer::{DecodedText, DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
@@ -52,6 +52,19 @@ pub struct Finished {
     pub ec_transfer_params: Option<serde_json::Value>,
 }
 
+/// Sample metadata emitted by one engine output update.
+///
+/// Token IDs and logprobs share the engine-update clock and align by generated
+/// token position. They may arrive before the corresponding decoded text is
+/// visible or alongside decoded text attributed to earlier updates.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SampledDelta {
+    /// Token IDs produced by this engine update, after stop-string truncation.
+    pub token_ids: Vec<u32>,
+    /// Per-position logprobs aligned with `token_ids`, when requested.
+    pub logprobs: Option<DecodedLogprobs>,
+}
+
 /// Internal decoded-text event emitted before higher-level assistant
 /// adaptation.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,25 +81,25 @@ pub enum DecodedTextEvent {
         /// remaining prompt positions.
         prompt_logprobs: Option<DecodedPromptLogprobs>,
     },
-    /// A delta of text has been decoded, optionally alongside token-position
-    /// logprobs.
+    /// Decoded text and sampled metadata observed during one output update.
     ///
-    /// `delta` is the newly visible decoded text fragment for this update.
+    /// `decoded` follows the decoder clock. It may be empty while tokens remain
+    /// undecodable, and may later contain token attributions from earlier
+    /// engine updates. Tokens suppressed before decoding are absent.
     ///
-    /// `logprobs` covers the newly generated token positions from the same
-    /// update, but is not guaranteed to align with `delta` by character
-    /// span. One update may carry token logprobs but no newly visible text
-    /// yet, and one visible text fragment may reflect multiple token
-    /// positions becoming decodable together.
+    /// `sampled` follows the engine-update clock. Its token IDs and logprobs
+    /// align with each other. `decoded.attributions` has an independent decoder
+    /// clock and positional sequence.
     ///
-    /// Upper-level may further parse `delta` as reasoning or tool calls.
+    /// Upper-level may further parse `decoded.text` as reasoning or tool calls.
     ///
     /// When `finished` is `Some`, this is the terminal event for the request.
     TextDelta {
-        delta: String,
-        token_ids: Vec<u32>,
-        logprobs: Option<DecodedLogprobs>,
-        finished: Option<Finished>,
+        decoded: DecodedText,
+        sampled: SampledDelta,
+        /// Heap-backed because terminal metadata is large and appears once per
+        /// request, while every streaming event carries this enum variant.
+        finished: Option<Box<Finished>>,
     },
 }
 
@@ -104,9 +117,9 @@ pub async fn decoded_text_event_stream(
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
     let mut cached_token_count = 0_usize;
-    let mut token_ids = Vec::new();
+    let mut sampled_token_ids = Vec::new();
     let mut output_token_count: usize = 0;
-    let mut logprobs: Option<DecodedLogprobs> = None;
+    let mut sampled_logprobs: Option<DecodedLogprobs> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
@@ -126,14 +139,12 @@ pub async fn decoded_text_event_stream(
                 // when streaming the outputs.
                 match decode_options.include_stop_str_in_output {
                     true => 0,
-                    false => {
-                        decode_options
-                            .stop_strings
-                            .as_ref()
-                            .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
-                            .unwrap_or(1)
-                            - 1
-                    }
+                    false => decode_options
+                        .stop_strings
+                        .as_ref()
+                        .and_then(|stops| stops.iter().map(|ss| ss.len()).max())
+                        .unwrap_or(1)
+                        .saturating_sub(1),
                 },
             );
             decoder = Some(dec);
@@ -170,7 +181,7 @@ pub async fn decoded_text_event_stream(
             &output.token_ids
         };
 
-        let mut delta: Option<String> = None;
+        let mut decoded = DecodedText::default();
         let mut truncate_output_to = None;
         let mut truncate_tokens_to = None;
         for (tok_idx, &token_id) in decodable_token_ids.iter().enumerate() {
@@ -191,12 +202,9 @@ pub async fn decoded_text_event_stream(
                 break;
             }
 
+            // TODO: avoid generating a chunk every time a token is pushed
             if intermediate && let Some(chunk) = decoder.next_chunk() {
-                if let Some(delta_str) = delta.as_mut() {
-                    delta_str.push_str(&chunk);
-                } else {
-                    delta = Some(chunk);
-                }
+                decoded.append(chunk);
             }
         }
 
@@ -225,9 +233,9 @@ pub async fn decoded_text_event_stream(
             .transpose()?;
 
         if !intermediate {
-            token_ids.extend(&new_token_ids);
+            sampled_token_ids.extend(&new_token_ids);
             if let Some(dlp) = decoded_logprobs.as_ref() {
-                logprobs
+                sampled_logprobs
                     .get_or_insert_with(|| DecodedLogprobs { positions: vec![] })
                     .positions
                     .extend_from_slice(&dlp.positions);
@@ -236,22 +244,19 @@ pub async fn decoded_text_event_stream(
 
         if let Some(reason) = finish_reason {
             // Flush any remaining buffered text.
-            let (last_chunk, mut text) = decoder.flush(truncate_output_to)?;
-            let text_len = text.len();
-            let full_text = tracing::enabled!(Level::TRACE).then(|| text.clone());
-
-            if intermediate {
+            let (last_chunk, full_decoded) = decoder.flush(truncate_output_to)?;
+            let text_len = full_decoded.text.len();
+            let full_text = tracing::enabled!(Level::TRACE).then(|| full_decoded.text.clone());
+            let decoded = if intermediate {
                 if let Some(chunk) = last_chunk {
-                    if let Some(delta_str) = delta.as_mut() {
-                        delta_str.push_str(&chunk);
-                    } else {
-                        delta = Some(chunk);
-                    }
+                    decoded.append(chunk);
                 }
-                token_ids = new_token_ids;
-                logprobs = decoded_logprobs;
-                text = delta.unwrap_or_default();
-            }
+                sampled_token_ids = new_token_ids;
+                sampled_logprobs = decoded_logprobs;
+                decoded
+            } else {
+                full_decoded
+            };
 
             debug!(
                 finish_reason = ?reason,
@@ -271,10 +276,12 @@ pub async fn decoded_text_event_stream(
             }
 
             y.yield_ok(DecodedTextEvent::TextDelta {
-                delta: text,
-                token_ids,
-                logprobs,
-                finished: Some(Finished {
+                decoded,
+                sampled: SampledDelta {
+                    token_ids: sampled_token_ids,
+                    logprobs: sampled_logprobs,
+                },
+                finished: Some(Box::new(Finished {
                     usage: TokenUsage {
                         prompt_token_count,
                         output_token_count,
@@ -283,7 +290,7 @@ pub async fn decoded_text_event_stream(
                     finish_reason: reason,
                     kv_transfer_params,
                     ec_transfer_params,
-                }),
+                })),
             })
             .await;
             return Ok(());
@@ -291,9 +298,11 @@ pub async fn decoded_text_event_stream(
 
         if intermediate {
             y.yield_ok(DecodedTextEvent::TextDelta {
-                delta: delta.unwrap_or_default(),
-                token_ids: new_token_ids,
-                logprobs: decoded_logprobs,
+                decoded,
+                sampled: SampledDelta {
+                    token_ids: new_token_ids,
+                    logprobs: decoded_logprobs,
+                },
                 finished: None,
             })
             .await;
@@ -306,6 +315,12 @@ pub async fn decoded_text_event_stream(
 /// If stop string matches, returns tuple
 /// (index into stop string vec, byte index of first byte of stop string in
 /// output)
+///
+/// When several stop strings match within the newly generated text (for example
+/// when a step appends multiple tokens, or one token decodes to several
+/// characters), the stop string that completes earliest in the text is selected,
+/// so the result matches appending one character at a time. Ties are broken by
+/// stop-list order.
 fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Option<(usize, usize)> {
     // We compare byte subslices to avoid utf8 boundary problem
     let output = output.as_bytes();
@@ -314,12 +329,18 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .iter()
         .map(|ss| (ss.as_bytes(), ss.len(), next_off.saturating_sub(ss.len())))
         .enumerate()
-        .find_map(|(ss_idx, (ss, len, start_off))| {
+        .filter_map(|(ss_idx, (ss, len, start_off))| {
+            if len == 0 {
+                return None;
+            }
             output[start_off..]
                 .windows(len)
                 .position(|w| w == ss)
-                .map(|pos| (ss_idx, start_off + pos))
+                .map(|pos| (ss_idx, start_off + pos, start_off + pos + len))
         })
+        // `min_by_key` keeps the first minimum, so ties fall back to stop-list order.
+        .min_by_key(|&(_, _, end)| end)
+        .map(|(ss_idx, start, _)| (ss_idx, start))
 }
 
 #[cfg(test)]
@@ -328,10 +349,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
 
-    use futures::{Stream, stream};
+    use futures::{Stream, StreamExt as _, stream};
     use vllm_engine_core_client::AbortCause;
     use vllm_llm::GenerateOutput;
-    use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{TokenAnchor, TokenAttribution, test_utils::TestTokenizer};
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
@@ -365,6 +386,129 @@ mod tests {
             stop_strings: Some(stop.iter().map(|s| s.to_string()).collect()),
             min_tokens,
             ..Default::default()
+        }
+    }
+
+    fn visible(token_id: u32, byte_offset: u32) -> TokenAttribution {
+        TokenAttribution {
+            token_id,
+            anchor: TokenAnchor::Visible { byte_offset },
+        }
+    }
+
+    fn text_delta(
+        text: impl Into<String>,
+        attributions: impl IntoIterator<Item = TokenAttribution>,
+        sampled_token_ids: Vec<u32>,
+        finished: Option<Finished>,
+    ) -> DecodedTextEvent {
+        DecodedTextEvent::TextDelta {
+            decoded: DecodedText {
+                text: text.into(),
+                attributions: attributions.into_iter().collect(),
+            },
+            sampled: SampledDelta {
+                token_ids: sampled_token_ids,
+                logprobs: None,
+            },
+            finished: finished.map(Box::new),
+        }
+    }
+
+    async fn run_intermediate(
+        outputs: Vec<GenerateOutput>,
+        decode_options: TextDecodeOptions,
+    ) -> Vec<DecodedTextEvent> {
+        let tokenizer: DynTokenizer = Arc::new(TestTokenizer::new());
+        decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            stream::iter(outputs.into_iter().map(Ok)),
+            decode_options,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn decoded_and_sampled_clocks_are_independent() {
+        struct Case {
+            name: &'static str,
+            outputs: Vec<GenerateOutput>,
+            expected: Vec<DecodedTextEvent>,
+        }
+
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let cases = [
+            Case {
+                name: "utf8 byte fallback resolves across engine updates",
+                outputs: vec![
+                    GenerateOutput::for_test(Some(Arc::clone(&prompt)), vec![0xe4], None),
+                    GenerateOutput::for_test(None, vec![0xbd, 0xa0], Some(FinishReason::Length)),
+                ],
+                expected: vec![
+                    DecodedTextEvent::Start {
+                        prompt_token_ids: Arc::clone(&prompt),
+                        prompt_logprobs: None,
+                    },
+                    text_delta("", [], vec![0xe4], None),
+                    text_delta(
+                        "你",
+                        [visible(0xe4, 0), visible(0xbd, 0), visible(0xa0, 0)],
+                        vec![0xbd, 0xa0],
+                        Some(Finished {
+                            usage: TokenUsage {
+                                prompt_token_count: 0,
+                                output_token_count: 3,
+                                cached_token_count: 0,
+                            },
+                            finish_reason: FinishReason::Length,
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                        }),
+                    ),
+                ],
+            },
+            Case {
+                name: "terminal stop token remains sampled and bypasses decoder",
+                outputs: vec![GenerateOutput::for_test(
+                    Some(Arc::clone(&prompt)),
+                    ascii_tokens("a!"),
+                    Some(FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))),
+                )],
+                expected: vec![
+                    DecodedTextEvent::Start {
+                        prompt_token_ids: Arc::clone(&prompt),
+                        prompt_logprobs: None,
+                    },
+                    text_delta(
+                        "a",
+                        [visible(b'a' as u32, 0)],
+                        ascii_tokens("a!"),
+                        Some(Finished {
+                            usage: TokenUsage {
+                                prompt_token_count: 0,
+                                output_token_count: 2,
+                                cached_token_count: 0,
+                            },
+                            finish_reason: FinishReason::Stop(Some(StopReason::TokenId(
+                                b'!' as u32,
+                            ))),
+                            kv_transfer_params: None,
+                            ec_transfer_params: None,
+                        }),
+                    ),
+                ],
+            },
+        ];
+
+        for case in cases {
+            let actual = run_intermediate(case.outputs, TextDecodeOptions::default()).await;
+            assert_eq!(actual, case.expected, "{}", case.name);
         }
     }
 
@@ -451,6 +595,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_empty_stop_string_does_not_underflow_buffer() {
+        let output = run_to_completion(ascii_tokens("hello"), opts(&[""], 0)).await;
+        assert_eq!(output.text, "hello");
+        assert_eq!(output.finish_reason, FinishReason::Length);
+    }
+
+    #[tokio::test]
     async fn stream_stop_string_multi_char() {
         let output = run_to_completion(ascii_tokens("say hello world"), opts(&["lo"], 0)).await;
         assert_eq!(output.text, "say hel");
@@ -524,9 +675,47 @@ mod tests {
     #[test]
     fn stop_string_matches_first_of_multiple() {
         let stops = vec!["wor".to_string(), "say".to_string()];
-        // "say" appears earlier but "wor" is checked first (index 0)
+        // Only "wor" can complete in the 1-new-byte window; the "say" at index 0
+        // is behind the window start and is not a candidate.
         let result = matches_stop_string(&stops, "say wor", 1);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    /// Several stop strings can land in the same window when a step appends
+    /// multiple tokens (speculative decoding) or when one token decodes to
+    /// several characters. The earliest-completing one must win over stop-list
+    /// order, so that a batched step agrees with character-at-a-time appending.
+    #[test]
+    fn stop_string_earliest_completing_wins_regardless_of_list_order() {
+        // " The user is a": " is a" (5 bytes) was appended in one step. Both
+        // "is" (index 10, completes at 12) and " a" (index 12, completes at 14)
+        // land in the window. "is" completes earlier, so it wins either order.
+        for stops in [vec!["a", "is"], vec!["is", "a"]] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let is_idx = stops.iter().position(|s| *s == "is").unwrap();
+            let result = matches_stop_string(&owned, " The user is a", " is a".len());
+            assert_eq!(result, Some((is_idx, 10)), "stop list order {stops:?}");
+        }
+    }
+
+    /// Both stops complete at the same offset, so stop-list order decides. This
+    /// pins `min_by_key`'s first-minimum behavior, which is what implements the
+    /// tie-break.
+    #[test]
+    fn stop_string_ties_broken_by_list_order() {
+        for (stops, expected) in [(vec!["ab", "b"], (0, 0)), (vec!["b", "ab"], (0, 1))] {
+            let owned: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
+            let result = matches_stop_string(&owned, "ab", "ab".len());
+            assert_eq!(result, Some(expected), "stop list order {stops:?}");
+        }
+    }
+
+    #[test]
+    fn stop_string_completion_position_not_start_position() {
+        // "b" starts later than "abc" but completes earlier, so it must win.
+        let stops = vec!["abc".to_string(), "b".to_string()];
+        let result = matches_stop_string(&stops, "abc", 3);
+        assert_eq!(result, Some((1, 1)));
     }
 
     #[test]
@@ -585,6 +774,13 @@ mod tests {
     #[test]
     fn stop_string_empty_list() {
         let stops: Vec<String> = vec![];
+        let result = matches_stop_string(&stops, "hello", 1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn empty_stop_string_is_ignored_by_matcher() {
+        let stops = vec!["".to_string(), "world".to_string()];
         let result = matches_stop_string(&stops, "hello", 1);
         assert_eq!(result, None);
     }

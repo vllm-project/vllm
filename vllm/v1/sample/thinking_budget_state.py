@@ -100,8 +100,8 @@ class ThinkingBudgetStateHolder:
 
         for i1, i2, direction in batch_update.moved:
             if direction == MoveDirectionality.SWAP:
-                state1 = self._state.get(i1)
-                state2 = self._state.get(i2)
+                state1 = self._state.pop(i1, None)
+                state2 = self._state.pop(i2, None)
                 if state1 is not None:
                     self._state[i2] = state1
                 if state2 is not None:
@@ -145,12 +145,6 @@ class ThinkingBudgetStateHolder:
                 state["spec_token_ids"] = []
             state["in_spec_mode"] = self.in_spec_mode
             state["force_index"] = []
-            if len(state["output_tok_ids"]) > 0:
-                spec_len = len(state["spec_token_ids"])
-                # Only strip draft suffix when there are spec tokens; ``[:-0]`` would
-                # clear the whole list (Python treats stop index 0 as "up to empty").
-                if spec_len > 0 and len(state["output_tok_ids"]) >= spec_len:
-                    state["output_tok_ids"] = state["output_tok_ids"][:-spec_len]
             self._update_think_state(state)
 
     def apply_to_logits(

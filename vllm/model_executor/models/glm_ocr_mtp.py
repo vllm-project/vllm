@@ -41,13 +41,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .glm4 import Glm4DecoderLayer, get_spec_layer_idx_from_weight_name
+from .glm4 import Glm4DecoderLayer
 from .glm4_moe_lite_mtp import (
     Glm4MoeLiteMultiTokenPredictor,
     SharedHead,
 )
 from .interfaces import SupportsPP
 from .utils import (
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     maybe_prefix,
 )
@@ -57,7 +58,9 @@ class GlmOcrMultiTokenPredictorLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
-        config = vllm_config.speculative_config.draft_model_config.hf_config.text_config
+        speculative_config = vllm_config.speculative_config
+        assert speculative_config is not None
+        config = speculative_config.draft_model_config.hf_config.text_config
         self.config = config
         quant_config = vllm_config.quant_config
 
@@ -143,7 +146,7 @@ class GlmOcrMTP(nn.Module, SupportsPP):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -194,9 +197,10 @@ class GlmOcrMTP(nn.Module, SupportsPP):
 
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

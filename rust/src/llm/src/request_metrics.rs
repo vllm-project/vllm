@@ -375,6 +375,7 @@ mod tests {
                     num_cached_tokens: 4,
                     num_local_cached_tokens: 4,
                     num_external_cached_tokens: 0,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

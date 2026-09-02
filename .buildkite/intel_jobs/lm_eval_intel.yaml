@@ -1,0 +1,28 @@
+group: LM Eval
+depends_on:
+  - image-build-xpu
+steps:
+- label: "XPU GPQA Eval (GPT-OSS)"
+  key: xpu-gpqa-eval-gpt-oss
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - csrc/
+    - vllm/model_executor/layers/quantization
+    - tests/evals/gpt_oss/
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install "gpt-oss[eval]==0.0.5" &&
+      cd tests &&
+      pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'

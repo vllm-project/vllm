@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use vllm_parser::tool::{
-    Result, StructuralTagModel, Tool, ToolParser, ToolParserError, ToolParserOutput,
+    Result, StructuralTagBuilder, Tool, ToolParser, ToolParserError, ToolParserOutput,
 };
 use vllm_parser::unified::{
     UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
@@ -17,6 +17,10 @@ struct BenchTokenizer;
 impl Tokenizer for BenchTokenizer {
     fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
         Ok(text.chars().map(|_| u32::MAX).collect())
+    }
+
+    fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+        self.encode(text, false)
     }
 
     fn decode(
@@ -85,8 +89,8 @@ impl<T: UnifiedParser> ToolParser for UnifiedToolParserAdapter<T> {
         self.inner.preserve_special_tokens()
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        self.inner.structural_tag_model()
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        self.inner.structural_tag_builder()
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {

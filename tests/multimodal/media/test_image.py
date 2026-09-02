@@ -80,6 +80,29 @@ def test_image_media_io_rgba_custom_background(tmp_path):
     assert green_numpy[0][0][2] == 0  # B
 
 
+def test_image_media_io_no_mode_conversion(tmp_path):
+    """image_mode=None skips conversion and preserves the original mode."""
+    # RGBA image: opaque black pixel on a fully transparent background
+    rgba_image = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    rgba_image.putpixel((5, 5), (0, 0, 0, 255))
+    test_image_path = tmp_path / "test_rgba.png"
+    rgba_image.save(test_image_path)
+
+    # Default behavior: RGBA is composited onto a white background
+    image_io_default = ImageMediaIO()
+    converted_default = image_io_default.load_file(test_image_path)
+    assert converted_default.media.mode == "RGB"
+    assert converted_default.media.getpixel((0, 0)) == (255, 255, 255)
+    assert converted_default.media.getpixel((5, 5)) == (0, 0, 0)
+
+    # image_mode=None: original mode and alpha channel are preserved
+    image_io_keep = ImageMediaIO(image_mode=None)
+    converted_keep = image_io_keep.load_file(test_image_path)
+    assert converted_keep.media.mode == "RGBA"
+    assert converted_keep.media.getpixel((0, 0)) == (0, 0, 0, 0)
+    assert converted_keep.media.getpixel((5, 5)) == (0, 0, 0, 255)
+
+
 def test_image_media_io_rgba_background_color_validation():
     """Test that invalid rgba_background_color values are properly rejected."""
 

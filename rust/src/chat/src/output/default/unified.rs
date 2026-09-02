@@ -13,7 +13,7 @@ use futures::{StreamExt as _, pin_mut};
 use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_parser::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
-use vllm_text::output::DecodedTextEvent;
+use vllm_text::output::{DecodedTextEvent, SampledDelta};
 
 use crate::Result;
 use crate::error::Error;
@@ -237,12 +237,15 @@ pub(crate) async fn unified_event_stream(
                 .await;
             }
             DecodedTextEvent::TextDelta {
-                delta,
-                token_ids,
-                logprobs,
+                decoded,
+                sampled:
+                    SampledDelta {
+                        token_ids,
+                        logprobs,
+                    },
                 finished,
             } => {
-                for next in state.process_delta(delta)? {
+                for next in state.process_delta(decoded.text)? {
                     y.yield_ok(next).await;
                 }
                 if logprobs.is_some() || !token_ids.is_empty() {
@@ -375,24 +378,22 @@ mod tests {
 
     fn decoded_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            delta: delta.to_string(),
-            token_ids: Vec::new(),
-            logprobs: None,
+            decoded: vllm_text::DecodedText::unattributed(delta),
+            sampled: vllm_text::SampledDelta::default(),
             finished: None,
         }
     }
 
     fn finished_delta(delta: &str) -> vllm_text::output::DecodedTextEvent {
         vllm_text::output::DecodedTextEvent::TextDelta {
-            delta: delta.to_string(),
-            token_ids: Vec::new(),
-            logprobs: None,
-            finished: Some(vllm_text::output::Finished {
+            decoded: vllm_text::DecodedText::unattributed(delta),
+            sampled: vllm_text::SampledDelta::default(),
+            finished: Some(Box::new(vllm_text::output::Finished {
                 usage: vllm_llm::TokenUsage::default(),
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
-            }),
+            })),
         }
     }
 
@@ -449,6 +450,57 @@ mod tests {
         let mut output = first;
         output.append(second);
         output
+    }
+
+    #[tokio::test]
+    async fn unified_stream_parses_formatted_tool_call_without_latch() {
+        use vllm_parser::tool::{HermesToolParser, ToolParser as _};
+
+        let hermes = HermesToolParser::create(&[]).unwrap();
+        let parser = vllm_parser::unified::CombinedParser::new(None, Some(hermes));
+
+        // Regression guard: a formatted call (space before the outer `}`) must not
+        // trip the parse-error latch that turns it and every later call into text.
+        let d1 = decoded_delta(
+            r#"<tool_call>{"name":"get_weather","arguments":{"location":"Paris"} }</tool_call>"#,
+        );
+        let d2 = finished_delta(
+            r#"<tool_call>{"name":"get_time","arguments":{"tz":"UTC"}}</tool_call>"#,
+        );
+
+        let stream = stream::iter(vec![d1, d2].into_iter().map(Ok));
+        let events = unified_event_stream(stream, Box::new(parser))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantEvent::ToolCallStart { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["get_weather", "get_time"]);
+
+        let text_leaks = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AssistantEvent::TextDelta {
+                        kind: AssistantBlockKind::Text,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            text_leaks, 0,
+            "formatted tool call leaked into text: {events:#?}"
+        );
     }
 
     #[tokio::test]

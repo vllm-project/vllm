@@ -41,8 +41,8 @@ def _mxfp8_e4m3_quantize_torch(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Naive MXFP8 quantization.
     For each block of 32 elements along the last dimension, compute a
-    shared e8m0 scale (the biased exponent of the block-wise amax)
-    and quantize each element to float8_e4m3fn.
+    shared e8m0 scale that fits the block-wise amax into the finite
+    float8_e4m3fn range, and quantize each element to float8_e4m3fn.
 
     Returns (quantized_values [same shape, fp8], scales uint8).
     Scale shape depends on is_sf_swizzled_layout:
@@ -58,7 +58,8 @@ def _mxfp8_e4m3_quantize_torch(
 
     amax = x_blocked.abs().amax(dim=-1)
     amax = amax.clamp(min=torch.finfo(torch.float32).tiny)
-    scale_biased = torch.floor(torch.log2(amax)) + 127.0
+    fp8_max = torch.finfo(MXFP8_VALUE_DTYPE).max
+    scale_biased = torch.ceil(torch.log2(amax / fp8_max)) + 127.0
     scale_biased = scale_biased.clamp(0, 254)
     scales_uint8 = scale_biased.to(torch.uint8)
 
@@ -106,6 +107,8 @@ def _mxfp8_quant_triton_kernel():
         ssm,
         ssk,
         BLOCK_M: tl.constexpr,
+        FP8_MAX: tl.constexpr,
+        TINY: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
         pid_b = tl.program_id(1)  # which 32-element block along K
@@ -117,8 +120,11 @@ def _mxfp8_quant_triton_kernel():
             mask=m_mask[:, None],
             other=0.0,
         ).to(tl.float32)
-        amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-30)  # [BLOCK_M]
-        sb = tl.floor(tl.log2(amax)) + 127.0
+        # Mirror _mxfp8_e4m3_quantize_torch: the scale has to put the block amax
+        # at the top of the e4m3 range rather than at 1.0, or small elements of
+        # the block end up in the subnormals.
+        amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
+        sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
         descale = tl.exp2(sb - 127.0)
         xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
@@ -166,6 +172,8 @@ def _mxfp8_e4m3_quantize_triton(
         scales.stride(0),
         scales.stride(1),
         BLOCK_M=BLOCK_M,
+        FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
+        TINY=float(torch.finfo(torch.float32).tiny),
     )
     return xq, scales
 
@@ -176,8 +184,9 @@ def _mxfp8_e4m3_quantize_impl(
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
 
-    if current_platform.has_device_capability(100):
+    if current_platform.has_device_capability(100) and has_flashinfer():
         from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
 
         x_q, x_scales = flashinfer_mxfp8_quantize(
