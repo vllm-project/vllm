@@ -69,7 +69,6 @@ class ReasoningParser:
         """
         return False
 
-    @abstractmethod
     @property
     def emits_reasoning_span(self) -> bool:
         """Whether this request's output opens with a reasoning span.
@@ -83,6 +82,7 @@ class ReasoningParser:
         """
         return False
 
+    @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
