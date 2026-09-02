@@ -74,9 +74,9 @@ from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
 logger = init_logger(__name__)
 
 # fp8_ds_mla 656-byte layout constants (DeepSeek V3.2 main MLA).
-_FP8DS_NOPE_DIM = 512          # number of fp8 NoPE values
-_FP8DS_ROPE_DIM = 64           # number of bf16 RoPE values
-_FP8DS_QUANT_TILE = 128        # one fp32 scale per 128 fp8 values
+_FP8DS_NOPE_DIM = 512  # number of fp8 NoPE values
+_FP8DS_ROPE_DIM = 64  # number of bf16 RoPE values
+_FP8DS_QUANT_TILE = 128  # one fp32 scale per 128 fp8 values
 _FP8DS_NUM_SCALES = _FP8DS_NOPE_DIM // _FP8DS_QUANT_TILE  # 4
 _FP8DS_ENTRY_BYTES = (
     _FP8DS_NOPE_DIM + 4 * _FP8DS_NUM_SCALES + 2 * _FP8DS_ROPE_DIM
@@ -171,7 +171,9 @@ def flash_mla_sparse_fwd_triton(
     """
     assert q.dim() == 3, f"expected q [s_q, h_q, d_qk], got {q.shape}"
     assert kv.dim() == 3, f"expected kv [s_kv, h_kv, d_qk], got {kv.shape}"
-    assert indices.dim() == 3, f"expected indices [s_q, h_kv, topk], got {indices.shape}"
+    assert indices.dim() == 3, (
+        f"expected indices [s_q, h_kv, topk], got {indices.shape}"
+    )
     assert kv.shape[1] == 1, "sparse MLA requires h_kv == 1"
     assert indices.shape[1] == 1, "sparse MLA requires h_kv == 1 on indices"
     s_q, h_q, d_qk = q.shape
@@ -181,7 +183,7 @@ def flash_mla_sparse_fwd_triton(
     assert indices.shape[0] == s_q
 
     device = q.device
-    kv_flat = kv.reshape(s_kv, d_qk)              # [s_kv, d_qk]
+    kv_flat = kv.reshape(s_kv, d_qk)  # [s_kv, d_qk]
     idx2d = indices.reshape(s_q, topk).contiguous()  # [s_q, topk] int32
 
     # Per-query candidate count (lens). The accumulate kernel iterates
@@ -205,7 +207,9 @@ def flash_mla_sparse_fwd_triton(
     profile.start()
 
     # State buffers for the online-softmax accumulation (fp32).
-    max_score = torch.full((s_q, h_q), float("-inf"), dtype=torch.float32, device=device)
+    max_score = torch.full(
+        (s_q, h_q), float("-inf"), dtype=torch.float32, device=device
+    )
     denom = torch.zeros((s_q, h_q), dtype=torch.float32, device=device)
     acc = torch.zeros((s_q, h_q, d_qk), dtype=torch.float32, device=device)
 
@@ -268,9 +272,9 @@ def flash_mla_sparse_fwd_triton(
 # ---------------------------------------------------------------------------
 @triton.jit
 def _gather_dequant_fp8ds_kernel(
-    cache_ptr,            # uint8 [total_slots, 656] (or strided view)
-    indices_ptr,          # int32 [T, K] global slot ids, -1 invalid
-    out_ptr,              # bf16  [T, K, 576] gathered dequantized kv
+    cache_ptr,  # uint8 [total_slots, 656] (or strided view)
+    indices_ptr,  # int32 [T, K] global slot ids, -1 invalid
+    out_ptr,  # bf16  [T, K, 576] gathered dequantized kv
     stride_cache_s,
     stride_idx_t: tl.constexpr,
     stride_idx_k: tl.constexpr,
@@ -278,12 +282,12 @@ def _gather_dequant_fp8ds_kernel(
     stride_out_k: tl.constexpr,
     stride_out_d: tl.constexpr,
     total_slots,
-    nope_dim: tl.constexpr,       # 512
-    rope_dim: tl.constexpr,       # 64
-    quant_tile: tl.constexpr,     # 128
+    nope_dim: tl.constexpr,  # 512
+    rope_dim: tl.constexpr,  # 64
+    quant_tile: tl.constexpr,  # 128
     scale_byte_off: tl.constexpr,  # 512
-    rope_byte_off: tl.constexpr,   # 528
-    BLOCK_D: tl.constexpr,        # >= 576 (head_dim)
+    rope_byte_off: tl.constexpr,  # 528
+    BLOCK_D: tl.constexpr,  # >= 576 (head_dim)
 ):
     # int64 program ids: the gathered-KV ``out`` tensor is [T, K, 576] and for
     # the cluster's mixed-batch prefill (T=2048, K=2048) its per-token stride
@@ -321,7 +325,9 @@ def _gather_dequant_fp8ds_kernel(
     b1 = tl.load(base + scale_byte + 1, mask=nope_mask & is_valid, other=0).to(tl.int32)
     b2 = tl.load(base + scale_byte + 2, mask=nope_mask & is_valid, other=0).to(tl.int32)
     b3 = tl.load(base + scale_byte + 3, mask=nope_mask & is_valid, other=0).to(tl.int32)
-    scale_bits = (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24)
+    scale_bits = (
+        (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24)
+    )
     scale_f32 = scale_bits.to(tl.float32, bitcast=True)
     nope = fp8_vals * scale_f32
 
@@ -343,8 +349,8 @@ def _gather_dequant_fp8ds_kernel(
 
 
 def _gather_dequant_fp8ds(
-    cache_flat: torch.Tensor,   # uint8 [total_slots, 656]
-    indices: torch.Tensor,      # int32 [T, K] global slot ids
+    cache_flat: torch.Tensor,  # uint8 [total_slots, 656]
+    indices: torch.Tensor,  # int32 [T, K] global slot ids
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather + dequantize fp8_ds_mla cache rows selected by ``indices``.
 
@@ -382,7 +388,7 @@ def _gather_dequant_fp8ds(
         _FP8DS_NOPE_DIM,
         _FP8DS_ROPE_DIM,
         _FP8DS_QUANT_TILE,
-        _FP8DS_NOPE_DIM,            # scale_byte_off = 512
+        _FP8DS_NOPE_DIM,  # scale_byte_off = 512
         _FP8DS_NOPE_DIM + 4 * _FP8DS_NUM_SCALES,  # rope_byte_off = 528
         BLOCK_D=block_d,
         num_warps=4,
@@ -436,13 +442,13 @@ def _gather_dequant_fp8ds(
 # The int64 offset-promotion fix is preserved (slot*stride is computed in int64).
 @triton.jit
 def _fused_gather_dequant_attn_kernel(
-    q_ptr,                # bf16 [T, H, D]
-    cache_ptr,            # uint8 [total_slots, 656] (flattened paged cache)
-    indices_ptr,          # int32 [T, K] global slot ids, -1 / >= total invalid
-    lens_ptr,             # int32 [T] per-token valid-candidate count
-    max_score_ptr,        # f32  [T, H] (pre-filled -inf)
-    denom_ptr,            # f32  [T, H] (pre-zeroed)
-    acc_ptr,              # f32  [T, H, D] (pre-zeroed; only [:, :, :512] written)
+    q_ptr,  # bf16 [T, H, D]
+    cache_ptr,  # uint8 [total_slots, 656] (flattened paged cache)
+    indices_ptr,  # int32 [T, K] global slot ids, -1 / >= total invalid
+    lens_ptr,  # int32 [T] per-token valid-candidate count
+    max_score_ptr,  # f32  [T, H] (pre-filled -inf)
+    denom_ptr,  # f32  [T, H] (pre-zeroed)
+    acc_ptr,  # f32  [T, H, D] (pre-zeroed; only [:, :, :512] written)
     stride_q_t,
     stride_q_h: tl.constexpr,
     stride_q_d: tl.constexpr,
@@ -456,17 +462,17 @@ def _fused_gather_dequant_attn_kernel(
     stride_acc_d: tl.constexpr,
     total_slots,
     num_heads: tl.constexpr,
-    nope_dim: tl.constexpr,        # 512 (pow2 -> BLOCK_NOPE)
-    rope_dim: tl.constexpr,        # 64  (pow2 -> BLOCK_ROPE)
-    quant_tile: tl.constexpr,      # 128
+    nope_dim: tl.constexpr,  # 512 (pow2 -> BLOCK_NOPE)
+    rope_dim: tl.constexpr,  # 64  (pow2 -> BLOCK_ROPE)
+    quant_tile: tl.constexpr,  # 128
     scale_byte_off: tl.constexpr,  # 512
-    rope_byte_off: tl.constexpr,   # 528
+    rope_byte_off: tl.constexpr,  # 528
     num_candidates,
     scale: tl.constexpr,
     HEAD_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    BLOCK_NOPE: tl.constexpr,      # 512
-    BLOCK_ROPE: tl.constexpr,      # 64
+    BLOCK_NOPE: tl.constexpr,  # 512
+    BLOCK_ROPE: tl.constexpr,  # 64
 ):
     # int64 token id: matches the materialized kernels' offset-promotion fix.
     # (q/acc here are [T,H,D] so per-token offsets are small, but keep 64-bit
@@ -475,24 +481,30 @@ def _fused_gather_dequant_attn_kernel(
     head_block_idx = tl.program_id(1)
     head_offsets = head_block_idx * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
     head_mask = head_offsets < num_heads
-    nope_off = tl.arange(0, BLOCK_NOPE)            # 0..511
-    rope_off = tl.arange(0, BLOCK_ROPE)            # 0..63
+    nope_off = tl.arange(0, BLOCK_NOPE)  # 0..511
+    rope_off = tl.arange(0, BLOCK_ROPE)  # 0..63
     nope_dmask = nope_off < nope_dim
     rope_dmask = rope_off < rope_dim
-    scale_tile = nope_off // quant_tile            # per-128 scale index (0..3)
+    scale_tile = nope_off // quant_tile  # per-128 scale index (0..3)
 
     # q split into NoPE [HEAD_BLOCK, 512] and RoPE [HEAD_BLOCK, 64] bf16 (tensor-
     # core dot operands), loaded once. Masked dims load as 0 (contribute nothing,
     # matching the materialized path which zero-pads q beyond head_dim).
     q_nope = tl.load(
-        q_ptr + token_idx * stride_q_t
-        + head_offsets[:, None] * stride_q_h + nope_off[None, :] * stride_q_d,
-        mask=head_mask[:, None] & nope_dmask[None, :], other=0.0,
+        q_ptr
+        + token_idx * stride_q_t
+        + head_offsets[:, None] * stride_q_h
+        + nope_off[None, :] * stride_q_d,
+        mask=head_mask[:, None] & nope_dmask[None, :],
+        other=0.0,
     ).to(tl.bfloat16)
     q_rope = tl.load(
-        q_ptr + token_idx * stride_q_t
-        + head_offsets[:, None] * stride_q_h + (nope_dim + rope_off[None, :]) * stride_q_d,
-        mask=head_mask[:, None] & rope_dmask[None, :], other=0.0,
+        q_ptr
+        + token_idx * stride_q_t
+        + head_offsets[:, None] * stride_q_h
+        + (nope_dim + rope_off[None, :]) * stride_q_d,
+        mask=head_mask[:, None] & rope_dmask[None, :],
+        other=0.0,
     ).to(tl.bfloat16)
 
     running_max = tl.full((HEAD_BLOCK,), -float("inf"), tl.float32)
@@ -506,7 +518,7 @@ def _fused_gather_dequant_attn_kernel(
 
     cand_base = tl.arange(0, BLOCK_N)
     for n0 in range(0, num_candidates, BLOCK_N):
-        cand = n0 + cand_base                       # [BLOCK_N] candidate cols
+        cand = n0 + cand_base  # [BLOCK_N] candidate cols
         cand_in_range = cand < num_candidates
         slot = tl.load(
             indices_ptr + token_idx * stride_idx_t + cand * stride_idx_k,
@@ -530,19 +542,18 @@ def _fused_gather_dequant_attn_kernel(
         b2 = tl.load(base + scale_byte + 2, mask=nmask, other=0).to(tl.int32)
         b3 = tl.load(base + scale_byte + 3, mask=nmask, other=0).to(tl.int32)
         scale_bits = (
-            (b0 & 0xFF)
-            | ((b1 & 0xFF) << 8)
-            | ((b2 & 0xFF) << 16)
-            | ((b3 & 0xFF) << 24)
+            (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24)
         )
         scale_f32 = scale_bits.to(tl.float32, bitcast=True)
-        kv_nope = tl.where(nmask, fp8_vals * scale_f32, 0.0).to(tl.bfloat16)  # [BLOCK_N, 512]
+        kv_nope = tl.where(nmask, fp8_vals * scale_f32, 0.0).to(
+            tl.bfloat16
+        )  # [BLOCK_N, 512]
 
         # ---- RoPE [BLOCK_N, 64]: bf16 values at byte offset 528 ----
         rmask = cand_valid[:, None] & rope_dmask[None, :]
         rope_ptr = (base + rope_byte_off).to(tl.pointer_type(tl.bfloat16))
         kv_rope = tl.load(rope_ptr + rope_off[None, :], mask=rmask, other=0.0)
-        kv_rope = tl.where(rmask, kv_rope, 0.0).to(tl.bfloat16)               # [BLOCK_N, 64]
+        kv_rope = tl.where(rmask, kv_rope, 0.0).to(tl.bfloat16)  # [BLOCK_N, 64]
 
         # ---- scores: q_nope.kv_nopeᵀ + q_rope.kv_ropeᵀ over 512+64=576 ----
         # bf16xbf16 -> fp32 accumulate (matches the materialized path which
@@ -550,15 +561,14 @@ def _fused_gather_dequant_attn_kernel(
         # the two bf16 dots reproduce the same 576-d inner product up to fp32
         # accumulation).
         scores = (
-            tl.dot(q_nope, tl.trans(kv_nope))
-            + tl.dot(q_rope, tl.trans(kv_rope))
-        ).to(tl.float32) * scale                        # [HEAD_BLOCK, BLOCK_N]
+            tl.dot(q_nope, tl.trans(kv_nope)) + tl.dot(q_rope, tl.trans(kv_rope))
+        ).to(tl.float32) * scale  # [HEAD_BLOCK, BLOCK_N]
         # Invalid candidates -> -inf so they get zero softmax weight (and a zero
         # kv row, so they also contribute nothing to the value accumulation).
         scores = tl.where(cand_valid[None, :], scores, -float("inf"))
 
         # ---- flash-style online-softmax block update over BLOCK_N ----
-        tile_max = tl.max(scores, axis=1)               # [HEAD_BLOCK]
+        tile_max = tl.max(scores, axis=1)  # [HEAD_BLOCK]
         next_max = tl.maximum(running_max, tile_max)
         # If a head has seen no valid candidate yet, next_max may be -inf; guard
         # exp(-inf - -inf)=exp(nan). When next_max is -inf the whole tile is
@@ -566,9 +576,9 @@ def _fused_gather_dequant_attn_kernel(
         safe_next = tl.where(next_max == -float("inf"), 0.0, next_max)
         previous_weight = tl.exp(running_max - safe_next)
         previous_weight = tl.where(running_max == -float("inf"), 0.0, previous_weight)
-        p = tl.exp(scores - safe_next[:, None])         # [HEAD_BLOCK, BLOCK_N]
+        p = tl.exp(scores - safe_next[:, None])  # [HEAD_BLOCK, BLOCK_N]
         p = tl.where(cand_valid[None, :], p, 0.0)
-        tile_denom = tl.sum(p, axis=1)                  # [HEAD_BLOCK]
+        tile_denom = tl.sum(p, axis=1)  # [HEAD_BLOCK]
         # value accumulation over the NoPE block only (512); RoPE is not a value
         # dim, so the PV dot is 512-wide (was 1024-wide in the single-tile path).
         running_acc = running_acc * previous_weight[:, None] + tl.dot(
@@ -616,14 +626,14 @@ _FUSED_NUM_STAGES = 1
 
 
 def _fused_gather_dequant_attend(
-    q: torch.Tensor,         # [T, H, D] bf16
+    q: torch.Tensor,  # [T, H, D] bf16
     cache_flat: torch.Tensor,  # [total_slots, 656] uint8
-    indices: torch.Tensor,   # [T, K] int32 global slot ids
-    lens: torch.Tensor,      # [T] int32 per-token valid candidate count
+    indices: torch.Tensor,  # [T, K] int32 global slot ids
+    lens: torch.Tensor,  # [T] int32 per-token valid candidate count
     scale: float,
     max_score: torch.Tensor,  # [T, H] f32 (pre-filled -inf)
-    denom: torch.Tensor,      # [T, H] f32 (pre-zeroed)
-    acc: torch.Tensor,        # [T, H, D] f32 (pre-zeroed)
+    denom: torch.Tensor,  # [T, H] f32 (pre-zeroed)
+    acc: torch.Tensor,  # [T, H, D] f32 (pre-zeroed)
     *,
     block_n: int = _FUSED_BLOCK_N,
     head_block: int | None = None,
@@ -673,17 +683,17 @@ def _fused_gather_dequant_attend(
         acc.stride(2),
         total_slots,
         H,
-        _FP8DS_NOPE_DIM,                          # nope_dim = 512
-        _FP8DS_ROPE_DIM,                          # rope_dim = 64
+        _FP8DS_NOPE_DIM,  # nope_dim = 512
+        _FP8DS_ROPE_DIM,  # rope_dim = 64
         _FP8DS_QUANT_TILE,
-        _FP8DS_NOPE_DIM,                          # scale_byte_off = 512
+        _FP8DS_NOPE_DIM,  # scale_byte_off = 512
         _FP8DS_NOPE_DIM + 4 * _FP8DS_NUM_SCALES,  # rope_byte_off = 528
         K,
         float(scale),
         HEAD_BLOCK=head_block,
         BLOCK_N=block_n,
-        BLOCK_NOPE=_FP8DS_NOPE_DIM,               # 512 (pow2)
-        BLOCK_ROPE=_FP8DS_ROPE_DIM,               # 64 (pow2)
+        BLOCK_NOPE=_FP8DS_NOPE_DIM,  # 512 (pow2)
+        BLOCK_ROPE=_FP8DS_ROPE_DIM,  # 64 (pow2)
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -730,8 +740,12 @@ def flash_mla_with_kvcache_triton(
     extra_k_cache / extra_indices / *_topk_length are the DeepSeek-V4 SWA
     arguments; the V3.2 backend never sets them and they are asserted None.
     """
-    assert indices is not None, "Triton flash_mla_with_kvcache only supports sparse mode"
-    assert is_fp8_kvcache, "Triton decode path requires is_fp8_kvcache=True (fp8_ds_mla)"
+    assert indices is not None, (
+        "Triton flash_mla_with_kvcache only supports sparse mode"
+    )
+    assert is_fp8_kvcache, (
+        "Triton decode path requires is_fp8_kvcache=True (fp8_ds_mla)"
+    )
     assert head_dim_v == _DV, f"head_dim_v must be {_DV}, got {head_dim_v}"
     assert extra_k_cache is None and extra_indices_in_kvcache is None, (
         "V3.2 sparse decode does not use extra_k_cache / extra_indices "
@@ -848,12 +862,12 @@ def flash_mla_with_kvcache_triton(
 
 @triton.jit
 def _materialized_attn_kernel(
-    q_ptr,           # bf16 [T, H, D]
-    kv_ptr,          # bf16 [T, K, D] (per-query gathered)
-    valid_ptr,       # bool [T, K]
-    max_score_ptr,   # f32  [T, H]
-    denom_ptr,       # f32  [T, H]
-    acc_ptr,         # f32  [T, H, D]
+    q_ptr,  # bf16 [T, H, D]
+    kv_ptr,  # bf16 [T, K, D] (per-query gathered)
+    valid_ptr,  # bool [T, K]
+    max_score_ptr,  # f32  [T, H]
+    denom_ptr,  # f32  [T, H]
+    acc_ptr,  # f32  [T, H, D]
     stride_q_t: tl.constexpr,
     stride_q_h: tl.constexpr,
     stride_q_d: tl.constexpr,
@@ -944,13 +958,13 @@ def _materialized_attn_kernel(
 
 
 def _materialized_indexed_accumulate(
-    q: torch.Tensor,         # [T, H, D]
-    kv: torch.Tensor,        # [T, K, D]  per-query gathered + dequantized
-    valid: torch.Tensor,     # [T, K] bool
+    q: torch.Tensor,  # [T, H, D]
+    kv: torch.Tensor,  # [T, K, D]  per-query gathered + dequantized
+    valid: torch.Tensor,  # [T, K] bool
     scale: float,
     max_score: torch.Tensor,  # [T, H] f32 (pre-filled -inf)
-    denom: torch.Tensor,      # [T, H] f32 (pre-zeroed)
-    acc: torch.Tensor,        # [T, H, D] f32 (pre-zeroed)
+    denom: torch.Tensor,  # [T, H] f32 (pre-zeroed)
+    acc: torch.Tensor,  # [T, H, D] f32 (pre-zeroed)
 ) -> None:
     """Online-softmax accumulation over per-query materialized KV.
 

@@ -20,9 +20,7 @@ def _view_packed_fp8_paged_mqa_kv_cache(
     elif kv_cache.dim() == 4:
         num_blocks, block_size, num_kv_heads, head_dim_with_scale = kv_cache.shape
     else:
-        raise ValueError(
-            f"Expected 3D or 4D kv_cache, got {kv_cache.dim()} dimensions"
-        )
+        raise ValueError(f"Expected 3D or 4D kv_cache, got {kv_cache.dim()} dimensions")
     if num_kv_heads != 1:
         raise ValueError(f"Expected one KV head, got {num_kv_heads}")
 
