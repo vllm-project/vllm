@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer.gdn_prefill
+import pytest
 import torch
+
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip(
+        reason="FlashInfer GDN prefill is not supported on ROCm.",
+        allow_module_level=True,
+    )
+
+import flashinfer.gdn_prefill  # noqa: E402
 
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     fi_chunk_gated_delta_rule,
-)
+)  # noqa: E402
 
 
 def test_flashinfer_gdn_prefill_uses_int64_cu_seqlens(monkeypatch):
