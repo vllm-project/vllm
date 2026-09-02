@@ -185,6 +185,11 @@ class EngineCoreSentinel:
         return self._mark_healthy(ft_request)
 
     def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        if self._initial_dp_size == 1:
+            raise ValueError(
+                "scale_down requires data_parallel_size > 1; a dp=1 "
+                "engine has no ranks to remove"
+            )
         removed_set = set(ft_request.params["removed_dp_ranks"])
         my_rank = self.parallel_config.data_parallel_rank
         newly_dead = removed_set - self._dead_dp_ranks
