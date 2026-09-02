@@ -708,6 +708,8 @@ run_failure_diagnostic() {
 
 upload_failure_diagnostics_artifact() {
   local upload_root=$1 upload_path=$2 agent_bin=""
+  local agent_upload_help=""
+  local -a upload_options=()
 
   if [[ -n "${BUILDKITE_BIN_PATH:-}" \
     && -x "${BUILDKITE_BIN_PATH}/buildkite-agent" ]]; then
@@ -721,6 +723,17 @@ upload_failure_diagnostics_artifact() {
   [[ -n "${agent_bin}" && -n "${BUILDKITE_JOB_ID:-}" ]] || return 1
   command -v timeout >/dev/null 2>&1 || return 1
 
+  # Older AMD runners predate the literal upload options. A restricted path
+  # has no glob or delimiter characters, so it is safe with either agent.
+  if [[ ! "${upload_path}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$ ]]; then
+    agent_upload_help=$("${agent_bin}" artifact upload --help 2>&1 || true)
+    if [[ "${agent_upload_help}" != *"--literal"* \
+      || "${agent_upload_help}" != *"--delimiter"* ]]; then
+      return 1
+    fi
+    upload_options=(--literal --delimiter "")
+  fi
+
   (
     cd "${upload_root}" || exit 1
     BUILDKITE_AGENT_DEBUG=false \
@@ -729,7 +742,7 @@ upload_failure_diagnostics_artifact() {
       BUILDKITE_AGENT_LOG_LEVEL=error \
       timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
       "${agent_bin}" artifact upload \
-        --literal --delimiter "" "./${upload_path}"
+        "${upload_options[@]}" "./${upload_path}"
   ) >/dev/null 2>&1
 }
 
