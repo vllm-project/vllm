@@ -59,6 +59,7 @@ from .minicpmv import (
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
     MiniCPMVVideoEmbeddingItems,
+    _image_kwargs_from_video,
 )
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
@@ -97,7 +98,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         ds = mm_kwargs.get("downsample_mode")
         if ds is not None:
             return str(ds)
-        return self.info._get_downsample_mode()
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info._get_downsample_mode()
 
     def get_image_prompt_texts(
         self,
@@ -105,7 +108,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         image_idx: int = 0,
         downsample_mode: str | None = None,
     ) -> str:
-        return self.info.get_slice_image_placeholder(
+        info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
+        return info.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
             downsample_mode=downsample_mode,
@@ -127,6 +132,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         # which one is used. Using image_token for video silently produces
         # garbage descriptions.
         info = self.info
+        assert isinstance(info, MiniCPMV4_6ProcessingInfo)
         grids, source_tokens, patch_tokens = info._compute_visual_tokens(
             image_size,
             max_slice_nums=info.get_video_max_slice_num(),
@@ -1015,6 +1021,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         config: MiniCPMV4_6Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -1077,6 +1084,7 @@ class MiniCPMV4_6ForConditionalGeneration(
                 image_embeds=image_embeds,
             )
 
+        assert isinstance(pixel_values, torch.Tensor | list)
         tgt_sizes = kwargs.pop("tgt_sizes")
         num_slices_flat = torch.tensor([len(ps) for ps in pixel_values])
         pixel_values_flat = flatten_bn(pixel_values)
@@ -1200,18 +1208,12 @@ class MiniCPMV4_6ForConditionalGeneration(
                     for t in use_vit_merger_tensors
                 )
 
-        # Split kwargs into image / video buckets (videos are processed via
-        # the same vision pipeline; their fields just carry a ``video_`` prefix).
         image_kwargs = {
             k: v
             for k, v in kwargs.items()
             if k in ("pixel_values", "image_embeds", "tgt_sizes")
         }
-        video_kwargs = {
-            k.removeprefix("video_"): v
-            for k, v in kwargs.items()
-            if k.startswith("video_")
-        }
+        video_kwargs = _image_kwargs_from_video(kwargs)
 
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 

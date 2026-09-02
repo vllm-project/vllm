@@ -8,6 +8,7 @@ mod wire;
 
 use std::ops::{Deref, DerefMut};
 
+use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -162,10 +163,7 @@ impl Serialize for MaybeWireLogprobs {
 impl MaybeWireLogprobs {
     /// Resolve the wire representation into decoded logprobs by looking up aux
     /// frames and decoding raw views as needed.
-    pub(super) fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    pub(super) fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Self> {
         match self {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
@@ -229,10 +227,7 @@ impl WireLogprobs {
     /// Resolve the wire-format logprobs into semantic [`Logprobs`] records by
     /// looking up aux frames, decoding raw views, and grouping each row
     /// into one [`PositionLogprobs`].
-    fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Logprobs>
-    where
-        Frame: AsRef<[u8]>,
-    {
+    fn resolve(self, frames: &[Bytes], field_prefix: &str) -> Result<Logprobs> {
         if let Some(indices) = self.cu_num_generated_tokens {
             bail_ext_value_decode!(
                 "{field_prefix}.cu_num_generated_tokens: \

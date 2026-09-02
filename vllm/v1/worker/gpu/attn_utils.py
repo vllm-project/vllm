@@ -234,11 +234,11 @@ def init_kv_cache(
             kv_cache.tensors,
             num_attn_module,
             pcp_symm_mem_domain=kv_cache.pcp_domain,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
         )
     except Exception:
         kv_cache.close()
         raise
-
     return kv_caches
 
 
