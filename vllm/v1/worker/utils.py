@@ -3,16 +3,21 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed.device_communicators.symm_mem import (
+    allocate_symmetric_memory_storage,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.direct_kv import KVCacheSymmMemDomain
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
@@ -563,11 +568,99 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             runner_only_attn_layers.add(layer_name)
 
 
+@dataclass
+class KVCache:
+    """Own KV-cache tensors and their optional symmetric-memory state."""
+
+    # Symmetric-memory allocation that owns the storage behind all cache views.
+    # This remains None when the cache uses the regular allocator.
+    storage: torch.Tensor | None = field(default=None, init=False)
+
+    # Layer-shaped KV-cache views, ordered for model-runner consumers.
+    tensors: list[torch.Tensor] = field(default_factory=list)
+
+    # PCP-specific peer pointers, cache views, and barrier state.
+    pcp_domain: KVCacheSymmMemDomain | None = None
+
+    # TODO: Configure this when direct KV supports a TP/DCP domain.
+    tp_domain: KVCacheSymmMemDomain | None = None
+
+    def _symm_mem_domains(self) -> tuple[KVCacheSymmMemDomain, ...]:
+        return tuple(
+            domain for domain in (self.pcp_domain, self.tp_domain) if domain is not None
+        )
+
+    def _allocate_symm_mem_storage(
+        self, nbytes: int, device: torch.device
+    ) -> torch.Tensor:
+        assert self.storage is None, (
+            "KV cache must use one symmetric-memory backing allocation"
+        )
+
+        storage = allocate_symmetric_memory_storage((nbytes,), torch.int8, device)
+        self.storage = storage
+
+        for domain in self._symm_mem_domains():
+            domain.rendezvous(storage)
+
+        return storage
+
+    def allocate(
+        self,
+        kv_cache_config: KVCacheConfig,
+        device: torch.device,
+        layout: KVCacheLayout,
+        kernel_block_sizes: list[int] | None = None,
+        shared_layers: Mapping[str, str] | None = None,
+        allocation_context: AbstractContextManager | None = None,
+    ) -> dict[str, torch.Tensor]:
+        domains = self._symm_mem_domains()
+        buffer_allocator = self._allocate_symm_mem_storage if domains else None
+        allocation_context = allocation_context or nullcontext()
+
+        try:
+            with allocation_context:
+                kv_caches = allocate_kv_cache(
+                    kv_cache_config,
+                    device,
+                    layout,
+                    kernel_block_sizes,
+                    buffer_allocator=buffer_allocator,
+                )
+
+            for layer_name, target in (shared_layers or {}).items():
+                kv_caches[layer_name] = kv_caches[target]
+
+            if domains:
+                storage = self.storage
+                if storage is None:
+                    raise RuntimeError("Direct KV found no KV-cache backing allocation")
+
+                for domain in domains:
+                    domain.finalize(kv_caches, storage)
+        except Exception:
+            self.close()
+            raise
+
+        return kv_caches
+
+    def close(self) -> None:
+        try:
+            for domain in self._symm_mem_domains():
+                domain.close()
+        finally:
+            self.pcp_domain = None
+            self.tp_domain = None
+            self.storage = None
+            self.tensors.clear()
+
+
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    pcp_symm_mem_domain: KVCacheSymmMemDomain | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -584,6 +677,9 @@ def bind_kv_cache(
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
+        num_attn_module: Number of attention modules in each decoder layer.
+        pcp_symm_mem_domain: Optional PCP symmetric-memory state passed to layers
+            that support direct KV-cache access.
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
@@ -612,7 +708,11 @@ def bind_kv_cache(
     # splits conv/ssm), so the kv_caches dict can hold a single tensor per
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].bind_kv_cache(kv_cache)
+        layer = forward_context[layer_name]
+        if pcp_symm_mem_domain is not None and layer.supports_direct_kv:
+            cast(Any, layer).bind_kv_cache(kv_cache, pcp_symm_mem_domain)
+        else:
+            layer.bind_kv_cache(kv_cache)
 
 
 def copy_kv_cache_blocks_inplace(

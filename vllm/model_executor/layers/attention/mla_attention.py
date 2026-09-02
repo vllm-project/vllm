@@ -698,7 +698,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata.num_decode_tokens
                     if attn_metadata is not None
                     else None,
-                    self.use_pcp,
+                    use_pcp_kv_gather=self.use_pcp,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -1285,7 +1285,7 @@ def unified_mla_kv_cache_update(
             k_pe,
             layer_slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
-            attn_layer.use_pcp,
+            use_pcp_kv_gather=attn_layer.use_pcp,
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
