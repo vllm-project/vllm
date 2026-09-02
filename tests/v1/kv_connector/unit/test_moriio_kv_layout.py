@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import math
 import threading
 from collections import OrderedDict, defaultdict
 from queue import Queue
@@ -14,6 +15,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    MambaSpec,
     MLAAttentionSpec,
 )
 
@@ -496,9 +498,6 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper._transfer_timeout = 1
-    # Pin the Python polling path: this asserts on per-status Succeeded() calls,
-    # which the batched mori wait does not make.
-    wrapper._wait_all_supported = False
     global_status = FakeStatus()
     scoped_status = FakeStatus()
     wrapper.transfer_status = [global_status]
@@ -835,11 +834,100 @@ def test_mamba_transfer_geometry_is_slot_strided():
     assert geom.ssm_region_len == ssm.shape[0] * ssm.stride(0) * ssm.element_size()
 
 
+def test_kda_conv_ssm_unpacks_padded_pages_as_aliasing_strided_views():
+    num_blocks = 4
+    page_bytes = 128
+    conv_shape = (3, 4)
+    ssm_shape = (2, 2, 4)
+    conv_bytes = math.prod(conv_shape) * torch.bfloat16.itemsize
+    ssm_bytes = math.prod(ssm_shape) * torch.bfloat16.itemsize
+    assert conv_bytes + ssm_bytes < page_bytes
+
+    pages = torch.zeros((num_blocks, 1, 1, page_bytes), dtype=torch.uint8)
+    spec = MambaSpec(
+        block_size=1,
+        shapes=(conv_shape, ssm_shape),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        page_size_padded=page_bytes,
+    )
+
+    conv, ssm = moriio_layout.kda_conv_ssm(pages, spec)
+
+    assert conv.shape == (num_blocks, *conv_shape)
+    assert ssm.shape == (num_blocks, *ssm_shape)
+    assert conv.stride() == (page_bytes // 2, 4, 1)
+    assert ssm.stride() == (page_bytes // 2, 8, 4, 1)
+    assert conv.untyped_storage().data_ptr() == pages.untyped_storage().data_ptr()
+    assert ssm.untyped_storage().data_ptr() == pages.untyped_storage().data_ptr()
+    assert conv.storage_offset() == 0
+    assert ssm.storage_offset() * ssm.element_size() == conv_bytes
+
+    conv[1].fill_(1)
+    ssm[2].fill_(2)
+    assert torch.all(pages[1, 0, 0, :conv_bytes].view(torch.bfloat16) == 1)
+    assert torch.all(
+        pages[2, 0, 0, conv_bytes : conv_bytes + ssm_bytes].view(torch.bfloat16) == 2
+    )
+
+
+def test_kda_conv_ssm_accepts_strided_blocks_without_copying():
+    backing = torch.zeros(4 * 256, dtype=torch.uint8)
+    pages = backing.as_strided((4, 1, 1, 128), (256, 128, 128, 1))
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((3, 4), (2, 2, 4)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        page_size_padded=128,
+    )
+
+    conv, ssm = moriio_layout.kda_conv_ssm(pages, spec)
+
+    assert not pages.is_contiguous()
+    assert conv.stride(0) == 128
+    assert ssm.stride(0) == 128
+    assert conv.untyped_storage().data_ptr() == backing.data_ptr()
+    assert ssm.untyped_storage().data_ptr() == backing.data_ptr()
+
+
+def test_kda_conv_ssm_rejects_noncontiguous_page_bytes():
+    pages = torch.zeros((4, 1, 1, 256), dtype=torch.uint8)[..., ::2]
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((3, 4), (2, 2, 4)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        page_size_padded=128,
+    )
+
+    with pytest.raises(ValueError, match="contiguous byte dimension"):
+        moriio_layout.kda_conv_ssm(pages, spec)
+
+
+def test_kda_conv_ssm_rejects_non_byte_packed_cache():
+    pages = torch.zeros((4, 1, 1, 128), dtype=torch.bfloat16)
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((3, 4), (2, 2, 4)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        page_size_padded=128,
+    )
+
+    with pytest.raises(ValueError, match="byte-sized dtype"):
+        moriio_layout.kda_conv_ssm(pages, spec)
+
+
 def test_mamba_transfer_geometry_requires_matching_slot_counts():
     conv = torch.empty((5, 4, 3), dtype=torch.bfloat16)
     ssm = torch.empty((4, 2, 4, 4), dtype=torch.bfloat16)
 
     with pytest.raises(ValueError, match="conv/ssm slot count mismatch"):
+        moriio_layout.get_mamba_transfer_geometry(conv, ssm)
+
+
+def test_mamba_transfer_geometry_rejects_empty_caches():
+    conv = torch.empty((0, 4, 3), dtype=torch.bfloat16)
+    ssm = torch.empty((0, 2, 4, 4), dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="at least one slot"):
         moriio_layout.get_mamba_transfer_geometry(conv, ssm)
 
 
@@ -906,3 +994,29 @@ def test_local_mamba_slots_must_fit_registered_regions():
 
     with pytest.raises(ValueError, match="local mamba slot 6"):
         moriio_layout.apply_mamba_offset_template(template, [6], [0])
+
+
+@pytest.mark.parametrize(
+    ("local_slots", "remote_slots"),
+    [([1, 2], [3]), ([1], [2, 3])],
+)
+def test_mamba_slot_counts_must_match(local_slots, remote_slots):
+    split = _gdn_split_info()
+    conv_dim = sum(split.local_proj_dims)
+    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
+    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+
+    with pytest.raises(ValueError, match="slot counts must match"):
+        moriio_layout.apply_mamba_offset_template(template, local_slots, remote_slots)
+
+
+def test_remote_mamba_slots_must_be_non_negative():
+    split = _gdn_split_info()
+    conv_dim = sum(split.local_proj_dims)
+    conv = _slot_strided(6, (conv_dim, split.conv_rows), slot_stride=200)
+    ssm = _slot_strided(6, (2, 4, 4), slot_stride=64)
+    template = moriio_layout.build_mamba_offset_template(conv, ssm, split, tp_ratio=1)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        moriio_layout.apply_mamba_offset_template(template, [1], [-1])
