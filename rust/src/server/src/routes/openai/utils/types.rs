@@ -1,17 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::HashMap;
 use std::slice;
 
 use llm_multimodal::ImageDetail;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use vllm_llm::TokenUsage;
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// Default model identifier used when no model is specified.
-pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 // ============================================================================
 // Default value helpers
@@ -20,6 +20,23 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 /// Helper function for serde default value (returns true).
 pub fn default_true() -> bool {
     true
+}
+
+/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => vllm_text::normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 // ============================================================================
@@ -51,14 +68,59 @@ impl StringOrArray {
     }
 }
 
-/// Validates stop sequences (non-empty strings)
+fn max_stop_strings() -> usize {
+    std::env::var("VLLM_MAX_STOP_STRINGS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
+}
+
+/// Validates stop sequences (at most the configured number of non-empty strings).
 pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationError> {
-    if stop.as_slice().iter().any(|s| s.is_empty()) {
+    let stop = stop.as_slice();
+    let max_stop_strings = max_stop_strings();
+    if stop.len() > max_stop_strings {
+        let mut error = validator::ValidationError::new("too_many_stop_strings");
+        error.code = format!("stop strings must contain at most {max_stop_strings} items").into();
+        return Err(error);
+    }
+    if stop.iter().any(|s| s.is_empty()) {
         return Err(validator::ValidationError::new(
             "stop strings cannot be empty",
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StringOrArray, validate_stop};
+
+    #[test]
+    fn validate_stop_accepts_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four"].into_iter().map(str::to_string).collect(),
+        );
+
+        validate_stop(&stop).expect("four stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_stop_rejects_more_than_four_stop_strings() {
+        let stop = StringOrArray::Array(
+            ["one", "two", "three", "four", "five"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let error = validate_stop(&stop).expect_err("five stop strings should be rejected");
+
+        assert_eq!(
+            error.code.as_ref(),
+            "stop strings must contain at most 4 items"
+        );
+    }
 }
 
 // ============================================================================
@@ -91,7 +153,23 @@ pub enum ContentPart {
         uuid: Option<String>,
     },
     #[serde(rename = "video_url")]
-    VideoUrl { video_url: VideoUrl },
+    VideoUrl {
+        video_url: VideoUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "audio_url")]
+    AudioUrl {
+        audio_url: AudioUrl,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    #[serde(rename = "input_audio")]
+    InputAudio {
+        input_audio: InputAudio,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
 }
 
 #[serde_with::skip_serializing_none]
@@ -106,9 +184,45 @@ pub struct VideoUrl {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AudioUrl {
+    pub url: String,
+}
+
+/// Base64-encoded audio bytes in OpenAI `input_audio` form.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct InputAudio {
+    pub data: String,
+    pub format: Option<String>,
+}
+
 // ============================================================================
 // Streaming
 // ============================================================================
+
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
 
 /// Mirrors the Python vLLM `StreamOptions` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -124,8 +238,13 @@ pub struct StreamOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
 }
 
 #[serde_with::skip_serializing_none]
@@ -133,6 +252,7 @@ pub struct Tool {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
@@ -311,7 +431,9 @@ pub enum MessageContent {
 // ============================================================================
 
 /// Mirrors the Python vLLM `UsageInfo` class.
-#[serde_with::skip_serializing_none]
+///
+/// Do not skip serializing `None` fields here: non-streaming response types
+/// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
@@ -401,15 +523,23 @@ pub struct LogProbs {
     pub text_offset: Vec<u32>,
 }
 
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
+
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatLogProbs {
     pub content: Option<Vec<ChatLogProbsContent>>,
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbsContent` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatLogProbsContent {
     pub token: String,
@@ -419,7 +549,6 @@ pub struct ChatLogProbsContent {
 }
 
 /// Mirrors the Python vLLM `ChatCompletionLogProb` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct TopLogProb {
     pub token: String,
@@ -436,7 +565,6 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
@@ -457,6 +585,12 @@ pub struct ModelObject {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// Backend model path (base cards) or adapter path (LoRA cards).
+    pub root: Option<String>,
+    /// Base model a LoRA adapter derives from; `null` for base models.
+    pub parent: Option<String>,
+    /// Maximum context length; `null` for LoRA adapter cards.
+    pub max_model_len: Option<u32>,
 }
 
 /// Response body for `GET /v1/models`.

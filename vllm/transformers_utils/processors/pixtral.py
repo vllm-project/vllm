@@ -4,13 +4,13 @@ import torch
 from mistral_common.protocol.instruct.chunk import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import BatchFeature, ImageProcessingMixin, ProcessorMixin, TensorType
 from transformers.image_utils import ImageInput
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
-class MistralCommonImageProcessor:
+class MistralCommonImageProcessor(ImageProcessingMixin):
     """
     Provide a HF-compatible interface for
     `mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
@@ -45,6 +45,22 @@ class MistralCommonImageProcessor:
         image = Image.new("RGB", (width, height))
         ncols, nrows = self.mm_encoder._image_to_num_tokens(image)
         return ncols * nrows, nrows, ncols
+
+    # Copied from Transformers (Apache-2.0):
+    # https://github.com/huggingface/transformers/blob/d20946079fd422335fbae3eeb98b7cd88334612f/src/transformers/image_processing_base.py#L473
+    def fetch_images(self, image_url_or_urls):
+        from transformers.image_utils import is_valid_image, load_image
+
+        if isinstance(image_url_or_urls, (list, tuple)):
+            return [self.fetch_images(x) for x in image_url_or_urls]
+        if isinstance(image_url_or_urls, str):
+            return load_image(image_url_or_urls)
+        if is_valid_image(image_url_or_urls):
+            return image_url_or_urls
+        raise TypeError(
+            "only a single or a list of entries is supported but got "
+            f"type={type(image_url_or_urls)}"
+        )
 
 
 class MistralCommonPixtralProcessor(ProcessorMixin):

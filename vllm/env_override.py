@@ -856,3 +856,18 @@ def _patch_inductor_fallback_allow_list() -> None:
 
 
 _patch_inductor_fallback_allow_list()
+
+# ============================================================
+# Triton Autotuner determinism
+# ============================================================
+# Replace the Autotuner.run so it always pick the first running configuration.
+# Useful to eliminate autotune variability leading to non determinism.
+if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
+    "1",
+    "true",
+):
+    from vllm.triton_utils.force_first_config import (
+        install as _install_force_first_config,
+    )
+
+    _install_force_first_config()

@@ -190,30 +190,32 @@ number: "1" | "2"
 @pytest.fixture(scope="session")
 def qwen3_lora_files():
     """Download Qwen3 LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="charent/self_cognition_Alice")
+    return hf_api().snapshot_download(repo_id="charent/self_cognition_Alice")
 
 
 @pytest.fixture(scope="session")
 def qwen3_meowing_lora_files():
     """Download Qwen3 LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+    return hf_api().snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
 
 
 @pytest.fixture(scope="session")
 def qwen3_woofing_lora_files():
     """Download Qwen3 LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
+    return hf_api().snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
 
 
 @pytest.fixture(scope="session")
 def opt125_lora_files() -> str:
     """Download opt-125m LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id="peft-internal-testing/opt-125m-dummy-lora")
+    return hf_api().snapshot_download(
+        repo_id="peft-internal-testing/opt-125m-dummy-lora"
+    )

@@ -91,9 +91,9 @@ def parse_from_filename(file: str) -> WheelFileInfo:
     else:
         if "+" in version:
             version_part, suffix = version.split("+", 1)
-            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu)
+            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu, xpu)
             # Git hashes and other suffixes are NOT variants
-            if suffix.startswith(("rocm", "cu", "cpu")):
+            if suffix.startswith(("rocm", "cu", "cpu", "xpu")):
                 variant = suffix
                 version = version_part
             # Otherwise keep the full version string (variant stays None)
@@ -429,7 +429,11 @@ if __name__ == "__main__":
     if PY_VERSION_RE.match(version):
         # upload-wheels.sh ensures no "dev" is in args.version
         wheel_files = list(
-            filter(lambda x: version in x and "dev" not in x, wheel_files)
+            filter(
+                lambda x: (version in x and "dev" not in x)
+                or (x.startswith("triton-") and "+xpu-" in x),
+                wheel_files,
+            )
         )
         print(f"Non-nightly version detected, wheel files used: {wheel_files}")
     else:

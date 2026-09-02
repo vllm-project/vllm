@@ -26,6 +26,29 @@ class EncoderItemSpec:
     """Number of output tokens after encoder processing (e.g. after
     spatial merge)."""
 
+    path_output_tokens: dict[str, int] = field(default_factory=dict)
+    """Per-path output token counts for multi-path encoders.
+
+    Single-path encoders leave this empty and use ``output_tokens`` for the
+    default path.
+    """
+
+    def get_path_output_tokens(self, path: str) -> int:
+        if path == "default" and not self.path_output_tokens:
+            return self.output_tokens
+        return self.path_output_tokens.get(path, 0)
+
+
+@dataclass(frozen=True)
+class EncoderCudaGraphPathConfig:
+    """Capture policy for one independently replayable encoder path."""
+
+    min_token_budget: int | None = None
+    """Smallest capture budget, or the model default minimum when unset."""
+
+    allow_zero_tokens: bool = False
+    """Whether a batch may omit this path entirely."""
+
 
 @dataclass
 class EncoderCudaGraphConfig:
@@ -59,6 +82,11 @@ class EncoderCudaGraphConfig:
     """Maximum number of frames per video.
     Only relevant when "video" is in ``modalities``.
     Image-only models can use the default of 1."""
+
+    paths: dict[str, EncoderCudaGraphPathConfig] = field(
+        default_factory=lambda: {"default": EncoderCudaGraphPathConfig()}
+    )
+    """Independently captured encoder paths keyed by their forward name."""
 
 
 @dataclass

@@ -11,16 +11,16 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -46,6 +46,7 @@ class Llama3JsonToolParser(ToolParser):
     """
 
     bot_token: str = "<|python_tag|>"
+    structural_tag_model = "llama"
     # Simple regex to find opening braces - we'll use JSON decoder for parsing
     # This handles arbitrary nesting depth correctly
     tool_call_start_regex: re.Pattern = re.compile(r"\{")

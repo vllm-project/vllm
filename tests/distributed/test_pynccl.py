@@ -16,6 +16,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_tp_group,
     get_world_group,
     graph_capture,
     init_distributed_environment,
@@ -197,6 +198,52 @@ def all_gather_worker_fn():
 )
 def test_pynccl_all_gather():
     distributed_run(all_gather_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def cuda_communicator_all_gather_dim_worker_fn():
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 1)
+
+    tp_group = get_tp_group()
+    comm = tp_group.device_communicator
+    assert comm is not None
+
+    rank = tp_group.rank_in_group
+    world_size = tp_group.world_size
+    device = tp_group.device
+
+    shape = (2, 3, 4)
+    num_elems = 1
+    for size in shape:
+        num_elems *= size
+
+    for dim in (1, -1):
+        tensor = (
+            torch.arange(num_elems, dtype=torch.float32, device=device).reshape(shape)
+            + rank * num_elems
+        )
+        expected = torch.cat(
+            [
+                torch.arange(num_elems, dtype=torch.float32, device=device).reshape(
+                    shape
+                )
+                + r * num_elems
+                for r in range(world_size)
+            ],
+            dim=dim,
+        )
+
+        result = comm.all_gather(tensor, dim=dim)
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_cuda_communicator_all_gather_dim_not_zero():
+    distributed_run(cuda_communicator_all_gather_dim_worker_fn, 2)
 
 
 @worker_fn_wrapper
@@ -425,3 +472,42 @@ def test_ncclGetUniqueId():
     # 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     # as long as the function doesn't raise an exception, we're good
     assert unique_id is not None
+
+
+def test_pynccl_suspend_resume_idempotent():
+    """Repeated suspend/resume (e.g. staged wake-ups) reach NCCL once each."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.comm = object()
+    comm.nccl = Mock()
+
+    comm.suspend()
+    comm.suspend()
+    comm.resume()
+    comm.resume()
+
+    assert comm.nccl.ncclCommSuspend.call_count == 1
+    assert comm.nccl.ncclCommResume.call_count == 1
+
+
+def test_pynccl_suspend_noop_without_symbol():
+    """RCCL / NCCL < 2.29.7 lack ncclCommSuspend; suspend() must no-op, not
+    crash, and resume() must then no-op too since nothing was suspended."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.comm = object()
+    comm.nccl = Mock()
+    comm.nccl.has_symbol.return_value = False
+
+    comm.suspend()
+    comm.resume()
+
+    comm.nccl.ncclCommSuspend.assert_not_called()
+    comm.nccl.ncclCommResume.assert_not_called()
+    assert comm._suspended is False

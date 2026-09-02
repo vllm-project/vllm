@@ -14,8 +14,8 @@ from vllm.utils.import_utils import import_plugin
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
@@ -30,6 +30,8 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
+    engine_based_streaming: bool = False
+
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
         # Optional vLLM ModelConfig from the server. Use get (not pop) so composite
@@ -38,7 +40,7 @@ class ReasoningParser:
 
     @cached_property
     def vocab(self) -> dict[str, int]:
-        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # NOTE: Only TokenizersBackend is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
@@ -55,6 +57,17 @@ class ReasoningParser:
         the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
         """
         return None
+
+    def has_engine_confirmed_reasoning_end(self) -> bool:
+        """Whether the engine has confirmed the reasoning end transition.
+
+        Engine-based parsers may defer terminal processing when the
+        detokenizer holds back text.  This method returns the engine's
+        *processed* state, not a raw token-ID check.
+
+        Only called for parsers with ``engine_based_streaming = True``.
+        """
+        return False
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -173,6 +186,18 @@ class ReasoningParser:
         """Adjust request parameters; override in subclasses as needed."""
         return request
 
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Hook called once at the start of streaming with the prompt tokens.
+
+        Gives parsers a chance to adjust their initial parsing state based on
+        the prompt — for example, when the chat template leaves the prompt
+        inside an open reasoning channel and the engine's default initial
+        state would otherwise misclassify the first generated tokens.
+
+        Default is a no-op; override in subclasses as needed.
+        """
+        return
+
     def prepare_structured_tag(
         self,
         original_tag: str | None,
@@ -180,9 +205,8 @@ class ReasoningParser:
     ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag
-        Otherwise, None is returned
         """
-        return None
+        return original_tag
 
 
 class ReasoningParserManager:
@@ -285,8 +309,8 @@ class ReasoningParserManager:
         Example:
             ReasoningParserManager.register_lazy_module(
                 name="qwen3",
-                module_path="vllm.reasoning.parsers.qwen3_reasoning_parser",
-                class_name="Qwen3ReasoningParser",
+                module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+                class_name="Qwen3ParserReasoningAdapter",
             )
         """
         cls.lazy_parsers[name] = (module_path, class_name)

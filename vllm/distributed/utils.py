@@ -64,6 +64,24 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
+
+
 def is_weak_contiguous(inp: torch.Tensor) -> bool:
     """Check that *inp* occupies a single contiguous block of memory.
 
@@ -515,6 +533,16 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
 def init_gloo_process_group(
     prefix_store: PrefixStore,
     group_rank: int,
@@ -598,6 +626,10 @@ def stateless_init_torch_distributed_process_group(
         gloo_timeout = get_cpu_distributed_timeout_or_none()
         if gloo_timeout is not None:
             timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(

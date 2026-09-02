@@ -55,6 +55,7 @@ def _run_engine_core_handshake(
     class _FakeScheduler:
         def __init__(self, **kwargs: Any) -> None:
             self.connector = connector
+            self.ec_connector = None
 
         def get_kv_connector(self) -> KVConnectorBase_V1:
             return connector
@@ -104,7 +105,7 @@ def _run_engine_core_handshake(
         speculative_config=None,
         ec_transfer_config=None,
         max_concurrent_batches=1,
-        model_config=SimpleNamespace(runner_type="generate"),
+        model_config=SimpleNamespace(runner_type="generate", is_diffusion=False),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
             prefix_caching_hash_algo="builtin",

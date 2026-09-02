@@ -30,6 +30,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     _SUPPORTED_SOFT_TOKENS,
@@ -43,6 +44,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultimodalEmbedder,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
+    Gemma4VideoInputs,
     _get_max_soft_tokens,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -264,22 +266,16 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.audio_tower = None
 
         # ---- Encoder-free vision embedder ----
-        self.vision_embedder = (
-            Gemma4UnifiedVisionEmbedder(
-                config.vision_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vision_embedder"),
-            )
-            if config.vision_config is not None
-            else None
+        if config.vision_config is None:
+            raise ValueError("Gemma4 Unified requires a vision configuration")
+        self.vision_embedder = Gemma4UnifiedVisionEmbedder(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_embedder"),
         )
-        self.embed_vision = (
-            Gemma4MultimodalEmbedder(
-                config.vision_config,
-                config.text_config,
-            )
-            if config.vision_config is not None
-            else None
+        self.embed_vision = Gemma4MultimodalEmbedder(
+            config.vision_config,
+            config.text_config,
         )
 
         # ---- Encoder-free audio embedder ----
@@ -335,7 +331,6 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
                 )
 
         # --- MixtureOfExperts delegation to language_model ---
-        self.expert_weights = self.language_model.expert_weights
         self.moe_layers = self.language_model.moe_layers
         self.num_moe_layers = self.language_model.num_moe_layers
         self.num_logical_experts = self.language_model.num_logical_experts
@@ -345,6 +340,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.num_expert_groups = self.language_model.num_expert_groups
         self.num_shared_experts = self.language_model.num_shared_experts
         self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.set_eplb_state = self.language_model.set_eplb_state
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
@@ -381,7 +377,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
 
     def _process_video_input(
         self,
-        video_input: dict[str, torch.Tensor],
+        video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
         """Project video frames to LM space, one frame at a time.
 
@@ -423,9 +419,12 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         No audio tower: the per-frame raw features are passed straight
         through the multimodal embedder, then padding is stripped.
         """
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = batch_audio_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
 
+        assert self.embed_audio is not None
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
         per_audio: list[torch.Tensor] = []

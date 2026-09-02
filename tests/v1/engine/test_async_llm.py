@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -485,7 +486,7 @@ async def test_dp_rank_argument():
             pass
 
         # Test with out-of-range DP rank.
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError):
             async for _ in engine.generate(
                 request_id="request-35",
                 prompt=TEXT_PROMPT,
@@ -512,12 +513,11 @@ async def test_header_dp_rank_argument():
         )
 
         # Create render serving instance (required by OpenAIServingChat)
-        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+        from vllm.renderers.online_renderer import OnlineRenderer
 
-        serving_render = OpenAIServingRender(
+        online_renderer = OnlineRenderer(
             model_config=engine.model_config,
             renderer=engine.renderer,
-            model_registry=models.registry,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -528,7 +528,7 @@ async def test_header_dp_rank_argument():
             engine_client=engine,
             models=models,
             response_role="assistant",
-            openai_serving_render=serving_render,
+            online_renderer=online_renderer,
             chat_template=None,
             chat_template_content_format="auto",
             request_logger=None,
@@ -555,8 +555,8 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should raise ValueError for out-of-range rank
-        with pytest.raises(ValueError):
+        # should raise VLLMValidationError for out-of-range rank
+        with pytest.raises(VLLMValidationError):
             await serving_chat.create_chat_completion(req, mock_raw_request)
 
 

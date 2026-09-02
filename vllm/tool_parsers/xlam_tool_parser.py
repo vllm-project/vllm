@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -165,7 +165,7 @@ class xLAMToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),
@@ -473,7 +473,9 @@ class xLAMToolParser(ToolParser):
                             ):
                                 current_tool = parsed_tools[current_idx]
                                 if isinstance(current_tool.get("arguments"), dict):
-                                    args_text = json.dumps(current_tool["arguments"])
+                                    args_text = json.dumps(
+                                        current_tool["arguments"], ensure_ascii=False
+                                    )
                                 else:
                                     args_text = str(current_tool.get("arguments", "{}"))
                         except (json.JSONDecodeError, KeyError, IndexError):

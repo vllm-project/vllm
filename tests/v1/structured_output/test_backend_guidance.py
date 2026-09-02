@@ -17,7 +17,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
-TOKENIZER = "gpt2"
+TOKENIZER = "openai-community/gpt2"
 
 
 @pytest.fixture(scope="module")

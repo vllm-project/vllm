@@ -358,7 +358,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "download_image",
-                            "arguments": '{"url": "https://example.com/x.png"}',
+                            "arguments": {"url": "https://example.com/x.png"},
                         },
                     },
                 ],
@@ -392,7 +392,7 @@ class TestGemma4ChatTemplate:
                         "type": "function",
                         "function": {
                             "name": "process",
-                            "arguments": "{}",
+                            "arguments": {},
                         },
                     },
                 ],

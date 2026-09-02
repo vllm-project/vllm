@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! DeepSeek V4 prompt renderer.
 //!
-//! Original Python implementation:
-//! <https://github.com/vllm-project/vllm/blob/main/vllm/tokenizers/deepseek_v4_encoding.py>
+//! Official Python reference:
+//! <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py>
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -21,10 +24,15 @@ const THINKING_END_TOKEN: &str = "</think>";
 const DSML_TOKEN: &str = "｜DSML｜";
 const USER_SP_TOKEN: &str = "<｜User｜>";
 const ASSISTANT_SP_TOKEN: &str = "<｜Assistant｜>";
-const REASONING_EFFORT_MAX: &str = concat!(
+const REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n",
+);
+const REASONING_EFFORT_MAX: &str = concat!(
+    "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n",
+    "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n",
+    "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n",
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +52,7 @@ struct RenderedToolSchema<'a> {
 
 /// Render one chat request into the final prompt string.
 pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
-    let (thinking_mode, max_reasoning_effort) = resolve_thinking_options(request)?;
+    let (thinking_mode, reasoning_effort_prompt) = resolve_thinking_options(request)?;
     let request_tools = request_tools(request);
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
@@ -52,8 +60,8 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), synthetic_tool_system);
     let mut out = String::from(BOS_TOKEN);
-    if thinking_mode == ThinkingMode::Thinking && max_reasoning_effort {
-        out.push_str(REASONING_EFFORT_MAX);
+    if thinking_mode == ThinkingMode::Thinking {
+        out.push_str(reasoning_effort_prompt);
     }
 
     let mut request_tools_attached = false;
@@ -64,8 +72,9 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         render_index += 1;
     }
 
+    let mut last_tool_call_order = HashMap::new();
     for (message_index, message) in request.messages.iter().enumerate() {
-        if is_following_tool_response(request.messages.as_slice(), message_index) {
+        if is_following_user_content(request.messages.as_slice(), message_index) {
             continue;
         }
 
@@ -85,7 +94,14 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
             ChatMessage::Developer { content, tools } => {
                 render_developer_message(&mut out, content, tools.as_deref().unwrap_or(&[]))?;
             }
-            ChatMessage::User { content } => render_user_message(&mut out, content)?,
+            ChatMessage::User { .. } | ChatMessage::ToolResponse { .. } => {
+                render_user_content_block(
+                    &mut out,
+                    request.messages.as_slice(),
+                    message_index,
+                    &last_tool_call_order,
+                )?;
+            }
             ChatMessage::Assistant { content } => {
                 // Mirror Python: thinking block (reasoning + </think>) is
                 // emitted whenever thinking is active and reasoning isn't
@@ -96,13 +112,20 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
                 let append_eos = !(message_index + 1 == request.messages.len()
                     && request.chat_options.continue_final_message());
                 render_assistant_message(&mut out, emit_thinking_block, append_eos, content)?;
-            }
-            ChatMessage::ToolResponse { .. } => {
-                render_tool_response_block(&mut out, request.messages.as_slice(), message_index)?;
+
+                if content.has_tool_calls() {
+                    last_tool_call_order.clear();
+                    last_tool_call_order.extend(
+                        content
+                            .tool_calls()
+                            .enumerate()
+                            .map(|(index, tool_call)| (tool_call.id.clone(), index)),
+                    );
+                }
             }
         }
 
-        if is_user_like_entry(message)
+        if (is_user_like_entry(message) || matches!(message, ChatMessage::System { .. }))
             && next_rendered_entry_is_assistant_or_end(request.messages.as_slice(), message_index)
         {
             write_assistant_transition(
@@ -121,26 +144,34 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 /// wrapper, the Rust renderer only consumes the typed top-level
 /// `reasoning_effort`; the generic template-kwargs map is left for HF
 /// templates.
-fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, bool)> {
-    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(false) {
+fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'static str)> {
+    let mut thinking_mode = match request.enable_thinking()?.unwrap_or(true) {
         true => ThinkingMode::Thinking,
         false => ThinkingMode::Chat,
     };
-    let mut max_reasoning_effort = false;
+    let mut reasoning_effort_prompt = REASONING_EFFORT_HIGH;
 
     match request.chat_options.reasoning_effort {
         Some(ReasoningEffort::None) => thinking_mode = ThinkingMode::Chat,
-        Some(ReasoningEffort::Max | ReasoningEffort::XHigh) => max_reasoning_effort = true,
-        Some(_) | None => {}
+        Some(ReasoningEffort::Max) => {
+            reasoning_effort_prompt = REASONING_EFFORT_MAX;
+        }
+        Some(ReasoningEffort::XHigh | ReasoningEffort::High) => {
+            reasoning_effort_prompt = REASONING_EFFORT_HIGH;
+        }
+        Some(ReasoningEffort::Minimal | ReasoningEffort::Medium | ReasoningEffort::Low) => {
+            reasoning_effort_prompt = "";
+        }
+        None => {}
     }
 
-    Ok((thinking_mode, max_reasoning_effort))
+    Ok((thinking_mode, reasoning_effort_prompt))
 }
 
 /// Return request-level tools only when native tool parsing is enabled.
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     if request.tool_parsing_enabled() {
-        request.tools.as_slice()
+        request.initial_tools()
     } else {
         &[]
     }
@@ -175,7 +206,7 @@ fn find_last_user_render_index(messages: &[ChatMessage], synthetic_tool_system: 
     let mut last_user_index = -1;
 
     for (message_index, message) in messages.iter().enumerate() {
-        if is_following_tool_response(messages, message_index) {
+        if is_following_user_content(messages, message_index) {
             continue;
         }
 
@@ -188,14 +219,20 @@ fn find_last_user_render_index(messages: &[ChatMessage], synthetic_tool_system: 
     last_user_index
 }
 
-/// Return whether this tool message is already covered by a previous tool run.
-fn is_following_tool_response(messages: &[ChatMessage], message_index: usize) -> bool {
-    matches!(messages[message_index], ChatMessage::ToolResponse { .. })
+/// Return whether this message is already covered by a previous user-content
+/// entry.
+fn is_following_user_content(messages: &[ChatMessage], message_index: usize) -> bool {
+    is_user_content_entry(&messages[message_index])
         && message_index > 0
-        && matches!(
-            messages[message_index - 1],
-            ChatMessage::ToolResponse { .. }
-        )
+        && is_user_content_entry(&messages[message_index - 1])
+}
+
+/// Return whether one message contributes content to a V4 user turn.
+fn is_user_content_entry(message: &ChatMessage) -> bool {
+    matches!(
+        message,
+        ChatMessage::User { .. } | ChatMessage::ToolResponse { .. }
+    )
 }
 
 /// Return whether one rendered entry should be treated as user-like.
@@ -210,10 +247,8 @@ fn is_user_like_entry(message: &ChatMessage) -> bool {
 /// entry.
 fn next_rendered_entry_is_assistant_or_end(messages: &[ChatMessage], message_index: usize) -> bool {
     let mut next_index = message_index + 1;
-    if matches!(messages[message_index], ChatMessage::ToolResponse { .. }) {
-        while next_index < messages.len()
-            && matches!(messages[next_index], ChatMessage::ToolResponse { .. })
-        {
+    if is_user_content_entry(&messages[message_index]) {
+        while next_index < messages.len() && is_user_content_entry(&messages[next_index]) {
             next_index += 1;
         }
     }
@@ -313,47 +348,49 @@ fn render_developer_message(
     Ok(())
 }
 
-/// Render one plain user turn.
-fn render_user_message(out: &mut String, content: &ChatContent) -> Result<()> {
-    out.push_str(USER_SP_TOKEN);
-    write_chat_content(out, content)?;
-    Ok(())
-}
-
-/// Render a contiguous tool-response run as one synthetic user turn.
-fn render_tool_response_block(
+/// Render contiguous user and tool-response messages as one V4 user turn.
+fn render_user_content_block(
     out: &mut String,
     messages: &[ChatMessage],
     message_index: usize,
+    tool_call_order: &HashMap<String, usize>,
 ) -> Result<()> {
-    let (block_start, block_end) = tool_response_block_bounds(messages, message_index);
-    let sorted_indices = sorted_tool_response_indices(messages, block_start, block_end);
+    let (block_start, block_end) = user_content_block_bounds(messages, message_index);
+    let mut sorted_tool_indices =
+        sorted_tool_response_indices(messages, block_start, block_end, tool_call_order).into_iter();
 
     out.push_str(USER_SP_TOKEN);
-    for (offset, message_index) in sorted_indices.iter().enumerate() {
+    for (offset, message_index) in (block_start..block_end).enumerate() {
         if offset > 0 {
             out.push_str("\n\n");
         }
-        let ChatMessage::ToolResponse { content, .. } = &messages[*message_index] else {
-            unreachable!("tool response block should only contain tool messages");
-        };
-        write_tool_result(out, content)?;
+        match &messages[message_index] {
+            ChatMessage::User { content } => write_chat_content(out, content)?,
+            ChatMessage::ToolResponse { .. } => {
+                let sorted_index = sorted_tool_indices
+                    .next()
+                    .expect("tool response block should include this tool message");
+                let ChatMessage::ToolResponse { content, .. } = &messages[sorted_index] else {
+                    unreachable!("sorted tool response index should reference a tool message");
+                };
+                write_tool_result(out, content)?;
+            }
+            _ => unreachable!("user content block should only contain user content messages"),
+        }
     }
 
     Ok(())
 }
 
-/// Return the contiguous tool-response block containing `actual_index`.
-fn tool_response_block_bounds(messages: &[ChatMessage], actual_index: usize) -> (usize, usize) {
+/// Return the contiguous user-content block containing `actual_index`.
+fn user_content_block_bounds(messages: &[ChatMessage], actual_index: usize) -> (usize, usize) {
     let mut block_start = actual_index;
-    while block_start > 0 && matches!(messages[block_start - 1], ChatMessage::ToolResponse { .. }) {
+    while block_start > 0 && is_user_content_entry(&messages[block_start - 1]) {
         block_start -= 1;
     }
 
     let mut block_end = actual_index + 1;
-    while block_end < messages.len()
-        && matches!(messages[block_end], ChatMessage::ToolResponse { .. })
-    {
+    while block_end < messages.len() && is_user_content_entry(&messages[block_end]) {
         block_end += 1;
     }
 
@@ -364,12 +401,15 @@ fn sorted_tool_response_indices(
     messages: &[ChatMessage],
     block_start: usize,
     block_end: usize,
+    tool_call_order: &HashMap<String, usize>,
 ) -> Vec<usize> {
-    let Some(tool_call_order) = last_tool_call_order_before(messages, block_start) else {
-        return (block_start..block_end).collect();
-    };
+    let mut indices = (block_start..block_end)
+        .filter(|index| matches!(messages[*index], ChatMessage::ToolResponse { .. }))
+        .collect::<Vec<_>>();
+    if indices.len() <= 1 || tool_call_order.is_empty() {
+        return indices;
+    }
 
-    let mut indices = (block_start..block_end).collect::<Vec<_>>();
     indices.sort_by_key(|index| {
         let ChatMessage::ToolResponse { tool_call_id, .. } = &messages[*index] else {
             unreachable!("tool response block should only contain tool messages");
@@ -377,26 +417,6 @@ fn sorted_tool_response_indices(
         tool_call_order.get(tool_call_id.as_str()).copied().unwrap_or(0)
     });
     indices
-}
-
-fn last_tool_call_order_before(
-    messages: &[ChatMessage],
-    message_index: usize,
-) -> Option<HashMap<&str, usize>> {
-    let mut tool_call_order = None;
-    for message in &messages[..message_index] {
-        if let ChatMessage::Assistant { content } = message {
-            let order = content
-                .tool_calls()
-                .enumerate()
-                .map(|(index, tool_call)| (tool_call.id.as_str(), index))
-                .collect::<HashMap<_, _>>();
-            if !order.is_empty() {
-                tool_call_order = Some(order);
-            }
-        }
-    }
-    tool_call_order
 }
 
 /// Render one tool response payload inside a V4 `<tool_result>` block.
@@ -407,7 +427,7 @@ fn write_tool_result(out: &mut String, content: &ChatContent) -> Result<()> {
     Ok(())
 }
 
-/// Append the assistant transition token after a user-like turn.
+/// Append the assistant transition token after a user-like or system turn.
 fn write_assistant_transition(
     out: &mut String,
     thinking_mode: ThinkingMode,

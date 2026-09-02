@@ -17,7 +17,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4Static,
 )
 
 # User-facing names addressable from quantization_config.
@@ -87,7 +89,7 @@ class QuantizationConfigArgs:
     """Spec applied to ``LinearBase`` layers."""
 
     moe: QuantSpec | None = None
-    """Spec applied to ``FusedMoE`` layers."""
+    """Spec applied to ``FusedMoEFactory`` layers."""
 
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for."""
@@ -130,9 +132,18 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kMxfp8Dynamic),
         moe=QuantSpec(weight=kMxfp8Dynamic),
     ),
+    "mxfp4": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static),
+        moe=QuantSpec(weight=kMxfp4Static),
+    ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # Online NVFP4 on MoE with per-token dynamic activation scales (Blackwell +
+    # FlashInfer TRTLLM only); linear stays unquantized (no `linear` field).
+    "nvfp4_per_token": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kNvfp4Static),
     ),
 }
 

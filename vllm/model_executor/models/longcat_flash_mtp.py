@@ -126,8 +126,10 @@ class LongCatMultiTokenPredictor(nn.Module):
 class LongCatFlashMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        # LongCat MTP without MoE layers
-        vllm_config.model_config.hf_config.n_routed_experts = None
+        # LongCat MTP has no MoE layers: clear n_routed_experts so the predictor
+        # builds a dense MLP. object.__setattr__ bypasses the ngram remote
+        # config's strict validation (it rejects setting the int field to None).
+        object.__setattr__(vllm_config.model_config.hf_config, "n_routed_experts", None)
         self.config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         self.quant_config = (
             None
@@ -287,14 +289,22 @@ class LongCatFlashMTP(nn.Module):
         ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
         self_attn.w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
         self_attn.w_vc = w_vc.contiguous().transpose(1, 2)
-        if self.config.mla_scale_q_lora:
+        # Guard against compounding on incremental load_weights calls (the
+        # in-place *= would otherwise double-apply the LoRA scaling).
+        if self.config.mla_scale_q_lora and not getattr(
+            self_attn, "_mla_q_lora_scaled", False
+        ):
             self_attn.q_a_layernorm.weight.data *= (
                 self.config.hidden_size / self.config.q_lora_rank
             ) ** 0.5
-        if self.config.mla_scale_kv_lora:
+            self_attn._mla_q_lora_scaled = True
+        if self.config.mla_scale_kv_lora and not getattr(
+            self_attn, "_mla_kv_lora_scaled", False
+        ):
             self_attn.kv_a_layernorm.weight.data *= (
                 self.config.hidden_size / self.config.kv_lora_rank
             ) ** 0.5
+            self_attn._mla_kv_lora_scaled = True
         return loaded_params
 
     def _rewrite_spec_layer_name(

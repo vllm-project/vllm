@@ -1,7 +1,9 @@
-use vllm_text::Prompt;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::types::CompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::validate_generation_prompt_truncation;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -11,8 +13,10 @@ pub(super) fn validate_request_compat(
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if !served_model_names.iter().any(|n| n == &request.model) {
-        return Err(ApiError::model_not_found(request.model.clone()));
+    if let Some(model) = request.model.as_ref().filter(|model| !model.is_empty())
+        && !served_model_names.iter().any(|name| name == model)
+    {
+        return Err(ApiError::model_not_found(model.clone()));
     }
 
     if request.stream_options.is_some() && !request.stream {
@@ -26,14 +30,10 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
 
-    if request.max_tokens == Some(0) {
-        bail_invalid_request!(param = "max_tokens", "max_tokens must be greater than 0.");
-    }
-
-    if request.echo && matches!(request.prompt, Prompt::TokenIds(_)) {
+    if request.max_tokens == Some(0) && !request.echo {
         bail_invalid_request!(
-            param = "echo",
-            "echo is not supported with token-ID prompts."
+            param = "max_tokens",
+            "max_tokens=0 is only supported when echo=true."
         );
     }
 
@@ -42,11 +42,12 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(logprobs) = request.logprobs
-        && logprobs > i32::MAX as u32
+        && logprobs < 0
+        && logprobs != -1
     {
         bail_invalid_request!(
             param = "logprobs",
-            "`logprobs` must fit within a signed 32-bit integer."
+            "`logprobs` must be a non-negative value or -1."
         );
     }
 
@@ -85,21 +86,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
-        bail_invalid_request!(
-            param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
-        );
-    }
-
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
 
     Ok(())
 }
@@ -136,6 +123,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_request_compat_accepts_full_vocab_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-1),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_other_negative_logprobs() {
+        let request = CompletionRequest {
+            logprobs: Some(-2),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
+    }
+
+    #[test]
     fn validate_request_compat_accepts_any_served_name() {
         let request = base_request();
         assert!(
@@ -145,6 +154,17 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_default_model_inputs() {
+        for model in [None, Some(String::new())] {
+            let request = CompletionRequest {
+                model,
+                ..base_request()
+            };
+            assert!(validate_request_compat(&request, &served_names(&["served-model"])).is_ok());
+        }
     }
 
     #[test]
@@ -173,6 +193,47 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_prompt_only_echo() {
+        let request = CompletionRequest {
+            stream: false,
+            echo: true,
+            max_tokens: Some(0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_token_id_prompt_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": [104, 101, 108, 108, 111],
+            "stream": true,
+            "echo": true,
+        }))
+        .expect("parse request");
+
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_prompt_only_without_echo() {
+        let request = CompletionRequest {
+            stream: false,
+            echo: false,
+            max_tokens: Some(0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 }
