@@ -516,23 +516,29 @@ def sanity_check_mm_encoder_outputs(
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
-    Calculate the amount of memory required by vLLM, then validate
-    that the current amount of free memory is sufficient for that.
+    Calculate the amount of memory vLLM may use on this device.
+
+    The budget is ``total_memory * gpu_memory_utilization``, clamped to the
+    actually-free memory so that a GPU shared with another process gets a
+    smaller budget automatically while unshared GPUs keep their full budget.
     """
     requested_memory = math.ceil(
         init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
 
     if init_snapshot.free_memory < requested_memory:
-        raise ValueError(
-            f"Free memory on device {init_snapshot.device_} "
-            f"({format_gib(init_snapshot.free_memory)}/"
-            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
-            f"is less than desired GPU memory utilization "
-            f"({cache_config.gpu_memory_utilization}, "
-            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
-            f"utilization or reduce GPU memory used by other processes."
+        logger.warning(
+            "Free memory on device %s (%s/%s GiB) is less than "
+            "gpu_memory_utilization=%.4f would request (%s GiB). "
+            "Clamping memory budget to available free memory. "
+            "This is expected when sharing a GPU with another process.",
+            init_snapshot.device_,
+            format_gib(init_snapshot.free_memory),
+            format_gib(init_snapshot.total_memory),
+            cache_config.gpu_memory_utilization,
+            format_gib(requested_memory),
         )
+        requested_memory = init_snapshot.free_memory
 
     return requested_memory
 
