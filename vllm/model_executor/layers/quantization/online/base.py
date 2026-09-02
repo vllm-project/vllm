@@ -375,7 +375,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
         if resolved is not None:
             source, quant_key_str, target_pattern, _, quant_method_cls = resolved
             self.quantized_layers[prefix] = (
-                source,
+                source.value,
                 quant_key_str,
                 target_pattern,
             )

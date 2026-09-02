@@ -209,6 +209,6 @@ def test_targets_reject_moe_only_shorthand_for_linear_layer():
     )
 
     with pytest.raises(ValueError, match="does not define a QuantSpec"):
-        config._dispatch_target(
-            "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
+        config.resolve_quant_method_cls(
+            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
         )
