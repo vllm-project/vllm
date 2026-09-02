@@ -48,10 +48,10 @@ steps:
       pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
       pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
 
-# Spec decode unit tests that run on CPU without a GPU and without draft-model
-# weights. The rest of tests/v1/spec_decode/ needs CUDA, HF draft checkpoints,
-# or both, and is covered by .buildkite/test_areas/spec_decode.yaml.
-- label: CPU Spec Decode Tests
+# Spec decode unit tests that run on CPU without a GPU. The unlisted files in
+# tests/v1/spec_decode/ either skip or fail without CUDA, or need HF model
+# assets, and stay covered by .buildkite/test_areas/spec_decode.yaml.
+- label: CPU-Spec Decode Tests
   key: cpu-spec-decode-tests
   depends_on: []
   device: intel_cpu
@@ -63,7 +63,7 @@ steps:
   - tests/v1/spec_decode/
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 15m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s tests/v1/spec_decode/test_ngram.py
       pytest -x -v -s tests/v1/spec_decode/test_dynamic_sd.py
       pytest -x -v -s tests/v1/spec_decode/test_llm_base_proposer.py
