@@ -232,13 +232,20 @@ class OnlineQuantizationConfig(QuantizationConfig):
     ) -> tuple[str, QuantSpec, type] | None:
         """Return the QuantizeMethodBase subclass target
         without instantiating it."""
+        if self.args.targets is not None:
+            target = self._get_target_quantization_target(prefix, layer)
+            if target is None:
+                return None
+            _, _, spec, cls = target
+            return "targets", spec, cls
+
         if isinstance(layer, LinearBase):
             source = "linear"
-            spec = self.args.linear
+            global_spec = self.args.linear
             table = _ONLINE_LINEAR_METHODS
         elif isinstance(layer, RoutedExperts):
             source = "moe"
-            spec = self.args.moe
+            global_spec = self.args.moe
             table = _ONLINE_MOE_METHODS
         else:
             return None
@@ -247,18 +254,19 @@ class OnlineQuantizationConfig(QuantizationConfig):
             prefix,
             ignore=self.ignored_layers,
             fused_mapping=self.packed_modules_mapping,
+            use_fnmatch=True,
         ):
             return None
 
-        cls = self._get_method_cls(spec, table, layer)
-        if cls is None:
+        method_cls = self._get_method_cls(global_spec, table, layer)
+        if method_cls is None:
             return None
-        assert spec is not None
-        return source, spec, cls
+        assert global_spec is not None
+        return source, global_spec, method_cls
 
-    def _dispatch_target(
+    def _get_target_quantization_target(
         self, prefix: str, layer: torch.nn.Module
-    ) -> "QuantizeMethodBase | None":
+    ) -> tuple[str, str, QuantSpec, type] | None:
         assert self.args.targets is not None
         ignored = should_ignore_layer(
             prefix,
@@ -303,10 +311,30 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"not define a QuantSpec for {type(layer).__name__} layers "
                 f"(matched at {prefix})."
             )
-        method = self._dispatch(quant_spec, table, layer)
-        if method is not None:
-            self.quantized_layers[prefix] = ("targets", quant_key_str, matches[0])
-        return method
+        cls = self._get_method_cls(quant_spec, table, layer)
+        if cls is None:
+            return None
+        return quant_key_str, matches[0], quant_spec, cls
+
+    def _instantiate_method(
+        self, cls: type, layer: torch.nn.Module
+    ) -> "QuantizeMethodBase":
+        if isinstance(layer, RoutedExperts):
+            assert issubclass(cls, FusedMoEMethodBase)
+            return cls(moe=layer.moe_config)
+        assert issubclass(cls, OnlineLinearBase)
+        linear_method_cls = cast(type[OnlineLinearBase], cls)
+        return linear_method_cls()
+
+    def _dispatch_target(
+        self, prefix: str, layer: torch.nn.Module
+    ) -> "QuantizeMethodBase | None":
+        target = self._get_target_quantization_target(prefix, layer)
+        if target is None:
+            return None
+        quant_key_str, pattern, _, cls = target
+        self.quantized_layers[prefix] = ("targets", quant_key_str, pattern)
+        return self._instantiate_method(cls, layer)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -323,34 +351,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return None
 
+        target = self.get_quantization_target(layer, prefix)
+        if target is not None:
+            source, spec, cls = target
+            self.quantized_layers[prefix] = (source, str(spec), None)
+            return self._instantiate_method(cls, layer)
+
         if isinstance(layer, LinearBase):
-            if should_ignore_layer(
-                prefix,
-                ignore=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                use_fnmatch=True,
-            ):
-                return UnquantizedLinearMethod()
-            method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
-            if method is not None:
-                self.quantized_layers[prefix] = (
-                    "linear",
-                    str(self.args.linear),
-                    None,
-                )
-                return method
             return UnquantizedLinearMethod()
-        elif isinstance(layer, RoutedExperts):
-            if should_ignore_layer(
-                prefix,
-                ignore=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                use_fnmatch=True,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)
-            if method is not None:
-                self.quantized_layers[prefix] = ("moe", str(self.args.moe), None)
-                return method
+        if isinstance(layer, RoutedExperts):
             return UnquantizedFusedMoEMethod(layer.moe_config)
         return None

@@ -91,10 +91,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     weight_amax,
 )
-from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.models.granitemoe import (
@@ -266,6 +266,29 @@ def test_online_prequantized_compatibility(
     else:
         layer = ColumnParallelLinear(**layer_kwargs)
         assert isinstance(layer.quant_method, Mxfp8OnlineLinearMethod)
+
+
+def test_online_target_rejects_prequantized_layer(
+    default_vllm_config, dist_init
+) -> None:
+    """A targets match participates in checkpoint compatibility checks."""
+    default_vllm_config.model_config = ModelConfig()
+    prefix = "model.layers.0.self_attn.o_proj"
+    quant_config = _fully_quantized_quark_config()
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={prefix: "mxfp8"})
+    )
+
+    with pytest.raises(ValueError, match="pre-quantized layer"):
+        ColumnParallelLinear(
+            input_size=32,
+            output_size=32,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix=prefix,
+            disable_tp=True,
+        )
 
 
 def test_online_ignore_keeps_checkpoint_quantization_linear(
@@ -871,6 +894,20 @@ def test_online_quantization_targets_ignore_collision() -> None:
         config._dispatch_target(
             "model.layers.0.self_attn.o_proj", Mock(spec=LinearBase)
         )
+
+
+def test_online_quantization_global_ignore_supports_fnmatch() -> None:
+    """Global online quantization applies fnmatch patterns to ignore entries."""
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="mxfp8", ignore=["*self_attn.o_proj"])
+    )
+
+    assert (
+        config.get_quantization_target(
+            Mock(spec=LinearBase), "model.layers.0.self_attn.o_proj"
+        )
+        is None
+    )
 
 
 def test_online_quantization_targets_reject_unsupported_layer() -> None:
