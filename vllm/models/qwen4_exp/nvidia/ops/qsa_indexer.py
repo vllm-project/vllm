@@ -97,7 +97,7 @@ def _qsa_mqa_paged_uniform_kernel(
             scores,
             (BLOCK_N, DECODE_QUERY_LEN_PADDED, NUM_HEADS_PADDED),
         )
-        score = tl.sum(scores, axis=2) / HEAD_DIM**0.5
+        score = tl.sum(scores, axis=2)
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
             score,
@@ -202,7 +202,7 @@ def _qsa_mqa_paged_prefill_kernel(
         )
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.reshape(scores, (BLOCK_N, TILE_R, NUM_HEADS_PADDED))
-        score = tl.sum(tl.maximum(scores, 0.0), axis=2) / HEAD_DIM**0.5
+        score = tl.sum(tl.maximum(scores, 0.0), axis=2)
         store_mask = (
             valid_rows[None, :]
             & (columns[:, None] < visible[None, :])
