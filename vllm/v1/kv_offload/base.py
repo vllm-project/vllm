@@ -400,6 +400,9 @@ class OffloadingManager(ABC):
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
     Spec for loading/storing KV blocks from given block numbers.
+
+    Subclass semantics differ: GPULoadStoreSpec.block_ids are GPU block
+    indices; CPULoadStoreSpec.block_ids are CPU cache chunk indices.
     """
 
     def __init__(self, block_ids: list[int]):
