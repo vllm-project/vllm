@@ -1236,7 +1236,7 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom)."
                 )
 
-        if not model_module.is_backend_compatible():
+        if not model_module._can_set_attn_implementation():
             if model_config.model_impl != "transformers":
                 return None
 
