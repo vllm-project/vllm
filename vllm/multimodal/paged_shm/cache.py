@@ -274,10 +274,10 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
         happen for sender).
         """
         if mm_item is not None:
-            self._stats.record_access(is_hit=True)
+            self._stats.record_access(is_hit=False)
             return self.create_item(mm_item, mm_hash)
         else:
-            self._stats.record_access(is_hit=False)
+            self._stats.record_access(is_hit=True)
             return self.get_item(mm_hash)
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
