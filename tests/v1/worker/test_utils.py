@@ -174,6 +174,8 @@ def test_hisparse_submits_layer_mirror_at_replayed_attention_boundary(
     handle.finish_kv_update()
 
     assert handle.submit_layer_mirror.call_count == expected_calls
+
+
 def _hisparse_parallel_config(**overrides):
     values = {
         "tensor_parallel_size": 2,
@@ -221,6 +223,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.total_size_bytes = kwargs["num_blocks"] * kwargs["kv_bytes_per_block"]
             self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
             self.is_pinned = False
+            self.pinned_addresses = []
             self.view_sizes = []
             self.offset = 0
 
@@ -241,8 +244,19 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     monkeypatch.setattr(
         hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
     )
-    pinned: list[torch.Tensor] = []
-    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pinned.append)
+    registration_ranges = MagicMock(return_value=((0, 4096), (4096, 16384)))
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "_hisparse_registration_ranges",
+        registration_ranges,
+    )
+    pinned: list[tuple[torch.Tensor, int | None]] = []
+
+    def pin_tensor(tensor, *, max_chunk_bytes=None):
+        pinned.append((tensor, max_chunk_bytes))
+        return []
+
+    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
         instance_id="instance",
         parallel_config=_hisparse_parallel_config(
@@ -270,10 +284,32 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "cpu_page_size": 16,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
     }
-    assert region.view_sizes == [6, 10]
-    assert [pool.shape for pool in pools] == [(4, 6), (4, 10)]
-    assert pinned == [region.base_tensor]
+    assert region.view_sizes == [24, 40]
+    assert [pool.shape for pool in pools] == [(24,), (40,)]
+    registration_ranges.assert_called_once_with([24, 40], 4, 4096)
+    assert [
+        (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes, chunk_bytes)
+        for tensor, chunk_bytes in pinned
+    ] == [(0, 4096, None), (4096, 12288, None)]
     assert region.is_pinned
+
+
+def test_hisparse_registration_chunks_end_between_host_blocks():
+    """Registration seams must not bisect a DMA-addressable host block."""
+    page = 4096
+    ranges = hisparse_runtime_module._hisparse_registration_ranges(
+        tensor_sizes=[4 * 3 * page, 4 * 5 * page],
+        num_blocks=4,
+        host_block_stride=8 * page,
+        max_chunk_bytes=10 * page,
+    )
+
+    assert ranges == (
+        (0, 9 * page),
+        (9 * page, 17 * page),
+        (17 * page, 27 * page),
+        (27 * page, 32 * page),
+    )
 
 
 def test_hisparse_host_pool_uses_resolved_private_mode(monkeypatch):
