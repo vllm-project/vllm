@@ -55,11 +55,9 @@ def test_dspark_mla_checkpoint_weight_mapping(checkpoint_name, runtime_name, sha
 def test_dspark_mla_shares_frozen_target_weights_and_skips_training_head():
     assert not K3DSparkForCausalLM.has_own_embed_tokens
     assert not K3DSparkForCausalLM.has_own_lm_head
-    assert set(K3DSparkForCausalLM.checkpoint_skip_substrs) == {
-        "confidence_head",
-        "embed_tokens",
-        "lm_head",
-    }
+    mapper = K3DSparkForCausalLM.hf_to_vllm_mapper
+    for name in ("confidence_head.weight", "embed_tokens.weight", "lm_head.weight"):
+        assert mapper._map_name(name) is None
 
 
 @pytest.mark.cpu_test

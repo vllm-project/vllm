@@ -160,14 +160,26 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
-    def get_unstacked_mapper(self) -> "WeightsMapper":
-        """Mapper variant that drops stacked maps, keeping all genuine renames/prefixes.
+    def get_rename_mapper(self) -> "WeightsMapper":
+        """Mapper variant keeping only the renames.
 
-        Consumers that reference the checkpoint's *unstacked* module names (LoRA name
-        parsing and the quantization config's layer lists) need the constituent names
-        (e.g. `q_proj`) to survive rather than being rewritten to the stacked vLLM name
-        (`qkv_proj`)."""
-        return replace(self, orig_to_new_stacked={})
+        This is what consumers that *name* modules rather than load them need:
+        LoRA name parsing and the quantization config's layer lists.
+
+        Stacked maps are dropped so that constituent names (e.g. `q_proj`) survive
+        rather than being rewritten to the stacked vLLM name (`qkv_proj`). Mappings to
+        `None` are dropped because "do not load this weight" is meaningless to such a
+        consumer, and applying it would silently shrink a quantization config's ignore
+        list or make LoRA name parsing fail."""
+        remove_none = lambda d: {k: v for k, v in d.items() if v is not None}
+        return replace(
+            self,
+            orig_to_new_regex=remove_none(self.orig_to_new_regex),
+            orig_to_new_substr=remove_none(self.orig_to_new_substr),
+            orig_to_new_stacked={},
+            orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
+            orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+        )
 
 
 def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
@@ -201,32 +213,28 @@ class AutoWeightsLoader:
     """
 
     # Models trained using early version ColossalAI or quantized by
-    # GPTQModel may include these tensors in checkpoint. Skip them.
-    ROTARY_EMBEDS_UNUSED_WEIGHTS = [
-        "rotary_pos_emb.inv_freq",
-        "rotary_emb.inv_freq",
-        "rotary_emb.cos_cached",
-        "rotary_emb.sin_cached",
-    ]
+    # GPTQModel may include these tensors in checkpoint. Drop them.
+    REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER = WeightsMapper(
+        orig_to_new_substr={
+            "rotary_pos_emb.inv_freq": None,
+            "rotary_emb.inv_freq": None,
+            "rotary_emb.cos_cached": None,
+            "rotary_emb.sin_cached": None,
+        }
+    )
 
     def __init__(
         self,
         module: nn.Module,
         *,
-        skip_prefixes: list[str] | None = None,
-        skip_substrs: list[str] | None = None,
         ignore_unexpected_prefixes: list[str] | None = None,
         ignore_unexpected_suffixes: list[str] | None = None,
     ) -> None:
         super().__init__()
 
         self.module = module
-        self.skip_prefixes = skip_prefixes or []
-        self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
-        # update default skip_substrs
-        self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
         # Weight tying makes two qualnames point at the same `nn.Parameter`
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
@@ -265,11 +273,7 @@ class AutoWeightsLoader:
         return ".".join((prefix, rest))
 
     def _can_skip(self, qualname: str) -> bool:
-        return (
-            qualname in self.aliased_params
-            or any(qualname.startswith(p) for p in self.skip_prefixes)
-            or any(substr in qualname for substr in self.skip_substrs)
-        )
+        return qualname in self.aliased_params
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
@@ -375,11 +379,6 @@ class AutoWeightsLoader:
             prefix = self._get_qualname(base_prefix, child_prefix)
 
             if child_prefix in child_modules:
-                if self._can_skip(prefix + "."):
-                    logger.debug("Skipping module %s", prefix)
-
-                    continue
-
                 yield from self._load_module(
                     prefix, child_modules[child_prefix], child_weights
                 )
@@ -393,9 +392,7 @@ class AutoWeightsLoader:
                     prefix, child_params[child_prefix], child_weights
                 )
             else:
-                can_skip_module = self._can_skip(prefix + ".")
-                can_skip_param = self._can_skip(prefix)
-                if can_skip_module or can_skip_param:
+                if self._can_skip(prefix):
                     logger.debug("Skipping missing %s", prefix)
 
                     continue
@@ -429,18 +426,19 @@ class AutoWeightsLoader:
         # Ignore unexpected biases (typically from GPTQ models)
         self.ignore_unexpected_suffixes.append(".bias")
 
+        mapper = mapper or WeightsMapper()
         # Many models store quant_config in the base model instead of the causal model.
         # We look at the causal model's direct children for this reason.
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
         if quant_config := next(iterator, None):
             # Get mappings and ignore prefixes for KV cache quantization scales
-            mapper = mapper or WeightsMapper()
             mapper |= quant_config.get_cache_scale_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
-        if mapper is not None:
-            weights = mapper.apply(weights)
+        mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER
+
+        weights = mapper.apply(weights)
         weights = self._filter_skipped(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
