@@ -81,6 +81,11 @@ def test_sampling_mask_tensors_tolist():
     assert result.offsets.tolist() == [0, 2, 3]
     assert result.cu_num_generated_tokens == [0, 1, 1, 2]
 
+    empty = tensors.tolists(np.zeros(3, dtype=np.int32))
+    assert empty.token_ids.size == 0
+    assert empty.offsets.tolist() == [0]
+    assert empty.cu_num_generated_tokens == [0, 0, 0, 0]
+
 
 def test_sampling_mask_tensors_tolist_overflow_uses_bitmask():
     """A row whose support exceeds ``max_num_kept`` (top-k ties) is rebuilt
@@ -115,9 +120,9 @@ def test_sampling_mask_lists_to_nested_list():
     assert SamplingMaskLists(np.array([7, 9])).to_nested_list() == [[7, 9]]
 
 
-def test_sampling_mask_lists_slice_and_merge_single_position():
-    """Per-step request slices carry one array (offsets=None) and merge
-    back into the CSR form, including an empty support."""
+def test_sampling_mask_lists_slice_single_position():
+    """Per-step request slices carry one array (offsets=None), including an
+    empty support."""
     from vllm.v1.outputs import SamplingMaskLists
 
     batch = SamplingMaskLists(
@@ -129,11 +134,6 @@ def test_sampling_mask_lists_slice_and_merge_single_position():
 
     assert all(chunk.offsets is None for chunk in chunks)
     assert [chunk.token_ids.tolist() for chunk in chunks] == [[1, 2], [], [3, 4]]
-
-    merged = SamplingMaskLists.merge(chunks)
-
-    assert merged.to_nested_list() == [[1, 2], [], [3, 4]]
-    assert merged.offsets.tolist() == [0, 2, 2, 4]
 
 
 def test_sampling_mask_tensors_from_logits():

@@ -37,10 +37,10 @@ def _compact_sampling_mask_kernel(
     max_num_kept,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Per row: write the finite-logit token ids in ascending order into
-    ``token_ids[row, :count]`` and the same support as a bitmask into
-    ``packed_mask[row]``. The bitmask is only read back on the host for
-    rows whose support overflows ``max_num_kept`` (top-k ties)."""
+    """Per row: write the first ``max_num_kept`` finite-logit token ids in
+    ascending order into ``token_ids[row]``, the full count into
+    ``counts[row]`` and the exact support as a bitmask into ``packed_mask[row]``.
+    """
     req_idx = tl.program_id(0)
     is_active = tl.load(num_sampled_tokens_ptr + req_idx) > 0
     count = tl.zeros((), dtype=tl.int32)

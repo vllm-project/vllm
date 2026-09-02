@@ -81,15 +81,6 @@ class SamplingMaskLists(NamedTuple):
         offsets = self.offsets.tolist()
         return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
-    @staticmethod
-    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
-        """Stack single-position step slices into one CSR mask."""
-        offsets = np.zeros(len(chunks) + 1, dtype=np.int64)
-        np.cumsum([len(chunk.token_ids) for chunk in chunks], out=offsets[1:])
-        return SamplingMaskLists(
-            np.concatenate([chunk.token_ids for chunk in chunks]), offsets
-        )
-
 
 class LogprobsTensors(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
