@@ -375,7 +375,17 @@ def kda_conv_ssm(
     for shp, dt in zip(shapes, dtypes):
         nbytes = prod(shp) * get_dtype_size(dt)
         state = pages[:, offset : offset + nbytes].view(dt)
-        states.append(state.view(-1, *shp))
+        inner_strides: list[int] = []
+        inner_stride = 1
+        for dim in reversed(shp):
+            inner_strides.append(inner_stride)
+            inner_stride *= dim
+        states.append(
+            state.as_strided(
+                (state.shape[0], *shp),
+                (state.stride(0), *reversed(inner_strides)),
+            )
+        )
         offset += nbytes
     if len(states) < 2:
         raise ValueError(f"KDA page unpack expected >=2 states, got {len(states)}")
@@ -556,9 +566,8 @@ def build_mamba_offset_template(
         # Heterogeneous-TP recurrent-state transfer needs the remote page's
         # slot stride (which differs from the local page) and, for
         # P_TP > D_TP, a multi-rank gather of conv/ssm slices. Both are
-        # follow-ups (see docs/design/moriio_kda_transfer.md). The mamba path
-        # bypasses the attention KV-head validator, so fail loudly here
-        # instead of silently transferring wrong bytes.
+        # follow-ups. The mamba path bypasses the attention KV-head validator,
+        # so fail loudly here instead of silently transferring wrong bytes.
         raise NotImplementedError(
             "heterogeneous-TP mamba/KDA transfer is not supported yet "
             f"(tp_ratio={tp_ratio}); use equal prefill/decode TP for "
