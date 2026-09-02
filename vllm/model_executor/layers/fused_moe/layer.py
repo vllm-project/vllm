@@ -23,6 +23,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
+from vllm.model_executor.layers.fused_moe.expert_substitution import (
+    ConstantExpertSubstitution,
+    make_expert_substitution,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -210,6 +214,15 @@ def FusedMoEFactory(
     vllm_config = get_current_vllm_config()
 
     layer_name = prefix
+    expert_substitution: ConstantExpertSubstitution | None = None
+    if vllm_config.model_config is not None:
+        expert_substitution = make_expert_substitution(
+            config=vllm_config.model_config.hf_config,
+            module_path=layer_name,
+            num_logical_experts=num_experts,
+            hidden_size=hidden_size,
+            params_dtype=params_dtype,
+        )
 
     moe_activation = MoEActivation.from_str(activation)
     is_act_and_mul = moe_activation.is_gated
@@ -222,6 +235,29 @@ def FusedMoEFactory(
         parallel_config=vllm_config.parallel_config,
     )
 
+    if expert_substitution is not None:
+        unsupported = [
+            name
+            for name, enabled in (
+                ("quantized MoE weights", quant_config is not None),
+                ("MoE LoRA", vllm_config.lora_config is not None),
+                ("EPLB", num_redundant_experts != 0 or enable_eplb),
+                ("fused shared experts", fuse_shared_experts),
+                ("expert parallelism", moe_parallel_config.use_ep),
+                ("data parallelism", moe_parallel_config.dp_size > 1),
+                ("prefill-context parallelism", moe_parallel_config.pcp_size > 1),
+                ("sequence parallelism", moe_parallel_config.is_sequence_parallel),
+                ("deferred MoE reduction", not reduce_results),
+                ("router weights on expert inputs", apply_router_weight_on_input),
+                ("routed input transforms", routed_input_transform is not None),
+                ("routed output transforms", routed_output_transform is not None),
+            )
+            if enabled
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "expert substitution does not support: " + ", ".join(unsupported)
+            )
     # Resolve the deferred all-reduce request against the parallel config.
     skip_final_all_reduce = (
         not reduce_results
@@ -230,14 +266,21 @@ def FusedMoEFactory(
         and zero_expert_type is None
     )
 
+    num_compute_experts = (
+        expert_substitution.num_compute_experts
+        if expert_substitution is not None
+        else num_experts
+    )
     global_num_experts, logical_num_experts, num_fused_shared_experts = (
         determine_expert_counts(
-            num_experts,
+            num_compute_experts,
             num_redundant_experts,
             n_shared_experts,
             fuse_shared_experts,
         )
     )
+    if expert_substitution is not None:
+        logical_num_experts = expert_substitution.num_logical_experts
 
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
@@ -279,7 +322,11 @@ def FusedMoEFactory(
     if router is None:
         router = create_fused_moe_router(
             top_k=top_k,
-            global_num_experts=global_num_experts,
+            global_num_experts=(
+                logical_num_experts
+                if expert_substitution is not None
+                else global_num_experts
+            ),
             eplb_state=eplb_state,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
@@ -328,6 +375,8 @@ def FusedMoEFactory(
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
+    moe_backend = vllm_config.kernel_config.moe_backend
+
     moe_config = FusedMoEConfig(
         num_experts=global_num_experts,
         experts_per_token=top_k,
@@ -338,7 +387,7 @@ def FusedMoEFactory(
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=moe_in_dtype,
-        moe_backend=vllm_config.kernel_config.moe_backend,
+        moe_backend=moe_backend,
         router_logits_dtype=router_logits_dtype,
         max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
@@ -353,6 +402,8 @@ def FusedMoEFactory(
         activation_situ_linear_beta=activation_situ_linear_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
         skip_final_all_reduce=skip_final_all_reduce,
+        skip_invalid_expert_routes=False,
+        require_decomposed_backend=expert_substitution is not None,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)
@@ -391,8 +442,24 @@ def FusedMoEFactory(
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
+        expert_substitution=expert_substitution,
         **routed_experts_args if routed_experts_args is not None else {},
     )
+
+    if expert_substitution is not None and routed_experts.quant_method.is_monolithic:
+        raise NotImplementedError(
+            "expert substitution requires a decomposed MoE backend"
+        )
+    if expert_substitution is not None:
+        moe_config.skip_invalid_expert_routes = (
+            routed_experts.quant_method.supports_invalid_expert_routes
+        )
+        if moe_config.skip_invalid_expert_routes:
+            logger.info_once(
+                "Using optimized invalid-route skipping for expert substitution."
+            )
+        else:
+            logger.info_once("Using the generic zero-weight expert-substitution path.")
 
     if runner_cls is None:
         runner_cls = MoERunner
@@ -414,6 +481,7 @@ def FusedMoEFactory(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        expert_substitution=expert_substitution,
         **runner_args if runner_args is not None else {},
     )
 

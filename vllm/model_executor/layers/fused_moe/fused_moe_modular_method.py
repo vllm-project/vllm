@@ -59,6 +59,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return self.old_quant_method.supports_eplb
 
     @property
+    def supports_invalid_expert_routes(self) -> bool:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.supports_invalid_expert_routes()
+
+    @property
     def method_name(self) -> str:
         return self.old_quant_method.method_name
 

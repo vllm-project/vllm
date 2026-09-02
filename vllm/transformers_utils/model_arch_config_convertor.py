@@ -261,7 +261,23 @@ class ModelArchConfigConvertorBase:
         quant_cfg = getattr(config, "quantization_config", None)
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
-            quant_cfg = getattr(config, "compression_config", None)
+            compression_cfg = getattr(config, "compression_config", None)
+            quantization_keys = {
+                "quant_method",
+                "config_groups",
+                "quantization_status",
+                "format",
+                "quantization",
+                "kv_cache_scheme",
+            }
+            if compression_cfg is not None and not any(
+                key in compression_cfg for key in quantization_keys
+            ):
+                # A compression envelope may contain inference transforms
+                # without quantization. Do not mutate transform-only metadata
+                # by inserting an empty quant_method.
+                return None
+            quant_cfg = compression_cfg
 
         else:
             # Set quant_method for ModelOpt models.

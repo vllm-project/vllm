@@ -1324,6 +1324,13 @@ class FusedMoEConfig:
     # Optional consumer capacity for deferred finalize. Negative means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
 
+    # Drop expert-map-invalid routes from GEMM scheduling and from the final
+    # top-k reduction. Expert replacements produce those routes separately.
+    skip_invalid_expert_routes: bool = False
+
+    # Require routing to remain separate from expert execution.
+    require_decomposed_backend: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
