@@ -29,8 +29,14 @@ def test_args_resolve_ambiguous_strings_by_field():
     args = QuantizationConfigArgs(moe={"weight": "mxfp8", "activation": "mxfp8"})
     assert args.moe == QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
 
+    assert QuantSpec(weight="mxfp8").weight is kMxfp8Static
+    args = QuantizationConfigArgs(moe=QuantSpec(weight="mxfp8"))
+    assert args.moe is not None
+    assert args.moe.weight is kMxfp8Static
+
     args = QuantizationConfigArgs(moe={"weight": "mxfp4", "activation": "mxfp4"})
     assert args.moe == QuantSpec(weight=kMxfp4Static, activation=kMxfp4Dynamic)
+    assert QuantSpec(weight="mxfp4").weight is kMxfp4Static
 
 
 def test_quant_spec_accepts_quant_key_directly():
@@ -72,7 +78,9 @@ def test_args_string_shorthand_missing_slot_raises():
 
 def test_args_accepts_dict_form():
     args = QuantizationConfigArgs(moe={"activation": "mxfp8"})
-    assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
+    assert args.moe is not None
+    assert args.moe.weight is None
+    assert args.moe.activation is kMxfp8Dynamic
 
 
 def test_online_shorthands_do_not_set_activation_defaults():
@@ -104,7 +112,9 @@ def test_resolve_quantization_config_only():
     # checkpoint that needs an activation override), it's returned as-is.
     args = resolve_quantization_config(None, {"moe": {"activation": "mxfp8"}})
     assert args.linear is None
-    assert args.moe == QuantSpec(weight=None, activation=kMxfp8Dynamic)
+    assert args.moe is not None
+    assert args.moe.weight is None
+    assert args.moe.activation is kMxfp8Dynamic
 
 
 def test_resolve_merges_explicit_over_shorthand():
@@ -142,11 +152,10 @@ def test_resolve_rejects_quantization_config_with_non_shorthand_quant():
 
 
 def test_quant_key_names_round_trip():
-    # Every advertised name should round-trip through QuantSpec without error
-    # and produce the same QuantKey it maps to.
+    # Every advertised name should round-trip through QuantSpec activation
+    # parsing without error and produce the same QuantKey it maps to.
     for name, expected in QUANT_KEY_NAMES.items():
         assert QuantSpec(activation=name).activation == expected, name
-        assert QuantSpec(weight=name).weight == expected, name
 
 
 def test_static_block_weight_paired_with_dynamic_block_activation():

@@ -94,6 +94,13 @@ class QuantSpec:
     _fields_set: frozenset[str] = Field(init=False, repr=False, exclude=True)
     """Names explicitly provided when constructing this spec."""
 
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _coerce_weight_quant_key(cls, v: Any) -> Any:
+        if isinstance(v, str) and v in _WEIGHT_QUANT_KEY_NAMES:
+            return _WEIGHT_QUANT_KEY_NAMES[v]
+        return v
+
     def __post_init__(self) -> None:
         """
         We need a way to distinguish cases where `activation` is set by the
@@ -113,11 +120,6 @@ class QuantSpec:
     def fields_set(self) -> frozenset[str]:
         """Names explicitly provided when constructing this spec."""
         return self._fields_set
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, QuantSpec):
-            return False
-        return (self.weight, self.activation) == (other.weight, other.activation)
 
 
 @config
@@ -140,13 +142,6 @@ class QuantizationConfigArgs:
     @field_validator("linear", "moe", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
-        # e.g. `--quantization-config.moe '{"weight": "mxfp4", "activation": null}'`
-        if isinstance(v, dict):
-            weight = v.get("weight")
-            if isinstance(weight, str) and weight in _WEIGHT_QUANT_KEY_NAMES:
-                return {**v, "weight": _WEIGHT_QUANT_KEY_NAMES[weight]}
-            return v
-
         if not isinstance(v, str):
             return v
 

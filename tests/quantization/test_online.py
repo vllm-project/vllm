@@ -361,6 +361,12 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
         ),
+        (
+            "mxfp4",
+            {"moe": {"weight": "mxfp4", "activation": None}},
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
+        ),
     ],
     ids=[
         "fp8_per_tensor",
@@ -370,6 +376,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
         "ignore",
         "mxfp4",
         "mxfp4_activation_override",
+        "mxfp4_null_activation_override",
     ],
 )
 @pytest.mark.parametrize(
@@ -444,6 +451,8 @@ def test_online_quantization(
     )
     if isinstance(moe_args, dict) and moe_args.get("activation") == "mxfp8":
         assert moe._quant_method.activation_quant_key == quant_utils.kMxfp8Dynamic
+    elif isinstance(moe_args, dict) and "activation" in moe_args:
+        assert moe._quant_method.activation_quant_key is None
 
     if quant_scheme == "mxfp4":
         assert o_proj.weight.dtype == torch.uint8
