@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, NamedTuple, TypedDict, TypeGuard
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeGuard
 
 import regex as re
 import xgrammar as xgr
@@ -25,19 +25,19 @@ from vllm.entrypoints.cohere.cohere_chat_message import (
     CitationSource,
     CohereDeltaMessage,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 REPLACEMENT_CHAR = "\ufffd"
 
