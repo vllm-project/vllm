@@ -301,8 +301,8 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         vllm_config: VllmConfig,
         *,
         pool_workers: int = 1,
-        pin: bool = True,
-        device: DeviceLikeType = "cuda",
+        pin: bool = False,
+        device: DeviceLikeType = "cpu",
     ) -> None:
         PagedShmCache.__init__(
             self, vllm_config, pin=pin, pool_workers=pool_workers, device=device
@@ -322,6 +322,7 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         if mm_item is not None:
             return mm_item
         kwargs_item, _ = self.get_item(mm_hash)
+        assert kwargs_item is not None
         return kwargs_item
 
     def touch_receiver_cache_item(

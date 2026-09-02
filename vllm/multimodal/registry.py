@@ -344,9 +344,7 @@ class MultiModalRegistry:
         elif cache_type == "paged_shm":
             from .paged_shm.cache import PagedShmReceiverCache
 
-            device = vllm_config.device_config.device
-            assert device is not None
-            return PagedShmReceiverCache(vllm_config, pin=PIN_MEMORY, device=device)
+            return PagedShmReceiverCache(vllm_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -364,9 +362,7 @@ class MultiModalRegistry:
         elif cache_type == "paged_shm":
             from .paged_shm.cache import PagedShmReceiverCache
 
-            device = vllm_config.device_config.device
-            assert device is not None
-            return PagedShmReceiverCache(vllm_config, pin=PIN_MEMORY, device=device)
+            return PagedShmReceiverCache(vllm_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 

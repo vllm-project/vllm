@@ -25,7 +25,7 @@ Shared memory enables multiple processes to access the same physical memory regi
 
 Data flows:
 
-```
+```text
 ZMQ IPC Path (without SHM):
 [Multi-modal Tensor] ─ZMQ IPC→ [CPU Buffer] ─(pin & H2D)→ [GPU]
     (API Server)               (GPU Worker)
@@ -66,7 +66,7 @@ The tensor bytes are **offloaded** from the ZMQ hot path, eliminating serializat
 
 **Format layout** (as implemented in `serial_utils.py`):
 
-```
+```text
 Chunks:   [ Meta ]   [   Data 0   ]        [ Data 1  ...]
 Blocks:   +----------+----------+----------+----------+ ...
           Block 0    Block 1    Block 2    Block 3
