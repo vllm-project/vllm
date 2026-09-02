@@ -298,6 +298,10 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
 
 
 def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
+    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+        pytest.skip("requires FlashInfer ReplaySSM autotuning support")
+
     builder = _create_replayssm_builder(
         16,
         mamba_backend=MambaBackendEnum.FLASHINFER,
