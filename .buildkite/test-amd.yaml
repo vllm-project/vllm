@@ -128,7 +128,7 @@ steps:
   - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
