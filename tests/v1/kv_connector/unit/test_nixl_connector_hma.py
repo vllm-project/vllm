@@ -1798,12 +1798,14 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker.block_len_per_layer == [unified_page // 3] * 2
     # Split handles must replicate every FA descriptor (MLA isn't head-sharded).
     assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
-    # FA descs: 2 regions x 12 kernel blocks, page stride = kernel page.
-    # Mamba descs: 2 regions x (3 conv sub-projections + 1 ssm) x 4 blocks.
-    assert worker.src_blocks_data.shape == (24 + 32, 3)
-    fa_descs = worker.src_blocks_data[:24]
-    assert fa_descs[1][0] - fa_descs[0][0] == unified_page // 3
-    assert all(size == unified_page // 3 for size in fa_descs[:, 1])
+    # FA runs: one per region x 12 kernel blocks, page stride = kernel page.
+    # Mamba runs: 2 regions x (3 conv sub-projections + 1 ssm), 4 blocks each.
+    assert worker.src_blocks_data.shape == (2 + 8, 5)
+    fa_runs = worker.src_blocks_data[:2]
+    assert fa_runs[:, 1].tolist() == [unified_page // 3] * 2
+    assert fa_runs[:, 3].tolist() == [unified_page // 3] * 2
+    assert fa_runs[:, 4].tolist() == [12] * 2
+    assert worker.src_blocks_data[2:, 4].tolist() == [4] * 8
 
 
 @pytest.mark.cpu_test
