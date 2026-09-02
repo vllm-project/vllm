@@ -223,6 +223,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                 self.last_token_indices[:num_reqs],
                 num_reqs,
             )
+            if not dummy_run and self.slot_mapping_observer is not None:
+                self.slot_mapping_observer(slot_mappings_tensor, batch_desc.num_tokens)
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )

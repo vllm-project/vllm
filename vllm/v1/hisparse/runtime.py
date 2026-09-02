@@ -875,6 +875,7 @@ class HiSparseCacheHandle:
         self.num_decode_tokens = 0
         self.req_id_per_token: torch.Tensor | None = None
         self.host_mirror_required = False
+        self.mirror_from_resident = False
         self.mirror_slot_mapping: torch.Tensor | None = None
         self.mirror_staging_cache: torch.Tensor | None = None
         self.mirror_staging_slots: torch.Tensor | None = None
@@ -920,7 +921,11 @@ class HiSparseCacheHandle:
     def mirror_write_target(
         self, num_rows: int
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if not self.host_mirror_required or self.decode_batch:
+        if (
+            not self.host_mirror_required
+            or self.decode_batch
+            or self.mirror_from_resident
+        ):
             return None
         cache = self.mirror_staging_cache
         slots = self.mirror_staging_slots
@@ -1042,4 +1047,11 @@ def create_hisparse_cache_handle(
         config.host_pool_gib,
         max_num_reqs,
     )
-    return HiSparseCacheHandle(runtime)
+    handle = HiSparseCacheHandle(runtime)
+    speculative_config = vllm_config.speculative_config
+    handle.mirror_from_resident = bool(
+        vllm_config.scheduler_config.async_scheduling
+        and speculative_config is not None
+        and speculative_config.use_multi_module_mtp()
+    )
+    return handle

@@ -76,10 +76,15 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
 class HiSparseConnectorScheduler:
     def __init__(
-        self, coordinator: HiSparseCoordinator, *, async_speculative: bool
+        self,
+        coordinator: HiSparseCoordinator,
+        *,
+        async_speculative: bool,
+        draft_kv_lookahead: int = 0,
     ) -> None:
         self.coordinator = coordinator
         self.async_speculative = async_speculative
+        self.draft_kv_lookahead = draft_kv_lookahead
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -145,7 +150,10 @@ class HiSparseConnectorScheduler:
                     (
                         request_id,
                         mirror_start,
-                        scheduled_count + scheduled_start - mirror_start,
+                        scheduled_count
+                        + scheduled_start
+                        - mirror_start
+                        + self.draft_kv_lookahead,
                     ),
                 ),
             )
@@ -193,11 +201,17 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if role == KVConnectorRole.SCHEDULER:
             if coordinator is None:
                 raise ValueError("HiSparse scheduler requires a coordinator.")
+            speculative_config = vllm_config.speculative_config
+            exact_async_mtp = bool(
+                vllm_config.scheduler_config.async_scheduling
+                and speculative_config is not None
+                and speculative_config.use_multi_module_mtp()
+            )
             self.connector_scheduler = HiSparseConnectorScheduler(
                 coordinator,
-                async_speculative=bool(
-                    vllm_config.scheduler_config.async_scheduling
-                    and vllm_config.speculative_config is not None
+                async_speculative=exact_async_mtp,
+                draft_kv_lookahead=(
+                    vllm_config.num_speculative_tokens + 1 if exact_async_mtp else 0
                 ),
             )
         elif role == KVConnectorRole.WORKER:
@@ -216,6 +230,12 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def finish_forward(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.finish_forward()
+
+    def stage_host_mirror_mapping(
+        self, slot_mappings: torch.Tensor, num_tokens: int
+    ) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.stage_row_mirror_mapping(slot_mappings, num_tokens)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None
