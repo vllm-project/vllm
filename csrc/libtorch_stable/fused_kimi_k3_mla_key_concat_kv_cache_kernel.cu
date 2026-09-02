@@ -675,11 +675,9 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
 // Only ql_nope / q_pe come from the producing GEMM chain, so everything else
 // (slot_mapping, scales, rope table, cache-row inputs) is read before the
 // grid-dependency wait, and the cache-slot warps skip the wait entirely.
-// With SPLIT=3 the query warps trigger the dependent launch right after the
-// wait, leaving one load -> convert -> store round trip in flight; cache
-// warps never trigger — a no-wait warp triggering would release the consumer
-// before the producer's data arrived — and complete via exit. SPLIT=1 loops
-// multiple chunks per lane and keeps the end-of-kernel trigger.
+// The dependent-launch trigger stays at the end of the kernel: it releases
+// the consuming FMHA's grid-dependency wait, so it must not fire before this
+// kernel's stores to mqa_q are issued.
 // ────────────────────────────────────────────────────────────────────────────
 template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE,
           int SPLIT = 1>
@@ -728,9 +726,6 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
         q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride;
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
     cudaGridDependencySynchronize();
-    if constexpr (SPLIT != 1) {
-      cudaTriggerProgrammaticLaunchCompletion();
-    }
 #endif
     writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
         dst, nope_src, pe_src, lane, kLaneStride, kMqElem, qsi, rope_cache);
@@ -746,15 +741,10 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
           kv_c + tokenIdx * kv_c_tok_stride, k_pe + tokenIdx * k_pe_tok_stride,
           lane, kLaneStride, kCacheElem, ksi, rope_cache);
     }
-    // No trigger from no-wait warps (see the kernel comment); complete via
-    // exit.
-    return;
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  if constexpr (SPLIT == 1) {
-    cudaTriggerProgrammaticLaunchCompletion();
-  }
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 

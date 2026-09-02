@@ -282,6 +282,9 @@ def test_decode_epilogue_preserves_nope_path() -> None:
     )
 
     torch.testing.assert_close(q_actual, torch.cat((ql_nope, q_pe), dim=-1))
+    torch.testing.assert_close(
+        _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
+    )
 
 
 @torch.inference_mode()
@@ -302,9 +305,6 @@ def test_decode_epilogue_row_split_boundary(num_tokens: int) -> None:
     )
 
     torch.testing.assert_close(q_actual, torch.cat((ql_nope, q_pe), dim=-1))
-    torch.testing.assert_close(
-        _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
-    )
     torch.testing.assert_close(
         _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
     )
