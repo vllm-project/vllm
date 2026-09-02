@@ -24,7 +24,6 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.renderers import ChatParams, renderer_from_config
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 
-from ..utils import create_new_process_for_each_test
 from .registry import (
     _TRANSFORMERS_BACKEND_MODELS,
     AUTO_EXAMPLE_MODELS,
@@ -85,16 +84,15 @@ def _get_weights_iterator(
         if "dtype" not in info:
             raise _SkipValidation(f"Missing safetensors dtype metadata for {name=}")
 
-        dtype = info["dtype"]
-        if dtype not in _SAFETENSORS_TO_TORCH_DTYPE:
+        dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(info["dtype"])
+        if dtype is None:
             raise _SkipValidation(
-                f"Unrecognized safetensors dtype metadata for {name=}: {dtype=}"
+                f"Unrecognized safetensors dtype for {name=}: {info['dtype']}"
             )
 
-        yield (
-            name,
-            torch.empty(info["shape"], dtype=_SAFETENSORS_TO_TORCH_DTYPE[dtype]),
-        )
+        weight = torch.empty(info["shape"], dtype=dtype)
+
+        yield name, weight
 
 
 def _get_dummy_weights(model: nn.Module, model_config: ModelConfig):
@@ -146,7 +144,6 @@ def _load_dummy_weights(vllm_config: VllmConfig):
     return model
 
 
-@create_new_process_for_each_test()
 def can_initialize(model_arch: str, EXAMPLE_MODELS: HfExampleModels):
     """
     create_new_process_for_each_test can avoid CUDA re-initialization error.
@@ -232,7 +229,7 @@ def can_initialize(model_arch: str, EXAMPLE_MODELS: HfExampleModels):
 
     try:
         # TODO: Handle speculative model
-        with initialize_dummy_model(_load_dummy_weights, vllm_config):
+        with initialize_dummy_model(_load_dummy_weights, vllm_config, device="meta"):
             pass
     except _SkipValidation as e:
         logger.warning(
