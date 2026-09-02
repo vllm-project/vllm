@@ -1002,10 +1002,16 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-        self._use_modelwide_replayssm = (
-            self.cache_config.mamba_cache_mode in ("align", "all")
-            and self.cache_config.use_replayssm
+        self._use_flashinfer_replayssm = (
+            self.cache_config.use_replayssm
             and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
+        self._needs_prefix_state_migration = (
+            self.cache_config.mamba_cache_mode == "align"
+            or (
+                self._use_flashinfer_replayssm
+                and self.cache_config.mamba_cache_mode == "all"
+            )
         )
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if (
@@ -1080,8 +1086,7 @@ class GPUModelRunner(
         # The postprocess sub-object is also the model-level owner of
         # FlashInfer ReplaySSM trackers, including STP.
         assert (
-            self.cache_config.mamba_cache_mode == "align"
-            or self._use_modelwide_replayssm
+            self._needs_prefix_state_migration or self._use_flashinfer_replayssm
         )
         if self._mamba_bufs is None:
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
@@ -1093,7 +1098,7 @@ class GPUModelRunner(
                 with_postprocess_align=(
                     self.speculative_config is not None and self.model_config.is_hybrid
                 )
-                or self._use_modelwide_replayssm,
+                or self._use_flashinfer_replayssm,
             )
         return self._mamba_bufs
 
@@ -1601,7 +1606,7 @@ class GPUModelRunner(
         each sequence, and a shifting is done during the next iteration
         based on the number of accepted tokens.
         """
-        if not self._use_modelwide_replayssm and (
+        if not self._use_flashinfer_replayssm and (
             not self.speculative_config or not self.model_config.is_hybrid
         ):
             return
@@ -1613,8 +1618,7 @@ class GPUModelRunner(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if (
-            self.cache_config.mamba_cache_mode == "align"
-            or self._use_modelwide_replayssm
+            self._needs_prefix_state_migration or self._use_flashinfer_replayssm
         ):
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
@@ -1631,6 +1635,7 @@ class GPUModelRunner(
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
                 mamba_state_copy_funcs=self._get_mamba_state_copy_funcs(),
+                run_prefix_state_migration=self._needs_prefix_state_migration,
             )
 
             if self.num_accepted_tokens_event is not None:
@@ -2158,7 +2163,7 @@ class GPUModelRunner(
         needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and (
             not self.use_async_scheduling
             or self.cache_config.mamba_cache_mode == "align"
-            or self._use_modelwide_replayssm
+            or self._needs_prefix_state_migration
         )
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
@@ -4432,10 +4437,8 @@ class GPUModelRunner(
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-            if (
-                self.cache_config.mamba_cache_mode == "align"
-                or self._use_modelwide_replayssm
-            ):
+            mamba_bufs = None
+            if self._needs_prefix_state_migration:
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
@@ -4464,18 +4467,24 @@ class GPUModelRunner(
                 )
                 self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                # Stage inputs only when the fused postprocess will run. This
-                # includes spec-decode hybrid models and model-owned
-                # FlashInfer ReplaySSM lifecycle maintenance under STP.
-                if mamba_bufs.postprocess_align is not None:
-                    mamba_utils.stage_postprocess_inputs_to_gpu(
-                        mamba_bufs.postprocess_align,
-                        scheduler_output,
-                        self.input_batch.req_ids,
-                        num_reqs,
-                        self.requests,
-                        self.mamba_state_idx,
-                    )
+            elif self._use_flashinfer_replayssm:
+                mamba_bufs = self._get_mamba_bufs()
+
+            # Stage inputs whenever the fused state-copy or model-wide
+            # ReplaySSM tracker postprocess will run. Mode none does not run
+            # prefix preprocessing and always uses logical live column zero.
+            if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
+                mamba_utils.stage_postprocess_inputs_to_gpu(
+                    mamba_bufs.postprocess_align,
+                    scheduler_output,
+                    self.input_batch.req_ids,
+                    num_reqs,
+                    self.requests,
+                    self.mamba_state_idx,
+                    fixed_live_col=(
+                        None if self._needs_prefix_state_migration else 0
+                    ),
+                )
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices

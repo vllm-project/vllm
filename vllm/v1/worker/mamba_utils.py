@@ -1691,6 +1691,7 @@ def postprocess_mamba_align_gpu(
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: MambaStateCopyFuncsByType,
+    run_prefix_state_migration: bool,
 ) -> None:
     """GPU-side Mamba postprocess for fused align state maintenance.
 
@@ -1720,14 +1721,17 @@ def postprocess_mamba_align_gpu(
             ],
         )
 
-    ctx.run_fused_postprocess(
-        num_reqs=num_reqs,
-        num_accepted_tokens_gpu=num_accepted_tokens_gpu,
-        mamba_state_idx_gpu=ctx.mamba_state_idx_buf.gpu,
-        num_scheduled_tokens_gpu=ctx.num_scheduled_tokens_buf.gpu,
-        num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
-        num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
-    )
+    accepted_tokens_for_postprocess = num_accepted_tokens_gpu
+    if run_prefix_state_migration:
+        ctx.run_fused_postprocess(
+            num_reqs=num_reqs,
+            num_accepted_tokens_gpu=num_accepted_tokens_gpu,
+            mamba_state_idx_gpu=ctx.mamba_state_idx_buf.gpu,
+            num_scheduled_tokens_gpu=ctx.num_scheduled_tokens_buf.gpu,
+            num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
+            num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
+        )
+        accepted_tokens_for_postprocess = ctx.num_accepted_tokens_out
     if ctx.replayssm is not None:
         ctx.replayssm.postprocess_and_materialize(
             idx_mapping=None,
@@ -1735,7 +1739,7 @@ def postprocess_mamba_align_gpu(
             query_is_cumulative=False,
             num_computed_tokens=ctx.num_computed_tokens_buf.gpu,
             num_computed_is_after=False,
-            num_accepted_tokens=num_accepted_tokens_gpu,
+            num_accepted_tokens=accepted_tokens_for_postprocess,
             is_prefilling=ctx.is_prefilling_buf.gpu,
             live_cols=ctx.mamba_state_idx_buf.gpu,
             materialize_src_cols=ctx.materialize_src_cols,
@@ -1750,7 +1754,7 @@ def postprocess_mamba_align_gpu(
     # when src_block_idx == dest_block_idx (copy within the same block), so
     # the original count is preserved for everyone else.
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-        ctx.num_accepted_tokens_out[:num_reqs], non_blocking=True
+        accepted_tokens_for_postprocess[:num_reqs], non_blocking=True
     )
 
 
@@ -1761,6 +1765,8 @@ def stage_postprocess_inputs_to_gpu(
     num_reqs: int,
     requests: dict[str, CachedRequestState],
     mamba_state_idx: dict[str, int],
+    *,
+    fixed_live_col: int | None = None,
 ) -> None:
     """Stage all per-request inputs the fused mamba postprocess kernel reads.
 
@@ -1770,8 +1776,9 @@ def stage_postprocess_inputs_to_gpu(
     indexes the resulting GPU tensors by ``req_idx``. Buffers live on ``ctx``
     and only exist when the postprocess kernel is enabled.
 
-    Invariant: ``preprocess_mamba`` must have run first for the same batch so
-    that every ``req_ids[i]`` has an entry in ``mamba_state_idx``.
+    Prefix-migration modes read the live column populated by
+    ``preprocess_mamba``. Mode ``none`` instead passes ``fixed_live_col=0``
+    because its one backend-owned live state always occupies logical column 0.
     """
     assert ctx.mamba_state_idx_buf is not None
     assert ctx.num_scheduled_tokens_buf is not None
@@ -1788,11 +1795,13 @@ def stage_postprocess_inputs_to_gpu(
     prefill_np = ctx.is_prefilling_buf.np
     for i in range(num_reqs):
         req_id = req_ids[i]
-        state_idx = mamba_state_idx.get(req_id)
-        assert state_idx is not None, (
-            f"mamba_state_idx missing entry for {req_id!r}; "
-            "preprocess_mamba must run before stage_postprocess_inputs_to_gpu"
-        )
+        state_idx = fixed_live_col
+        if state_idx is None:
+            state_idx = mamba_state_idx.get(req_id)
+            assert state_idx is not None, (
+                f"mamba_state_idx missing entry for {req_id!r}; "
+                "preprocess_mamba must run before stage_postprocess_inputs_to_gpu"
+            )
         state_idx_np[i] = state_idx
         scheduled = num_scheduled[req_id]
         computed = requests[req_id].num_computed_tokens

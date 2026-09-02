@@ -371,7 +371,7 @@ def test_replayssm_materialize_ready_requires_cuda_ssm_state():
         ssu_dispatch._replayssm_materialize_ready([mixer])
 
 
-def _modelwide_replayssm_fixture():
+def _modelwide_replayssm_fixture(cache_mode: str = "align"):
     groups = [
         [_materialize_mixer(device="cuda"), _materialize_mixer(device="cuda")],
         [_materialize_mixer(device="cuda"), _materialize_mixer(device="cuda")],
@@ -390,12 +390,109 @@ def _modelwide_replayssm_fixture():
             forward_context[name] = mixer
 
     config = Mock()
-    config.kv_cache_groups = [Mock(layer_names=names) for names in layer_names]
+    specs = [
+        MambaSpec(
+            block_size=1024 if cache_mode == "none" else 4,
+            shapes=((4, 3, 5),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode=cache_mode,
+        )
+        for _ in layer_names
+    ]
+    config.kv_cache_groups = [
+        Mock(layer_names=names, kv_cache_spec=spec)
+        for names, spec in zip(layer_names, specs)
+    ]
     block_tables = [
         torch.tensor([[1, 2, 3], [0, 0, 0]], dtype=torch.int32, device="cuda"),
         torch.tensor([[4, 5, 6], [0, 0, 0]], dtype=torch.int32, device="cuda"),
     ]
     return groups, config, forward_context, block_tables
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_modelwide_replayssm_none_commits_trackers_without_materialization(
+    monkeypatch,
+):
+    groups, config, forward_context, block_tables = _modelwide_replayssm_fixture(
+        cache_mode="none"
+    )
+    materializer = Mock()
+    monkeypatch.setattr(
+        ssu_dispatch, "_load_replayssm_materialize", lambda: materializer
+    )
+    ctx = ReplaySSMModelContext.create(
+        config,
+        [0, 1],
+        forward_context,
+        block_tables,
+        max_num_reqs=2,
+    )
+    assert ctx is not None
+    assert not ctx.materialize_prefixes
+
+    query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
+    num_computed = torch.zeros(2, dtype=torch.int32, device="cuda")
+    accepted = torch.ones(2, dtype=torch.int32, device="cuda")
+    is_prefilling = torch.zeros(2, dtype=torch.bool, device="cuda")
+    live_cols = torch.zeros(2, dtype=torch.int32, device="cuda")
+    no_materialize = torch.full((2,), -1, dtype=torch.int32, device="cuda")
+    materialize_counts = torch.zeros(2, dtype=torch.int32, device="cuda")
+
+    def step(*, scheduled: int, num_accepted: int, prefilling: bool = False) -> None:
+        query_len[0] = scheduled
+        accepted[0] = num_accepted
+        is_prefilling[0] = prefilling
+        ctx.postprocess_and_materialize(
+            idx_mapping=None,
+            query_metadata=query_len,
+            query_is_cumulative=False,
+            num_computed_tokens=num_computed,
+            num_computed_is_after=False,
+            num_accepted_tokens=accepted,
+            is_prefilling=is_prefilling,
+            live_cols=live_cols,
+            materialize_src_cols=no_materialize,
+            materialize_dst_cols=no_materialize,
+            materialize_token_counts=materialize_counts,
+            mamba_block_size=1024,
+            num_reqs=1,
+        )
+        num_computed[0] += num_accepted
+
+    # Prefill canonicalizes the one live slot in mode none.
+    for mixers, slot in zip(groups, (1, 4)):
+        mixers[0]._replayssm_ring_start[slot] = 17
+        mixers[0]._replayssm_prev_num_accepted[slot] = 9
+    step(scheduled=8, num_accepted=1, prefilling=True)
+
+    # Mix STP and MTP-shaped updates. Several scheduled lengths exceed the
+    # accepted count; repeated crossings eventually wrap the 20-row ring.
+    for scheduled, num_accepted in (
+        (4, 2),
+        (4, 1),
+        (14, 3),
+        (18, 2),
+        (16, 16),
+        (1, 1),
+    ):
+        step(scheduled=scheduled, num_accepted=num_accepted)
+    torch.accelerator.synchronize()
+
+    assert materializer.call_count == 0
+    assert ctx.plan_flush_count.tolist() == [-1, -1]
+    for mixers, live_slot in zip(groups, (1, 4)):
+        # Both layers share this group tracker. The expected single transition
+        # per step would differ if either layer committed it independently.
+        assert mixers[0]._replayssm_ring_start[live_slot].item() == 4
+        assert mixers[0]._replayssm_prev_num_accepted[live_slot].item() == 1
+
+    # A later prefill resets the exact same live physical slot again.
+    step(scheduled=8, num_accepted=1, prefilling=True)
+    torch.accelerator.synchronize()
+    for mixers, live_slot in zip(groups, (1, 4)):
+        assert mixers[0]._replayssm_ring_start[live_slot].item() == 0
+        assert mixers[0]._replayssm_prev_num_accepted[live_slot].item() == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")

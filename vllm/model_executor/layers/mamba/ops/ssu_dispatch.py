@@ -377,6 +377,7 @@ class ReplaySSMModelContext:
     max_layers_per_group: int
     logical_window: int
     ring_buffer_len: int
+    materialize_prefixes: bool
 
     @classmethod
     def create(
@@ -399,6 +400,21 @@ class ReplaySSMModelContext:
             )
         block_table_by_gid = dict(zip(mamba_group_ids, block_tables))
         replayssm_block_tables = [block_table_by_gid[gid] for gid, _ in grouped]
+        cache_modes = set()
+        for gid, _ in grouped:
+            spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+            if not isinstance(spec, MambaSpec):
+                raise TypeError(
+                    "FlashInfer ReplaySSM layers require a Mamba cache spec; "
+                    f"got {type(spec).__name__}"
+                )
+            cache_modes.add(spec.mamba_cache_mode)
+        if len(cache_modes) != 1:
+            raise ValueError(
+                "model-wide ReplaySSM requires one Mamba cache mode; "
+                f"got {sorted(cache_modes)}"
+            )
+        materialize_prefixes = next(iter(cache_modes)) in ("align", "all")
 
         mixers = [mixer for _, group_mixers in grouped for mixer in group_mixers]
         if not _replayssm_materialize_ready(mixers):
@@ -507,6 +523,7 @@ class ReplaySSMModelContext:
             max_layers_per_group=max_layers_per_group,
             logical_window=int(first.replayssm_buffer_len),
             ring_buffer_len=first_x.size(2),
+            materialize_prefixes=materialize_prefixes,
         )
 
     def postprocess_and_materialize(
@@ -561,12 +578,13 @@ class ReplaySSMModelContext:
             HAS_IDX_MAPPING=idx_mapping is not None,
         )
 
-        self._materialize_planned(
-            self.src_slots,
-            self.dst_slots,
-            self.plan_ring_start,
-            self.plan_flush_count,
-        )
+        if self.materialize_prefixes:
+            self._materialize_planned(
+                self.src_slots,
+                self.dst_slots,
+                self.plan_ring_start,
+                self.plan_flush_count,
+            )
 
     def copy_reassigned_slots(
         self,
@@ -579,6 +597,10 @@ class ReplaySSMModelContext:
         """Copy exact live state when align assigns a new writable slot."""
         if num_reqs == 0:
             return
+        if not self.materialize_prefixes:
+            raise RuntimeError(
+                "ReplaySSM writable-slot materialization requires align or all mode"
+            )
         _copy_reassigned_replayssm_slots_kernel[(self.max_num_reqs, self.num_groups)](
             idx_mapping,
             src_cols,

@@ -102,14 +102,24 @@ class MambaHybridModelState(DefaultModelState):
             self.cache_config.use_replayssm is True
             and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
-        self._mamba_lifecycle_mode = self._align_mode or (
+        self._needs_prefix_state_migration = self._align_mode or (
             self.cache_config.mamba_cache_mode == "all"
             and self._use_flashinfer_replayssm
         )
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
-        if self._mamba_lifecycle_mode:
+        if self._needs_prefix_state_migration or self._use_flashinfer_replayssm:
+            self._replayssm_live_cols_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
+            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
+            self._mamba_group_ids: list[int] = []
+            self._mamba_spec: MambaSpec | None = None
+            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
+            self._mamba_kv_cache_config: KVCacheConfig | None = None
+            self._mamba_block_tables: tuple[torch.Tensor, ...] | None = None
+        if self._needs_prefix_state_migration:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
@@ -119,18 +129,12 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
             )
-            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
-            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
-            self._mamba_kv_cache_config: KVCacheConfig | None = None
-            self._mamba_block_tables: tuple[torch.Tensor, ...] | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
-        if self._mamba_lifecycle_mode:
+        if self._needs_prefix_state_migration:
             # Seed the running state block from the resumed/prefilled position.
             state_block_size = self.cache_config.block_size
             if self.cache_config.mamba_cache_mode == "all":
@@ -214,7 +218,7 @@ class MambaHybridModelState(DefaultModelState):
         ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
         is visible to the forward kernels.
         """
-        if not self._mamba_lifecycle_mode:
+        if not self._needs_prefix_state_migration:
             return
         num_reqs = input_batch.num_reqs
         if num_reqs == 0:
@@ -314,6 +318,10 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        if self._use_flashinfer_replayssm:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
@@ -406,7 +414,7 @@ class MambaHybridModelState(DefaultModelState):
         # acceptance leaves the sequence non-block-aligned. num_computed_tokens
         # already holds the post-step advanced count.
         if (
-            self._mamba_lifecycle_mode
+            self._needs_prefix_state_migration
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):
@@ -417,40 +425,53 @@ class MambaHybridModelState(DefaultModelState):
                 num_computed_tokens,
                 idx_mapping,
             )
-            # Must match the condition that sets ``state_skip_postprocess``:
-            # the fused kernel skips the temporal copy for every FlashInfer
-            # ReplaySSM layer, so the materializer has to cover every one of
-            # them. Gating this on spec decode would drop the SSM state on any
-            # non-spec boundary where src_col != dst_col. Rows that need no
-            # work carry the -1 src_col sentinel and cost nothing.
-            if self._use_flashinfer_replayssm:
-                replayssm = self._mamba_ctx.replayssm
-                assert replayssm is not None
-                if query_start_loc is None:
-                    raise RuntimeError(
-                        "ReplaySSM postprocess requires the query_start_loc from "
-                        "the forward that produced this acceptance"
-                    )
-                if is_prefilling is None:
-                    is_prefilling = self._is_prefilling_gpu[:num_reqs]
-                replayssm.postprocess_and_materialize(
-                    idx_mapping=idx_mapping,
-                    query_metadata=query_start_loc,
-                    query_is_cumulative=True,
-                    num_computed_tokens=num_computed_tokens,
-                    num_computed_is_after=True,
-                    # run_fused_postprocess_align can reset the live buffer to
-                    # one for the next step. Its persistent snapshot still
-                    # contains the acceptance produced by this forward.
-                    num_accepted_tokens=self._mamba_ctx.num_accepted_tokens_out,
-                    is_prefilling=is_prefilling,
-                    live_cols=self._mamba_state_idx_gpu,
-                    materialize_src_cols=self._mamba_ctx.materialize_src_cols,
-                    materialize_dst_cols=self._mamba_ctx.materialize_dst_cols,
-                    materialize_token_counts=(self._mamba_ctx.materialize_token_counts),
-                    mamba_block_size=self._mamba_ctx.block_size,
-                    num_reqs=num_reqs,
+
+        if self._use_flashinfer_replayssm:
+            if num_computed_tokens is None:
+                raise RuntimeError(
+                    "ReplaySSM postprocess requires the post-step computed-token "
+                    "counts from the forward that produced this acceptance"
                 )
+            if query_start_loc is None:
+                raise RuntimeError(
+                    "ReplaySSM postprocess requires the query_start_loc from "
+                    "the forward that produced this acceptance"
+                )
+            ctx = self._mamba_ctx
+            if ctx is None or not ctx.is_initialized:
+                raise RuntimeError(
+                    "ReplaySSM postprocess context was not initialized before forward"
+                )
+            replayssm = ctx.replayssm
+            assert replayssm is not None
+            if is_prefilling is None:
+                is_prefilling = self._is_prefilling_gpu[:num_reqs]
+            replayssm.postprocess_and_materialize(
+                idx_mapping=idx_mapping,
+                query_metadata=query_start_loc,
+                query_is_cumulative=True,
+                num_computed_tokens=num_computed_tokens,
+                num_computed_is_after=True,
+                # Prefix migration can reset the live buffer to one for the
+                # next step; use its snapshot in that case. Mode none never
+                # runs the migration kernel, so the acceptance buffer is exact.
+                num_accepted_tokens=(
+                    ctx.num_accepted_tokens_out
+                    if self._needs_prefix_state_migration
+                    else self.num_accepted_tokens_gpu
+                ),
+                is_prefilling=is_prefilling,
+                live_cols=(
+                    self._mamba_state_idx_gpu
+                    if self._needs_prefix_state_migration
+                    else self._replayssm_live_cols_gpu
+                ),
+                materialize_src_cols=ctx.materialize_src_cols,
+                materialize_dst_cols=ctx.materialize_dst_cols,
+                materialize_token_counts=ctx.materialize_token_counts,
+                mamba_block_size=ctx.block_size,
+                num_reqs=num_reqs,
+            )
 
 
 @triton.jit

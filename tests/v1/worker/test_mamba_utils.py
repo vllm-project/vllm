@@ -258,10 +258,57 @@ def test_postprocess_mamba_align_materializes_after_fused_copy(monkeypatch):
         kv_cache_config=kv_cache_config,
         forward_context={},
         mamba_state_copy_funcs={},
+        run_prefix_state_migration=True,
     )
 
     assert order == ["copy", "materialize"]
     assert accepted_cpu.tolist() == [3]
+
+
+def test_postprocess_mamba_none_skips_prefix_copy():
+    ctx = MagicMock()
+    ctx.is_initialized = True
+    ctx.mamba_group_ids = [0]
+    ctx.mamba_state_idx_buf = MagicMock(gpu=torch.zeros(1, dtype=torch.int32))
+    ctx.num_scheduled_tokens_buf = MagicMock(
+        gpu=torch.tensor([4], dtype=torch.int32)
+    )
+    ctx.num_computed_tokens_buf = MagicMock(
+        gpu=torch.tensor([20], dtype=torch.int32)
+    )
+    ctx.num_draft_tokens_buf = MagicMock(gpu=torch.tensor([3], dtype=torch.int32))
+    ctx.is_prefilling_buf = MagicMock(gpu=torch.tensor([False]))
+    ctx.materialize_src_cols = torch.full((1,), -1, dtype=torch.int32)
+    ctx.materialize_dst_cols = torch.full((1,), -1, dtype=torch.int32)
+    ctx.materialize_token_counts = torch.zeros(1, dtype=torch.int32)
+    ctx.block_size = 1024
+    ctx.replayssm = MagicMock()
+    input_batch = MagicMock()
+    input_batch.block_table = []
+    accepted = torch.tensor([2], dtype=torch.int32)
+    accepted_cpu = torch.zeros(1, dtype=torch.int32)
+
+    postprocess_mamba_align_gpu(
+        bufs=MagicMock(postprocess_align=ctx),
+        num_reqs=1,
+        num_accepted_tokens_gpu=accepted,
+        num_accepted_tokens_cpu_tensor=accepted_cpu,
+        input_batch=input_batch,
+        kv_cache_config=MagicMock(),
+        forward_context={},
+        mamba_state_copy_funcs={},
+        run_prefix_state_migration=False,
+    )
+
+    ctx.run_fused_postprocess.assert_not_called()
+    assert ctx.replayssm.postprocess_and_materialize.call_count == 1
+    assert (
+        ctx.replayssm.postprocess_and_materialize.call_args.kwargs[
+            "num_accepted_tokens"
+        ]
+        is accepted
+    )
+    assert accepted_cpu.tolist() == [2]
 
 
 # -----------------------------------------------------------------------------
@@ -940,6 +987,35 @@ def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
             requests,
             mamba_state_idx,
         )
+
+
+def test_stage_postprocess_inputs_to_gpu_uses_fixed_none_mode_live_col():
+    device = torch.device("cpu")
+    ctx = _make_staging_ctx(max_num_reqs=4, device=device)
+    scheduler_output = _make_postprocess_scheduler_output(
+        req_ids=["req_a", "req_b"],
+        num_scheduled_tokens={"req_a": 4, "req_b": 1},
+    )
+    requests = _make_requests(
+        ["req_a", "req_b"],
+        [20, 7],
+        [[0], [0]],
+        num_prompt_tokens=[10, 8],
+    )
+
+    stage_postprocess_inputs_to_gpu(
+        ctx,
+        scheduler_output,
+        ["req_a", "req_b"],
+        2,
+        requests,
+        {},
+        fixed_live_col=0,
+    )
+
+    np.testing.assert_array_equal(ctx.mamba_state_idx_buf.np[:2], [0, 0])
+    np.testing.assert_array_equal(ctx.num_scheduled_tokens_buf.np[:2], [4, 1])
+    np.testing.assert_array_equal(ctx.num_computed_tokens_buf.np[:2], [20, 7])
 
 
 def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
