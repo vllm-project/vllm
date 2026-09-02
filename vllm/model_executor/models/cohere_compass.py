@@ -1169,9 +1169,6 @@ class CohereCompassProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> CohereCompassImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self, **kwargs: object) -> None:
-        return None
-
     def get_data_parser(self):
         return CohereCompassMultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
