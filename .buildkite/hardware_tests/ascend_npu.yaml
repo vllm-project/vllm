@@ -2,6 +2,7 @@ group: Hardware
 depends_on: ~
 steps:
   - label: "Ascend NPU Test"
+    key: ascend-npu-test
     soft_fail: true
     no_plugin: true
     device: ascend_npu

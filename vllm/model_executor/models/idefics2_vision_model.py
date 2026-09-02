@@ -39,6 +39,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -85,7 +86,9 @@ class Idefics2VisionEmbeddings(nn.Module):
             1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side
         )
         position_ids = torch.full(
-            size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
+            size=(batch_size, max_nb_patches_h * max_nb_patches_w),
+            fill_value=0,
+            pin_memory=PIN_MEMORY,
         )
 
         with gpu_sync_allowed():
