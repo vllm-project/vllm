@@ -181,6 +181,18 @@ async def run_server_worker(
 ) -> None:
     """Run a single API server worker."""
 
+    if args.snapshot_config is not None:
+        client_config = dict(client_config) if client_config else {}
+        from vllm.snapshot.monitor import SnapshotMonitor
+
+        # vllm serve injects one process-shared monitor into every API worker. A
+        # directly launched single worker has no parent-provided monitor and only
+        # needs the default thread-safe instance.
+        snapshot_monitor = client_config.get("snapshot_monitor")
+        if snapshot_monitor is None:
+            snapshot_monitor = SnapshotMonitor()
+            client_config["snapshot_monitor"] = snapshot_monitor
+
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 

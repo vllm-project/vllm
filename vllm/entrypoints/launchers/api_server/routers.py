@@ -19,6 +19,13 @@ def register_api_routers(
 
     register_vllm_serve_api_routers(app)
 
+    if args.snapshot_config is not None:
+        from vllm.entrypoints.serve.snapshot.api_router import (
+            attach_router as attach_snapshot_router,
+        )
+
+        attach_snapshot_router(app)
+
     from vllm.entrypoints.openai.models.api_router import (
         attach_router as register_models_api_router,
     )
