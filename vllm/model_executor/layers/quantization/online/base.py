@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
@@ -71,6 +72,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class OnlineQuantizationSource(str, Enum):
+    """Supported online quantization configuration sources."""
+
+    linear = "linear"  # LinearBase
+    moe = "moe"  # RoutedExperts
+    targets = "targets"
 
 
 # Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
@@ -240,7 +249,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
     def resolve_quant_method_cls(
         self, layer: torch.nn.Module, prefix: str
-    ) -> tuple[str, str, str | None, QuantSpec, type] | None:
+    ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
         """Resolve quantization metadata and method class without instantiating it.
 
         Args:
@@ -262,11 +271,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
             source, quant_key_str, target_pattern, quant_spec, table = resolved_pattern
         else:
             if isinstance(layer, LinearBase):
-                source = "linear"
+                source = OnlineQuantizationSource.linear
                 quant_spec = self.args.linear
                 table = _ONLINE_LINEAR_METHODS
             elif isinstance(layer, RoutedExperts):
-                source = "moe"
+                source = OnlineQuantizationSource.moe
                 quant_spec = self.args.moe
                 table = _ONLINE_MOE_METHODS
             else:
@@ -290,7 +299,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
     def _resolve_targets_quant_method_metadata(
         self, prefix: str, layer: torch.nn.Module
-    ) -> tuple[str, str, str, QuantSpec, dict[QuantKey, type]] | None:
+    ) -> (
+        tuple[OnlineQuantizationSource, str, str, QuantSpec, dict[QuantKey, type]]
+        | None
+    ):
         """Resolve target-pattern quantization metadata and dispatch table.
 
         Args:
@@ -347,7 +359,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"not define a QuantSpec for {type(layer).__name__} layers "
                 f"(matched at {prefix})."
             )
-        return "targets", quant_key_str, target_pattern, quant_spec, table
+        return (
+            OnlineQuantizationSource.targets,
+            quant_key_str,
+            target_pattern,
+            quant_spec,
+            table,
+        )
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
