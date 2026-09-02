@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
 import threading
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import zmq
@@ -9,12 +10,14 @@ import zmq
 from vllm.utils import network_utils
 from vllm.utils.network_utils import (
     get_file_store_init_method,
+    get_ip,
     get_open_port,
     get_open_ports_list,
     get_tcp_uri,
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
+    replace_zmq_tcp_host,
     split_host_port,
     split_zmq_path,
 )
@@ -45,6 +48,53 @@ def _call_with_timeout(func, timeout: float = 10.0):
     if "error" in result:
         raise result["error"]
     return result["value"]
+
+
+def _udp_socket(ip: str | None = None, error: Exception | None = None):
+    context = MagicMock()
+    sock = context.__enter__.return_value
+    sock.connect.side_effect = error
+    if ip is not None:
+        sock.getsockname.return_value = (ip, 0)
+    return context
+
+
+def test_get_ip_force_probes_ipv4_first():
+    ipv4_socket = _udp_socket("10.0.0.2")
+
+    with patch(
+        "vllm.utils.network_utils.socket.socket", return_value=ipv4_socket
+    ) as factory:
+        assert get_ip(force=True) == "10.0.0.2"
+
+    factory.assert_called_once_with(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+def test_get_ip_force_falls_back_to_ipv6():
+    ipv4_socket = _udp_socket(error=OSError())
+    ipv6_socket = _udp_socket("2001:db8::2")
+
+    with patch(
+        "vllm.utils.network_utils.socket.socket",
+        side_effect=[ipv4_socket, ipv6_socket],
+    ) as factory:
+        assert get_ip(force=True) == "2001:db8::2"
+
+    assert factory.call_args_list == [
+        call(socket.AF_INET, socket.SOCK_DGRAM),
+        call(socket.AF_INET6, socket.SOCK_DGRAM),
+    ]
+
+
+def test_get_ip_force_uses_default_when_probe_fails():
+    with (
+        patch(
+            "vllm.utils.network_utils.socket.socket",
+            side_effect=[OSError(), OSError()],
+        ),
+        pytest.warns(UserWarning, match="using 0.0.0.0 by default"),
+    ):
+        assert get_ip(force=True) == "0.0.0.0"
 
 
 def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
@@ -208,6 +258,18 @@ def test_make_zmq_socket_ipv6():
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+
+
+@pytest.mark.parametrize(
+    "path,host,expected",
+    [
+        ("tcp://10.0.0.1:5555", "10.0.0.2", "tcp://10.0.0.2:5555"),
+        ("tcp://10.0.0.1:5555", "::1", "tcp://[::1]:5555"),
+        ("ipc://some_path", "10.0.0.2", "ipc://some_path"),
+    ],
+)
+def test_replace_zmq_tcp_host(path, host, expected):
+    assert replace_zmq_tcp_host(path, host) == expected
 
 
 def test_get_tcp_uri():
