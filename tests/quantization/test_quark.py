@@ -699,20 +699,23 @@ def test_quark_w8a8_fp8_per_block_registers_weight_scale(monkeypatch):
         get_fp8_block_weight_scale,
     )
 
-    layer = torch.nn.Module()
-    layer.weight_scale = torch.tensor([2.0])
-    assert get_fp8_block_weight_scale(layer) is None
-    layer.weight_block_size = [128, 128]
-    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
-    layer.weight_scale_inv = torch.tensor([3.0])
-    assert get_fp8_block_weight_scale(layer) is layer.weight_scale_inv
-
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.quark.schemes."
         "quark_w8a8_fp8.get_current_vllm_config",
         lambda: SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16)),
     )
     scheme = QuarkW8A8Fp8PerBlock(kFp8Static128BlockSym, kFp8Dynamic128Sym)
+
+    layer = torch.nn.Module()
+    layer.weight_scale = torch.tensor([2.0])
+    assert get_fp8_block_weight_scale(layer) is None
+    layer.scheme = scheme
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
+    layer.weight_scale_inv = torch.tensor([3.0])
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale
+    layer.scheme = None
+    assert get_fp8_block_weight_scale(layer) is layer.weight_scale_inv
+
     loaded = torch.nn.Module()
 
     def weight_loader(param, loaded_weight):

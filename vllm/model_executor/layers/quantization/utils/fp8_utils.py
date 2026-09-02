@@ -46,21 +46,18 @@ def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
 
 
 def get_fp8_block_weight_scale(layer: torch.nn.Module) -> torch.Tensor | None:
-    """Return the block-FP8 weight scale regardless of parameter name.
+    """Return the block-FP8 weight scale for supported quant methods."""
+    # Local import avoids a circular import: quark_w8a8_fp8 imports this module.
+    from vllm.model_executor.layers.quantization.quark.schemes.quark_w8a8_fp8 import (
+        QuarkW8A8Fp8PerBlock,
+    )
 
-    ``Fp8LinearMethod`` registers DeepSeek-V3 block scales as
-    ``weight_scale_inv``. Quark per-block FP8 registers ``weight_scale``,
-    matching Quark-exported checkpoints. Prefer ``weight_scale_inv`` when
-    both exist so callers match ``Fp8BlockScaledMMLinearKernel``. Require
-    ``weight_block_size`` before falling back to ``weight_scale`` so
-    per-tensor/per-channel FP8 is not treated as block scales.
-    """
-    scale_inv = getattr(layer, "weight_scale_inv", None)
-    if scale_inv is not None:
-        return scale_inv
-    if getattr(layer, "weight_block_size", None) is None:
-        return None
-    return getattr(layer, "weight_scale", None)
+    if isinstance(
+        getattr(layer, "scheme", None),
+        QuarkW8A8Fp8PerBlock,
+    ):
+        return getattr(layer, "weight_scale", None)
+    return getattr(layer, "weight_scale_inv", None)
 
 
 def input_to_float8(
