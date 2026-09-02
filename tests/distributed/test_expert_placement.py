@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
+import torch
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
+)
+from vllm.model_executor.layers.fused_moe.riy import (
+    RiyState,
+    build_riy_layer_prune_plan,
+    load_riy_profile,
 )
 
 
@@ -134,6 +142,187 @@ def test_expert_placement_edge_cases(expert_placement_strategy, world_size):
             ep_rank=0,
             global_num_experts=8,
             expert_placement_strategy=expert_placement_strategy,
+        )
+
+
+def test_riy_v1_profile_defaults_to_pre_topk_mask(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [1, 2]]})
+    )
+
+    profile = load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+    plan = build_riy_layer_prune_plan(profile, layer_idx=0, top_k=2)
+
+    assert profile.routing_mode == "pre_topk_mask"
+    assert plan.routing_mode == "pre_topk_mask"
+    assert plan.num_kept == 3
+    assert plan.expert_map.tolist() == [0, -1, 1, 2]
+    assert plan.pre_topk_logit_mask.tolist() == [
+        0.0,
+        float("-inf"),
+        0.0,
+        0.0,
+    ]
+    assert plan.post_topk_drop_mask is None
+
+
+def test_riy_v2_profile_requires_routing_mode(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"version": 2, "pruned_experts": []}))
+
+    with pytest.raises(ValueError, match="routing_mode"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+@pytest.mark.parametrize("version", [0, 3])
+def test_riy_profile_rejects_unknown_version(tmp_path, version):
+    profile_path = tmp_path / f"profile-{version}.json"
+    profile_path.write_text(json.dumps({"version": version, "pruned_experts": []}))
+
+    with pytest.raises(ValueError, match="Unsupported RIY profile version"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_riy_profile_rejects_unknown_routing_mode(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "routing_mode": "replace_with_next_expert",
+                "pruned_experts": [],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Unsupported RIY routing_mode"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_riy_profile_rejects_out_of_range_expert(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"version": 1, "pruned_experts": [[0, 4]]}))
+
+    with pytest.raises(ValueError, match="out of range"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_riy_profile_rejects_duplicate_entries(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [0, 1]]})
+    )
+
+    with pytest.raises(ValueError, match="Duplicate pruned expert"):
+        load_riy_profile(str(profile_path), num_layers=2, num_experts=4)
+
+
+def test_post_topk_drop_plan_permits_fewer_kept_experts_than_topk(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "routing_mode": "post_topk_drop",
+                "pruned_experts": [[0, 1], [0, 2]],
+            }
+        )
+    )
+    profile = load_riy_profile(str(profile_path), num_layers=1, num_experts=4)
+
+    plan = build_riy_layer_prune_plan(profile, layer_idx=0, top_k=3)
+
+    assert plan.routing_mode == "post_topk_drop"
+    assert plan.num_kept == 2
+    assert plan.expert_filter.tolist() == [True, False, False, True]
+    assert plan.expert_map.tolist() == [0, -1, -1, 1]
+    assert plan.pre_topk_logit_mask is None
+    assert plan.post_topk_drop_mask.tolist() == [False, True, True, False]
+
+
+def test_pre_topk_mask_still_requires_at_least_topk_experts(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        json.dumps({"version": 1, "pruned_experts": [[0, 1], [0, 2]]})
+    )
+    profile = load_riy_profile(str(profile_path), num_layers=1, num_experts=4)
+
+    with pytest.raises(ValueError, match="top_k"):
+        build_riy_layer_prune_plan(profile, layer_idx=0, top_k=3)
+
+
+def test_post_topk_metrics_report_compute_reduction():
+    state = RiyState()
+    state.register_layer(layer_idx=0, num_experts=4, top_k=2)
+    state.initialize_tensors(torch.device("cpu"), num_layers=1)
+    state.get_original_topk_slots_view(0).fill_(8)
+    state.get_surviving_topk_slots_view(0).fill_(5)
+    state.get_effective_count_histogram_view(0).copy_(torch.tensor([1, 1, 2]))
+
+    metrics = state.get_stats()["post_topk_drop"]
+
+    assert metrics["original_topk_slots"] == 8
+    assert metrics["surviving_topk_slots"] == 5
+    assert metrics["dropped_topk_slots"] == 3
+    assert metrics["average_surviving_experts_per_token"] == 1.25
+    assert metrics["average_dropped_experts_per_token"] == 0.75
+    assert metrics["expert_compute_reduction_ratio"] == 0.375
+    assert metrics["effective_expert_count_distribution"] == [1, 1, 2]
+
+
+def test_expert_filter_compacts_kept_experts_without_ep():
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=1,
+        ep_rank=0,
+        global_num_experts=4,
+        expert_filter=torch.tensor([True, False, True, True]),
+    )
+
+    assert local_num_experts == 3
+    assert expert_map.tolist() == [0, -1, 1, 2]
+
+
+def test_expert_filter_intersects_with_ep_placement():
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=2,
+        ep_rank=0,
+        global_num_experts=5,
+        expert_filter=torch.tensor([True, False, True, True, True]),
+    )
+
+    assert local_num_experts == 2
+    assert expert_map.tolist() == [0, -1, 1, -1, -1]
+
+
+def test_expert_filter_rejects_pruning_every_expert():
+    with pytest.raises(ValueError, match="at least one expert"):
+        determine_expert_map(
+            ep_size=1,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_filter=torch.zeros(4, dtype=torch.bool),
+        )
+
+
+def test_expert_filter_rejects_rank_without_local_experts():
+    with pytest.raises(ValueError, match="EP rank 0"):
+        determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_filter=torch.tensor([False, False, True, True]),
+        )
+
+
+def test_expert_filter_rejects_round_robin_placement():
+    with pytest.raises(NotImplementedError, match="round-robin"):
+        determine_expert_map(
+            ep_size=2,
+            ep_rank=0,
+            global_num_experts=4,
+            expert_placement_strategy="round_robin",
+            expert_filter=torch.ones(4, dtype=torch.bool),
         )
 
 

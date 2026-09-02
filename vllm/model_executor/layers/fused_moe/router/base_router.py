@@ -1,17 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from abc import abstractmethod
 from collections.abc import Callable
 
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.riy import get_riy_state
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+_riy_monitor_enabled = os.environ.get("VLLM_RIY_MONITOR", "0") == "1"
+
+
+def _is_capturing() -> bool:
+    """Check if we're inside torch.compile tracing.
+
+    During tracing, we must not perform side-effect ops (scatter_add_ on
+    non-graph tensors, HTTP calls, etc.).
+
+    Note: we only check torch.compiler.is_compiling(), NOT
+    torch.cuda.is_current_stream_capturing(). The latter returns True
+    during both CUDA graph capture AND replay, which would permanently
+    block RIY stats. The scatter_add_ on separate tensors is safe
+    during graph replay (it's just not captured into the graph).
+    """
+    return torch.compiler.is_compiling()
+
 
 if current_platform.is_cuda_alike():
 
@@ -170,6 +190,7 @@ class BaseRouter(FusedMoERouter):
         top_k: int,
         global_num_experts: int,
         eplb_state: EplbLayerState | None = None,
+        layer_idx: int = -1,
     ):
         """
         Args:
@@ -181,6 +202,16 @@ class BaseRouter(FusedMoERouter):
         self.top_k = top_k
         self.global_num_experts = global_num_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
+        self.layer_idx = layer_idx
+        # RIY compiled stats views (set by FusedMoE.__init__)
+        self.riy_freq_view: torch.Tensor | None = None
+        self.riy_weight_view: torch.Tensor | None = None
+        self.riy_collecting_flag: torch.Tensor | None = None
+        self.prune_logit_mask: torch.Tensor | None = None
+        self.post_topk_drop_mask: torch.Tensor | None = None
+        self.riy_original_topk_slots_view: torch.Tensor | None = None
+        self.riy_surviving_topk_slots_view: torch.Tensor | None = None
+        self.riy_effective_count_histogram_view: torch.Tensor | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -287,10 +318,57 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
+        # RIY: mask profile-pruned experts before top-k selection.
+        if self.prune_logit_mask is not None:
+            router_logits = router_logits + self.prune_logit_mask
+
         # Step 2: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
+
+        # Step 3b: RIY — stats on registered buffers (graph-compatible)
+        if self.riy_freq_view is not None:
+            assert self.riy_weight_view is not None
+            assert self.riy_collecting_flag is not None
+            ids = topk_ids.reshape(-1).long()
+            collecting = self.riy_collecting_flag
+            self.riy_freq_view.scatter_add_(
+                0, ids, collecting.long().expand(ids.shape[0])
+            )
+            weights = topk_weights.reshape(-1).to(self.riy_weight_view.dtype)
+            self.riy_weight_view.scatter_add_(0, ids, weights * collecting.float())
+
+        if self.post_topk_drop_mask is not None:
+            logical_ids = topk_ids.long()
+            valid_ids = (logical_ids >= 0) & (
+                logical_ids < self.post_topk_drop_mask.numel()
+            )
+            safe_ids = logical_ids.clamp(
+                min=0, max=self.post_topk_drop_mask.numel() - 1
+            )
+            dropped_slots = valid_ids & self.post_topk_drop_mask[safe_ids]
+            if self.riy_original_topk_slots_view is not None:
+                assert self.riy_surviving_topk_slots_view is not None
+                assert self.riy_effective_count_histogram_view is not None
+                assert self.riy_collecting_flag is not None
+                collecting = self.riy_collecting_flag.long()
+                surviving_per_token = (~dropped_slots).sum(dim=-1).long()
+                self.riy_original_topk_slots_view.add_(collecting * topk_ids.numel())
+                self.riy_surviving_topk_slots_view.add_(
+                    collecting * surviving_per_token.sum()
+                )
+                self.riy_effective_count_histogram_view.scatter_add_(
+                    0,
+                    surviving_per_token,
+                    collecting.expand_as(surviving_per_token),
+                )
+            topk_weights = topk_weights.masked_fill(dropped_slots, 0.0)
+
+        if _riy_monitor_enabled and not _is_capturing():
+            riy = get_riy_state()
+            if riy.enabled and self.layer_idx >= 0:
+                riy.on_forward()
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
