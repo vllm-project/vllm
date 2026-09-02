@@ -54,38 +54,60 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
+    """CSR sampling masks: ``token_ids[offsets[i]:offsets[i + 1]]`` is the
+    support of generated position ``i``. ``offsets is None`` is the compact
+    single-position form used per request per step, where all ``token_ids``
+    belong to one position."""
+
     # [num_kept_tokens]
     token_ids: np.ndarray
-    # [num_generated_tokens + 1]
-    offsets: np.ndarray
+    # [num_generated_tokens + 1], or None for a single position
+    offsets: np.ndarray | None = None
     # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
+        assert self.offsets is not None
         if self.cu_num_generated_tokens is None:
             start_idx = req_idx
         else:
             start_idx = self.cu_num_generated_tokens[req_idx]
         end_idx = start_idx + num_positions
-        flat_start = self.offsets[start_idx]
-        flat_end = self.offsets[end_idx]
+        flat_start = int(self.offsets[start_idx])
+        flat_end = int(self.offsets[end_idx])
+        token_ids = self.token_ids[flat_start:flat_end]
+        if num_positions == 1:
+            return SamplingMaskLists(token_ids)
         return SamplingMaskLists(
-            self.token_ids[flat_start:flat_end],
-            self.offsets[start_idx : end_idx + 1] - flat_start,
-            None,
+            token_ids, self.offsets[start_idx : end_idx + 1] - flat_start
         )
 
     def to_nested_list(self) -> list[list[int]]:
         """Convert CSR representation to ``list[list[int]]``."""
-        return [
-            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
-            for i in range(len(self.offsets) - 1)
-        ]
+        token_ids = self.token_ids.tolist()
+        if self.offsets is None:
+            return [token_ids]
+        offsets = self.offsets.tolist()
+        return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
     @staticmethod
     def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
         token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
-        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
+        if all(chunk.offsets is None for chunk in chunks):
+            counts = np.fromiter(
+                (len(chunk.token_ids) for chunk in chunks),
+                dtype=np.int64,
+                count=len(chunks),
+            )
+        else:
+            counts = np.concatenate(
+                [
+                    np.diff(chunk.offsets)
+                    if chunk.offsets is not None
+                    else np.array([len(chunk.token_ids)], dtype=np.int64)
+                    for chunk in chunks
+                ]
+            )
         offsets = np.empty(len(counts) + 1, dtype=np.int64)
         offsets[0] = 0
         np.cumsum(counts, dtype=np.int64, out=offsets[1:])

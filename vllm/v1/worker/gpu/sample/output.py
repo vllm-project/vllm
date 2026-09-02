@@ -76,6 +76,12 @@ def _compact_sampling_mask_kernel(
     tl.store(counts_ptr + req_idx, count)
 
 
+# Widest compact row the sampler allocates. Requests whose support is larger
+# (a top_k near the vocab size, or top-k ties) fall back to the exact bitmask,
+# so this only bounds GPU/host memory: [max_num_reqs, cap] int32.
+MAX_COMPACT_SUPPORT = 2048
+
+
 class SamplingMaskTensors(NamedTuple):
     """Device-side sampling mask data pending async D2H.
 
@@ -106,11 +112,12 @@ class SamplingMaskTensors(NamedTuple):
             num_sampled_tokens: Per-request sampled token count; rows with
                 zero are skipped.
             max_num_kept: Expected upper bound on the support size, normally
-                the largest ``top_k`` in the batch. Rows exceeding it (ties
-                at the top-k boundary) still round-trip exactly.
+                the largest ``top_k`` in the batch; clamped to
+                ``MAX_COMPACT_SUPPORT``. Rows exceeding it still round-trip
+                exactly through the bitmask.
         """
         num_reqs, vocab_size = logits.shape
-        max_num_kept = max(1, min(max_num_kept, vocab_size))
+        max_num_kept = max(1, min(max_num_kept, vocab_size, MAX_COMPACT_SUPPORT))
         device = logits.device
 
         token_ids = torch.empty(

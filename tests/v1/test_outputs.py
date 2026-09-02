@@ -112,6 +112,30 @@ def test_sampling_mask_lists_to_nested_list():
     nested = mask.to_nested_list()
 
     assert nested == [[10, 11, 12], [20, 21]]
+    assert SamplingMaskLists(np.array([7, 9])).to_nested_list() == [[7, 9]]
+
+
+def test_sampling_mask_lists_slice_and_merge_single_position():
+    """Per-step request slices carry one array (offsets=None) and merge
+    back into the CSR form, including an empty support."""
+    from vllm.v1.outputs import SamplingMaskLists
+
+    batch = SamplingMaskLists(
+        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
+        offsets=np.array([0, 2, 2, 4]),
+        cu_num_generated_tokens=[0, 1, 2, 3],
+    )
+    chunks = [batch.slice_request(i, 1) for i in range(3)]
+
+    assert all(chunk.offsets is None for chunk in chunks)
+    assert [chunk.token_ids.tolist() for chunk in chunks] == [[1, 2], [], [3, 4]]
+
+    merged = SamplingMaskLists.merge(
+        chunks + [SamplingMaskLists(np.array([5, 6]), np.array([0, 1, 2]))]
+    )
+
+    assert merged.to_nested_list() == [[1, 2], [], [3, 4], [5], [6]]
+    assert merged.offsets.tolist() == [0, 2, 2, 4, 5, 6]
 
 
 def test_sampling_mask_tensors_from_logits():
@@ -156,6 +180,28 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
     result = tensors.tolists(np.array([1]))
 
     assert result.to_nested_list() == [expected_token_ids]
+
+
+def test_sampling_mask_tensors_from_logits_caps_compact_width():
+    """A huge top_k must not allocate [num_reqs, vocab]; rows wider than the
+    cap are still returned exactly via the bitmask."""
+    from vllm.v1.worker.gpu.sample.output import MAX_COMPACT_SUPPORT
+
+    vocab_size = 3 * MAX_COMPACT_SUPPORT
+    logits = torch.full((2, vocab_size), float("-inf"), device=DEVICE_TYPE)
+    wide = torch.arange(0, vocab_size, 2)
+    logits[0, wide] = 1.0
+    logits[1, [5, 6]] = 1.0
+
+    tensors = SamplingMaskTensors.from_logits(
+        logits,
+        num_sampled_tokens=torch.tensor([1, 1], device=DEVICE_TYPE),
+        max_num_kept=vocab_size,
+    )
+    result = tensors.tolists(np.array([1, 1]))
+
+    assert tensors.token_ids.shape[1] == MAX_COMPACT_SUPPORT
+    assert result.to_nested_list() == [wide.tolist(), [5, 6]]
 
 
 def test_sampling_mask_tensors_from_logits_large_vocab():
