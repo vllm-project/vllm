@@ -98,6 +98,14 @@ class SimpleCPUOffloadScheduler:
             kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
+        # Only prefix-cacheable groups are keyed by block hash and can be
+        # offloaded. Scratch groups such as the QSA key ring
+        # (CircularBufferSpec) hold one unhashed block per request; the core
+        # coordinator never reports hits for them, and the store/load paths
+        # below skip them explicitly.
+        self._offload_group_ids = frozenset(
+            kv_cache_config.prefix_cacheable_transfer_group_ids
+        )
         # Find the full attention kv group for prefix cache matching.
         self.fa_gidx = -1
         for g_idx, g in enumerate(self.cpu_kv_cache_config.kv_cache_groups):
@@ -231,6 +239,11 @@ class SimpleCPUOffloadScheduler:
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
+            if not spec.prefix_cacheable:
+                # Scratch groups are never offloaded and hold a single block
+                # per request; their (small) block size would otherwise
+                # dominate the estimate.
+                continue
             block_size = spec.block_size * cp_world_size
             if isinstance(spec, MambaSpec):
                 target += 2
@@ -354,6 +367,9 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
+            if g not in self._offload_group_ids:
+                cpu_hit_blocks.append([])
+                continue
             g_block_size = (
                 kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
             )
@@ -629,6 +645,8 @@ class SimpleCPUOffloadScheduler:
         for g, group_gpu_ids in enumerate(block_ids_by_group):
             if len(gpu_block_ids) >= num_free:
                 break
+            if g not in self._offload_group_ids:
+                continue
             # FIXME (yifan): handle CPU cache eviction, where
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
