@@ -47,15 +47,11 @@ async def init_render_app_state(
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    # Fall back to the config-resolved reasoning parser (model-specific
-    # defaults applied by `verify_and_update_config`, e.g. "openai_gptoss"
-    # for gpt_oss) to match the main API server. The render entrypoint
-    # builds VllmConfig directly from the model config, so unlike
-    # `create_engine_config` the CLI flag is not merged into
-    # `structured_outputs_config` and must take precedence here.
-    reasoning_parser = (
-        args.reasoning_parser or vllm_config.structured_outputs_config.reasoning_parser
-    )
+    # The config-resolved reasoning parser carries both the CLI flag (merged
+    # in the entrypoint via `create_structured_outputs_config`) and any
+    # model-specific default applied by `verify_and_update_config`
+    # (e.g. "openai_gptoss" for gpt_oss), matching the main API server.
+    reasoning_parser = vllm_config.structured_outputs_config.reasoning_parser
 
     state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,

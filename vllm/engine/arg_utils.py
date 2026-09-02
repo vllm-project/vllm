@@ -1942,6 +1942,23 @@ class EngineArgs:
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
 
+    def create_structured_outputs_config(self) -> StructuredOutputsConfig:
+        """Merge frontend parser flags into the structured outputs config.
+
+        Model-specific defaults (e.g. gpt_oss -> "openai_gptoss") are applied
+        later by `verify_and_update_config` only when the resolved value is
+        still empty, so explicit CLI flags take precedence.
+        """
+        if self.reasoning_parser:
+            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
+
+        return self.structured_outputs_config
+
     def create_observability_config(self) -> ObservabilityConfig:
         return ObservabilityConfig(
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
@@ -2478,13 +2495,7 @@ class EngineArgs:
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
-        if self.reasoning_parser:
-            self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-
-        if self.reasoning_parser_plugin:
-            self.structured_outputs_config.reasoning_parser_plugin = (
-                self.reasoning_parser_plugin
-            )
+        self.create_structured_outputs_config()
 
         observability_config = self.create_observability_config()
 
