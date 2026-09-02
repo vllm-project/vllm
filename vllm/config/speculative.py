@@ -1803,9 +1803,7 @@ class SpeculativeConfig:
 
     def supports_batch_invariance(self) -> bool:
         return (
-            self.draft_sample_method == "probabilistic"
-            and self.rejection_sample_method == "standard"
-            and self.num_speculative_tokens_per_batch_size is None
+            not self.uses_dynamic_speculative_decoding()
             and not self.enable_adaptive_verification
         )
 

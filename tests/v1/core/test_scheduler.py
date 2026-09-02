@@ -62,9 +62,49 @@ def test_batch_invariant_spec_decode_warns_for_unvalidated_config(monkeypatch):
 
     warning_once.assert_any_call(
         "VLLM_BATCH_INVARIANT with speculative decoding is supported for Model "
-        "Runner V2 with probabilistic drafting, standard rejection sampling, "
-        "fixed speculative lengths, and adaptive verification disabled."
+        "Runner V2 with fixed speculative lengths and adaptive verification "
+        "disabled."
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_spec_decode_preemption_rebuilds_proposal(async_scheduling, use_kv_connector):
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        max_model_len=32,
+        enable_prefix_caching=True,
+        block_size=1,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+        use_kv_connector=use_kv_connector,
+    )
+    scheduler.enable_spec_recovery = True
+    [request] = create_requests(num_requests=1, num_tokens=4, block_size=1)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    _model_output(scheduler, output, [[7]])
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(
+        request, 0.0, drop_stale_output=scheduler.requires_kv_delivery
+    )
+    assert request.spec_recovery_size == 3
+
+    replay = scheduler.schedule()
+    assert replay.num_scheduled_tokens[request.request_id] == 1
+    assert request.num_computed_tokens == request.num_tokens - 1
+    _model_output(scheduler, replay, [[]])
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+
+    verify = scheduler.schedule()
+    assert verify.num_scheduled_tokens[request.request_id] == 4
+    assert verify.scheduled_spec_decode_tokens[request.request_id] == [1, 2, 3]
+    assert request.spec_recovery_size == 0
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():

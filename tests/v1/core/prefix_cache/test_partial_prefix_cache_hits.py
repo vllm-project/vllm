@@ -43,7 +43,8 @@ def test_connector_without_divergent_hit_support_uses_common_lookup():
         kv_cache_manager=manager,
     )
 
-    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+    request = SimpleNamespace(spec_recovery_size=0)
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, request)
 
     assert result == (common_blocks, 0, 0, False)
     manager.get_computed_blocks_for_connector.assert_not_called()
@@ -63,10 +64,27 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
         kv_cache_manager=manager,
     )
 
-    result = Scheduler._get_local_prefix_cache_hit(scheduler, MagicMock())
+    request = SimpleNamespace(spec_recovery_size=0)
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, request)
 
     assert result == (per_group_blocks, 6, 0, True)
     manager.get_computed_blocks.assert_not_called()
+
+
+def test_spec_recovery_uses_common_prefix_hit_lookup():
+    common_blocks = MagicMock()
+    manager = MagicMock()
+    manager.get_computed_blocks.return_value = (common_blocks, 4, 0)
+    scheduler = SimpleNamespace(
+        connector=SimpleNamespace(supports_divergent_local_hybrid_hits=True),
+        kv_cache_manager=manager,
+    )
+
+    request = SimpleNamespace(spec_recovery_size=3)
+    result = Scheduler._get_local_prefix_cache_hit(scheduler, request)
+
+    assert result == (common_blocks, 4, 0, False)
+    manager.get_computed_blocks_for_connector.assert_not_called()
 
 
 def make_full_mamba_manager(

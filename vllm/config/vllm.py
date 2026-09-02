@@ -1138,9 +1138,8 @@ class VllmConfig:
         ):
             logger.warning_once(
                 "VLLM_BATCH_INVARIANT with speculative decoding is supported for "
-                "Model Runner V2 with probabilistic drafting, standard rejection "
-                "sampling, fixed speculative lengths, and adaptive verification "
-                "disabled."
+                "Model Runner V2 with fixed speculative lengths and adaptive "
+                "verification disabled."
             )
 
         if self.model_config is not None:

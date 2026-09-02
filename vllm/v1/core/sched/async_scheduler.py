@@ -25,24 +25,20 @@ class AsyncScheduler(Scheduler):
         ] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
-            if (
-                req_id in self.spec_recovery_sizes
-                and request.num_computed_tokens == request.num_tokens - 1
-                and not request.spec_token_ids
-            ):
-                request.spec_token_ids = [-1] * self.spec_recovery_sizes[req_id]
-                if self.use_v2_model_runner:
+            if request.is_prefill_chunk:
+                if (
+                    request.spec_recovery_size > 0
+                    and request.num_computed_tokens == request.num_tokens - 1
+                ):
+                    request.spec_token_ids = [-1] * request.spec_recovery_size
                     request.next_decode_eligible_step = self.current_step + self.pp_size
                 continue
-            if request.is_prefill_chunk:
-                continue
 
+            has_inflight_output = request.num_output_placeholders > 0
+            has_draft_tokens = bool(spec_decode_tokens.get(req_id))
             scheduler_output.pending_structured_output_tokens |= (
                 request.use_structured_output
-                and (
-                    request.num_output_placeholders > 0
-                    or bool(spec_decode_tokens.get(req_id))
-                )
+                and (has_inflight_output or has_draft_tokens)
             )
             # The request will generate num_sampled_tokens_per_step new tokens
             # plus num_spec_tokens in this scheduling step. Diffusion has no AR
