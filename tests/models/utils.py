@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import tempfile
 import warnings
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.model import AttnTypeStr, ModelConfig, ModelDType, RunnerOption
 from vllm.config.pooler import SequencePoolingType, TokenPoolingType
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.platforms import current_platform
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -619,3 +629,35 @@ def check_transformers_version(
         min_transformers_version=min_transformers_version,
         max_transformers_version=max_transformers_version,
     ).check_transformers_version(on_fail="skip")
+
+
+class VllmModelLike(Protocol):
+    def __call__(self, vllm_config: VllmConfig) -> nn.Module: ...
+
+
+@contextmanager
+def initialize_dummy_model(
+    model_cls: VllmModelLike,
+    vllm_config: VllmConfig,
+):
+    temp_file = tempfile.mkstemp()[1]
+    current_device = torch.get_default_device()
+
+    with set_current_vllm_config(vllm_config=vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
+        with set_default_torch_dtype(vllm_config.model_config.dtype):
+            torch.set_default_device(current_platform.device_type)
+            model = model_cls(vllm_config=vllm_config)
+            torch.set_default_device(current_device)
+        yield model
+
+    del model
+    cleanup_dist_env_and_memory()
