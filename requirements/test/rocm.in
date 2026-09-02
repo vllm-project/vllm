@@ -1,4 +1,21 @@
--r ../common.txt
+-r ../rocm.txt
+
+# Dependencies of source-built ROCm image components that are not already
+# present in requirements/rocm.txt. Wheel is also used while building LMCache
+# and TorchCodec; the generated lock constrains those earlier build stages.
+flydsl==0.2.4
+pybind11==3.0.4
+quart
+wheel
+
+# LMCache dependencies missing from the existing ROCm lock. Its other runtime
+# requirements are already provided by common.txt or the test requirements
+# below; PyTorch is supplied by the ROCm base image.
+aiofile
+aiofiles
+awscrt
+cupy-rocm-7-0
+google-cloud-bigtable
 
 # testing
 pytest

@@ -607,14 +607,33 @@ steps:
           - |
             set -euo pipefail
 
+            # Resolve the parent once and use the same digest and build inputs
+            # for the cache key, final image, and exported wheels.
+            export ROCM_BASE_DOCKERFILE=docker/Dockerfile.rocm_base
+            export ROCM_BASE_CONTENT_FILES="docker/Dockerfile.rocm_base .dockerignore requirements/test/rocm.txt"
+            export ROCM_BASE_IMAGE_TARGET=final
+            export ROCM_BASE_WHEEL_TARGET=debs_wheel_release
+            export ROCM_BASE_PLATFORM=linux/amd64
+            export ROCM_BASE_USE_SCCACHE=1
+            export SCCACHE_BUCKET_NAME=vllm-build-sccache
+            export SCCACHE_REGION_NAME=us-west-2
+            export SCCACHE_S3_NO_CREDENTIALS=0
+            unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL SCCACHE_VERSION SCCACHE_DOWNLOAD_SHA256
+            PINNED_BASE_IMAGE=$$(.buildkite/scripts/cache-rocm-base-wheels.sh parent)
+            export ROCM_BASE_PARENT_IMAGE="$${PINNED_BASE_IMAGE%@*}"
+            export ROCM_BASE_PARENT_DIGEST="$${PINNED_BASE_IMAGE##*@}"
+
             # Generate cache key
             CACHE_KEY=$$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
-            ECR_CACHE_TAG="public.ecr.aws/q9t5s3a7/vllm-release-repo:$${CACHE_KEY}-rocm-base"
+            ECR_REPOSITORY="public.ecr.aws/q9t5s3a7/vllm-release-repo"
+            ECR_CACHE_TAG="$${ECR_REPOSITORY}:$${CACHE_KEY}-rocm-base"
+            ECR_IMAGE_REF=""
 
             echo "========================================"
             echo "ROCm Base Build Configuration"
             echo "========================================"
             echo "  CACHE_KEY: $${CACHE_KEY}"
+            echo "  BASE_IMAGE: $${PINNED_BASE_IMAGE}"
             echo "  ECR_CACHE_TAG: $${ECR_CACHE_TAG}"
             echo "========================================"
             
@@ -625,18 +644,34 @@ steps:
             IMAGE_EXISTS=false
             WHEELS_EXIST=false
             
-            # Check ECR for Docker image
-
-            if docker manifest inspect "$${ECR_CACHE_TAG}" > /dev/null 2>&1; then
-              IMAGE_EXISTS=true
-              echo "ECR image cache HIT"
-            fi
-            
             # Check S3 for wheels
             WHEEL_CACHE_STATUS=$(.buildkite/scripts/cache-rocm-base-wheels.sh check)
             if [ "$${WHEEL_CACHE_STATUS}" = "hit" ]; then
               WHEELS_EXIST=true
               echo "S3 wheels cache HIT"
+            fi
+
+            # Validate the immutable wheel set before committing to the hit
+            # path. A corrupt remote object falls back to a clean rebuild.
+            if [ "$${WHEELS_EXIST}" = "true" ]; then
+              CACHED_IMAGE_DIGEST_FILE=$$(mktemp)
+              export ROCM_BASE_IMAGE_DIGEST_FILE="$${CACHED_IMAGE_DIGEST_FILE}"
+              if ! .buildkite/scripts/cache-rocm-base-wheels.sh download; then
+                WHEELS_EXIST=false
+                echo "S3 wheel cache validation failed; rebuilding"
+              else
+                CACHED_IMAGE_DIGEST=$$(cat "$${CACHED_IMAGE_DIGEST_FILE}")
+                ECR_IMAGE_REF="$${ECR_REPOSITORY}@$${CACHED_IMAGE_DIGEST}"
+                if ! docker manifest inspect "$${ECR_IMAGE_REF}" > /dev/null 2>&1; then
+                  IMAGE_EXISTS=false
+                  echo "Paired ECR image digest is unavailable; rebuilding"
+                else
+                  IMAGE_EXISTS=true
+                  echo "Paired ECR image cache HIT"
+                fi
+              fi
+              rm -f "$${CACHED_IMAGE_DIGEST_FILE}"
+              unset ROCM_BASE_IMAGE_DIGEST_FILE
             fi
 
             
@@ -646,12 +681,6 @@ steps:
               echo "FULL CACHE HIT - Reusing both image and wheels"
               echo ""
 
-              # Download wheels
-              .buildkite/scripts/cache-rocm-base-wheels.sh download
-              
-              # Save ECR tag for downstream jobs
-              buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
-              
             # Scenario 2: Full rebuild needed
             else
               echo ""
@@ -659,44 +688,59 @@ steps:
               echo ""
               
               # Build full base image and push to ECR
+              ROCM_BASE_BUILD_METADATA=$$(mktemp)
               DOCKER_BUILDKIT=1 docker buildx build \
                 --file docker/Dockerfile.rocm_base \
                 --tag "$${ECR_CACHE_TAG}" \
-                --build-arg USE_SCCACHE=1 \
-                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-                --build-arg SCCACHE_REGION_NAME=us-west-2 \
-                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --target "$${ROCM_BASE_IMAGE_TARGET}" \
+                --platform "$${ROCM_BASE_PLATFORM}" \
+                --pull \
+                --build-arg BASE_IMAGE="$${PINNED_BASE_IMAGE}" \
+                --build-arg USE_SCCACHE="$${ROCM_BASE_USE_SCCACHE}" \
+                --build-arg SCCACHE_BUCKET_NAME="$${SCCACHE_BUCKET_NAME}" \
+                --build-arg SCCACHE_REGION_NAME="$${SCCACHE_REGION_NAME}" \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS="$${SCCACHE_S3_NO_CREDENTIALS}" \
+                --metadata-file "$${ROCM_BASE_BUILD_METADATA}" \
                 --push \
                 .
+              ECR_IMAGE_DIGEST=$$(awk -F'"' \
+                '$$2 == "containerimage.digest" { print $$4; exit }' \
+                "$${ROCM_BASE_BUILD_METADATA}")
+              rm -f "$${ROCM_BASE_BUILD_METADATA}"
+              [[ "$${ECR_IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$$ ]]
+              ECR_IMAGE_REF="$${ECR_REPOSITORY}@$${ECR_IMAGE_DIGEST}"
+              export ROCM_BASE_IMAGE_DIGEST="$${ECR_IMAGE_DIGEST}"
               
               # Build wheel extraction stage
               DOCKER_BUILDKIT=1 docker buildx build \
                 --file docker/Dockerfile.rocm_base \
                 --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
-                --target debs_wheel_release \
-                --build-arg USE_SCCACHE=1 \
-                --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
-                --build-arg SCCACHE_REGION_NAME=us-west-2 \
-                --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+                --target "$${ROCM_BASE_WHEEL_TARGET}" \
+                --platform "$${ROCM_BASE_PLATFORM}" \
+                --pull \
+                --build-arg BASE_IMAGE="$${PINNED_BASE_IMAGE}" \
+                --build-arg USE_SCCACHE="$${ROCM_BASE_USE_SCCACHE}" \
+                --build-arg SCCACHE_BUCKET_NAME="$${SCCACHE_BUCKET_NAME}" \
+                --build-arg SCCACHE_REGION_NAME="$${SCCACHE_REGION_NAME}" \
+                --build-arg SCCACHE_S3_NO_CREDENTIALS="$${SCCACHE_S3_NO_CREDENTIALS}" \
                 --load \
                 .
               
               # Extract and upload wheels
               mkdir -p artifacts/rocm-base-wheels
+              find artifacts/rocm-base-wheels -maxdepth 1 -type f \
+                -name '*.whl' -delete
               cid=$(docker create rocm-base-debs:$${BUILDKITE_BUILD_NUMBER})
               docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
               docker rm $${cid}
               
               .buildkite/scripts/cache-rocm-base-wheels.sh upload
-
-              # Cache base docker image to ECR
-              docker push "$${ECR_CACHE_TAG}"
-              
-              buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_CACHE_TAG}"
               
               echo ""
               echo " Build complete - Image and wheels cached"
             fi
+
+            buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_IMAGE_REF}"
 
         artifact_paths:
           - "artifacts/rocm-base-wheels/*.whl"

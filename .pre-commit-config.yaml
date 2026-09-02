@@ -62,7 +62,7 @@ repos:
         -c, requirements/rocm.txt,
         -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
-        --python-platform, x86_64-manylinux_2_28,
+        --python-platform, x86_64-manylinux_2_35,
         --python-version, "3.12",
         # Exclude torch and CUDA/NVIDIA packages
         --no-emit-package, torch,

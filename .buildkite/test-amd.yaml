@@ -239,6 +239,8 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - .dockerignore
+  - .buildkite/scripts/cache-rocm-base-wheels.sh
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
   - .buildkite/release-pipeline.yaml
@@ -249,7 +251,12 @@ steps:
   - docker/ci-rocm.hcl
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
+  - requirements/common.txt
+  - requirements/rocm.txt
+  - requirements/test/rocm.in
+  - requirements/test/rocm.txt
   - tests/tools/test_docker_build_metadata_args.py
+  - tools/install_torchcodec_rocm.sh
   commands:
   - pytest -v -s tools/test_docker_build_metadata_args.py
 

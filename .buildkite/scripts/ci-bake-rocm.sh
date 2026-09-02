@@ -21,9 +21,9 @@ DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-in
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
-DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
+DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt requirements/test/rocm.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
@@ -2403,6 +2403,13 @@ resolve_ci_base_dependency_targets() {
 
     [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
 
+    if [[ "${FORCE_BUILD:-0}" == "1" ]]; then
+        BAKE_TARGETS=("ci-base-rocm-ci")
+        DEPENDENCY_CACHE_TARGETS=()
+        echo "FORCE_BUILD=1; skipping redundant dependency-cache seed builds"
+        return 0
+    fi
+
     case "${mode}" in
         always)
             echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
@@ -2567,15 +2574,21 @@ seed_dependency_caches_if_needed() {
 
 run_bake() {
     local confirmation_ref="${IMAGE_TAG:-}"
+    local -a cache_policy_args=()
 
     if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
         confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
+    fi
+    if is_ci_base_target && [[ "${FORCE_BUILD:-0}" == "1" ]]; then
+        cache_policy_args+=(--no-cache)
+        echo "FORCE_BUILD=1; disabling BuildKit layer reuse for ci_base"
     fi
 
     echo "--- :docker: Building ${TARGET}"
     docker buildx bake \
         "${BAKE_ALLOW_ARGS[@]}" \
         "${BAKE_FILES[@]}" \
+        "${cache_policy_args[@]}" \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         "${BAKE_TARGETS[@]}"
 

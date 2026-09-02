@@ -6,10 +6,17 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import regex as re
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
 ROCM_IMAGE_SMOKE = REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "smoke-test-image.sh"
+ROCM_BASE_WHEEL_CACHE = (
+    REPO_ROOT / ".buildkite" / "scripts" / "cache-rocm-base-wheels.sh"
+)
 
 
 def run_helper(
@@ -197,6 +204,234 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         "docker/Dockerfile.rocm",
     ):
         assert expected in ci_bake
+
+
+def test_rocm_ci_base_stage_hash_covers_dependency_graph() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    ci_bake = ROCM_CI_BAKE.read_text()
+    global_args: dict[str, str] = {}
+    stage_dependencies: dict[str, set[str]] = {}
+    current_stage: str | None = None
+
+    def expand_args(value: str) -> str:
+        return re.sub(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            lambda match: global_args.get(match.group(1), match.group(0)),
+            value,
+        )
+
+    for raw_line in dockerfile.splitlines():
+        line = raw_line.split("#", maxsplit=1)[0].strip()
+        arg_match = re.match(r"ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line)
+        if arg_match and current_stage is None and arg_match.group(2) is not None:
+            global_args[arg_match.group(1)] = arg_match.group(2).strip().strip('"')
+
+        from_match = re.match(r"FROM\s+(\S+)(?:\s+AS\s+(\S+))?", line, re.I)
+        if from_match:
+            parent = expand_args(from_match.group(1))
+            current_stage = from_match.group(2)
+            if current_stage is not None:
+                stage_dependencies[current_stage] = {parent}
+            continue
+
+        if current_stage is not None:
+            for dependency in re.findall(r"(?:--from=|,from=)([^,\s\\]+)", line):
+                stage_dependencies[current_stage].add(expand_args(dependency))
+
+    stage_names = set(stage_dependencies)
+    for dependencies in stage_dependencies.values():
+        dependencies.intersection_update(stage_names)
+
+    ci_base_closure: set[str] = set()
+    pending = ["ci_base"]
+    while pending:
+        stage = pending.pop()
+        if stage in ci_base_closure:
+            continue
+        ci_base_closure.add(stage)
+        pending.extend(stage_dependencies[stage])
+
+    configured_stages = re.search(
+        r'^DEFAULT_CI_BASE_DOCKERFILE_STAGES="([^"]+)"$', ci_bake, re.M
+    )
+    assert configured_stages is not None
+    assert set(configured_stages.group(1).split()) == ci_base_closure
+
+
+def requirement_names(path: Path, seen: set[Path] | None = None) -> set[str]:
+    seen = seen or set()
+    path = path.resolve()
+    if path in seen:
+        return set()
+    seen.add(path)
+
+    names = set()
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.split("#", maxsplit=1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(("-r ", "--requirement ")):
+            names.update(
+                requirement_names(path.parent / line.split(maxsplit=1)[1], seen)
+            )
+        elif not line.startswith("-"):
+            names.add(canonicalize_name(Requirement(line).name))
+    return names
+
+
+def test_rocm_test_lock_covers_runtime_requirements() -> None:
+    requirements = REPO_ROOT / "requirements"
+    lock = requirements / "test" / "rocm.txt"
+
+    assert requirement_names(requirements / "rocm.txt") <= requirement_names(lock)
+    locked_requirements = (
+        Requirement(line)
+        for line in lock.read_text().splitlines()
+        if line and not line.startswith((" ", "#", "-"))
+    )
+    assert all(
+        str(requirement.specifier).startswith("==")
+        for requirement in locked_requirements
+    )
+
+
+def test_rocm_base_wheel_cache_key_covers_declared_inputs(tmp_path: Path) -> None:
+    inputs = []
+    for name in ("Dockerfile.rocm_base", ".dockerignore", "rocm.txt", "pipeline.yaml"):
+        path = tmp_path / name
+        path.write_text(f"{name}: original\n")
+        inputs.append(path)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROCM_BASE_DOCKERFILE": str(inputs[0]),
+            "ROCM_BASE_CONTENT_FILES": " ".join(map(str, inputs)),
+            "ROCM_BASE_PARENT_IMAGE": "rocm/example:mutable",
+            "ROCM_BASE_PARENT_DIGEST": f"sha256:{'1' * 64}",
+        }
+    )
+
+    def cache_key(**overrides: str) -> str:
+        command_env = env | overrides
+        return subprocess.run(
+            ["bash", str(ROCM_BASE_WHEEL_CACHE), "key"],
+            check=True,
+            cwd=REPO_ROOT,
+            env=command_env,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+
+    baseline = cache_key()
+    for path in inputs:
+        original = path.read_text()
+        path.write_text(f"{original}changed\n")
+        assert cache_key() != baseline
+        path.write_text(original)
+    for overrides in (
+        {"ROCM_BASE_PARENT_DIGEST": f"sha256:{'2' * 64}"},
+        {"ROCM_BASE_PLATFORM": "linux/arm64"},
+        {"SCCACHE_BUCKET_NAME": "different-bucket"},
+        {"ROCM_BASE_WHEEL_TARGET": "different-target"},
+    ):
+        assert cache_key(**overrides) != baseline
+
+
+def docker_arg_value(dockerfile: str, name: str) -> str:
+    prefix = f"ARG {name}="
+    line = next(line for line in dockerfile.splitlines() if line.startswith(prefix))
+    return line.removeprefix(prefix).split("#", maxsplit=1)[0].strip().strip('"')
+
+
+def test_rocm_image_dependency_inputs_are_closed() -> None:
+    rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    torchcodec = (REPO_ROOT / "tools" / "install_torchcodec_rocm.sh").read_text()
+
+    for dockerfile, commit_arg_names in (
+        (
+            rocm_base,
+            (
+                "TRITON_BRANCH",
+                "PYTORCH_BRANCH",
+                "PYTORCH_VISION_BRANCH",
+                "PYTORCH_AUDIO_BRANCH",
+                "FA_BRANCH",
+                "AITER_BRANCH",
+                "MORI_BRANCH",
+                "ROCPROFILER_SDK_COMMIT",
+                "ROCM_RUNTIME_COMMIT",
+            ),
+        ),
+        (
+            rocm_ci,
+            (
+                "ROCM_TRITON_KERNELS_COMMIT",
+                "NIXL_BRANCH",
+                "UCX_BRANCH",
+                "LMCACHE_REF",
+                "ROCSHMEM_BRANCH",
+                "DEEPEP_BRANCH",
+                "RDMA_CORE_COMMIT",
+            ),
+        ),
+    ):
+        for name in commit_arg_names:
+            value = docker_arg_value(dockerfile, name)
+            assert len(value) == 40
+            int(value, 16)
+    for dockerfile, checksum_arg_names in (
+        (
+            rocm_base,
+            (
+                "GET_PIP_SHA256",
+                "SCCACHE_DOWNLOAD_SHA256",
+                "TRITON_LLVM_SHA256",
+                "ROCPROFILER_SDK_PR_7796_SHA256",
+                "ROCPROFILER_SDK_PR_7924_SHA256",
+            ),
+        ),
+        (rocm_ci, ("UV_DOWNLOAD_SHA256", "RUSTUP_INIT_SHA256")),
+    ):
+        for name in checksum_arg_names:
+            value = docker_arg_value(dockerfile, name)
+            assert len(value) == 64
+            int(value, 16)
+
+    for expected in (
+        "source=requirements/test/rocm.txt",
+        "pip wheel --no-build-isolation --no-deps",
+        "TRITON_OFFLINE_BUILD=1 TRITON_BUILD_PROTON=OFF",
+        "FLASH_ATTENTION_FORCE_BUILD=TRUE",
+        "AITER_USE_SYSTEM_TRITON=1",
+        "pip check",
+    ):
+        assert expected in rocm_base
+    for expected in (
+        "--build-constraints /tmp/rocm-test-reqs.txt",
+        "--no-build-isolation",
+        "uv pip install --system --no-cache --no-deps --no-build-isolation",
+        "python3 -m pip install --no-cache-dir --force-reinstall --no-deps",
+        "uv pip install --system --no-deps /lmcache_install/*.whl",
+        "uv pip check --system",
+    ):
+        assert expected in rocm_ci
+    assert "revision = e5fada43131d251e9c4786b04263ce98b6767ba5" in rocm_ci
+    assert docker_arg_value(rocm_ci, "RUST_TOOLCHAIN_VERSION") == "1.95.0"
+    torchcodec_commit = (
+        next(
+            line
+            for line in torchcodec.splitlines()
+            if line.startswith("TORCHCODEC_COMMIT=")
+        )
+        .split(":-", maxsplit=1)[1]
+        .split("}", maxsplit=1)[0]
+    )
+    assert len(torchcodec_commit) == 40
+    int(torchcodec_commit, 16)
+    assert "TORCHCODEC_WHEEL_CACHE" not in torchcodec
+    assert "pip wheel . --no-cache-dir --no-build-isolation --no-deps" in torchcodec
 
 
 def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:

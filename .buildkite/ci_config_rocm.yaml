@@ -18,6 +18,7 @@ run_all_patterns:
   - "requirements/rocm.txt"
   - "requirements/build/rust.txt"
   - "requirements/build/rocm.txt"
+  - "requirements/test/rocm.in"
   - "requirements/test/rocm.txt"
   - "pyproject.toml"
   - "setup.py"

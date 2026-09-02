@@ -8,8 +8,8 @@ DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
-DEFAULT_ROCM_BASE_METADATA_VERSION="2"
-DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
+DEFAULT_ROCM_BASE_METADATA_VERSION="3"
+DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/test/rocm.txt"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
@@ -113,7 +113,8 @@ configure_rocm_base_layer_cache() {
     local scope=""
 
     ROCM_BASE_CACHE_ARGS=()
-    if [[ "${ROCM_BASE_NO_CACHE:-0}" == "1" ]]; then
+    if [[ "${ROCM_BASE_NO_CACHE:-0}" == "1" \
+        || "${ROCM_BASE_REFRESH_FORCE:-0}" == "1" ]]; then
         ROCM_BASE_CACHE_ARGS+=(--no-cache)
         ROCM_BASE_LAYER_CACHE_REF="disabled"
         return 0
