@@ -263,10 +263,46 @@ jobs:
                 ],
               },
               "structured-output": {
+                // Whole-word terms: backends, engine internals, and format
+                // vocabulary that is unambiguous inside vLLM.
+                keywords: [
+                  { term: "xgrammar",   searchIn: "title" },
+                  { term: "outlines",   searchIn: "title" },  // "this RFC outlines..." in bodies
+                  { term: "llguidance", searchIn: "title" },
+                  { term: "grammar",    searchIn: "title" },
+                  { term: "FSM",        searchIn: "title" },
+                  { term: "EBNF",       searchIn: "title" },
+                  { term: "bitmask",    searchIn: "title" },
+                ],
+                // Substrings: separator variants of the feature name, the request
+                // fields that turn it on, and traceback frames it crashes in.
                 substrings: [
-                  { term: "structured output", searchIn: "title" },
-                  { term: "guided decoding",   searchIn: "title" },
-                  { term: "JSON schema",       searchIn: "title" },
+                  { term: "structured output",      searchIn: "title" },
+                  { term: "structured-output",      searchIn: "title" },
+                  { term: "structured_output",      searchIn: "title" },
+                  { term: "structuredoutput",       searchIn: "title" },  // StructuredOutputManager
+                  { term: "structured decoding",    searchIn: "title" },
+                  { term: "structured generation",  searchIn: "title" },
+                  { term: "guided decoding",        searchIn: "title" },
+                  { term: "guided generation",      searchIn: "title" },
+                  { term: "guided_decoding",        searchIn: "title" },
+                  { term: "constrained decoding",   searchIn: "title" },
+                  { term: "json schema",            searchIn: "title" },
+                  { term: "json_schema",            searchIn: "title" },
+                  { term: "json_object",            searchIn: "title" },
+                  { term: "response_format",        searchIn: "title" },
+                  { term: "structural tag",         searchIn: "title" },
+                  { term: "guided_json",            searchIn: "both"  },
+                  { term: "guided_grammar",         searchIn: "both"  },
+                  { term: "guided_choice",          searchIn: "both"  },
+                  { term: "guided_regex",           searchIn: "both"  },
+                  { term: "structural_tag",         searchIn: "title" },
+                  { term: "lm-format-enforcer",     searchIn: "title" },
+                  { term: "backend_xgrammar",       searchIn: "body"  },
+                  { term: "apply_grammar_bitmask",  searchIn: "body"  },
+                  { term: "grammar_bitmask",        searchIn: "body"  },
+                  { term: "Failed to advance FSM",  searchIn: "body"  },
+                  { term: "StructuredOutputsParams", searchIn: "body" },
                 ],
               },
               "tool-calling": {

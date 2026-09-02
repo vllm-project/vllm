@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import regex as re
@@ -31,6 +32,10 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
+from vllm.model_executor.layers.quantization.utils import flashinfer_utils
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    prepare_fp8_moe_layer_for_fi,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
@@ -48,6 +53,45 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def test_prepare_gated_trtllm_fp8_moe_weights_pads_each_projection(monkeypatch):
+    monkeypatch.setattr(
+        flashinfer_utils,
+        "rotate_weights_for_fi_trtllm_fp8_per_tensor_moe",
+        lambda *args: None,
+    )
+    intermediate = 17
+    padded_intermediate = 32
+    hidden_size = 4
+    gate = torch.ones((1, intermediate, hidden_size), dtype=torch.float8_e4m3fn)
+    up = torch.full_like(gate, 2)
+    w13 = torch.cat((gate, up), dim=1)
+    w2 = torch.ones((1, hidden_size, intermediate), dtype=torch.float8_e4m3fn)
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=True),
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=intermediate,
+        ),
+    )
+
+    padded_w31, _, _, _ = prepare_fp8_moe_layer_for_fi(
+        layer,
+        w13,
+        w2,
+        w13_scale=torch.ones(1),
+        w13_input_scale=torch.ones(1),
+        w2_scale=torch.ones(1),
+        w2_input_scale=torch.ones(1),
+        is_trtllm=True,
+    )
+
+    expected = w13.new_zeros((1, 2 * padded_intermediate, hidden_size))
+    expected[:, :intermediate] = up
+    expected[:, padded_intermediate : padded_intermediate + intermediate] = gate
+    assert layer.moe_config.intermediate_size_per_partition == padded_intermediate
+    assert torch.equal(padded_w31, expected)
 
 
 def test_static_fp8_moe_input_scales_remain_scalar() -> None:

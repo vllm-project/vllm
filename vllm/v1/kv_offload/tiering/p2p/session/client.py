@@ -130,10 +130,10 @@ class ClientRole:
         # _serve_pending. Populated by register_lookup, drained by
         # flush_pending_lookups, and discarded on finish/close.
         self._flush_pending: set[str] = set()
-        # kv_request_ids with at least one fetch in flight — the work-list
-        # collect_results walks for timeouts, and the has_active_loads
-        # predicate, instead of scanning every request. Kept in exact sync
-        # with ``st.loads``.
+        # kv_request_ids with at least one fetch in flight or aborting — the
+        # work-list collect_results walks for timeouts, and the
+        # has_active_loads predicate, instead of scanning every request.
+        # Kept in exact sync with ``st.loads``.
         self._active_loads: set[str] = set()
         self._completed_loads: list[LoadResult] = []
 
@@ -241,7 +241,8 @@ class ClientRole:
         while an earlier round's load is still in flight, so both can be
         owed at once.
 
-        Then drop all probe/lookup state and prune the entry.
+        Then drop all probe/lookup state. Keep aborted loads until their abort
+        acknowledgement or timeout produces a terminal result.
         """
         st = self._requests.get(kv_request_id)
         if st is None:
@@ -257,8 +258,7 @@ class ClientRole:
                         AbortFetchMsg.ROUND_SEQ: round_seq,
                     }
                 )
-            st.loads.clear()
-            self._active_loads.discard(kv_request_id)
+                load.aborted_at = time.monotonic()
         if st.peer_lookup_open:
             st.peer_lookup_open = False
             self._send(
@@ -311,10 +311,8 @@ class ClientRole:
         load = st.loads.pop(round_seq, None) if st is not None else None
         if st is not None and load is not None:
             logger.warning(
-                "P2PSession %s: load request %s (job_id=%d) timed out; "
-                "load job completed with failure. If this recurs, ensure all "
-                "nodes use the same prefix-cache hash seed (matching "
-                "PYTHONHASHSEED, if set) and hash algorithm.",
+                "P2PSession %s: load request %s (job_id=%d) "
+                "completed with failure after abort",
                 self._peer_id,
                 kv_request_id,
                 load.job_id,

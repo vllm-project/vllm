@@ -668,6 +668,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        assert expert_num_tokens is not None
 
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), f"{num_local_experts} == {w1.size(0)}"
