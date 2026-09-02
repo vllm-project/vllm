@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
@@ -687,28 +688,22 @@ class Blip2ForConditionalGeneration(
             tower_model="vision_model",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
-        if num_image_tokens <= 0:
-            return 0
-        assert num_image_tokens % self.config.num_query_tokens == 0, (
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        if num_mm_embeds <= 0:
+            return 0, 0
+        assert num_mm_embeds % self.config.num_query_tokens == 0, (
             "The number of image tokens must be a multiple of "
             "the number of query tokens."
         )
-        num_images = num_image_tokens / self.config.num_query_tokens
-        return num_images * self._vision_tokens_per_image
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        if num_vision_tokens <= 0:
-            return 0
-        assert num_vision_tokens % self._vision_tokens_per_image == 0, (
-            "The number of vision tokens must be a multiple of "
-            "the number of tokens per image."
+        num_images = num_mm_embeds // self.config.num_query_tokens
+        return (
+            num_images * self._vision_tokens_per_image,
+            num_images * self.config.num_query_tokens,
         )
-        num_images = num_vision_tokens / self._vision_tokens_per_image
-        return num_images * self.config.num_query_tokens

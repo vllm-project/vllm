@@ -418,24 +418,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the tower module of the multi-modal model.
-        Given the number of image tokens, output the number of
-        multi-modal encoder tokens.
-        """
-        ...
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the connector module of the multi-modal model.
-        Given the number of vision tokens, output the number of
-        multi-modal connector tokens.
-        """
-        ...
-
     def get_mm_lora_token_counts(
         self,
         *,
@@ -450,13 +432,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
         """
-        del modality, mm_kwargs
-        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
-        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
-        return (
-            num_encoder_tokens,
-            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
-        )
+        ...
 
     def _embed_text_input_ids(
         self,

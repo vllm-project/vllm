@@ -60,6 +60,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -1277,21 +1278,18 @@ class Llama4ForConditionalGeneration(
             tower_model="vision_model.",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         vision_config = self.config.vision_config
         patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        if num_image_tokens <= 0 or patches_per_chunk <= 0:
-            return 0
+        if num_mm_embeds <= 0 or patches_per_chunk <= 0:
+            return 0, 0
         raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        num_chunks = num_image_tokens // patches_per_chunk
-        # Encoder processes raw_patches + 1 (CLS) per chunk
-        return num_chunks * (raw_patches + 1)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        vision_config = self.config.vision_config
-        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
-        if num_vision_tokens <= 0:
-            return 0
-        num_chunks = num_vision_tokens // (raw_patches + 1)
-        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
-        return num_chunks * patches_per_chunk
+        num_chunks = num_mm_embeds // patches_per_chunk
+        return num_chunks * (raw_patches + 1), num_chunks * patches_per_chunk

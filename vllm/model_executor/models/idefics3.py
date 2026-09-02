@@ -39,6 +39,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
@@ -836,20 +837,14 @@ class Idefics3ForConditionalGeneration(
             tower_model="model.vision_model",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         hf_config = self.config
         scale_factor = hf_config.scale_factor
-
-        return num_image_tokens * scale_factor**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        scale_factor = hf_config.scale_factor
-
-        return num_vision_tokens // scale_factor**2
+        return num_mm_embeds * scale_factor**2, num_mm_embeds
