@@ -195,7 +195,9 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
         w2: torch.Tensor,
         activation: MoEActivation,
         a1q_scale: torch.Tensor | None,
-        **routing_kwargs: torch.Tensor,
+        token_selected_experts: torch.Tensor | None = None,
+        token_final_scales: torch.Tensor | None = None,
+        router_logits: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.quant_dtype in ("nvfp4", "mxfp4", "mxfp8")
         assert a1q_scale is not None
@@ -247,7 +249,8 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
         flashinfer_cute_dsl_fused_moe(
             x=hidden_states,
             x_sf=x_sf,
-            **routing_kwargs,
+            token_selected_experts=token_selected_experts,
+            token_final_scales=token_final_scales,
             w1_weight=w1,
             w1_weight_sf=self.w1_scale,
             w1_alpha=self.g1_alphas,
@@ -269,6 +272,7 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
             down_bias=self._down_bias,
             quant_mode="w4a4" if self.quant_dtype == "nvfp4" else "w4a8",
             weight_interleave=16,
+            router_logits=router_logits,
             **swiglu_kwargs,
         )
         if kernel_output is not output:

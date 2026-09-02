@@ -113,7 +113,7 @@ def test_modular_and_monolithic_select_routing_mode(monkeypatch):
         apply_router_weight_on_input=False,
         **common,
     )
-    assert "router_logits" not in captured
+    assert captured["router_logits"] is None
     # dtypes the kernel requires, normalized by apply()
     assert captured["token_selected_experts"].dtype == torch.int32
     assert captured["token_final_scales"].dtype == torch.float32
@@ -126,9 +126,9 @@ def test_modular_and_monolithic_select_routing_mode(monkeypatch):
         apply_router_weight_on_input=False,
         **common,
     )
-    assert "token_selected_experts" not in captured
-    assert "token_final_scales" not in captured
-    assert captured["router_logits"].shape == (2, 4)
+    assert captured["token_selected_experts"] is None
+    assert captured["token_final_scales"] is None
+    assert captured.pop("router_logits").shape == (2, 4)
 
 
 def test_monolithic_opts_out_when_fused_routing_cannot_be_used():
