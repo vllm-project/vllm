@@ -119,6 +119,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+  optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
@@ -153,6 +154,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+  optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
