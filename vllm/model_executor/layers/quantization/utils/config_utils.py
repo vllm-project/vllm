@@ -9,6 +9,41 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 
+def get_quark_ocp_mx_group_size(
+    quant_config: "QuantizationConfig | None",
+    layer_name: str,
+) -> int | None:
+    """Return the OCP MX group size for a quantized Quark linear layer."""
+    if quant_config is None:
+        return None
+
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.quark.utils import should_ignore_layer
+
+    if not isinstance(quant_config, QuarkConfig):
+        return None
+
+    if should_ignore_layer(
+        layer_name,
+        ignore=quant_config.quant_config.get("exclude") or [],
+        fused_mapping=quant_config.packed_modules_mapping,
+    ):
+        return None
+
+    layer_quant_config = (
+        quant_config.get_layer_quant_config_from_name(layer_name)
+        or quant_config.quant_config.get("global_quant_config")
+        or {}
+    )
+    weight_quant = layer_quant_config.get("weight")
+    input_quant = layer_quant_config.get("input_tensors")
+    if not quant_config._is_w_ocp_mx_a_x(weight_quant, input_quant):
+        return None
+
+    assert weight_quant is not None
+    return int(weight_quant["group_size"])
+
+
 def is_shared_expert_quant_fse_compatible(
     quant_config: "QuantizationConfig | None",
     expert_prefix: str,
@@ -32,7 +67,11 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+    )
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
     if isinstance(quant_config, DeepseekV4FP8Config):
@@ -99,15 +138,27 @@ def is_shared_expert_quant_fse_compatible(
         )
 
     if isinstance(quant_config, QuarkConfig):
+        from vllm.model_executor.layers.quantization.quark.utils import (
+            should_ignore_layer,
+        )
+
         # TODO: layer_type_quant_config is not taken into account here.
         assert "exclude" in quant_config.quant_config
         assert "global_quant_config" in quant_config.quant_config
 
-        is_compatible = not any(
-            "shared_expert" in str(entry)
-            for entry in quant_config.quant_config["exclude"]
+        exclude = quant_config.quant_config["exclude"]
+
+        # should_ignore_layer raises a rightful ValueError in case different shards
+        # have a different ignore policy, as unsupported.
+        is_excluded = any(
+            should_ignore_layer(
+                f"{shared_expert_prefix}.{projection_name}",
+                ignore=exclude,
+                fused_mapping=quant_config.packed_modules_mapping,
+            )
+            for projection_name in projection_names
         )
-        if not is_compatible:
+        if is_excluded:
             return False, f"Quark excludes shared experts at {shared_expert_prefix}"
 
         global_quant_config = quant_config.quant_config["global_quant_config"]
@@ -143,6 +194,46 @@ def is_shared_expert_quant_fse_compatible(
             "Quark uses different quantization configurations for routed and "
             f"shared experts at {shared_expert_prefix}",
         )
+
+    if isinstance(quant_config, Fp8Config):
+        if quant_config.store_dtype is not None:
+            return (
+                False,
+                f"FP8 stores routed experts as {quant_config.store_dtype}, which "
+                f"is not supported for fused shared experts at "
+                f"{shared_expert_prefix}",
+            )
+
+        # Serialized per-tensor checkpoints store 0-D or size-1 scales, which
+        # the shared-expert weight chunker cannot slice into the appended expert
+        # slots; online FP8 is simply untested. Both lack a weight block size.
+        if quant_config.weight_block_size is None:
+            return (
+                False,
+                "FP8 shared-expert FSE is only implemented for block-quantized "
+                "checkpoints",
+            )
+
+        def is_ignored(layer_name: str) -> bool:
+            return is_layer_skipped(
+                prefix=layer_name,
+                ignored_layers=quant_config.ignored_layers,
+                fused_mapping=quant_config.packed_modules_mapping,
+                match_mode=quant_config.ignored_layers_match_mode,
+            )
+
+        expert_ignored = is_ignored(expert_prefix)
+        if any(
+            is_ignored(f"{shared_expert_prefix}.{projection_name}") != expert_ignored
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "FP8 ignores routed and shared experts inconsistently at "
+                f"{shared_expert_prefix}",
+            )
+
+        return True, None
 
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
