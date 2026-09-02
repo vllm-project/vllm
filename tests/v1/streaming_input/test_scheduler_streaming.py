@@ -48,8 +48,14 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(
+    *, policy: str | None = None, max_num_seqs: int | None = None
+) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
+    if policy is not None:
+        vllm_config.scheduler_config.policy = policy
+    if max_num_seqs is not None:
+        vllm_config.scheduler_config.max_num_seqs = max_num_seqs
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
@@ -275,6 +281,31 @@ class TestStreamingScheduler(unittest.TestCase):
         _ = scheduler.schedule()
 
         assert session.status == RequestStatus.RUNNING
+
+    def test_priority_order_after_streaming_session_update(self):
+        scheduler = create_scheduler(policy="priority", max_num_seqs=1)
+        session_a = DummyRequest("A", prompt_token_ids=[1])
+        session_b = DummyRequest("B", prompt_token_ids=[2])
+        session_a.arrival_time = 0.0
+        session_b.arrival_time = 1.0
+
+        for session in (session_a, session_b):
+            scheduler.add_request(session)
+            scheduler.waiting.remove_request(session)
+            assert not scheduler._handle_stopped_request(session)
+
+        continuation_b = DummyRequest("B", prompt_token_ids=[20])
+        continuation_a = DummyRequest("A", prompt_token_ids=[10])
+        continuation_b.arrival_time = 2.0
+        continuation_a.arrival_time = 10.0
+        scheduler.add_request(continuation_b)
+        scheduler.add_request(continuation_a)
+
+        queued = list(scheduler.waiting) + list(scheduler.skipped_waiting)
+        assert sum(request is session_a for request in queued) == 1
+        assert sum(request is session_b for request in queued) == 1
+        output = scheduler.schedule()
+        assert [request.req_id for request in output.scheduled_new_reqs] == ["B"]
 
     def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
