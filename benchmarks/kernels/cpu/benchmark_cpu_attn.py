@@ -86,7 +86,11 @@ def main(
 
     # Resolve kv_cache_dtype: "auto" means same as compute dtype (no quantization)
     effective_kv_cache_dtype = kv_cache_dtype if kv_cache_dtype != "auto" else None
-    is_fp8_kv = is_quantized_kv_cache(effective_kv_cache_dtype) if effective_kv_cache_dtype else False
+    is_fp8_kv = (
+        is_quantized_kv_cache(effective_kv_cache_dtype)
+        if effective_kv_cache_dtype
+        else False
+    )
     # FP8 KV cache is stored as uint8 (byte-level view of fp8 values)
     kv_cache_torch_dtype = torch.uint8 if is_fp8_kv else dtype
 
@@ -268,8 +272,8 @@ if __name__ == "__main__":
         choices=KV_CACHE_DTYPE_CHOICES,
         default="auto",
         help="KV cache dtype: 'auto' uses compute dtype (bfloat16), "
-             "'fp8_e4m3'/'fp8_e5m2' enables FP8 quantized KV cache "
-             "(requires AMX-FP8 capable hardware for amx_fp8 ISA).",
+        "'fp8_e4m3'/'fp8_e5m2' enables FP8 quantized KV cache "
+        "(requires AMX-FP8 capable hardware for amx_fp8 ISA).",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=20)

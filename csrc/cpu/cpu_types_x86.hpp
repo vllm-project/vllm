@@ -359,7 +359,7 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 // Returns 16 packed uint8_t in the low 128-bits of an __m128i.
 #if defined(__AVX512F__)
 FORCE_INLINE __m128i quant_fp32x16_to_fp8e4m3_avx512(const float* src,
-                                                      float inv_scale) {
+                                                     float inv_scale) {
   __m512 v = _mm512_loadu_ps(src);
   v = _mm512_mul_ps(v, _mm512_set1_ps(inv_scale));
   // Clamp to FP8-E4M3 representable range [-448, 448]
@@ -386,18 +386,18 @@ FORCE_INLINE __m128i quant_fp32x16_to_fp8e4m3_avx512(const float* src,
 // Quantize 32 BF16 values to 32 FP8-E4M3 bytes using AVX-512.
 // Writes 32 bytes to dst.  inv_scale = 1.0f / q_scale.
 FORCE_INLINE void quant_bf16x32_to_fp8e4m3_avx512(const c10::BFloat16* src,
-                                                   uint8_t* dst,
-                                                   float inv_scale) {
+                                                  uint8_t* dst,
+                                                  float inv_scale) {
   // Convert 32 BF16 → 2x16 FP32 then quantize each half.
   const uint16_t* u16 = reinterpret_cast<const uint16_t*>(src);
   __m256i b16_lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16));
   __m256i b16_hi =
-    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16 + 16));
+      _mm256_loadu_si256(reinterpret_cast<const __m256i*>(u16 + 16));
   // Zero-extend uint16 -> uint32, then shift left by 16 to form FP32 bits.
-  __m512 lo_fp32 = _mm512_castsi512_ps(
-    _mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_lo), 16));
-  __m512 hi_fp32 = _mm512_castsi512_ps(
-    _mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_hi), 16));
+  __m512 lo_fp32 =
+      _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_lo), 16));
+  __m512 hi_fp32 =
+      _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b16_hi), 16));
   alignas(64) float fp32_buf[32];
   _mm512_store_ps(fp32_buf, lo_fp32);
   _mm512_store_ps(fp32_buf + 16, hi_fp32);

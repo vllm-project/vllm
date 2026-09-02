@@ -1,7 +1,7 @@
 #include "cpu_attn_dispatch_generated.h"
 
 #if defined(__x86_64__) || defined(_M_X64)
-#include <cpuid.h>
+  #include <cpuid.h>
 // Runtime check for AMX-FP8 (Diamond Rapids): CPUID leaf 7, subleaf 1, EAX[21].
 static bool runtime_has_amx_fp8() {
   unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;

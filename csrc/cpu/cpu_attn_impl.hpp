@@ -1130,17 +1130,14 @@ class AttentionMainLoop {
         // }
 
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
-                kv_tile_token_num, q_head_num, kv_tile_token_num,
-                is_first_iter, use_sink);
-
+                      kv_tile_token_num, q_head_num, kv_tile_token_num,
+                      is_first_iter, use_sink);
       }
 
       // compute P@V
       {
         constexpr bool prequantize_probabilities = []() {
-          if constexpr (requires {
-                          tile_gemm_t::prequantize_probabilities;
-                        }) {
+          if constexpr (requires { tile_gemm_t::prequantize_probabilities; }) {
             return tile_gemm_t::prequantize_probabilities;
           }
           return false;
@@ -1151,19 +1148,17 @@ class AttentionMainLoop {
             token_group_num_per_block - start_block_group_offset;
         int32_t remaining_group_num = token_group_num;
         int32_t head_dim_group_num = head_dim / headdim_alignment;
-        using pv_prob_buffer_t =
-          std::conditional_t<prequantize_probabilities, uint8_t,
-                     prob_buffer_t>;
+        using pv_prob_buffer_t = std::conditional_t<prequantize_probabilities,
+                                                    uint8_t, prob_buffer_t>;
         pv_prob_buffer_t* curr_prob_buffer =
-          reinterpret_cast<pv_prob_buffer_t*>(logits_buffer);
+            reinterpret_cast<pv_prob_buffer_t*>(logits_buffer);
         const int64_t prob_buffer_stride =
-          prequantize_probabilities
-            ? kv_tile_token_num
-            : kv_tile_token_num *
-                (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
+            prequantize_probabilities
+                ? kv_tile_token_num
+                : kv_tile_token_num *
+                      (sizeof(logits_buffer_t) / sizeof(prob_buffer_t));
         constexpr int64_t prob_buffer_elem_size =
-          prequantize_probabilities ? sizeof(uint8_t)
-                        : sizeof(prob_buffer_t);
+            prequantize_probabilities ? sizeof(uint8_t) : sizeof(prob_buffer_t);
         partial_output_buffer_t* curr_partial_q_buffer = partial_q_buffer;
         bool accum_c = !is_first_iter;
         for (int32_t block_idx = start_block_idx; block_idx < end_block_idx;
@@ -1274,20 +1269,17 @@ class AttentionMainLoop {
 
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
       constexpr bool prequantize_probabilities = []() {
-        if constexpr (requires {
-                        tile_gemm_t::prequantize_probabilities;
-                      }) {
+        if constexpr (requires { tile_gemm_t::prequantize_probabilities; }) {
           return tile_gemm_t::prequantize_probabilities;
         }
         return false;
       }();
       using softmax_prob_buffer_t =
-          std::conditional_t<prequantize_probabilities, uint8_t,
-                             prob_buffer_t>;
+          std::conditional_t<prequantize_probabilities, uint8_t, prob_buffer_t>;
       static_assert(sizeof(prob_buffer_t) <= sizeof(logits_buffer_t));
 
       logits_buffer_t* __restrict__ curr_logits_buffer = logits_buffer;
-        softmax_prob_buffer_t* __restrict__ curr_prob_buffer =
+      softmax_prob_buffer_t* __restrict__ curr_prob_buffer =
           reinterpret_cast<softmax_prob_buffer_t*>(logits_buffer);
       float* __restrict__ curr_partial_q_buffer = partial_q_buffer;
       const int32_t vec_num = kv_tile_token_num / 16;
@@ -1326,7 +1318,7 @@ class AttentionMainLoop {
         {
           logits_buffer_t* __restrict__ curr_logits_buffer_iter =
               curr_logits_buffer;
-            softmax_prob_buffer_t* __restrict__ curr_prob_buffer_iter =
+          softmax_prob_buffer_t* __restrict__ curr_prob_buffer_iter =
               curr_prob_buffer;
           for (int32_t j = 0; j < vec_num; ++j) {
             vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
@@ -1398,7 +1390,7 @@ class AttentionMainLoop {
         sum_buffer[i] = new_sum_val;
 
         curr_logits_buffer += logits_buffer_stride;
-  curr_prob_buffer += kv_tile_token_num;
+        curr_prob_buffer += kv_tile_token_num;
         curr_partial_q_buffer += head_dim;
       }
     }

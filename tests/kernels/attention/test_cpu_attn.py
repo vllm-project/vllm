@@ -1172,10 +1172,12 @@ def test_varlen_with_paged_kv_dynamic_causal(
 # AMX_FP8 (Diamond Rapids) tests
 # ---------------------------------------------------------------------------
 
+
 def _amx_fp8_available() -> bool:
     """Return True iff the runtime reports AMX_FP8 capability."""
-    return (torch.cpu._is_amx_tile_supported()
-            and torch.ops._C.cpu_attn_has_isa("amx_fp8"))
+    return torch.cpu._is_amx_tile_supported() and torch.ops._C.cpu_attn_has_isa(
+        "amx_fp8"
+    )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
@@ -1190,7 +1192,9 @@ def _amx_fp8_available() -> bool:
 @pytest.mark.parametrize("use_alibi", [False])
 @pytest.mark.parametrize("use_sink", [False])
 @pytest.mark.parametrize("isa", ["amx_fp8"])
-@pytest.mark.skipif(not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids).")
+@pytest.mark.skipif(
+    not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids)."
+)
 def test_varlen_with_paged_kv_amx_fp8(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],

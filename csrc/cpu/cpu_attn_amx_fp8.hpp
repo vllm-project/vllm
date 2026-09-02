@@ -29,12 +29,12 @@
 
 #ifdef CPU_CAPABILITY_AMXFP8
 
-#include "cpu_attn_amx.hpp"   // pulls in TileGemm224/TileGemm122 BF16 specialisations
-#include "cpu_attn_fp8.hpp"
-#include "cpu_attn_impl.hpp"
-#include "cpu_types.hpp"
+  #include "cpu_attn_amx.hpp"  // pulls in TileGemm224/TileGemm122 BF16 specialisations
+  #include "cpu_attn_fp8.hpp"
+  #include "cpu_attn_impl.hpp"
+  #include "cpu_types.hpp"
 
-#include <amxfp8intrin.h>  // requires GCC 14+ / Clang 17+, -mamx-fp8
+  #include <amxfp8intrin.h>  // requires GCC 14+ / Clang 17+, -mamx-fp8
 
 namespace cpu_attention {
 
@@ -52,17 +52,17 @@ namespace cpu_attention {
 // ---------------------------------------------------------------------------
 template <typename scalar_t, uint8_t (*quant_fn)(float, float)>
 inline void reshape_and_cache_k_amx_fp8_impl(
-    const scalar_t* key_ptr, uint8_t* key_cache_ptr,
-    const int64_t* slot_ptr, int64_t token_num, int64_t head_num,
-    int64_t head_dim, int64_t block_size, int64_t k_stride0, int64_t k_stride1,
-    int64_t kc_stride0, int64_t kc_stride1, float k_inv) {
+    const scalar_t* key_ptr, uint8_t* key_cache_ptr, const int64_t* slot_ptr,
+    int64_t token_num, int64_t head_num, int64_t head_dim, int64_t block_size,
+    int64_t k_stride0, int64_t k_stride1, int64_t kc_stride0,
+    int64_t kc_stride1, float k_inv) {
   constexpr int64_t token_num_per_group = AMX_TILE_ROW_NUM;  // 16
   constexpr int64_t fp8_per_row = AMX_TILE_ROW_BYTES;        // 64 FP8/row
   const int64_t slice_num = head_dim / fp8_per_row;
   // Bytes per 16-token group = slice_num * (16 * 64) = head_dim * 16
   const int64_t group_bytes = token_num_per_group * head_dim;
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static)
   for (int64_t tok = 0; tok < token_num; ++tok) {
     for (int64_t h = 0; h < head_num; ++h) {
       const int64_t slot = slot_ptr[tok];
@@ -73,17 +73,17 @@ inline void reshape_and_cache_k_amx_fp8_impl(
       const int64_t group_offset = block_offset % token_num_per_group;
 
       const scalar_t* ksrc = key_ptr + tok * k_stride0 + h * k_stride1;
-      uint8_t* group_base = key_cache_ptr + block_idx * kc_stride0
-                            + h * kc_stride1 + group_idx * group_bytes;
+      uint8_t* group_base = key_cache_ptr + block_idx * kc_stride0 +
+                            h * kc_stride1 + group_idx * group_bytes;
 
       // Each k-slice: 16 rows × 64 bytes.  Token group_offset occupies row
       // group_offset within each slice.
       for (int64_t s = 0; s < slice_num; ++s) {
-        uint8_t* row_base = group_base + s * token_num_per_group * fp8_per_row
-                            + group_offset * fp8_per_row;
+        uint8_t* row_base = group_base + s * token_num_per_group * fp8_per_row +
+                            group_offset * fp8_per_row;
         for (int64_t e = 0; e < fp8_per_row; ++e) {
-          row_base[e] = quant_fn(static_cast<float>(ksrc[s * fp8_per_row + e]),
-                                 k_inv);
+          row_base[e] =
+              quant_fn(static_cast<float>(ksrc[s * fp8_per_row + e]), k_inv);
         }
       }
     }
@@ -91,9 +91,8 @@ inline void reshape_and_cache_k_amx_fp8_impl(
 }
 
 template <typename fp8_t>
-__attribute__((target("avx10.2"), noinline))
-void quantize_probability_row(const float* __restrict__ src,
-                              uint8_t* __restrict__ dst, int32_t cols) {
+__attribute__((target("avx10.2"), noinline)) void quantize_probability_row(
+    const float* __restrict__ src, uint8_t* __restrict__ dst, int32_t cols) {
   constexpr float fp8_max =
       std::is_same_v<fp8_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
   const __m512 scale = _mm512_set1_ps(fp8_max);
@@ -112,8 +111,7 @@ void quantize_probability_row(const float* __restrict__ src,
 }
 
 template <typename fp8_t>
-__attribute__((target("avx10.2"), noinline))
-void quantize_q_tile(
+__attribute__((target("avx10.2"), noinline)) void quantize_q_tile(
     const c10::BFloat16* __restrict__ src, uint8_t* __restrict__ dst,
     int32_t q_num, int32_t q_heads_per_kv, int64_t q_num_stride,
     int64_t q_head_stride, int64_t head_dim, float inv_scale) {
@@ -130,12 +128,13 @@ void quantize_q_tile(
     for (int32_t h = 0; h < q_heads_per_kv;
          ++h, head += q_head_stride, ++packed_row) {
       uint8_t* packed_head =
-          dst + (packed_row / AMX_TILE_ROW_NUM) *
-                    head_size_block_num * AMX_TILE_BYTES +
+          dst +
+          (packed_row / AMX_TILE_ROW_NUM) * head_size_block_num *
+              AMX_TILE_BYTES +
           (packed_row % AMX_TILE_ROW_NUM) * AMX_TILE_ROW_BYTES;
       for (int64_t e = 0; e < head_dim; e += 16) {
-        const __m256i bf16 = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(head + e));
+        const __m256i bf16 =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(head + e));
         __m512 values = _mm512_castsi512_ps(
             _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16));
         values = _mm512_mul_ps(values, scale);
@@ -181,8 +180,9 @@ class TileGemm224<uint8_t, kv_cache_t> {
  public:
   static constexpr bool prequantize_probabilities = true;
 
-  FORCE_INLINE static void quantize_probability_row(
-      const float* src, uint8_t* dst, int32_t cols) {
+  FORCE_INLINE static void quantize_probability_row(const float* src,
+                                                    uint8_t* dst,
+                                                    int32_t cols) {
     cpu_attention::quantize_probability_row<kv_cache_t>(src, dst, cols);
   }
 
@@ -204,7 +204,8 @@ class TileGemm224<uint8_t, kv_cache_t> {
       // A fixed FP8-dependent P scale lets the tile accumulate all k-steps
       // before get_output_v_scale() applies the correction.
 
-      const int32_t m_0 = std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
+      const int32_t m_0 =
+          std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
       const int32_t m_1 = m_size - m_0;
 
       uint8_t* a0 = reinterpret_cast<uint8_t*>(a_tile);
@@ -234,8 +235,12 @@ class TileGemm224<uint8_t, kv_cache_t> {
           _tile_loadd(7, c7, c_stride);
         }
       } else {
-        _tile_zero(4); _tile_zero(5);
-        if (m_1 > 0) { _tile_zero(6); _tile_zero(7); }
+        _tile_zero(4);
+        _tile_zero(5);
+        if (m_1 > 0) {
+          _tile_zero(6);
+          _tile_zero(7);
+        }
       }
 
       for (int32_t k = 0; k < k_times; ++k) {
@@ -259,8 +264,10 @@ class TileGemm224<uint8_t, kv_cache_t> {
             _tile_dpbf8ps(7, 1, 3);
           }
         }
-        a0 += a_advance; a1 += a_advance;
-        v2 += v_advance; v3 += v_advance;
+        a0 += a_advance;
+        a1 += a_advance;
+        v2 += v_advance;
+        v3 += v_advance;
       }
 
       _tile_stored(4, c4, c_stride);
@@ -281,7 +288,7 @@ class TileGemm224<uint8_t, kv_cache_t> {
     const int32_t b_tile_stride = AMX_TILE_ROW_BYTES;  // 64 bytes
 
     const int32_t m_0 =
-      std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
+        std::min(m_size, static_cast<int32_t>(AMX_TILE_ROW_NUM));
     const int32_t m_1 = m_size - m_0;
     const int32_t c_tile_stride = ldc * sizeof(float);
     constexpr int32_t output_group_num = 2;
@@ -289,10 +296,10 @@ class TileGemm224<uint8_t, kv_cache_t> {
          ++output_group) {
       uint8_t* __restrict__ a_tile_0 = static_cast<uint8_t*>(a_tile);
       uint8_t* __restrict__ a_tile_1 = a_tile_0 + fp8_tile_elems;
-      uint8_t* __restrict__ b_tile_2 = static_cast<uint8_t*>(b_tile) +
+      uint8_t* __restrict__ b_tile_2 =
+          static_cast<uint8_t*>(b_tile) +
           output_group * 2 * k_size * AMX_TILE_ROW_NUM;
-      uint8_t* __restrict__ b_tile_3 =
-          b_tile_2 + (k_size * AMX_TILE_ROW_NUM);
+      uint8_t* __restrict__ b_tile_3 = b_tile_2 + (k_size * AMX_TILE_ROW_NUM);
       float* __restrict__ c_tile_4 = c_tile + output_group * 32;
       float* __restrict__ c_tile_5 = c_tile_4 + AMX_TILE_ROW_NUM;
       float* __restrict__ c_tile_6 = c_tile_4 + AMX_TILE_ROW_NUM * ldc;
@@ -304,38 +311,41 @@ class TileGemm224<uint8_t, kv_cache_t> {
         _tile_loadd(6, c_tile_6, c_tile_stride);
         _tile_loadd(7, c_tile_7, c_tile_stride);
       } else {
-        _tile_zero(4); _tile_zero(5); _tile_zero(6); _tile_zero(7);
+        _tile_zero(4);
+        _tile_zero(5);
+        _tile_zero(6);
+        _tile_zero(7);
       }
 
       for (int32_t k = 0; k < k_times; ++k) {
-      _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
-      _tile_stream_loadd(2, b_tile_2, b_tile_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(4, 0, 2);
-      } else {
-        _tile_dpbf8ps(4, 0, 2);
-      }
-      _tile_stream_loadd(3, b_tile_3, b_tile_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(5, 0, 3);
-      } else {
-        _tile_dpbf8ps(5, 0, 3);
-      }
-      _tile_loadd(1, a_tile_1, AMX_TILE_ROW_BYTES);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(6, 1, 2);
-        _tile_dphf8ps(7, 1, 3);
-      } else {
-        _tile_dpbf8ps(6, 1, 2);
-        _tile_dpbf8ps(7, 1, 3);
-      }
+        _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
+        _tile_stream_loadd(2, b_tile_2, b_tile_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(4, 0, 2);
+        } else {
+          _tile_dpbf8ps(4, 0, 2);
+        }
+        _tile_stream_loadd(3, b_tile_3, b_tile_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(5, 0, 3);
+        } else {
+          _tile_dpbf8ps(5, 0, 3);
+        }
+        _tile_loadd(1, a_tile_1, AMX_TILE_ROW_BYTES);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(6, 1, 2);
+          _tile_dphf8ps(7, 1, 3);
+        } else {
+          _tile_dpbf8ps(6, 1, 2);
+          _tile_dpbf8ps(7, 1, 3);
+        }
 
-      // Advance Q buffer (prepacked): 2 FP8 tiles per k-step.
-      a_tile_0 += 2 * fp8_tile_elems;
-      a_tile_1 += 2 * fp8_tile_elems;
-      // Advance K cache (native layout): 1 FP8 tile per k-step.
-      b_tile_2 += fp8_tile_elems;
-      b_tile_3 += fp8_tile_elems;
+        // Advance Q buffer (prepacked): 2 FP8 tiles per k-step.
+        a_tile_0 += 2 * fp8_tile_elems;
+        a_tile_1 += 2 * fp8_tile_elems;
+        // Advance K cache (native layout): 1 FP8 tile per k-step.
+        b_tile_2 += fp8_tile_elems;
+        b_tile_3 += fp8_tile_elems;
       }
 
       _tile_stored(4, c_tile_4, c_tile_stride);
@@ -347,8 +357,7 @@ class TileGemm224<uint8_t, kv_cache_t> {
 
   FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
     // QK and PV share one 64-byte tile configuration.
-    const int32_t m_0 =
-      std::min(m, static_cast<int32_t>(AMX_TILE_ROW_NUM));
+    const int32_t m_0 = std::min(m, static_cast<int32_t>(AMX_TILE_ROW_NUM));
     const int32_t m_1 = m - m_0;
     // Use all 64 bytes per row for every tile (same as BF16 AMX).
     // This works for both FP8 (64 FP8/row) and BF16 (32 BF16/row = 64B).
@@ -379,8 +388,9 @@ class TileGemm122<uint8_t, kv_cache_t> {
  public:
   static constexpr bool prequantize_probabilities = true;
 
-  FORCE_INLINE static void quantize_probability_row(
-      const float* src, uint8_t* dst, int32_t cols) {
+  FORCE_INLINE static void quantize_probability_row(const float* src,
+                                                    uint8_t* dst,
+                                                    int32_t cols) {
     cpu_attention::quantize_probability_row<kv_cache_t>(src, dst, cols);
   }
 
@@ -418,8 +428,10 @@ class TileGemm122<uint8_t, kv_cache_t> {
         _tile_loadd(6, c6, c_stride);
         _tile_loadd(7, c7, c_stride);
       } else {
-        _tile_zero(4); _tile_zero(5);
-        _tile_zero(6); _tile_zero(7);
+        _tile_zero(4);
+        _tile_zero(5);
+        _tile_zero(6);
+        _tile_zero(7);
       }
 
       for (int32_t k = 0; k < k_times; ++k) {
@@ -443,8 +455,10 @@ class TileGemm122<uint8_t, kv_cache_t> {
           _tile_dpbf8ps(5, 0, 3);
         }
         a += a_advance;
-        v2 += v_advance; v3 += v_advance;
-        v4 += v_advance; v5 += v_advance;
+        v2 += v_advance;
+        v3 += v_advance;
+        v4 += v_advance;
+        v5 += v_advance;
       }
 
       _tile_stored(4, c4, c_stride);
@@ -467,10 +481,10 @@ class TileGemm122<uint8_t, kv_cache_t> {
          ++output_group) {
       uint8_t* __restrict__ a_tile_0 = static_cast<uint8_t*>(a_tile);
       uint8_t* __restrict__ a_tile_1 = a_tile_0 + fp8_tile_elems;
-      uint8_t* __restrict__ b_tile_2 = static_cast<uint8_t*>(b_tile) +
+      uint8_t* __restrict__ b_tile_2 =
+          static_cast<uint8_t*>(b_tile) +
           output_group * 2 * k_size * AMX_TILE_ROW_NUM;
-      uint8_t* __restrict__ b_tile_3 =
-          b_tile_2 + (k_size * AMX_TILE_ROW_NUM);
+      uint8_t* __restrict__ b_tile_3 = b_tile_2 + (k_size * AMX_TILE_ROW_NUM);
       uint8_t* __restrict__ b_tile_4 = b_tile_2 + fp8_tile_elems;
       uint8_t* __restrict__ b_tile_5 = b_tile_3 + fp8_tile_elems;
       float* __restrict__ c_tile_6 = c_tile + output_group * 32;
@@ -480,59 +494,60 @@ class TileGemm122<uint8_t, kv_cache_t> {
         _tile_loadd(6, c_tile_6, c_stride);
         _tile_loadd(7, c_tile_7, c_stride);
       } else {
-        _tile_zero(6); _tile_zero(7);
+        _tile_zero(6);
+        _tile_zero(7);
       }
 
       for (int32_t k = 0; k < k_group_times; ++k) {
-      _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(6, 0, 2);
-      } else {
-        _tile_dpbf8ps(6, 0, 2);
-      }
-      _tile_stream_loadd(3, b_tile_3, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(7, 0, 3);
-      } else {
-        _tile_dpbf8ps(7, 0, 3);
-      }
-      _tile_loadd(1, a_tile_1, AMX_TILE_ROW_BYTES);
-      _tile_stream_loadd(2, b_tile_4, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(6, 1, 2);
-      } else {
-        _tile_dpbf8ps(6, 1, 2);
-      }
-      _tile_stream_loadd(3, b_tile_5, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(7, 1, 3);
-      } else {
-        _tile_dpbf8ps(7, 1, 3);
-      }
+        _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
+        _tile_stream_loadd(2, b_tile_2, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(6, 0, 2);
+        } else {
+          _tile_dpbf8ps(6, 0, 2);
+        }
+        _tile_stream_loadd(3, b_tile_3, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(7, 0, 3);
+        } else {
+          _tile_dpbf8ps(7, 0, 3);
+        }
+        _tile_loadd(1, a_tile_1, AMX_TILE_ROW_BYTES);
+        _tile_stream_loadd(2, b_tile_4, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(6, 1, 2);
+        } else {
+          _tile_dpbf8ps(6, 1, 2);
+        }
+        _tile_stream_loadd(3, b_tile_5, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(7, 1, 3);
+        } else {
+          _tile_dpbf8ps(7, 1, 3);
+        }
 
-      a_tile_0 += 2 * fp8_tile_elems;
-      a_tile_1 += 2 * fp8_tile_elems;
-      b_tile_2 += 2 * fp8_tile_elems;
-      b_tile_3 += 2 * fp8_tile_elems;
-      b_tile_4 += 2 * fp8_tile_elems;
-      b_tile_5 += 2 * fp8_tile_elems;
+        a_tile_0 += 2 * fp8_tile_elems;
+        a_tile_1 += 2 * fp8_tile_elems;
+        b_tile_2 += 2 * fp8_tile_elems;
+        b_tile_3 += 2 * fp8_tile_elems;
+        b_tile_4 += 2 * fp8_tile_elems;
+        b_tile_5 += 2 * fp8_tile_elems;
       }
 
       if (has_tail) {
-      _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(6, 0, 2);
-      } else {
-        _tile_dpbf8ps(6, 0, 2);
-      }
-      _tile_stream_loadd(3, b_tile_3, b_stride);
-      if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-        _tile_dphf8ps(7, 0, 3);
-      } else {
-        _tile_dpbf8ps(7, 0, 3);
-      }
+        _tile_loadd(0, a_tile_0, AMX_TILE_ROW_BYTES);
+        _tile_stream_loadd(2, b_tile_2, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(6, 0, 2);
+        } else {
+          _tile_dpbf8ps(6, 0, 2);
+        }
+        _tile_stream_loadd(3, b_tile_3, b_stride);
+        if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+          _tile_dphf8ps(7, 0, 3);
+        } else {
+          _tile_dpbf8ps(7, 0, 3);
+        }
       }
 
       _tile_stored(6, c_tile_6, c_stride);
@@ -568,12 +583,12 @@ template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
 class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
   // Q buffer holds FP8-quantized query.
-  using query_t = scalar_t;         // BF16 input
-  using q_buffer_t = uint8_t;       // FP8 quantized, stored in Q buffer
+  using query_t = scalar_t;    // BF16 input
+  using q_buffer_t = uint8_t;  // FP8 quantized, stored in Q buffer
   using kv_cache_t = kv_cache_scalar_t;
   using logits_buffer_t = float;
   using partial_output_buffer_t = float;
-  using prob_buffer_t = scalar_t;   // BF16 softmax probs (PV phase)
+  using prob_buffer_t = scalar_t;  // BF16 softmax probs (PV phase)
 
   constexpr static int64_t BlockSizeAlignment = 64;
   constexpr static int64_t HeadDimAlignment = 64;
@@ -646,8 +661,7 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     return BlockSizeAlignment * (AMX_TILE_ROW_BYTES / 4);
   }
 
-  constexpr static int64_t v_cache_head_group_stride(
-      const int32_t block_size) {
+  constexpr static int64_t v_cache_head_group_stride(const int32_t block_size) {
     return block_size * HeadDimAlignment;
   }
 
@@ -662,13 +676,12 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
   // stored in q_dynamic_scale for use in execute_attention().
   void copy_q_heads_tile(
       scalar_t* __restrict__ src,  // [q_num, q_heads_per_kv, head_size] BF16
-      q_buffer_t* __restrict__ q_buffer,
-      const int32_t q_num, const int32_t q_heads_per_kv,
-      const int64_t q_num_stride, const int64_t q_head_stride,
-      const float /*scale*/) {
+      q_buffer_t* __restrict__ q_buffer, const int32_t q_num,
+      const int32_t q_heads_per_kv, const int64_t q_num_stride,
+      const int64_t q_head_stride, const float /*scale*/) {
     // ---- Step 1: compute dynamic per-tile Q scale ----
     constexpr float fp8_max =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
+        std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ? 448.0f : 57344.0f;
     float max_abs = 0.0f;
     {
       scalar_t* src_iter = src;
@@ -681,10 +694,10 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
           for (int64_t e = 0; e < head_dim; e += 16) {
             const __m256i bf16 = _mm256_loadu_si256(
                 reinterpret_cast<const __m256i*>(head_iter + e));
-            const __m512i fp32_bits = _mm512_slli_epi32(
-                _mm512_cvtepu16_epi32(bf16), 16);
-            const __m512 abs_values = _mm512_castsi512_ps(
-                _mm512_and_si512(fp32_bits, abs_mask));
+            const __m512i fp32_bits =
+                _mm512_slli_epi32(_mm512_cvtepu16_epi32(bf16), 16);
+            const __m512 abs_values =
+                _mm512_castsi512_ps(_mm512_and_si512(fp32_bits, abs_mask));
             max_abs_vec = _mm512_max_ps(max_abs_vec, abs_values);
           }
         }
@@ -703,9 +716,9 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
     constexpr int64_t bytes_per_head = head_dim * sizeof(uint8_t);
     static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0,
                   "head_dim must be divisible by 64 for AMX_FP8");
-    quantize_q_tile<kv_cache_t>(
-        src, reinterpret_cast<uint8_t*>(q_buffer), q_num, q_heads_per_kv,
-        q_num_stride, q_head_stride, head_dim, inv_scale);
+    quantize_q_tile<kv_cache_t>(src, reinterpret_cast<uint8_t*>(q_buffer),
+                                q_num, q_heads_per_kv, q_num_stride,
+                                q_head_stride, head_dim, inv_scale);
   }
 
   // reshape KV to AMX-FP8 friendly layout.
@@ -731,12 +744,12 @@ class AttentionImpl<ISA::AMX_FP8, scalar_t, head_dim, kv_cache_scalar_t> {
 
     {
       constexpr int64_t token_num_per_sub_group = 4;
-      constexpr int64_t head_elems_per_group = 16;    // AMX_TILE_ROW_BYTES/4
+      constexpr int64_t head_elems_per_group = 16;  // AMX_TILE_ROW_BYTES/4
       const int64_t group_num = head_dim / head_elems_per_group;
       const int64_t group_size = block_size * head_elems_per_group;
       uint8_t* vc = reinterpret_cast<uint8_t*>(value_cache);
 
-#pragma omp parallel for collapse(2) schedule(static)
+  #pragma omp parallel for collapse(2) schedule(static)
       for (int64_t tok = 0; tok < token_num; ++tok) {
         for (int64_t h = 0; h < head_num; ++h) {
           const int64_t slot = slot_mapping[tok];

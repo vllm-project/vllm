@@ -123,9 +123,7 @@ def generate_cases_for_isa_group(isa_list: list[str], include_fp8: bool = False)
                 for isa in isa_list:
                     if isa not in ISA_FOR_FP8:
                         continue
-                    isa_override = (
-                        "AMX" if isa == "AMX_FP8" and head_dim % 64 else None
-                    )
+                    isa_override = "AMX" if isa == "AMX_FP8" and head_dim % 64 else None
                     cases.append(_make_case(head_dim, isa, fp8_type, isa_override))
 
     return "\n".join(cases)
