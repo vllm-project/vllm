@@ -1104,11 +1104,11 @@ async fn static_lora_module_rejects_empty_name_or_path() {
     let mut ready = default_ready_response();
     ready.supports_lora = true;
     ready.max_loras = 4;
-    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
-        ready,
-        |_dealer, _push| boxed_test_future(async {}),
-    )
-    .await;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, |_dealer, _push| {
+            boxed_test_future(async {})
+        })
+        .await;
 
     for (name, path) in [("", "org/alice"), ("alice", "")] {
         let module = LoraModulePath {
