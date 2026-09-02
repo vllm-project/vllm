@@ -283,10 +283,14 @@ async def test_shutdown_children_uses_engine_process_timeout(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fault_tolerant", "was_ready"), [(False, False), (True, False), (False, True)]
+)
 async def test_handles_child_exit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, fault_tolerant: bool, was_ready: bool
 ):
-    supervisor = DPSupervisor(_make_unit_args())
+    supervisor = DPSupervisor(_make_unit_args(enable_fault_tolerance=fault_tolerant))
+    supervisor._was_ready = was_ready
     supervisor._processes = [
         SimpleNamespace(
             name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True
@@ -337,31 +341,31 @@ async def test_fault_tolerant_keeps_survivors_on_child_exit(
         SimpleNamespace(name="APIServer_DPRank_5", is_alive=lambda: False),
     ]
 
-    async def fake_probe(*_args, **_kwargs) -> bool:
-        return True
+    async def fake_child_state(_session, _port) -> str:
+        return "ok"
 
-    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+    monkeypatch.setattr(supervisor, "_child_state", fake_child_state)
 
     await supervisor._monitor_children()
     assert supervisor._removed_ports == {8001}
     assert not supervisor._shutdown_event.is_set()
+    assert next(survivor_alive, None) is None
 
 
 @pytest.mark.asyncio
 async def test_fault_tolerant_waits_while_recovering(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A halted rank reported as recovering by its sentinel is not torn down."""
+    """A recovering rank is not torn down; a gone one only after the threshold."""
     supervisor = DPSupervisor(
         _make_unit_args(enable_fault_tolerance=True, dp_supervisor_probe_interval_s=0.0)
     )
     supervisor.child_ports = [8000]
-    probe_results = iter([True])
-    states = iter(["recovering", "gone"])
+    states = iter(["gone", "recovering", "gone", "gone", "gone"])
     ready_seen: list[bool] = []
 
     async def fake_probe(*_args, **_kwargs) -> bool:
-        return next(probe_results)
+        return True
 
     async def fake_child_state(_session, _port) -> str:
         ready_seen.append(supervisor.is_ready)
@@ -371,8 +375,29 @@ async def test_fault_tolerant_waits_while_recovering(
     monkeypatch.setattr(supervisor, "_child_state", fake_child_state)
 
     await supervisor._probe_all_children()
-    assert ready_seen == [True, False]
+    assert ready_seen == [True, False, False, False, False]
     assert supervisor.is_alive is False
+
+
+@pytest.mark.asyncio
+async def test_fault_tolerant_ready_with_one_serving_rank(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """One healthy rank keeps /ready up; removed ranks are not probed."""
+    supervisor = DPSupervisor(_make_unit_args(enable_fault_tolerance=True))
+    supervisor.child_ports = [8000, 8001, 8002]
+    supervisor._removed_ports = {8002}
+    probed: list[int] = []
+
+    async def fake_child_state(_session, port) -> str:
+        probed.append(port)
+        return "ok" if port == 8000 else "gone"
+
+    monkeypatch.setattr(supervisor, "_child_state", fake_child_state)
+
+    assert await supervisor._probe_fault_tolerant(None) is True
+    assert sorted(probed) == [8000, 8001]
+    assert supervisor.is_ready is True
 
 
 @pytest.mark.asyncio
@@ -394,7 +419,11 @@ async def test_child_state_maps_sentinel_status():
 
         return SimpleNamespace(get=lambda *_args, **_kwargs: FakeResponse())
 
-    for status, expected in [("healthy", "ok"), ("unhealthy", "recovering")]:
+    for status, expected in [
+        ("healthy", "ok"),
+        ("unhealthy", "recovering"),
+        ("dead", "gone"),
+    ]:
         session = session_for({"engines": [{"status": status}]})
         assert await supervisor._child_state(session, 8000) == expected
     assert await supervisor._child_state(session_for({}), 8000) == "gone"
@@ -419,8 +448,10 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
         async def serve(self):
             raise ValueError("supervisor boom")
 
+    alive_seen: list[bool] = []
+
     async def fake_shutdown_children(self):
-        return None
+        alive_seen.append(self.is_alive)
 
     def fake_start_children(self):
         return None
@@ -441,6 +472,7 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
 
     with pytest.raises(ValueError, match="supervisor boom"):
         await supervisor.run()
+    assert alive_seen == [False]
 
 
 # ---------------------------------------------------------------------------

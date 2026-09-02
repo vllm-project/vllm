@@ -278,8 +278,11 @@ class DPSupervisor:
         ]
         self._is_ready = False
         self._was_ready = False
-        self._fault_tolerant = getattr(args, "enable_fault_tolerance", False)
+        self._fault_tolerant = getattr(args, "enable_fault_tolerance", False) and not (
+            envs.VLLM_USE_RUST_FRONTEND and envs.VLLM_RUST_FRONTEND_PATH
+        )
         self._removed_ports: set[int] = set()
+        self._probe_failures = 0
         self._processes: list[BaseProcess] = []
         self._shutdown_event = asyncio.Event()
         self._shutdown_signal = signal.SIGTERM
@@ -290,7 +293,7 @@ class DPSupervisor:
 
     @property
     def is_alive(self) -> bool:
-        return self._was_ready and not self._shutdown_event.is_set()
+        return not self._shutdown_event.is_set()
 
     async def _child_state(self, session: aiohttp.ClientSession, port: int) -> str:
         """The rank's fault-tolerance state: "ok", "recovering" or "gone"."""
@@ -311,11 +314,7 @@ class DPSupervisor:
         return "recovering" if "unhealthy" in statuses else "gone"
 
     async def _probe_fault_tolerant(self, session: aiohttp.ClientSession) -> bool:
-        """Readiness follows the ranks' sentinels once the group has been ready.
-
-        A halted rank is recovering and a removed rank is gone; returns False
-        (and starts shutdown) only when no rank is serving or recovering.
-        """
+        """Poll the ranks' sentinels; False once no rank is serving or recovering."""
         states = await asyncio.gather(
             *(
                 self._child_state(session, port)
@@ -325,6 +324,10 @@ class DPSupervisor:
         )
         self._is_ready = "ok" in states
         if self._is_ready or "recovering" in states:
+            self._probe_failures = 0
+            return True
+        self._probe_failures += 1
+        if self._probe_failures < self.args.dp_supervisor_probe_failure_threshold:
             return True
         logger.info("DPSupervisor found no serving DP Servers.")
         self._shutdown_event.set()
@@ -356,6 +359,7 @@ class DPSupervisor:
 
             await monitor_task
         finally:
+            self._shutdown_event.set()
             self._is_ready = False
             await self._shutdown_children()
 
@@ -551,8 +555,7 @@ class DPSupervisor:
                     logger.info("DPSupervisor found %s exited DP Servers.", len(dead))
                     break
                 for process in dead:
-                    # An exited rank with live peers was removed by the engine
-                    # (fault-tolerant scale-down); keep serving on the rest.
+                    # An exited rank with live peers was removed by the engine.
                     port = self.child_ports[self._processes.index(process)]
                     if port not in self._removed_ports:
                         self._removed_ports.add(port)
