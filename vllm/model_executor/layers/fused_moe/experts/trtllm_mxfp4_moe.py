@@ -129,17 +129,6 @@ class TrtLlmMxfp4ExpertsBase:
         return False
 
     @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        SUPPORTED_W_A = [
-            (kMxfp4Static, None),
-            (kMxfp4Static, kMxfp8Dynamic),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
-
-    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
@@ -171,6 +160,17 @@ class TrtLlmMxfp4ExpertsMonolithic(
 
     def supports_routing_replay_capture(self) -> bool:
         return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_parallel_config(
@@ -286,11 +286,12 @@ class TrtLlmMxfp4ExpertsMonolithic(
         return routed_output
 
 
-class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
+class TrtLlmMxfp4ExpertsModularBase(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModular):
     """
-    Modular version of the MXFP4 TRTLLM kernel (just the experts).
+    Modular base version of the MXFP4 TRTLLM kernel (just the experts).
     Wraps flashinfer.trtllm_fp4_block_scale_routed_moe().
-    Moved from trtllm_moe.py.
+    The subclasses for this are split because only the mxfp4+mxfp8 experts support
+    PaddedStandard format.
     """
 
     @staticmethod
@@ -453,3 +454,34 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             )
 
         return output
+
+
+class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class TrtLlmMxfp4Mxfp8ExpertsModular(TrtLlmMxfp4ExpertsModularBase):
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kMxfp4Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def activation_formats() -> list[mk.FusedMoEActivationFormat]:
+        return [
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.PaddedStandard,
+        ]

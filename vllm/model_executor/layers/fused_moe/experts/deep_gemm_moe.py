@@ -150,10 +150,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def activation_formats() -> list[mk.FusedMoEActivationFormat]:
-        return [
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.PaddedStandard,
-        ]
+        return [mk.FusedMoEActivationFormat.Standard]
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -420,7 +417,10 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def activation_formats() -> list[mk.FusedMoEActivationFormat]:
-        return [mk.FusedMoEActivationFormat.Standard]
+        return [
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.PaddedStandard,  # only on blackwell
+        ]
 
     @staticmethod
     def _supports_current_device() -> bool:
