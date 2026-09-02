@@ -1100,6 +1100,72 @@ async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
     assert "Four" in content
 
 
+@pytest.fixture(scope="module")
+def harmony_default_server():
+    """gpt-oss render server with NO parser flags.
+
+    Regression fixture: the model-default reasoning parser
+    ("openai_gptoss", applied by verify_and_update_config) must be
+    resolved by the render server without any --reasoning-parser flag,
+    otherwise harmony markup leaks unparsed into derender output.
+    """
+    _ensure_harmony_vocab()
+    with RemoteLaunchRenderServer(
+        HARMONY_MODEL, ["--trust-remote-code"]
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def harmony_default_client(harmony_default_server):
+    async with httpx.AsyncClient(
+        base_url=harmony_default_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.mark.asyncio
+async def test_e2e_harmony_reasoning_default_parser(
+    harmony_default_client, harmony_tokenizer
+):
+    """GPT-OSS reasoning parses on a bare launch (no parser flags)."""
+    messages = [{"role": "user", "content": "Add 2 and 3."}]
+    gen_req = await _e2e_render_chat(harmony_default_client, HARMONY_MODEL, messages)
+
+    reasoning_text = "The user wants 2 plus 3."
+    answer_text = "The answer is 5."
+    assistant_msg = {
+        "role": "assistant",
+        "thinking": reasoning_text,
+        "content": answer_text,
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+
+    decoded = harmony_tokenizer.decode(output_ids)
+    if reasoning_text not in decoded:
+        pytest.skip("Harmony template did not render thinking")
+
+    resp = await harmony_default_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "include_reasoning": True,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    msg = resp.json()["choices"][0]["message"]
+    assert msg["reasoning"] is not None
+    assert reasoning_text in msg["reasoning"]
+    assert answer_text in (msg["content"] or "")
+    assert "<|channel|>" not in (msg["content"] or "")
+
+
 @pytest.mark.asyncio
 async def test_e2e_harmony_reasoning(harmony_client, harmony_tokenizer):
     """GPT-OSS reasoning: analysis channel extracted."""
