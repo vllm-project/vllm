@@ -141,9 +141,11 @@ class NixlBaseConnectorWorker:
             # read across all regions, same for [3], but group0-group1 blocks will
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
-            block_arr = np.concatenate(block_ids)[None, :]
-            region_ids = np.arange(self.num_regions)[:, None]
-            return (region_ids * num_blocks + block_arr).flatten()
+            block_arr = np.concatenate(
+                [np.asarray(g, dtype=np.int32) for g in block_ids]
+            )[None, :]
+            region_ids = np.arange(self.num_regions, dtype=np.int32)[:, None]
+            return (region_ids * num_blocks + block_arr).ravel()
 
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity, expanded by
@@ -153,18 +155,18 @@ class NixlBaseConnectorWorker:
         logical_blocks = dst_num_blocks // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
-            group_arr = np.asarray(group)
+            group_arr = np.asarray(group, dtype=np.int32)
             spec_type = self._group_spec_types[i]
             if _is_attention_spec(spec_type):
                 # A scratch cache lives only in its own regions; every other
                 # attention group spans all of them.
                 fa_region_ids = (
-                    np.asarray(self._scratch_region_indices, dtype=np.int64)
+                    np.asarray(self._scratch_region_indices, dtype=np.int32)
                     if spec_type is CircularBufferSpec
-                    else np.arange(self.num_regions)
+                    else np.arange(self.num_regions, dtype=np.int32)
                 )[:, None]
                 all_descs.append(
-                    (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
+                    (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
                 )
             elif _is_ssm_spec(spec_type):
                 # NOTE (NickLucche) SSM and Attention block regions can
@@ -175,16 +177,16 @@ class NixlBaseConnectorWorker:
                 # P and D can have different num_blocks (and thus
                 # different FA desc counts).
                 ssm_region_ids = (
-                    np.arange(num_ssm_regions, num_ssm_regions + 1)
+                    np.arange(num_ssm_regions, num_ssm_regions + 1, dtype=np.int32)
                     if i == self._ple_group_index
-                    else np.arange(num_ssm_regions)
+                    else np.arange(num_ssm_regions, dtype=np.int32)
                 )[:, None]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
                         + group_arr[None, :]
                         + num_fa_descs
-                    ).flatten()
+                    ).ravel()
                 )
             else:
                 raise ValueError(
