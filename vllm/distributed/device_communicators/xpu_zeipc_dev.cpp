@@ -13,6 +13,13 @@
 // with Signal/RankSignals: publish the local chunk into the peer-visible
 // staging buffer, handshake through per-workgroup flags, reduce.  The host
 // only enqueues; it never blocks on the peer.
+//
+// The kernel is graph-capture safe: it is submitted to whatever queue the
+// caller passes (the one currently recording, if any), and it carries no
+// per-call state from the host.  The sequence number that drives the
+// handshake and selects the staging slot is a per-workgroup counter in
+// device memory that the kernel itself advances, so a replayed launch keeps
+// making progress with arguments frozen at capture time.
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
@@ -25,7 +32,6 @@ namespace {
 
 namespace syclex = sycl::ext::oneapi::experimental;
 
-sycl::queue* g_q = nullptr;
 sycl::kernel* g_k[3] = {nullptr, nullptr, nullptr};
 
 const char* kKernelSource = R"CLC(
@@ -73,12 +79,32 @@ inline void handshake(volatile __global atomic_uint* lflags,
    handshake and no kernel-wide barrier is needed.  Phase 1 stages the own
    chunk for the peer, phase 2 reduces the local input against the peer's
    staged chunk.  8-wide vectors with a scalar tail; a two-operand add
-   rounds once, which is bit-identical to fp32 accumulation. */
+   rounds once, which is bit-identical to fp32 accumulation.
+
+   seq comes from a per-workgroup counter (own cache line, like the flags)
+   that only this rank's kernels touch, so plain loads and stores suffice;
+   launches on an in-order queue serialize, so each launch sees the value
+   the previous one left.  Its parity picks one of two staging slots.
+   That double buffer needs no release barrier: this rank reuses a slot at
+   seq+2 only after its seq+1 handshake completed, which required the
+   peer's seq+1 signal, which the peer sends only after its own kernel seq
+   (every read of this rank's slot included) finished on its in-order
+   queue. */
 #define AR_BODY(REDV, REDS)                                              \
   size_t wg = get_group_id(0);                                           \
+  size_t lid = get_local_id(0);                                          \
+  __local uint lseq;                                                     \
+  if (lid == 0) {                                                        \
+    uint s = counters[wg * 16] + 1;                                      \
+    counters[wg * 16] = s;                                               \
+    lseq = s;                                                            \
+  }                                                                      \
+  work_group_barrier(CLK_LOCAL_MEM_FENCE);                               \
+  uint seq = lseq;                                                       \
+  my_stage += (seq & 1) * slot;                                          \
+  peer_stage += (seq & 1) * slot;                                        \
   size_t start = wg * chunk;                                             \
   size_t end = min(n, start + chunk);                                    \
-  size_t lid = get_local_id(0);                                          \
   size_t ls = get_local_size(0);                                         \
   size_t vend = start + ((end - start) / 8) * 8;                         \
   for (size_t i = start + lid * 8; i < vend; i += ls * 8)                \
@@ -97,8 +123,9 @@ __kernel void ar_bf16(__global ushort* dst, __global const ushort* input,
                       __global ushort* my_stage,
                       __global const ushort* peer_stage,
                       volatile __global atomic_uint* lflags,
-                      volatile __global atomic_uint* pflags, uint seq,
-                      ulong n, ulong chunk) {
+                      volatile __global atomic_uint* pflags,
+                      __global uint* counters, ulong n, ulong chunk,
+                      ulong slot) {
   AR_BODY(vstore8(f2bf8(bf2f8(vload8(0, input + i)) +
                         bf2f8(vload8(0, peer_stage + i))),
                   0, dst + i),
@@ -109,8 +136,9 @@ __kernel void ar_f16(__global half* dst, __global const half* input,
                      __global half* my_stage,
                      __global const half* peer_stage,
                      volatile __global atomic_uint* lflags,
-                     volatile __global atomic_uint* pflags, uint seq,
-                     ulong n, ulong chunk) {
+                     volatile __global atomic_uint* pflags,
+                     __global uint* counters, ulong n, ulong chunk,
+                     ulong slot) {
   AR_BODY(vstore_half8_rte(vload_half8(0, input + i) +
                                vload_half8(0, peer_stage + i),
                            0, dst + i),
@@ -121,22 +149,24 @@ __kernel void ar_f32(__global float* dst, __global const float* input,
                      __global float* my_stage,
                      __global const float* peer_stage,
                      volatile __global atomic_uint* lflags,
-                     volatile __global atomic_uint* pflags, uint seq,
-                     ulong n, ulong chunk) {
+                     volatile __global atomic_uint* pflags,
+                     __global uint* counters, ulong n, ulong chunk,
+                     ulong slot) {
   AR_BODY(vstore8(vload8(0, input + i) + vload8(0, peer_stage + i), 0,
                   dst + i),
           dst[i] = input[i] + peer_stage[i])
 }
 )CLC";
 
-// init(queue_ptr) -> None ; compiles the kernels for torch's queue.
+// init(queue_ptr) -> None ; compiles the kernels for the queue's context.
+// queue_ptr is torch.xpu.Stream.sycl_queue (the sycl::queue* as an int).
 PyObject* py_init(PyObject*, PyObject* args) {
   unsigned long long qp;
   if (!PyArg_ParseTuple(args, "K", &qp)) return nullptr;
-  g_q = reinterpret_cast<sycl::queue*>(qp);
+  auto* q = reinterpret_cast<sycl::queue*>(qp);
   try {
     auto src = syclex::create_kernel_bundle_from_source(
-        g_q->get_context(), syclex::source_language::opencl,
+        q->get_context(), syclex::source_language::opencl,
         std::string(kKernelSource));
     // static: keeps the executable bundle (and its kernels) alive
     static auto kb =
@@ -153,27 +183,33 @@ PyObject* py_init(PyObject*, PyObject* args) {
   Py_RETURN_NONE;
 }
 
-// launch(dtype_code, dst, input, my_stage, peer_stage, lflags, pflags,
-//        seq, n, chunk, nwg, wgsize) -> None ; enqueue only, never blocks.
+// launch(queue_ptr, dtype_code, dst, input, my_stage, peer_stage, lflags,
+//        pflags, counters, n, chunk, slot, nwg, wgsize) -> None
+// Enqueue only, never blocks.  queue_ptr must be the caller's current
+// stream on every call: during graph capture that is the recording queue,
+// and a launch on any other queue would run eagerly and be missing from
+// the replay.  my_stage/peer_stage are slot-0 base pointers; slot is the
+// element stride to slot 1.
 PyObject* py_launch(PyObject*, PyObject* args) {
+  unsigned long long qp;
   int dt;
-  unsigned long long dst, in, ms, ps, lf, pf, n, chunk;
-  unsigned int seq;
+  unsigned long long dst, in, ms, ps, lf, pf, ctr, n, chunk, slot;
   int nwg, wgsize;
-  if (!PyArg_ParseTuple(args, "iKKKKKKIKKii", &dt, &dst, &in, &ms, &ps, &lf,
-                        &pf, &seq, &n, &chunk, &nwg, &wgsize))
+  if (!PyArg_ParseTuple(args, "KiKKKKKKKKKKii", &qp, &dt, &dst, &in, &ms, &ps,
+                        &lf, &pf, &ctr, &n, &chunk, &slot, &nwg, &wgsize))
     return nullptr;
   try {
-    g_q->submit([&](sycl::handler& h) {
+    reinterpret_cast<sycl::queue*>(qp)->submit([&](sycl::handler& h) {
       h.set_arg(0, reinterpret_cast<void*>(dst));
       h.set_arg(1, reinterpret_cast<void*>(in));
       h.set_arg(2, reinterpret_cast<void*>(ms));
       h.set_arg(3, reinterpret_cast<void*>(ps));
       h.set_arg(4, reinterpret_cast<void*>(lf));
       h.set_arg(5, reinterpret_cast<void*>(pf));
-      h.set_arg(6, (uint32_t)seq);
+      h.set_arg(6, reinterpret_cast<void*>(ctr));
       h.set_arg(7, (uint64_t)n);
       h.set_arg(8, (uint64_t)chunk);
+      h.set_arg(9, (uint64_t)slot);
       h.parallel_for(sycl::nd_range<1>((size_t)nwg * wgsize, (size_t)wgsize),
                      *g_k[dt]);
     });
@@ -184,15 +220,8 @@ PyObject* py_launch(PyObject*, PyObject* args) {
   Py_RETURN_NONE;
 }
 
-// wait() -> None ; host-synchronize torch's queue (init/smoke-test only).
-PyObject* py_wait(PyObject*, PyObject*) {
-  g_q->wait();
-  Py_RETURN_NONE;
-}
-
 PyMethodDef methods[] = {{"init", py_init, METH_VARARGS, nullptr},
                          {"launch", py_launch, METH_VARARGS, nullptr},
-                         {"wait", py_wait, METH_NOARGS, nullptr},
                          {nullptr, nullptr, 0, nullptr}};
 
 struct PyModuleDef mod = {PyModuleDef_HEAD_INIT, "vllm_xpu_zeipc_dev", nullptr,

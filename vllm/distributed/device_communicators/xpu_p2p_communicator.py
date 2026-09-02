@@ -66,7 +66,7 @@ class XpuP2pCommunicator(XpuCommunicator):
     _TIMEOUT_S = 60.0
 
     # Lets a subclass extend the exported staging region (the device-sync
-    # variant appends its flag page).
+    # variant appends its own slots and signal pages).
     _EXTRA_SHARED_BYTES = 0
 
     def __init__(

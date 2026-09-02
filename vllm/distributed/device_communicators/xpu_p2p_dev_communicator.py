@@ -35,18 +35,36 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     host-sync protocol, and beyond that to oneCCL.
     """
 
-    # The flag page appended to the exported staging region: one uint32 per
-    # workgroup on its own cache line, 64 workgroups max.
-    _EXTRA_SHARED_BYTES = 4096
     _MAX_WGS = 64
     _WG_SIZE = 256
 
-    # The kernel's vectorized PCIe reads reach ~12 GB/s, below the ~28 GB/s
-    # of the copy engine the host-sync parent uses, so the parent overtakes
-    # this path for large messages (measured bf16: 100 KiB 12.9us dev vs
-    # 16.6us host-sync, 256 KiB 25.0us vs 20.7us, 1 MiB 85.5us vs 54.1us).
-    # Above this cap all_reduce falls through to the parent.
-    _DEV_MAX_BYTES = 128 * 1024
+    # Eager crossover. The kernel's vectorized PCIe reads reach ~12 GB/s,
+    # below the ~28 GB/s of the copy engine the host-sync parent uses, so
+    # the parent overtakes this path for large messages (measured bf16:
+    # 100 KiB 12.9us dev vs 16.6us host-sync, 256 KiB 25.0us vs 20.7us,
+    # 1 MiB 85.5us vs 54.1us). Above this, eager calls fall through to the
+    # parent.
+    _DEV_EAGER_BYTES = 128 * 1024
+
+    # Capacity. Under XPU graph capture the kernel is the only recordable
+    # path (see all_reduce), so it must hold the largest all-reduce a
+    # captured batch issues: max_cudagraph_capture_size tokens x hidden x
+    # 2 bytes, 8 MiB at 512 x 8192. The communicator cannot derive that
+    # bound itself (which tensors a model all-reduces, and how capture
+    # sizes scale with speculative tokens, is the model's business), so
+    # it is fixed and all_reduce raises if a capture exceeds it. The
+    # kernel's PCIe read rate is flat at ~12 GB/s of payload from 512 KiB
+    # up to this size (measured bf16 under replay: 1.31 MB 116us, 4 MiB
+    # 340us, 8 MiB 696us; oneCCL 350us, 998us, 2053us).
+    _DEV_SLOT_BYTES = 8 << 20
+
+    # Appended to the parent's exported staging region, in this order: the
+    # kernel's own pair of staging slots, one page of per-workgroup
+    # handshake flags (uint32 each on its own cache line, written by the
+    # peer), one page of per-workgroup sequence counters (same indexing,
+    # written only by this rank's kernels).
+    _PAGE_BYTES = 4096
+    _EXTRA_SHARED_BYTES = 2 * _DEV_SLOT_BYTES + 2 * _PAGE_BYTES
 
     def __init__(
         self,
@@ -83,16 +101,20 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         try:
             self._dev_ext = self._load_dev_ext()
             self._dev_ext.init(torch.xpu.current_stream().sycl_queue)
-            # The flag page lives at the tail of the exported region, so
-            # the peer's flag page is visible at the same offset of the
-            # mapped peer buffer. Flags are monotonic sequence numbers and
-            # must start below any seq the kernels will use.
-            flags = self._stage[2 * self.MAX_BYTES :]
-            flags.zero_()
+            # Same offsets on both ranks, so the peer's slots and flags are
+            # visible at the same offsets of the mapped peer buffer. Flags
+            # and counters are monotonic sequence numbers and must start
+            # below any seq the kernels will use.
+            slots_off = 2 * self.MAX_BYTES
+            flags_off = slots_off + 2 * self._DEV_SLOT_BYTES
+            counters_off = flags_off + self._PAGE_BYTES
+            self._stage[flags_off:].zero_()
             torch.xpu.synchronize()
-            self._my_flags = self._stage.data_ptr() + 2 * self.MAX_BYTES
-            base = self._peer_stage  # parent: peer's staging base pointer
-            self._peer_flags = base + 2 * self.MAX_BYTES
+            self._dev_slots = self._stage.data_ptr() + slots_off
+            self._peer_dev_slots = self._peer_stage + slots_off
+            self._my_flags = self._stage.data_ptr() + flags_off
+            self._peer_flags = self._peer_stage + flags_off
+            self._counters = self._stage.data_ptr() + counters_off
             ok = True
         except Exception:
             logger.warning(
@@ -101,7 +123,9 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
                 exc_info=True,
             )
         # Both ranks must have zeroed their flags before either launches a
-        # kernel that signals into them.
+        # kernel that signals into them.  Counters are rank-local, but the
+        # kernel derives every seq from them, so zeroing them at the same
+        # point keeps both ranks' seqs identical from the first launch.
         if not self._all_ranks_ok(ok):
             return
 
@@ -155,38 +179,55 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     def _dev_all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if not input_.is_contiguous():
             input_ = input_.contiguous()
-        # Same parity double-buffering as the parent; the slot-reuse safety
-        # argument holds unchanged because a rank's kernel s+1 signals only
-        # after its kernel s (including every read of the peer slot) has
-        # completed on its in-order queue.
-        seq = self._seq + 1
-        parity = seq & 1
-        off = parity * self.MAX_BYTES
         numel = input_.numel()
         nwg, chunk = self._launch_cfg(numel)
         output = torch.empty_like(input_)
+        # Every argument is a function of the tensor alone; the sequence
+        # number and slot parity come from a device-side counter, so a
+        # launch recorded into an XPU graph stays correct on replay.
         self._dev_ext.launch(
+            torch.xpu.current_stream().sycl_queue,
             self._DTYPE_CODE[input_.dtype],
             output.data_ptr(),
             input_.data_ptr(),
-            self._stage.data_ptr() + off,
-            self._peer_stage + off,
+            self._dev_slots,
+            self._peer_dev_slots,
             self._my_flags,
             self._peer_flags,
-            seq,
+            self._counters,
             numel,
             chunk,
+            self._DEV_SLOT_BYTES // input_.element_size(),
             nwg,
             self._WG_SIZE,
         )
-        self._seq = seq
         return output
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
-        if (
-            self._dev_ready
-            and input_.dtype in self._SUPPORTED_DTYPES
-            and input_.nbytes <= self._DEV_MAX_BYTES
-        ):
+        dev_ok = self._dev_ready and input_.dtype in self._SUPPORTED_DTYPES
+        # Eager: dispatch by speed.
+        if dev_ok and input_.nbytes <= self._DEV_EAGER_BYTES:
             return self._dev_all_reduce(input_)
-        return super().all_reduce(input_)
+        if not torch.xpu.is_current_stream_capturing():
+            return super().all_reduce(input_)
+        # Capturing: dispatch by capability. Neither fallback can be
+        # recorded (the parent's protocol blocks the host on a spin loop,
+        # oneCCL rejects graph recording); both would run eagerly during
+        # capture and be missing from the replay, which is silent wrong
+        # output. A slower kernel beats that; a raise beats it too.
+        if dev_ok and input_.nbytes <= self._DEV_SLOT_BYTES:
+            return self._dev_all_reduce(input_)
+        if not self._dev_ready:
+            reason = "device-sync path unavailable"
+        elif input_.dtype not in self._SUPPORTED_DTYPES:
+            reason = f"dtype {input_.dtype} unsupported"
+        else:
+            reason = (
+                f"{input_.nbytes} bytes exceeds the {self._DEV_SLOT_BYTES} "
+                "byte staging slot; lower max_cudagraph_capture_size (or "
+                "max_num_seqs), or set VLLM_XPU_ENABLE_XPU_GRAPH=0"
+            )
+        raise RuntimeError(
+            f"XPU custom all-reduce ({self.unique_name}) cannot be "
+            f"graph-captured: {reason}"
+        )
