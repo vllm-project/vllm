@@ -547,6 +547,143 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         connector.connector_worker = None
 
 
+def test_hybrid_gdn_transfer_params_keep_pairing_when_only_producer_has_nulls(
+    monkeypatch,
+):
+    """A producer-side placeholder must not shift the Mamba group's pairing.
+
+    This is the shape real traffic takes: MambaManager's align mode voids one
+    interior block per decode step, while the consumer list never carries a
+    placeholder at all (get_unhashed_block_ids_all_groups skips is_null), and a
+    partial prefix cache hit leaves the producer with more blocks than the
+    consumer asked for.
+
+    Filtering the two lists separately shortens only the producer's, so its
+    right-alignment lands one block off and every pair after the gap is wrong.
+    Dropping the pair keeps index i naming the same block on both sides.
+    """
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+
+        block_len = 0x100
+        transfer_id = "xfer-gdn-producer-null"
+
+        async def build_transfer_params():
+            send_meta = SendBlockMeta(
+                p_req_id="p-gdn-producer-null",
+                transfer_id=transfer_id,
+                local_block_ids=[
+                    [10, 11],
+                    # GDN group: 4 blocks, one voided in the middle.
+                    [3, NULL_BLOCK_ID, 4, 5],
+                ],
+                ready=asyncio.Event(),
+            )
+            return await worker._build_transfer_params(
+                [("d-gdn-producer-null", send_meta)],
+                xfer_meta,
+                local_regions,
+                remote_regions,
+            )
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={
+                "d-gdn-producer-null": (
+                    transfer_id,
+                    [
+                        [30, 31],
+                        # Consumer needs the last 3, and carries no placeholder.
+                        [7, 8, 9],
+                    ],
+                )
+            },
+            kv_caches_base_addr=[],
+            block_lens=[],
+            kv_block_lens=[],
+        )
+
+        local_regions = [
+            TransferRegion(
+                layer_name="model.layers.1.linear_attn",
+                layer_index=1,
+                base_addr=0x5000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=0,
+            ),
+        ]
+        remote_regions = [
+            TransferRegion(
+                layer_name="model.layers.1.linear_attn",
+                layer_index=1,
+                base_addr=0x6000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=0,
+            ),
+        ]
+
+        src_ptrs, dst_ptrs, lengths, err_reqs, err_msg = asyncio.run(
+            build_transfer_params()
+        )
+
+        assert err_reqs == []
+        assert err_msg is None
+        # Right-aligned to the consumer's 3 blocks, the producer group reads
+        #   idx  0     1  2
+        #   P    null  4  5
+        #   D    7     8  9
+        # so column 0 goes and 4->8, 5->9 remain. Filtering the producer alone
+        # would leave [3, 4, 5] and pair 3->7, which is the block before.
+        assert src_ptrs == [
+            0x5000 + 4 * block_len,
+            0x1000 + 10 * block_len,
+        ]
+        assert dst_ptrs == [
+            0x6000 + 8 * block_len,
+            0x2000 + 30 * block_len,
+        ]
+        assert lengths == [2 * block_len, 2 * block_len]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
