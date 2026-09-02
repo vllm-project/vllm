@@ -28,6 +28,9 @@ from vllm.config.quantization import (
 )
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+    EmulationMxfp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
@@ -82,6 +85,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils import quant_utils
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
     amax_for_tp_weight_quant,
@@ -687,6 +693,12 @@ def test_online_quantization(
         o_proj.quant_method.kernel, MarlinMxfp8LinearKernel
     ):
         assert o_proj.weight.dtype == torch.int32
+    elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
+        o_proj.quant_method.kernel, EmulationMxfp8LinearKernel
+    ):
+        assert o_proj.weight.dtype == torch.bfloat16
+    elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
+        assert o_proj.weight.dtype == MXFP8_VALUE_DTYPE
     elif quant_scheme == "mxfp4":
         assert o_proj.weight.dtype == torch.uint8
     elif current_platform.is_cuda() or current_platform.is_xpu():
