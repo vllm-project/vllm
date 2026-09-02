@@ -34,20 +34,20 @@ class ROCmLatentMoERunner(MoERunner):
 
         transform = self.routed_output_transform
         up_proj = getattr(transform, "up_proj", None)
-        tp_world = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
 
         self._up_proj_shard_size = 0
         self._tail_shardable = (
             up_proj is not None
-            and tp_world > 1
-            and up_proj.weight.shape[0] % tp_world == 0
+            and tp_size > 1
+            and up_proj.weight.shape[0] % tp_size == 0
             and self._shared_experts is not None
             and not self.moe_config.is_sequence_parallel
             and self.routed_scaling_factor == 1.0
         )
         if self._tail_shardable:
             assert up_proj is not None
-            self._up_proj_shard_size = up_proj.weight.shape[0] // tp_world
+            self._up_proj_shard_size = up_proj.weight.shape[0] // tp_size
         else:
             logger.warning_once(
                 "K3 latent-MoE tail is not shardable under this config, "
