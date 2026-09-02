@@ -52,7 +52,7 @@ class _DMADescriptors(NamedTuple):
 
 
 @dataclass
-class _ExactMirrorMapping:
+class _SlotMappingStaging:
     stream: torch.Stream
     event: torch.Event
     slots: torch.Tensor
@@ -93,7 +93,7 @@ def _flatten_row_mirrors(
     )
 
 
-def _select_exact_row_mirrors(
+def _select_written_row_mirrors(
     candidates: tuple[SparseKVRowMirror, ...],
     source_slots: np.ndarray,
 ) -> tuple[SparseKVRowMirror, ...]:
@@ -181,7 +181,7 @@ class HiSparseConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         speculative_config = vllm_config.speculative_config
-        self.exact_row_mirrors = bool(
+        self.refines_row_mirrors = bool(
             vllm_config.scheduler_config.async_scheduling
             and speculative_config is not None
             and speculative_config.use_multi_module_mtp()
@@ -267,9 +267,9 @@ class HiSparseConnectorWorker:
         self.dma_stream = (
             torch.cuda.Stream(device=device) if self.is_host_writer else None
         )
-        self._exact_mapping = None
-        if self.is_host_writer and self.exact_row_mirrors:
-            self._exact_mapping = _ExactMirrorMapping(
+        self._slot_mapping_staging = None
+        if self.is_host_writer and self.refines_row_mirrors:
+            self._slot_mapping_staging = _SlotMappingStaging(
                 stream=torch.Stream(device=device),
                 event=torch.Event(),
                 slots=torch.empty(
@@ -394,8 +394,8 @@ class HiSparseConnectorWorker:
         current_stream().wait_event(previous_host_write_event)
         self._release_completed_dma_descriptors()
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
-        if self._exact_mapping is not None:
-            self._exact_mapping.candidates = mirrors
+        if self._slot_mapping_staging is not None:
+            self._slot_mapping_staging.candidates = mirrors
         self._set_row_mirrors(mirrors)
         self._row_mirrors_from_resident = metadata.row_mirrors_from_resident
         self._dma_submitted = False
@@ -403,7 +403,7 @@ class HiSparseConnectorWorker:
         for handle in self.cache_handles:
             handle.all_context_pages_resident = metadata.all_context_pages_resident
             handle.mirror_from_resident = (
-                self.exact_row_mirrors or metadata.row_mirrors_from_resident
+                self.refines_row_mirrors or metadata.row_mirrors_from_resident
             )
         self._copy_host_blocks(metadata.host_block_copies, previous_host_write_event)
         transfers = (
@@ -419,15 +419,8 @@ class HiSparseConnectorWorker:
             self._enqueue_pre_forward_transfers(pre_forward_transfers)
         else:
             self._post_forward_transfers.clear()
-        if (
-            not self.exact_row_mirrors
-            and self.is_host_writer
-            and self._row_mirror_num_rows
-        ):
-            for handle, callback in zip(
-                self.cache_handles, self._layer_mirror_callbacks
-            ):
-                handle.submit_layer_mirror = callback
+        if not self.refines_row_mirrors:
+            self._arm_layer_mirrors()
         self._pending_invalid_block_ids.extend(metadata.source_block_ids)
         if request_state_indices is not None:
             self.set_request_state_indices(request_state_indices)
@@ -443,12 +436,20 @@ class HiSparseConnectorWorker:
             handle.req_id_per_token = None
             handle.submit_layer_mirror = None
 
+    def _arm_layer_mirrors(self) -> None:
+        if not self.is_host_writer or not self._row_mirror_num_rows:
+            return
+        for handle, callback in zip(
+            self.cache_handles, self._layer_mirror_callbacks, strict=True
+        ):
+            handle.submit_layer_mirror = callback
+
     def stage_row_mirror_mapping(
         self, slot_mappings: torch.Tensor, num_tokens: int
     ) -> None:
-        if not self.is_host_writer or not self.exact_row_mirrors:
+        if not self.is_host_writer or not self.refines_row_mirrors:
             return
-        state = self._exact_mapping
+        state = self._slot_mapping_staging
         assert state is not None
         if state.num_tokens:
             raise RuntimeError("HiSparse row mapping was staged twice without use.")
@@ -470,19 +471,16 @@ class HiSparseConnectorWorker:
             )
             state.event.record(state.stream)
         state.num_tokens = num_tokens
-        for handle, callback in zip(
-            self.cache_handles, self._layer_mirror_callbacks, strict=True
-        ):
-            handle.submit_layer_mirror = callback
+        self._arm_layer_mirrors()
 
-    def _resolve_staged_row_mirrors(self) -> bool:
-        state = self._exact_mapping
+    def _try_refine_row_mirrors(self) -> bool:
+        state = self._slot_mapping_staging
         if state is None or not state.num_tokens:
             return True
         if not state.event.query():
             return False
         self._set_row_mirrors(
-            _select_exact_row_mirrors(
+            _select_written_row_mirrors(
                 state.candidates,
                 state.slots[: state.num_tokens].numpy(),
             )
@@ -491,8 +489,8 @@ class HiSparseConnectorWorker:
         state.num_tokens = 0
         return True
 
-    def _require_staged_row_mirrors(self) -> None:
-        if not self._resolve_staged_row_mirrors():
+    def _finish_row_mirror_refinement(self) -> None:
+        if not self._try_refine_row_mirrors():
             raise RuntimeError("HiSparse slot mapping copy outlived the model forward.")
 
     def _copy_host_blocks(
@@ -538,10 +536,8 @@ class HiSparseConnectorWorker:
             runtime.reset_hot_state()
 
     def finish_step(self) -> None:
-        if self.exact_row_mirrors:
-            self._require_staged_row_mirrors()
-            self._enqueue_host_mirror()
-            self._clear_forward_mirror_state()
+        if self.refines_row_mirrors:
+            self._finish_mirror_phase()
             self._enqueue_post_forward_transfers()
         if self.is_host_writer and self._dma_submitted:
             current_stream().wait_event(self.host_write_event)
@@ -701,13 +697,11 @@ class HiSparseConnectorWorker:
             return
         if layer_index in self._per_layer_mirrored:
             raise RuntimeError(f"HiSparse layer {layer_index} mirrored twice.")
-        if self.exact_row_mirrors:
-            if not self._resolve_staged_row_mirrors():
-                for cache in self.cache_handles:
-                    cache.submit_layer_mirror = None
-                return
-        else:
-            self._require_row_mirrors(handle.num_actual_tokens)
+        if not self._try_refine_row_mirrors():
+            for cache in self.cache_handles:
+                cache.submit_layer_mirror = None
+            return
+        self._require_row_mirrors(handle.num_actual_tokens)
         self._per_layer_mirrored.add(layer_index)
         next_layer = layer_index + 1
         if (
@@ -875,8 +869,7 @@ class HiSparseConnectorWorker:
         )
         if num_rows == 0:
             return
-        if not self.exact_row_mirrors:
-            self._require_row_mirrors(num_rows)
+        self._require_row_mirrors(num_rows)
         if self.is_host_writer:
             expected_layers = set(active_layer_indices)
             if self._per_layer_mirrored:
@@ -899,7 +892,7 @@ class HiSparseConnectorWorker:
                 self._enqueue_row_dma(active_layer_indices, ready_event=ready_event)
         num_written_tokens = (
             num_rows
-            if self.exact_row_mirrors
+            if self.refines_row_mirrors
             else min(cache.num_decode_tokens, num_rows)
         )
         if num_written_tokens:
@@ -911,17 +904,19 @@ class HiSparseConnectorWorker:
                         cache.req_id_per_token[:num_written_tokens],
                     )
 
+    def _finish_mirror_phase(self, ready_event: torch.Event | None = None) -> None:
+        for handle in self.cache_handles:
+            handle.submit_layer_mirror = None
+        self._finish_row_mirror_refinement()
+        self._enqueue_host_mirror(ready_event)
+        if self.refines_row_mirrors:
+            self._clear_forward_mirror_state()
+
     def finish_forward(self) -> None:
         compute_stream = current_stream()
         self._forward_ready_event.record()
-        for handle in self.cache_handles:
-            handle.submit_layer_mirror = None
-        if self.exact_row_mirrors:
-            self._require_staged_row_mirrors()
-        self._enqueue_host_mirror(self._forward_ready_event)
-        if self.exact_row_mirrors:
-            self._clear_forward_mirror_state()
-        else:
+        self._finish_mirror_phase(self._forward_ready_event)
+        if not self.refines_row_mirrors:
             self._enqueue_post_forward_transfers()
         if self.is_host_writer and not self._dma_submitted:
             self.host_write_event.record(compute_stream)
@@ -941,8 +936,8 @@ class HiSparseConnectorWorker:
     def shutdown(self) -> None:
         if not self._initialized:
             return
-        if self._exact_mapping is not None:
-            self._exact_mapping.stream.synchronize()
+        if self._slot_mapping_staging is not None:
+            self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
         release_pinned_state(

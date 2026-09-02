@@ -19,9 +19,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
-    _ExactMirrorMapping,
     _flatten_row_mirrors,
-    _select_exact_row_mirrors,
+    _select_written_row_mirrors,
+    _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -31,9 +31,12 @@ from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker = object.__new__(HiSparseConnectorWorker)
-    worker.exact_row_mirrors = False
-    worker._exact_mapping = None
+    worker.refines_row_mirrors = False
+    worker._slot_mapping_staging = None
+    worker._row_mirror_num_rows = 0
     worker._row_mirrors_from_resident = False
+    worker._per_layer_mirrored = set()
+    worker._submitted_mirror_layers = set()
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
     worker.host_write_events = (MagicMock(), MagicMock())
@@ -55,7 +58,7 @@ def test_hisparse_row_mirrors_follow_runner_request_order():
     )
 
 
-def test_hisparse_exact_gpu_slots_select_written_rows_from_async_envelope():
+def test_hisparse_gpu_slots_select_written_rows_from_async_envelope():
     """Rejected speculative rows must never become durable host KV."""
     candidates = (
         SparseKVRowMirror((100, 500), 1000, 4),
@@ -63,19 +66,19 @@ def test_hisparse_exact_gpu_slots_select_written_rows_from_async_envelope():
     )
     source_slots = np.array([102, 103, -1, 21, 22, 23], dtype=np.int64)
 
-    assert _select_exact_row_mirrors(candidates, source_slots) == (
+    assert _select_written_row_mirrors(candidates, source_slots) == (
         SparseKVRowMirror((102, 502), 1002, 2),
         SparseKVRowMirror((21, 301), 2001, 3),
     )
 
 
-def test_hisparse_exact_rows_preserve_scheduler_page_boundaries():
+def test_hisparse_written_rows_preserve_scheduler_page_boundaries():
     candidates = (
         SparseKVRowMirror((0,), 100, 4),
         SparseKVRowMirror((4,), 104, 4),
     )
 
-    assert _select_exact_row_mirrors(
+    assert _select_written_row_mirrors(
         candidates, np.array([2, 3, 4, 5], dtype=np.int64)
     ) == (
         SparseKVRowMirror((2,), 102, 2),
@@ -84,15 +87,15 @@ def test_hisparse_exact_rows_preserve_scheduler_page_boundaries():
 
 
 def test_hisparse_stages_reference_slots_on_copy_stream(monkeypatch):
-    """Exact async-MTP mirroring must stage GPU-written slots without a sync."""
+    """Async MTP must stage GPU-written slots without a sync."""
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
-    worker.exact_row_mirrors = True
+    worker.refines_row_mirrors = True
     worker._resident_group_id = 1
-    state = _ExactMirrorMapping(
+    state = _SlotMappingStaging(
         MagicMock(), MagicMock(), torch.empty(4, dtype=torch.int64)
     )
-    worker._exact_mapping = state
+    worker._slot_mapping_staging = state
     worker.cache_handles = []
     worker._layer_mirror_callbacks = ()
     worker._submitted_mirror_layers = set()
