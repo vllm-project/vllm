@@ -1141,6 +1141,7 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
+        self._require_tokenizer_for_hf_processor()
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
             use_fast=kwargs.pop("use_fast", True),

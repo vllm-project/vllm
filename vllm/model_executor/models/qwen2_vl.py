@@ -844,7 +844,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2VLConfig)
 
+    def _require_tokenizer_for_hf_processor(self) -> None:
+        if self.ctx.tokenizer is None:
+            raise ValueError(
+                "Cannot initialize the Qwen2-VL multimodal processor when "
+                "`skip_tokenizer_init=True`. Disable `--skip-tokenizer-init`."
+            )
+
     def get_hf_processor(self, **kwargs: object) -> Qwen2VLProcessor:
+        self._require_tokenizer_for_hf_processor()
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
