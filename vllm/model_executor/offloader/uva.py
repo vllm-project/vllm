@@ -121,6 +121,17 @@ class UVAOffloader(BaseOffloader):
             self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
             offloaded_parameters = True
 
+        if offloaded_parameters:
+            # Release per module rather than once after the loop: `make_layers`
+            # feeds `wrap_modules` a lazy generator, so module N+1 is built
+            # after N is offloaded. Moving a parameter to host drops its
+            # accelerator storage, but the caching allocator keeps the block,
+            # and under `expandable_segments` it extends the segment for the
+            # next module instead of reusing what was just freed -- so reserved
+            # memory grows with every offloaded module and loading OOMs
+            # mid-stack.
+            torch.accelerator.empty_cache()
+
         if offloaded_parameters and not self.uva_offloading:
             original_forward = module.forward
 
