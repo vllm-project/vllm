@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    activation_to_flashinfer_type,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -80,19 +81,33 @@ class TrtLlmFp8ExpertsBase:
         )
         if not supported:
             return supported, reason
-        # FlashInfer accepts gemm1_alpha/beta/clamp_limit only for MXFP8; the
-        # DeepSeek-FP8 block-scale kernel rejects them and the per-tensor kernel
-        # has no clamp at all, so a model-requested SwiGLU clamp cannot be
-        # honored on those paths.
+        # FlashInfer >= 0.6.18 applies gemm1_alpha/beta/clamp_limit for the
+        # MXFP8 and DeepSeek-FP8 block-scale kernels, and only with a SwiGLU
+        # activation; the per-tensor kernel has no clamp at all.
         if (
             moe_config.swiglu_limit is not None
             or moe_config.swiglu_alpha is not None
             or moe_config.swiglu_beta is not None
-        ) and (weight_key, activation_key) != (kMxfp8Static, kMxfp8Dynamic):
-            return False, (
-                "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
-                "parameters only for MXFP8 weights"
-            )
+        ):
+            if (weight_key, activation_key) not in (
+                (kMxfp8Static, kMxfp8Dynamic),
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            ):
+                return False, (
+                    "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
+                    "parameters only for block-scaled (MXFP8 / DeepSeek-FP8) "
+                    "weights"
+                )
+            # SILU maps to FlashInfer's Swiglu, so it names the accepted
+            # activation type without importing FlashInfer symbols here.
+            if activation_to_flashinfer_type(
+                moe_config.activation
+            ) != activation_to_flashinfer_type(MoEActivation.SILU):
+                return False, (
+                    "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
+                    "parameters only for SwiGLU activations, but got "
+                    f"{moe_config.activation}"
+                )
         if moe_config.num_experts > 2048:
             return False, (
                 "FlashInfer TRTLLM routing supports at most 2048 experts, "
