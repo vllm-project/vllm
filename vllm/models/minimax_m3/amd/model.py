@@ -711,6 +711,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
             indexer_kv_dtype=self.indexer_kv_dtype,
+            score_type=sparse_cfg.get("sparse_score_type", "max"),
         ).emits_sparse_block_table
         # impl is AttentionImplBase (broader than AttentionLayerBase's annotation).
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
@@ -1264,6 +1265,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 num_index_heads=num_index_heads,
                 index_head_dim=sparse_cfg["sparse_index_dim"],
                 indexer_kv_dtype=indexer_kv_dtype,
+                score_type=sparse_cfg.get("sparse_score_type", "max"),
             ).emits_sparse_block_table
             if emits_table and minimax_m3_use_aiter_sparse_pa(
                 num_kv_heads, emits_sparse_block_table=True

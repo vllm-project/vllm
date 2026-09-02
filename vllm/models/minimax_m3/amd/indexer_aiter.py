@@ -49,8 +49,14 @@ from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-# Page size == sparse block size == index-K block.
-PAGE_SIZE = 128
+# Compiled AITER MiniMax-M3 score/top-k contract (aiter#4787): the kernels are
+# instantiated for this shape only (max-reduce, 16 winners, 128-token blocks,
+# 128-dim index heads). Wider/looser checks would select AITER for configs the
+# objects cannot serve.
+COMPILED_TOPK_BLOCKS = 16
+COMPILED_SCORE_TYPE = "max"
+COMPILED_SPARSE_BLOCK_SIZE = 128
+COMPILED_INDEX_HEAD_DIM = 128
 # Wave width the top-k is written against: it gives one lane per output slot and
 # reads the score row in wave-wide strips.
 WAVE_SIZE = 64
@@ -121,6 +127,7 @@ def aiter_indexer_unsupported_reason(
     indexer_kv_dtype: IndexerKVDType,
     max_model_len: int,
     max_decode_query_len: int = 1,
+    score_type: str = "max",
 ) -> str | None:
     """Why the AITER indexer cannot serve this configuration, or None if it can.
 
@@ -128,6 +135,9 @@ def aiter_indexer_unsupported_reason(
     since most of these limits are shape constants a deployment can change.
     Covers whether AITER can supply the kernels at all, so a caller that gets
     None back can import them without guarding.
+
+    Score/top-k are compiled for ``topk_blocks==16``, ``score_type=="max"``,
+    and 128-token / 128-dim blocks; anything else must not select this impl.
     """
     if not current_platform.is_rocm():
         return "not running on ROCm"
@@ -140,8 +150,24 @@ def aiter_indexer_unsupported_reason(
 
     if not on_gfx950():
         return f"needs {' or '.join(SUPPORTED_ARCHS)} for the fp8 MFMA"
-    if topk_blocks > WAVE_SIZE:
-        return f"topk_blocks={topk_blocks} exceeds one wave ({WAVE_SIZE})"
+    if score_type != COMPILED_SCORE_TYPE:
+        return (
+            f"needs score_type={COMPILED_SCORE_TYPE!r}, got score_type={score_type!r}"
+        )
+    if topk_blocks != COMPILED_TOPK_BLOCKS:
+        return (
+            f"needs topk_blocks={COMPILED_TOPK_BLOCKS}, got topk_blocks={topk_blocks}"
+        )
+    if sparse_block_size != COMPILED_SPARSE_BLOCK_SIZE:
+        return (
+            f"needs sparse_block_size={COMPILED_SPARSE_BLOCK_SIZE}, "
+            f"got sparse_block_size={sparse_block_size}"
+        )
+    if index_head_dim != COMPILED_INDEX_HEAD_DIM:
+        return (
+            f"needs index_head_dim={COMPILED_INDEX_HEAD_DIM}, "
+            f"got index_head_dim={index_head_dim}"
+        )
     if num_index_heads > MFMA_COLS:
         return f"num_index_heads={num_index_heads} exceeds the {MFMA_COLS} MFMA columns"
     # A decode row's whole query shares one MFMA tile, one column per (token,
@@ -150,13 +176,6 @@ def aiter_indexer_unsupported_reason(
         return (
             f"num_index_heads={num_index_heads} x max_decode_query_len="
             f"{max_decode_query_len} exceeds the {MFMA_COLS} MFMA columns"
-        )
-    if index_head_dim % 64 != 0:
-        return f"index_head_dim={index_head_dim} must be a multiple of 64"
-    if sparse_block_size % MFMA_COLS != 0:
-        return (
-            f"sparse_block_size={sparse_block_size} must tile into "
-            f"{MFMA_COLS}-token MFMA rows"
         )
     max_blocks = math.ceil(max_model_len / sparse_block_size)
     if max_blocks > MAX_SUPPORTED_BLOCKS:
@@ -192,7 +211,7 @@ class MiniMaxM3IndexerAiterMetadata(MiniMaxM3IndexerMetadata):
     the last block holds.
     """
 
-    # [num_prefill_tokens] int32, cdiv(position + 1, PAGE_SIZE) per prefill row.
+    # [num_prefill_tokens] int32, cdiv(position + 1, sparse_block_size) per prefill row.
     prefill_num_valid_pages: torch.Tensor | None = None
     # [num_prefill_tokens] int32, the request each prefill row belongs to.
     prefill_row_req_id: torch.Tensor | None = None
@@ -274,7 +293,7 @@ class MiniMaxM3IndexerAiterMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 num_decode_tokens:num_tokens
             ]
             prefill_num_valid_pages.copy_(
-                row_positions // PAGE_SIZE + 1, non_blocking=True
+                row_positions // self.sparse_block_size + 1, non_blocking=True
             )
             prefill_kv_lens = self.kv_lens_buffer[num_decode_tokens:num_tokens]
             prefill_kv_lens.copy_(row_positions + 1, non_blocking=True)

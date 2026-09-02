@@ -231,6 +231,7 @@ class MiniMaxM3IndexerMetadataBuilder(
         else:
             assert tp_size % total_index_heads == 0
         self.num_index_heads = max(1, total_index_heads // tp_size)
+        self.sparse_block_size = int(sparse_cfg["sparse_block_size"])
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         assert self.reorder_batch_threshold is not None
         self.max_decode_query_len = self.reorder_batch_threshold
@@ -510,15 +511,17 @@ def select_indexer_impl_cls(
     num_index_heads: int,
     index_head_dim: int,
     indexer_kv_dtype: IndexerKVDType = "bf16",
+    score_type: str = "max",
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. On ROCm an fp8 index cache picks the
-    AITER fp8 MFMA score + top-k, provided the shape limits in
-    ``aiter_indexer_unsupported_reason`` hold. Everything else falls back to the
-    Triton indexer (bf16 only).
+    AITER fp8 MFMA score + top-k, provided the compiled-contract limits in
+    ``aiter_indexer_unsupported_reason`` hold (``topk_blocks==16``,
+    ``score_type=="max"``, 128-token blocks, 128-dim heads). Everything else
+    falls back to the Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -542,6 +545,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype=indexer_kv_dtype,
             max_model_len=vllm_config.model_config.max_model_len,
             max_decode_query_len=aiter_indexer_max_decode_query_len(vllm_config),
+            score_type=score_type,
         )
         if reason is None:
             logger.info_once(
@@ -624,6 +628,7 @@ class MiniMaxM3Indexer(nn.Module):
             num_index_heads=num_index_heads,
             index_head_dim=index_head_dim,
             indexer_kv_dtype=indexer_kv_dtype,
+            score_type=score_type,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,
