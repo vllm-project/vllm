@@ -75,6 +75,26 @@ def test_compact_topk_candidate_sampling_cpu(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_compact_rejection_indices_match_interleaved_layout():
+    """The fused index builder must remove exactly one bonus row per request."""
+    device = torch.device("cuda")
+    # Requests contain 0, 3 and 1 draft rows respectively, followed by one
+    # bonus row in the candidate layout.
+    cu_num_logits = torch.tensor([0, 1, 5, 7], dtype=torch.int32, device=device)
+    target_indices, bonus_indices = (
+        rejection_sampler_module._prepare_compact_rejection_indices(
+            cu_num_logits,
+            num_draft_tokens=4,
+            num_reqs=3,
+            device=device,
+        )
+    )
+    torch.cuda.synchronize()
+    assert target_indices.cpu().tolist() == [1, 2, 3, 5]
+    assert bonus_indices.cpu().tolist() == [0, 4, 6]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_chunked_scores_match_full_batch(logprobs_mode: str):
     device = torch.device("cuda")

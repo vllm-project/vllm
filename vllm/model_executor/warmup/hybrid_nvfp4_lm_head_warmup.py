@@ -18,8 +18,101 @@ from vllm.model_executor.layers.hybrid_nvfp4_lm_head import (
     get_hybrid_nvfp4_lm_head,
     warmup_hybrid_nvfp4_lm_head_kernels,
 )
+from vllm.triton_utils import HAS_TRITON
 
 logger = init_logger(__name__)
+
+
+@torch.inference_mode()
+def _warmup_compact_topk_sampler(worker: Any) -> None:
+    """JIT the compact top-k/rejection kernels before graph capture."""
+    if not HAS_TRITON or worker.device.type != "cuda":
+        return
+
+    from vllm.v1.worker.gpu.sample.compact_topk import (
+        pack_topk_pairs,
+        sample_compact_topk_pairs,
+        select_compact_topk_pairs,
+    )
+    from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample_compact
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
+        _compact_rejection_sample_kernel,
+        _prepare_compact_rejection_candidates,
+        _prepare_compact_rejection_indices,
+    )
+
+    device = worker.device
+    # ``_get_local_topk`` refines a wider candidate set but returns only the
+    # requested top-k values.  Thus the pack kernel sees ``top_k`` (20 by
+    # default), not the configured coarse candidate width (128), and TP=2
+    # merges 40 pairs rather than 256.  Warm the actual constexpr widths;
+    # otherwise the first real request still incurs a Triton JIT pause.
+    for top_k in (1, 8, 20, 32, 64):
+        local_values = torch.zeros(
+            (1, top_k), dtype=torch.float32, device=device
+        )
+        local_ids = torch.arange(
+            top_k, dtype=torch.int64, device=device
+        ).view(1, -1)
+        pack_topk_pairs(local_values, local_ids, 0)
+        gathered_pairs = torch.zeros(
+            (1, 2 * top_k, 2), dtype=torch.float32, device=device
+        )
+        select_compact_topk_pairs(gathered_pairs, top_k, 0.95)
+
+    candidate_logits = torch.zeros((1, 20), dtype=torch.float32, device=device)
+    candidate_ids = torch.arange(20, dtype=torch.int64, device=device).view(1, -1)
+    expanded = torch.zeros((1,), dtype=torch.int64, device=device)
+    seeds = torch.ones((1,), dtype=torch.int64, device=device)
+    positions = torch.zeros((1,), dtype=torch.int64, device=device)
+    temperatures = torch.ones((1,), dtype=torch.float32, device=device)
+    sample_compact_topk_pairs(
+        torch.zeros((1, 40, 2), dtype=torch.float32, device=device),
+        20,
+        0.95,
+        expanded,
+        seeds,
+        positions,
+    )
+    gumbel_sample_compact(
+        candidate_logits,
+        candidate_ids,
+        expanded,
+        temperatures,
+        seeds,
+        positions,
+    )
+    _prepare_compact_rejection_candidates(
+        candidate_logits,
+        candidate_ids,
+        torch.zeros((1,), dtype=torch.int64, device=device),
+    )
+    # The compact MTP layout is regular, so compile the direct index builder
+    # before graph capture as well.  Otherwise the first real rejection step
+    # can trigger a Triton JIT pause even though the sampler kernels are warm.
+    _prepare_compact_rejection_indices(
+        torch.tensor([0, 3], dtype=torch.int32, device=device),
+        num_draft_tokens=2,
+        num_reqs=1,
+        device=device,
+    )
+
+    spec_len = 2
+    sampled = torch.full(
+        (1, spec_len + 1), -1, dtype=torch.int64, device=device
+    )
+    _compact_rejection_sample_kernel[(1,)](
+        sampled,
+        torch.tensor([1], dtype=torch.int32, device=device),
+        torch.zeros((1,), dtype=torch.int64, device=device),
+        torch.ones((1,), dtype=torch.float32, device=device),
+        torch.zeros((1,), dtype=torch.int64, device=device),
+        torch.zeros((1,), dtype=torch.int64, device=device),
+        expanded,
+        positions,
+        seeds,
+        spec_len,
+    )
 
 
 def _collect_lm_heads(
@@ -108,6 +201,7 @@ def hybrid_nvfp4_lm_head_warmup(worker: Any) -> None:
         )
         logger.debug("Hybrid NVFP4 lm-head tuned row shapes: %s", tuned_shapes)
 
+    _warmup_compact_topk_sampler(worker)
     torch.accelerator.synchronize()
     logger.info(
         "Warmed %d hybrid NVFP4 lm-head state(s) across %d row shapes in %.2fs.",

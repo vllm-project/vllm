@@ -322,3 +322,98 @@ def gumbel_sample(
         max_scores = local_max.gather(dim=-1, index=max_block_idx).view(-1)
         return sampled, max_scores
     return sampled
+
+
+@triton.jit(do_not_specialize=["num_candidates"])
+def _compact_gumbel_sample_kernel(
+    output_token_ids_ptr,
+    candidate_logits_ptr,
+    candidate_logits_stride,
+    candidate_ids_ptr,
+    candidate_ids_stride,
+    expanded_idx_mapping_ptr,
+    seeds_ptr,
+    pos_ptr,
+    num_candidates,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Sample directly from a compact, token-keyed candidate row.
+
+    Unlike :func:`gumbel_sample`, compact rows fit in one Triton program.  The
+    kernel therefore avoids materializing per-block maxima/indices and the
+    follow-up PyTorch reductions.  The keyed random stream and Gumbel formula
+    intentionally match ``gumbel_noised_argmax``.
+    """
+    row_idx = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_candidates
+    logits = tl.load(
+        candidate_logits_ptr + row_idx * candidate_logits_stride + offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    token_ids = tl.load(
+        candidate_ids_ptr + row_idx * candidate_ids_stride + offsets,
+        mask=mask,
+        other=0,
+    ).to(tl.int64)
+    finite = (
+        mask
+        & (logits == logits)
+        & (logits != float("inf"))
+        & (logits != float("-inf"))
+    )
+
+    request_idx = tl.load(expanded_idx_mapping_ptr + row_idx).to(tl.int64)
+    seed = tl.load(seeds_ptr + request_idx)
+    pos = tl.load(pos_ptr + row_idx)
+    gumbel_seed = tl.randint(seed, pos)
+    u = tl_rand32(gumbel_seed, token_ids, includes_zero=False)
+    noise = -tl.log(-tldevice.log1p(-u))
+    scores = tl.where(finite, logits + noise, float("-inf"))
+    winner, winner_idx = tl.max(scores, axis=0, return_indices=True)
+    has_valid = tl.sum(finite.to(tl.int32), axis=0) > 0
+    winner_id = tl.load(
+        candidate_ids_ptr + row_idx * candidate_ids_stride + winner_idx,
+        mask=has_valid,
+        other=0,
+    ).to(tl.int64)
+    tl.store(output_token_ids_ptr + row_idx, tl.where(has_valid, winner_id, 0))
+
+
+def gumbel_sample_compact(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+) -> torch.Tensor:
+    """Sample token ids from compact rows using the regular keyed Gumbel stream."""
+    if not HAS_TRITON or not logits.is_cuda:
+        raise RuntimeError("gumbel_sample_compact requires CUDA Triton inputs")
+    if logits.ndim != 2 or token_ids.shape != logits.shape:
+        raise ValueError("logits and token_ids must have matching rank-2 shapes")
+    num_tokens, num_candidates = logits.shape
+    if num_candidates == 0 or num_candidates > 1024:
+        raise ValueError(
+            "compact Gumbel sampling supports candidate widths in [1, 1024]"
+        )
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    token_ids = token_ids.contiguous()
+    output = torch.empty((num_tokens,), dtype=torch.int64, device=logits.device)
+    block_size = triton.next_power_of_2(num_candidates)
+    _compact_gumbel_sample_kernel[(num_tokens,)](
+        output,
+        logits,
+        logits.stride(0),
+        token_ids,
+        token_ids.stride(0),
+        expanded_idx_mapping,
+        seed,
+        pos,
+        num_candidates,
+        BLOCK_SIZE=block_size,
+    )
+    return output

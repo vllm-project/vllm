@@ -16,7 +16,11 @@ from vllm.v1.worker.gpu.input_batch import (
     get_num_sampled_and_rejected,
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample, tl_rand32
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_sample,
+    gumbel_sample_compact,
+    tl_rand32,
+)
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -121,6 +125,106 @@ def _compact_rejection_sample_kernel(
         )
 
 
+@triton.jit
+def _prepare_compact_rejection_indices_kernel(
+    cu_num_logits_ptr,
+    target_indices_ptr,
+    bonus_indices_ptr,
+):
+    """Build compact target/bonus row indices directly on the device.
+
+    Compact candidate rows contain one bonus row at the end of every request.
+    The previous implementation first materialized a boolean mask and then
+    filtered a full ``arange``.  Besides allocating temporary tensors, that
+    path used indexed assignment with a scalar on CUDA and could force a
+    host-side stream synchronization.  The layout is regular, so each request
+    can write its target range and bonus row without either operation.
+    """
+    req_idx = tl.program_id(0)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
+    num_draft_tokens = end_idx - start_idx - 1
+    # Removing one bonus row for every preceding request shifts the compact
+    # target output by ``req_idx``.
+    target_start_idx = start_idx - req_idx
+    for pos in range(num_draft_tokens):
+        tl.store(target_indices_ptr + target_start_idx + pos, start_idx + pos)
+    tl.store(bonus_indices_ptr + req_idx, end_idx - 1)
+
+
+@triton.jit(do_not_specialize=["num_candidates"])
+def _compact_rejection_prepare_kernel(
+    # [num_target_rows]
+    target_draft_probs_ptr,
+    target_draft_probs_stride,
+    # [num_target_rows]
+    recovered_valid_ptr,
+    # [num_target_rows, num_candidates]
+    recovered_logits_ptr,
+    recovered_logits_stride,
+    # [num_target_rows, num_candidates]
+    candidate_logits_ptr,
+    candidate_logits_stride,
+    # [num_target_rows, num_candidates]
+    candidate_ids_ptr,
+    candidate_ids_stride,
+    # [num_target_rows]
+    draft_token_ids_ptr,
+    num_candidates,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Fuse compact rejection probabilities and residual preparation."""
+    row_idx = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_candidates
+
+    logits = tl.load(
+        candidate_logits_ptr + row_idx * candidate_logits_stride + offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    candidate_ids = tl.load(
+        candidate_ids_ptr + row_idx * candidate_ids_stride + offsets,
+        mask=mask,
+        other=0,
+    ).to(tl.int64)
+    finite = (
+        mask
+        & (logits == logits)
+        & (logits != float("inf"))
+        & (logits != float("-inf"))
+    )
+    safe_logits = tl.where(finite, logits, float("-inf"))
+    row_max = tl.max(safe_logits, axis=0)
+    weights = tl.where(finite, tl.exp(safe_logits - row_max), 0.0)
+    denom = tl.sum(weights, axis=0)
+
+    draft_id = tl.load(draft_token_ids_ptr + row_idx).to(tl.int64)
+    draft_mask = finite & (candidate_ids == draft_id)
+    draft_logit = tl.max(tl.where(draft_mask, logits, float("-inf")), axis=0)
+    draft_prob = tl.where(
+        (denom > 0.0)
+        & (draft_logit == draft_logit)
+        & (draft_logit != float("-inf")),
+        tl.exp(draft_logit - row_max) / denom,
+        0.0,
+    )
+    tl.store(
+        target_draft_probs_ptr + row_idx * target_draft_probs_stride, draft_prob
+    )
+
+    recovered_logits = tl.where(finite & ~draft_mask, logits, float("-inf"))
+    tl.store(
+        recovered_valid_ptr + row_idx,
+        tl.sum((finite & ~draft_mask).to(tl.int32)) > 0,
+    )
+    tl.store(
+        recovered_logits_ptr + row_idx * recovered_logits_stride + offsets,
+        recovered_logits,
+        mask=mask,
+    )
+
+
 @triton.jit(do_not_specialize=["max_spec_len"])
 def _compact_greedy_rejection_sample_kernel(
     output_token_ids_ptr,
@@ -159,6 +263,85 @@ def _compact_greedy_rejection_sample_kernel(
             output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
             bonus_token_id,
         )
+
+
+def _prepare_compact_rejection_candidates(
+    target_logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    draft_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Prepare compact residual rows with one fused CUDA kernel.
+
+    Return ``None`` for unsupported inputs so CPU tests and unusually wide
+    candidate sets retain the straightforward PyTorch reference path.
+    """
+    if (
+        not HAS_TRITON
+        or not target_logits.is_cuda
+        or target_logits.ndim != 2
+        or target_ids.shape != target_logits.shape
+        or draft_ids.ndim != 1
+        or draft_ids.shape[0] != target_logits.shape[0]
+        or target_logits.shape[-1] > 1024
+    ):
+        return None
+    num_rows, num_candidates = target_logits.shape
+    if num_rows == 0:
+        return (
+            torch.empty((0,), dtype=torch.float32, device=target_logits.device),
+            torch.empty_like(target_logits),
+            torch.empty((0,), dtype=torch.bool, device=target_logits.device),
+        )
+
+    target_draft_probs = torch.empty(
+        (num_rows,), dtype=torch.float32, device=target_logits.device
+    )
+    recovered_valid = torch.empty(
+        (num_rows,), dtype=torch.bool, device=target_logits.device
+    )
+    recovered_logits = torch.empty_like(target_logits)
+    block_size = triton.next_power_of_2(num_candidates)
+    _compact_rejection_prepare_kernel[(num_rows,)](
+        target_draft_probs,
+        target_draft_probs.stride(0),
+        recovered_valid,
+        recovered_logits,
+        recovered_logits.stride(0),
+        target_logits,
+        target_logits.stride(0),
+        target_ids,
+        target_ids.stride(0),
+        draft_ids,
+        num_candidates,
+        BLOCK_SIZE=block_size,
+    )
+    return target_draft_probs, recovered_logits, recovered_valid
+
+
+def _prepare_compact_rejection_indices(
+    cu_num_logits: torch.Tensor,
+    num_draft_tokens: int,
+    num_reqs: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Prepare compact row indices without host-synchronous indexing ops."""
+    if (
+        not HAS_TRITON
+        or not cu_num_logits.is_cuda
+        or num_reqs == 0
+        or num_draft_tokens < 0
+    ):
+        return None
+    target_indices = torch.empty(
+        (num_draft_tokens,), dtype=torch.int64, device=device
+    )
+    bonus_indices = torch.empty((num_reqs,), dtype=torch.int64, device=device)
+    _prepare_compact_rejection_indices_kernel[(num_reqs,)](
+        cu_num_logits,
+        target_indices,
+        bonus_indices,
+    )
+    return target_indices, bonus_indices
 
 
 class RejectionSampler:
@@ -420,6 +603,15 @@ class RejectionSampler:
                 raise ValueError(
                     "temperature_state is required with keyed Gumbel metadata"
                 )
+            if candidate_logits.shape[-1] <= 1024:
+                return gumbel_sample_compact(
+                    candidate_logits,
+                    candidate_ids,
+                    expanded_idx_mapping,
+                    temperature_state,
+                    seeds,
+                    pos,
+                )
             sampled_positions = gumbel_sample(
                 candidate_logits,
                 expanded_idx_mapping,
@@ -470,14 +662,27 @@ class RejectionSampler:
 
         num_reqs = input_batch.num_reqs
         device = candidate_logits.device
-        bonus_indices = input_batch.cu_num_logits[1:].to(torch.int64) - 1
-        is_bonus = torch.zeros(
-            candidate_logits.shape[0], dtype=torch.bool, device=device
+        compact_indices = _prepare_compact_rejection_indices(
+            input_batch.cu_num_logits,
+            input_batch.num_draft_tokens,
+            num_reqs,
+            device,
         )
-        is_bonus[bonus_indices] = True
-        target_indices = torch.arange(
-            candidate_logits.shape[0], dtype=torch.int64, device=device
-        )[~is_bonus]
+        if compact_indices is not None:
+            target_indices, bonus_indices = compact_indices
+        else:
+            bonus_indices = input_batch.cu_num_logits[1:].to(torch.int64) - 1
+            is_bonus = torch.zeros(
+                candidate_logits.shape[0], dtype=torch.bool, device=device
+            )
+            is_bonus.scatter_(
+                0,
+                bonus_indices,
+                torch.ones_like(bonus_indices, dtype=torch.bool),
+            )
+            target_indices = torch.arange(
+                candidate_logits.shape[0], dtype=torch.int64, device=device
+            )[~is_bonus]
         if target_indices.shape[0] != input_batch.num_draft_tokens:
             raise ValueError("candidate rows do not match draft-token layout")
 
@@ -519,24 +724,31 @@ class RejectionSampler:
         target_ids = candidate_ids[target_indices]
         draft_ids = draft_token_ids.to(target_ids.dtype).unsqueeze(-1)
 
-        valid = torch.isfinite(target_logits)
-        draft_mask = valid & (target_ids == draft_ids)
-        safe_logits = target_logits.masked_fill(~valid, -float("inf"))
-        max_logits = safe_logits.max(dim=-1, keepdim=True).values
-        weights = torch.exp(safe_logits - max_logits)
-        weights = torch.where(valid, weights, torch.zeros_like(weights))
-        denom = weights.sum(dim=-1)
-        draft_weight = torch.where(draft_mask, weights, torch.zeros_like(weights)).sum(
-            dim=-1
+        prepared = _prepare_compact_rejection_candidates(
+            target_logits, target_ids, draft_token_ids
         )
-        target_draft_probs = torch.where(
-            denom > 0.0, draft_weight / denom, torch.zeros_like(denom)
-        )
+        if prepared is not None:
+            target_draft_probs, recovered_logits, recovered_valid = prepared
+        else:
+            valid = torch.isfinite(target_logits)
+            draft_mask = valid & (target_ids == draft_ids)
+            safe_logits = target_logits.masked_fill(~valid, -float("inf"))
+            max_logits = safe_logits.max(dim=-1, keepdim=True).values
+            weights = torch.exp(safe_logits - max_logits)
+            weights = torch.where(valid, weights, torch.zeros_like(weights))
+            denom = weights.sum(dim=-1)
+            draft_weight = torch.where(
+                draft_mask, weights, torch.zeros_like(weights)
+            ).sum(dim=-1)
+            target_draft_probs = torch.where(
+                denom > 0.0, draft_weight / denom, torch.zeros_like(denom)
+            )
 
-        recovered_mask = valid & ~draft_mask
-        recovered_logits = target_logits.masked_fill(
-            ~recovered_mask, -float("inf")
-        )
+            recovered_mask = valid & ~draft_mask
+            recovered_logits = target_logits.masked_fill(
+                ~recovered_mask, -float("inf")
+            )
+            recovered_valid = recovered_mask.any(dim=-1)
         recovered_kwargs: dict[str, torch.Tensor | None] = {}
         if target_req_indices is not None:
             assert target_positions is not None
@@ -550,7 +762,7 @@ class RejectionSampler:
             recovered_logits, target_ids, **recovered_kwargs
         )
         recovered_token_ids = torch.where(
-            recovered_mask.any(dim=-1),
+            recovered_valid,
             recovered_token_ids,
             torch.zeros_like(recovered_token_ids),
         ).to(draft_token_ids.dtype)
@@ -643,6 +855,40 @@ class RejectionSampler:
         different CUDA RNG state on a TP rank can produce divergent sampled
         tokens even when every rank sees identical candidates.
         """
+        try:
+            tp_group = get_tp_group()
+        except AssertionError:
+            # Keep direct CPU/unit-test use independent of distributed setup.
+            tp_group = None
+        if tp_group is not None and tp_group.world_size > 1:
+            if tp_group.rank_in_group != 0:
+                # ``get_topk_candidates`` uses a destination gather, so
+                # non-owner ranks intentionally do not retain candidate rows.
+                # Only the compact sampled output is broadcast.  The request
+                # layout and prefill state are replicated on every TP rank, so
+                # counters can be derived locally after the one synchronization.
+                sampled = torch.empty(
+                    (input_batch.num_reqs, self.num_speculative_steps + 1),
+                    dtype=torch.int64,
+                    device=input_batch.input_ids.device,
+                )
+                tp_group.broadcast(sampled, src=0)
+                num_sampled = (sampled != -1).sum(dim=-1, dtype=torch.int32)
+                num_sampled, num_rejected = get_num_sampled_and_rejected(
+                    num_sampled,
+                    input_batch.seq_lens,
+                    input_batch.cu_num_logits,
+                    input_batch.idx_mapping,
+                    self.sampler.req_states.prefill_len.gpu,
+                )
+                return SamplerOutput(
+                    sampled_token_ids=sampled,
+                    logprobs_tensors=None,
+                    num_nans=None,
+                    num_sampled=num_sampled,
+                    num_rejected=num_rejected,
+                )
+
         if candidate_logits.ndim != 2:
             raise ValueError("candidate_logits must be rank 2")
         if candidate_ids.shape != candidate_logits.shape:
@@ -654,11 +900,6 @@ class RejectionSampler:
         if self.synthetic_conditional_rates is not None or self.use_block_verification:
             raise ValueError("compact candidates do not support this rejection mode")
 
-        try:
-            tp_group = get_tp_group()
-        except AssertionError:
-            # Keep direct CPU/unit-test use independent of distributed setup.
-            tp_group = None
         if tp_group is None or tp_group.world_size == 1:
             return self._sample_from_topk_candidates_local(
                 candidate_logits, candidate_ids, input_batch
@@ -671,22 +912,14 @@ class RejectionSampler:
             sampled = output.sampled_token_ids
             num_sampled = output.num_sampled
             num_rejected = output.num_rejected
-        else:
-            sampled = torch.empty(
-                (input_batch.num_reqs, self.num_speculative_steps + 1),
-                dtype=torch.int64,
-                device=candidate_logits.device,
-            )
-            num_sampled = torch.empty(
-                (input_batch.num_reqs,),
-                dtype=torch.int32,
-                device=candidate_logits.device,
-            )
-            num_rejected = torch.empty_like(num_sampled)
+        else:  # pragma: no cover - handled by the early non-owner return above.
+            raise AssertionError("non-owner TP rank reached compact sampler")
 
+        # ``sampled`` is the only rank-dependent value.  ``num_sampled`` and
+        # ``num_rejected`` depend solely on this tensor plus replicated request
+        # metadata, and are therefore cheaper to compute locally than to send
+        # through two additional NCCL broadcasts.
         tp_group.broadcast(sampled, src=0)
-        tp_group.broadcast(num_sampled, src=0)
-        tp_group.broadcast(num_rejected, src=0)
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=None,

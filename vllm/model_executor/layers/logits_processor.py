@@ -25,7 +25,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import (
+    gumbel_sample,
+    gumbel_sample_compact,
+)
+from vllm.v1.worker.gpu.sample.compact_topk import (
+    pack_topk_pairs,
+    sample_compact_topk_pairs,
+    select_compact_topk_pairs,
+)
 
 indexed_argmax_triton: Any
 reduce_global_argmax_triton: Any
@@ -56,6 +64,36 @@ logger = init_logger(__name__)
 # noise/scores matrix is not.
 _FULL_SAMPLE_BLOCK_SIZE = 8192
 _MAX_FLOAT32_TOKEN_ID = 1 << 24
+
+
+def _fast_stable_topk(
+    values: torch.Tensor,
+    k: int,
+    token_ids: torch.Tensor | None = None,
+    *,
+    allow_fast: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fast top-k for compact CUDA candidates.
+
+    The compact hybrid path normally receives distinct FP32 logits.  Use the
+    native CUDA top-k in that case; the generic CPU/large-vocabulary callers
+    retain the deterministic value/token-id tie handling below.  Equal CUDA
+    logits follow ``torch.topk``'s existing ordering, as they do in the native
+    vocab-parallel sampler.
+    """
+    if (
+        not allow_fast
+        or not values.is_cuda
+        or token_ids is None
+        or values.dtype != torch.float32
+        or token_ids.dtype not in (torch.int32, torch.int64)
+    ):
+        return _stable_topk(values, k, token_ids)
+
+    rank_values = torch.where(
+        torch.isnan(values), torch.full_like(values, -float("inf")), values
+    )
+    return torch.topk(rank_values, k, dim=-1, sorted=True)
 
 
 def _stable_topk(
@@ -1169,10 +1207,11 @@ class LogitsProcessor(PluggableLayer):
                     )
             if temperature != 1.0:
                 exact_logits.div_(temperature)
-            local_vals, positions = _stable_topk(
+            local_vals, positions = _fast_stable_topk(
                 exact_logits,
                 local_top_k,
                 candidate_indices,
+                allow_fast=self.vocab_size < _MAX_FLOAT32_TOKEN_ID,
             )
             return (
                 local_vals,
@@ -1218,9 +1257,17 @@ class LogitsProcessor(PluggableLayer):
         gathered_pairs: torch.Tensor,
         top_k: int,
         top_p: float,
+        *,
+        use_fast: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if use_fast:
+            return select_compact_topk_pairs(gathered_pairs, top_k, top_p)
         return LogitsProcessor._select_compact_topk_values_ids(
-            gathered_pairs[..., 0], gathered_pairs[..., 1].to(torch.int64), top_k, top_p
+            gathered_pairs[..., 0],
+            gathered_pairs[..., 1].to(torch.int64),
+            top_k,
+            top_p,
+            use_fast=use_fast,
         )
 
     @staticmethod
@@ -1229,15 +1276,18 @@ class LogitsProcessor(PluggableLayer):
         candidate_ids: torch.Tensor,
         top_k: int,
         top_p: float,
+        *,
+        use_fast: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select compact candidates without converting integer ids to FP32."""
         if candidate_values.shape != candidate_ids.shape:
             raise ValueError("candidate values and ids must have matching shapes")
         top_k = min(top_k, candidate_values.shape[-1])
-        top_values, positions = _stable_topk(
+        top_values, positions = _fast_stable_topk(
             candidate_values,
             top_k,
             candidate_ids,
+            allow_fast=use_fast,
         )
         top_ids = candidate_ids.gather(-1, positions)
         if top_p < 1.0:
@@ -1254,10 +1304,7 @@ class LogitsProcessor(PluggableLayer):
         vocab_start: int,
     ) -> torch.Tensor:
         """Pack local values and global token ids for TP communication."""
-        global_indices = local_indices.to(torch.int64) + vocab_start
-        return torch.stack(
-            [local_values, global_indices.to(torch.float32)], dim=-1
-        ).flatten(start_dim=-2)
+        return pack_topk_pairs(local_values, local_indices, vocab_start)
 
     def _sample_compact_topk(
         self,
@@ -1289,6 +1336,15 @@ class LogitsProcessor(PluggableLayer):
                 raise ValueError(
                     "temperature_state is required with keyed Gumbel metadata"
                 )
+            if top_values.shape[-1] <= 1024:
+                return gumbel_sample_compact(
+                    top_values,
+                    top_ids,
+                    expanded_idx_mapping,
+                    temperature_state,
+                    seeds,
+                    pos,
+                )
             sampled_positions = gumbel_sample(
                 top_values,
                 expanded_idx_mapping,
@@ -1307,6 +1363,45 @@ class LogitsProcessor(PluggableLayer):
         noise.exponential_()
         sampled_positions = probs.div(noise).argmax(dim=-1, keepdim=True)
         return top_ids.gather(-1, sampled_positions).view(-1)
+
+    def _sample_compact_topk_pairs(
+        self,
+        gathered_pairs: torch.Tensor,
+        top_k: int,
+        top_p: float,
+        *,
+        expanded_idx_mapping: torch.Tensor | None = None,
+        seeds: torch.Tensor | None = None,
+        pos: torch.Tensor | None = None,
+        temperature_state: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Merge and sample compact pairs, fusing both operations on CUDA."""
+        if (
+            expanded_idx_mapping is not None
+            and seeds is not None
+            and pos is not None
+        ):
+            sampled = sample_compact_topk_pairs(
+                gathered_pairs,
+                top_k,
+                top_p,
+                expanded_idx_mapping,
+                seeds,
+                pos,
+            )
+            if sampled is not None:
+                return sampled
+        top_values, top_ids = self._select_compact_topk_pairs(
+            gathered_pairs, top_k, top_p
+        )
+        return self._sample_compact_topk(
+            top_values,
+            top_ids,
+            expanded_idx_mapping=expanded_idx_mapping,
+            seeds=seeds,
+            pos=pos,
+            temperature_state=temperature_state,
+        )
 
     def get_topk_candidates(
         self,
@@ -1343,23 +1438,47 @@ class LogitsProcessor(PluggableLayer):
             embedding_bias=embedding_bias,
         )
         tp_size = lm_head.tp_size
+        tp_group = get_tp_group() if tp_size > 1 else None
         if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
             local_ids = local_indices.to(torch.int64) + vocab_start
             if tp_size > 1:
-                gathered_values = tensor_model_parallel_all_gather(
+                gathered_values = tensor_model_parallel_gather(
                     local_values, dim=-1
                 )
-                gathered_ids = tensor_model_parallel_all_gather(local_ids, dim=-1)
+                gathered_ids = tensor_model_parallel_gather(local_ids, dim=-1)
+                if tp_group is not None and tp_group.rank_in_group != 0:
+                    return (
+                        torch.empty(
+                            (0, 0), dtype=torch.float32, device=hidden_states.device
+                        ),
+                        torch.empty(
+                            (0, 0), dtype=torch.int64, device=hidden_states.device
+                        ),
+                    )
             else:
                 gathered_values = local_values
                 gathered_ids = local_ids
             return self._select_compact_topk_values_ids(
-                gathered_values, gathered_ids, top_k, top_p
+                gathered_values,
+                gathered_ids,
+                top_k,
+                top_p,
+                use_fast=False,
             )
 
         local_pairs = self._pack_topk_pairs(local_values, local_indices, vocab_start)
         if tp_size > 1:
-            gathered_pairs = tensor_model_parallel_all_gather(local_pairs, dim=-1)
+            gathered_pairs = tensor_model_parallel_gather(local_pairs, dst=0, dim=-1)
+            if tp_group is not None and tp_group.rank_in_group != 0:
+                return (
+                    torch.empty(
+                        (0, 0), dtype=torch.float32, device=hidden_states.device
+                    ),
+                    torch.empty(
+                        (0, 0), dtype=torch.int64, device=hidden_states.device
+                    ),
+                )
+            assert gathered_pairs is not None
             gathered_pairs = gathered_pairs.view(
                 hidden_states.shape[0], tp_size * local_values.shape[-1], 2
             )
@@ -1367,7 +1486,12 @@ class LogitsProcessor(PluggableLayer):
             gathered_pairs = local_pairs.view(
                 hidden_states.shape[0], local_values.shape[-1], 2
             )
-        return self._select_compact_topk_pairs(gathered_pairs, top_k, top_p)
+        return self._select_compact_topk_pairs(
+            gathered_pairs,
+            top_k,
+            top_p,
+            use_fast=self.vocab_size < _MAX_FLOAT32_TOKEN_ID,
+        )
 
     def sample_topk_tokens(
         self,
@@ -1413,7 +1537,11 @@ class LogitsProcessor(PluggableLayer):
             local_ids = local_indices.to(torch.int64) + vocab_start
             if tp_size == 1:
                 top_values, top_ids = self._select_compact_topk_values_ids(
-                    local_values, local_ids, top_k, top_p
+                    local_values,
+                    local_ids,
+                    top_k,
+                    top_p,
+                    use_fast=False,
                 )
                 return self._sample_compact_topk(
                     top_values,
@@ -1431,32 +1559,47 @@ class LogitsProcessor(PluggableLayer):
             local_pairs = self._pack_topk_pairs(
                 local_values, local_indices, vocab_start
             )
-            gathered_values = tensor_model_parallel_gather(local_pairs, dst=0, dim=-1)
+            gathered_values = tensor_model_parallel_gather(
+                local_pairs, dst=0, dim=-1
+            )
 
+        # Sampling must happen once and be broadcast.  Independent RNG draws
+        # on TP ranks can otherwise produce different tokens even though the
+        # candidate pairs are identical.  The compact normal-vocabulary path
+        # fuses global merge, top-p filtering, and keyed Gumbel sampling.
         if tp_size == 1:
             if self.vocab_size >= _MAX_FLOAT32_TOKEN_ID:
+                assert gathered_values is not None and gathered_ids is not None
+                gathered_values = gathered_values.view(
+                    hidden_states.shape[0], local_values.shape[-1]
+                )
+                gathered_ids = gathered_ids.view(
+                    hidden_states.shape[0], local_values.shape[-1]
+                )
                 top_values, top_ids = self._select_compact_topk_values_ids(
-                    local_values, local_ids, top_k, top_p
+                    gathered_values, gathered_ids, top_k, top_p, use_fast=False
                 )
-            else:
-                gathered_pairs = local_pairs.view(
-                    hidden_states.shape[0], local_values.shape[-1], 2
+                return self._sample_compact_topk(
+                    top_values,
+                    top_ids,
+                    expanded_idx_mapping=expanded_idx_mapping,
+                    seeds=seeds,
+                    pos=pos,
+                    temperature_state=temperature_state,
                 )
-                top_values, top_ids = self._select_compact_topk_pairs(
-                    gathered_pairs, top_k, top_p
-                )
-            return self._sample_compact_topk(
-                top_values,
-                top_ids,
+            gathered_pairs = gathered_values.view(
+                hidden_states.shape[0], local_values.shape[-1], 2
+            )
+            return self._sample_compact_topk_pairs(
+                gathered_pairs,
+                top_k,
+                top_p,
                 expanded_idx_mapping=expanded_idx_mapping,
                 seeds=seeds,
                 pos=pos,
                 temperature_state=temperature_state,
             )
 
-        # Sampling must happen once and be broadcast.  Independent RNG draws
-        # on TP ranks can otherwise produce different tokens even though the
-        # candidate pairs are identical.
         tp_group = get_tp_group()
         if tp_group.rank_in_group == 0:
             assert gathered_values is not None
@@ -1469,23 +1612,33 @@ class LogitsProcessor(PluggableLayer):
                     hidden_states.shape[0], tp_size * local_values.shape[-1]
                 )
                 top_values, top_ids = self._select_compact_topk_values_ids(
-                    gathered_values, gathered_ids, top_k, top_p
+                    gathered_values,
+                    gathered_ids,
+                    top_k,
+                    top_p,
+                    use_fast=False,
+                )
+                sampled = self._sample_compact_topk(
+                    top_values,
+                    top_ids,
+                    expanded_idx_mapping=expanded_idx_mapping,
+                    seeds=seeds,
+                    pos=pos,
+                    temperature_state=temperature_state,
                 )
             else:
                 gathered_pairs = gathered_values.view(
                     hidden_states.shape[0], tp_size * local_values.shape[-1], 2
                 )
-                top_values, top_ids = self._select_compact_topk_pairs(
-                    gathered_pairs, top_k, top_p
+                sampled = self._sample_compact_topk_pairs(
+                    gathered_pairs,
+                    top_k,
+                    top_p,
+                    expanded_idx_mapping=expanded_idx_mapping,
+                    seeds=seeds,
+                    pos=pos,
+                    temperature_state=temperature_state,
                 )
-            sampled = self._sample_compact_topk(
-                top_values,
-                top_ids,
-                expanded_idx_mapping=expanded_idx_mapping,
-                seeds=seeds,
-                pos=pos,
-                temperature_state=temperature_state,
-            )
         else:
             sampled = torch.empty(
                 (hidden_states.shape[0],),
