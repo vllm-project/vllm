@@ -354,9 +354,16 @@ class RequestOffloadState:
             )
 
     def update_offload_keys(self) -> None:
+        # E23 fix: groups whose tokens_per_chunk < tokens_per_hash resolve to
+        # hashes_per_chunk == 0 (e.g. GLM5Next's KpoolTail scratch group: 4
+        # tokens/block vs a 16-token hash granularity). islice(step=0) raises
+        # ValueError; such groups carry no hash-addressable offload blocks by
+        # construction, so skip them entirely.
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
+            if group_config.hashes_per_chunk <= 0:
+                continue
             for req_block_hash in islice(
                 self.req.block_hashes,
                 group_config.hashes_per_chunk * len(group_state.offload_keys)
