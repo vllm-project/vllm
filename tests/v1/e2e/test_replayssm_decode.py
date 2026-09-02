@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-level parity: ReplaySSM standard decode vs the baseline SSM kernel."""
 
+from inspect import signature
+
 import pytest
 
 import vllm.envs as envs
@@ -25,7 +27,9 @@ except ImportError:
 try:
     from flashinfer.mamba.replayssm_materialize import replayssm_materialize
 
-    HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = callable(replayssm_materialize)
+    HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = callable(replayssm_materialize) and (
+        "active_request_indices" in signature(replayssm_materialize).parameters
+    )
 except ImportError:
     HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = False
 
@@ -414,7 +418,8 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
 
 @requires_flashinfer_replayssm_materialization
 @large_gpu_mark(min_gb=40)
-def test_flashinfer_replayssm_all_prefix_cache_v2(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+def test_flashinfer_replayssm_all_prefix_cache(vllm_runner, monkeypatch, use_v2: bool):
     _check_flashinfer_replayssm_prefix_caching(
         vllm_runner,
         MAMBA2_PREFIX_MODEL,
@@ -422,7 +427,7 @@ def test_flashinfer_replayssm_all_prefix_cache_v2(vllm_runner, monkeypatch):
         mamba_cache_mode="all",
         moe_backend="triton",
         use_ngram=False,
-        use_v2=True,
+        use_v2=use_v2,
         tensor_parallel_size=1,
     )
 

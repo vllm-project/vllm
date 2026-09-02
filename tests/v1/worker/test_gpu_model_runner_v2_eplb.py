@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
@@ -202,3 +203,65 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_sample_tokens_pp_mixed_batch_only_postprocesses_prefill_rows(
+    monkeypatch,
+):
+    events = []
+    runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
+    idx_mapping = torch.tensor([3, 7], dtype=torch.int64)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=idx_mapping,
+        idx_mapping_np=np.array([3, 7], dtype=np.intp),
+        # Row 0 finishes prefill and will be processed from the deferred PP
+        # receive. Row 1 is a non-final chunk and must be published now.
+        num_computed_tokens_np=np.array([3, 2], dtype=np.int32),
+        prefill_len_np=np.array([4, 6], dtype=np.int32),
+        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+        query_start_loc=query_start_loc,
+    )
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+    )
+    num_computed_tokens = torch.zeros(8, dtype=torch.int32)
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens=SimpleNamespace(gpu=num_computed_tokens)
+    )
+    postprocess_args = []
+    runner.model_state = SimpleNamespace(
+        postprocess_state=lambda *args: postprocess_args.append(args)
+    )
+    runner.pp_handler = SimpleNamespace(
+        receive=lambda *_: events.append("receive") or False
+    )
+    runner.postprocess_num_computed_tokens = lambda *_: events.append(
+        "postprocess_num_computed_tokens"
+    )
+    runner.eplb.step = lambda *args, **kwargs: events.append("eplb")
+    monkeypatch.setattr(
+        mrv2,
+        "async_copy_to_gpu",
+        lambda value, *, device: torch.as_tensor(value, device=device),
+    )
+
+    output = mrv2.GPUModelRunner.sample_tokens(runner, None)
+
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
+    assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+    assert len(postprocess_args) == 1
+    published_mapping, num_sampled, computed, query_metadata = postprocess_args[0]
+    assert published_mapping.tolist() == [-1, 7]
+    assert num_sampled == 0
+    assert computed is num_computed_tokens
+    assert query_metadata is query_start_loc

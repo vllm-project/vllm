@@ -133,7 +133,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
-from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.pp_utils import PPHandler, compute_need_sampled_mask
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
@@ -1869,7 +1869,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not all_decode_next:
                 # Might contain non-final prefill chunks, which will be scheduled
                 # in the immediate next step (rather than in pp_size steps).
-                self.model_state.postprocess_state(input_batch.idx_mapping, 0)
+                idx_mapping = input_batch.idx_mapping
+                need_sampled_mask = compute_need_sampled_mask(input_batch)
+                if need_sampled_mask is not None:
+                    # Sampled rows are published from the deferred PP receive.
+                    # Mask them here so a mixed batch commits every row once.
+                    idx_mapping_np = np.where(
+                        need_sampled_mask, -1, input_batch.idx_mapping_np
+                    )
+                    idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+                self.model_state.postprocess_state(
+                    idx_mapping,
+                    0,
+                    self.req_states.num_computed_tokens.gpu,
+                    input_batch.query_start_loc,
+                )
 
             # Post-step KV connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)

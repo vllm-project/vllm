@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
+from inspect import signature
 from typing import Any
 
 import torch
@@ -27,7 +28,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 logger = init_logger(__name__)
 
 
-@triton.jit(do_not_specialize=["num_reqs"])
+@triton.jit(do_not_specialize=["num_reqs", "num_materialize_reqs"])
 def _postprocess_replayssm_modelwide_kernel(
     # Per-request step metadata.
     idx_mapping,
@@ -50,10 +51,12 @@ def _postprocess_replayssm_modelwide_kernel(
     dst_slots,
     plan_ring_start,
     plan_flush_count,
+    active_request_indices,
     # Runtime sizes.
     block_table_stride_req: tl.int64,
     slot_table_stride_layer: tl.int64,
     num_reqs,
+    num_materialize_reqs,
     # Compile-time model constants.
     MAX_LAYERS_PER_GROUP: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
@@ -63,6 +66,7 @@ def _postprocess_replayssm_modelwide_kernel(
     QUERY_METADATA_IS_CUMULATIVE: tl.constexpr,
     NUM_COMPUTED_IS_POST_STEP: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
+    MAX_NUM_REQS: tl.constexpr,
 ) -> None:
     """Commit all ReplaySSM trackers and optionally plan materialization.
 
@@ -71,15 +75,18 @@ def _postprocess_replayssm_modelwide_kernel(
     ``[batch_capacity]``. Group pointer/capacity tables have shape
     ``[num_groups]``, group-layer offsets have shape ``[num_groups + 1]``, and
     source/destination plans have shape ``[num_layers, batch_capacity]``.
+    ``active_request_indices`` has shape ``[batch_capacity]`` and contains the
+    compact physical-request prefix consumed by FlashInfer, followed by ``-1``.
 
     One CTA owns one ``(request row, cache group)`` tracker transition. Every
     group updates its distinct physical-slot namespace. Group zero alone writes
-    the request-level ``ring_start``/``flush_count`` plan consumed by the one
-    all-layer FlashInfer materializer call. Invalid and padded rows still write
-    sentinels so fixed-capacity plans cannot retain stale work.
+    the request-level ``ring_start``/``flush_count`` plan and one of its CTAs
+    compacts active request indices for the all-layer FlashInfer materializer.
+    Invalid and padded rows still write sentinels so fixed-capacity plans cannot
+    retain stale work.
 
-    The two metadata flags specialize runner input representation only; they do
-    not change recurrence semantics. Prefill has already produced canonical SSM
+    Metadata flags specialize runner input representation only; they do not
+    change recurrence semantics. Prefill has already produced canonical SSM
     state, so this kernel only resets the affected ReplaySSM cursors and, when a
     prefix snapshot is requested, emits ``flush_count=0`` for an exact copy.
     """
@@ -234,6 +241,72 @@ def _postprocess_replayssm_modelwide_kernel(
         tl.store(tracker_start + materialize_dst_slot, 0)
         tl.store(tracker_committed + materialize_dst_slot, 0)
 
+    if (group_idx == 0) & (batch_idx == 0):
+        # FlashInfer consumes a compact active prefix and stops at the
+        # first -1. Build it from planner inputs here so sparse flushes do
+        # not require a second Triton launch or a host synchronization.
+        active_count = 0
+        for candidate_idx in tl.range(0, num_materialize_reqs):
+            candidate_req_idx = candidate_idx
+            if HAS_IDX_MAPPING:
+                candidate_req_idx = tl.load(idx_mapping + candidate_idx)
+            candidate_valid_req = candidate_req_idx >= 0
+            candidate_live_col = tl.load(
+                live_cols + candidate_req_idx,
+                mask=candidate_valid_req,
+                other=-1,
+            )
+            candidate_valid_live_col = candidate_valid_req & (candidate_live_col >= 0)
+            candidate_live_slot = tl.load(
+                block_table
+                + candidate_idx * block_table_stride_req
+                + candidate_live_col,
+                mask=candidate_valid_live_col,
+                other=PAD_SLOT_ID,
+            )
+            candidate_valid_live = (
+                candidate_valid_live_col
+                & (candidate_live_slot != PAD_SLOT_ID)
+                & (candidate_live_slot >= 0)
+                & (candidate_live_slot < tracker_capacity)
+            )
+            candidate_src_col = tl.load(materialize_src_cols + candidate_idx)
+            candidate_dst_col = tl.load(materialize_dst_cols + candidate_idx)
+            candidate_wants_materialize = (
+                candidate_valid_req
+                & (candidate_src_col >= 0)
+                & (candidate_dst_col >= 0)
+            )
+            candidate_src_slot = tl.load(
+                block_table
+                + candidate_idx * block_table_stride_req
+                + candidate_src_col,
+                mask=candidate_wants_materialize,
+                other=PAD_SLOT_ID,
+            )
+            candidate_dst_slot = tl.load(
+                block_table
+                + candidate_idx * block_table_stride_req
+                + candidate_dst_col,
+                mask=candidate_wants_materialize,
+                other=PAD_SLOT_ID,
+            )
+            candidate_valid_materialize = (
+                candidate_valid_live
+                & candidate_wants_materialize
+                & (candidate_src_slot != PAD_SLOT_ID)
+                & (candidate_dst_slot != PAD_SLOT_ID)
+                & (candidate_src_slot >= 0)
+                & (candidate_dst_slot >= 0)
+                & (candidate_src_slot < tracker_capacity)
+                & (candidate_dst_slot < tracker_capacity)
+            )
+            if candidate_valid_materialize:
+                tl.store(active_request_indices + active_count, candidate_idx)
+                active_count += 1
+        if active_count < MAX_NUM_REQS:
+            tl.store(active_request_indices + active_count, -1)
+
 
 @triton.jit(do_not_specialize=["num_reqs"])
 def _copy_reassigned_replayssm_slots_kernel(
@@ -249,12 +322,14 @@ def _copy_reassigned_replayssm_slots_kernel(
     dst_slots,
     plan_ring_start,
     plan_flush_count,
+    active_request_indices,
     block_table_stride_req: tl.int64,
     slot_table_stride_layer: tl.int64,
     num_reqs,
     MAX_LAYERS_PER_GROUP: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
+    MAX_NUM_REQS: tl.constexpr,
 ) -> None:
     """Plan an exact copy when align reassigns a request's writable slot."""
     batch_idx = tl.program_id(0)
@@ -334,6 +409,61 @@ def _copy_reassigned_replayssm_slots_kernel(
         tl.store(tracker_start + dst_slot, 0)
         tl.store(tracker_committed + dst_slot, 0)
 
+    if (group_idx == 0) & (batch_idx == 0):
+        # The logical reassignment can require other cache groups to copy
+        # even when group zero's physical slots alias. Compact every valid
+        # group-zero plan into the ordered map required by FlashInfer.
+        active_count = 0
+        for candidate_idx in tl.range(0, num_reqs):
+            candidate_req_idx = candidate_idx
+            if HAS_IDX_MAPPING:
+                candidate_req_idx = tl.load(idx_mapping + candidate_idx)
+            candidate_valid_req = candidate_req_idx >= 0
+            candidate_src_col = tl.load(
+                src_cols + candidate_req_idx,
+                mask=candidate_valid_req,
+                other=-1,
+            )
+            candidate_dst_col = tl.load(
+                dst_cols + candidate_req_idx,
+                mask=candidate_valid_req,
+                other=-1,
+            )
+            candidate_wants_copy = (
+                candidate_valid_req
+                & (candidate_src_col >= 0)
+                & (candidate_dst_col >= 0)
+                & (candidate_src_col != candidate_dst_col)
+            )
+            candidate_src_slot = tl.load(
+                block_table
+                + candidate_idx * block_table_stride_req
+                + candidate_src_col,
+                mask=candidate_wants_copy,
+                other=PAD_SLOT_ID,
+            )
+            candidate_dst_slot = tl.load(
+                block_table
+                + candidate_idx * block_table_stride_req
+                + candidate_dst_col,
+                mask=candidate_wants_copy,
+                other=PAD_SLOT_ID,
+            )
+            candidate_valid_mapping = (
+                candidate_wants_copy
+                & (candidate_src_slot != PAD_SLOT_ID)
+                & (candidate_dst_slot != PAD_SLOT_ID)
+                & (candidate_src_slot >= 0)
+                & (candidate_dst_slot >= 0)
+                & (candidate_src_slot < tracker_capacity)
+                & (candidate_dst_slot < tracker_capacity)
+            )
+            if candidate_valid_mapping:
+                tl.store(active_request_indices + active_count, candidate_idx)
+                active_count += 1
+        if active_count < MAX_NUM_REQS:
+            tl.store(active_request_indices + active_count, -1)
+
 
 def _replayssm_specialization_key(mixer: Any) -> tuple[Any, ...]:
     ssm = mixer.kv_cache[1]
@@ -384,10 +514,12 @@ class ReplaySSMModelContext:
     dst_slots: torch.Tensor
     plan_ring_start: torch.Tensor
     plan_flush_count: torch.Tensor
+    active_request_indices: torch.Tensor
     precopy_src_slots: torch.Tensor
     precopy_dst_slots: torch.Tensor
     precopy_ring_start: torch.Tensor
     precopy_flush_count: torch.Tensor
+    precopy_active_request_indices: torch.Tensor
     block_table_stride_req: int
     max_num_reqs: int
     num_groups: int
@@ -525,6 +657,9 @@ class ReplaySSMModelContext:
             plan_flush_count=torch.full(
                 (max_num_reqs,), -1, dtype=torch.int32, device=device
             ),
+            active_request_indices=torch.full(
+                (max_num_reqs,), -1, dtype=torch.int32, device=device
+            ),
             precopy_src_slots=torch.full(
                 (len(mixers), max_num_reqs),
                 NULL_BLOCK_ID,
@@ -541,6 +676,9 @@ class ReplaySSMModelContext:
                 max_num_reqs, dtype=torch.int32, device=device
             ),
             precopy_flush_count=torch.full(
+                (max_num_reqs,), -1, dtype=torch.int32, device=device
+            ),
+            precopy_active_request_indices=torch.full(
                 (max_num_reqs,), -1, dtype=torch.int32, device=device
             ),
             block_table_stride_req=next(iter(strides)),
@@ -591,9 +729,11 @@ class ReplaySSMModelContext:
             self.dst_slots,
             self.plan_ring_start,
             self.plan_flush_count,
+            self.active_request_indices,
             self.block_table_stride_req,
             self.src_slots.stride(0),
             num_reqs,
+            num_reqs if self.materialize_prefixes else 0,
             MAX_LAYERS_PER_GROUP=self.max_layers_per_group,
             MAMBA_BLOCK_SIZE=mamba_block_size,
             LOGICAL_WINDOW=self.logical_window,
@@ -602,6 +742,7 @@ class ReplaySSMModelContext:
             QUERY_METADATA_IS_CUMULATIVE=query_metadata_is_cumulative,
             NUM_COMPUTED_IS_POST_STEP=num_computed_is_post_step,
             HAS_IDX_MAPPING=idx_mapping is not None,
+            MAX_NUM_REQS=self.max_num_reqs,
         )
 
         if self.materialize_prefixes:
@@ -610,6 +751,7 @@ class ReplaySSMModelContext:
                 self.dst_slots,
                 self.plan_ring_start,
                 self.plan_flush_count,
+                self.active_request_indices,
             )
 
     def materialize_reassigned_slots(
@@ -640,18 +782,21 @@ class ReplaySSMModelContext:
             self.precopy_dst_slots,
             self.precopy_ring_start,
             self.precopy_flush_count,
+            self.precopy_active_request_indices,
             self.block_table_stride_req,
             self.precopy_src_slots.stride(0),
             num_reqs,
             MAX_LAYERS_PER_GROUP=self.max_layers_per_group,
             PAD_SLOT_ID=NULL_BLOCK_ID,
             HAS_IDX_MAPPING=idx_mapping is not None,
+            MAX_NUM_REQS=self.max_num_reqs,
         )
         self._materialize_planned(
             self.precopy_src_slots,
             self.precopy_dst_slots,
             self.precopy_ring_start,
             self.precopy_flush_count,
+            self.precopy_active_request_indices,
         )
 
     def _materialize_planned(
@@ -660,6 +805,7 @@ class ReplaySSMModelContext:
         dst_slots: torch.Tensor,
         ring_start: torch.Tensor,
         flush_count: torch.Tensor,
+        active_request_indices: torch.Tensor,
     ) -> None:
         first = self.mixers[0]
         mamba_config = first.mamba_config
@@ -686,6 +832,7 @@ class ReplaySSMModelContext:
             dst_slots,
             ring_start,
             flush_count,
+            active_request_indices,
             state_dtype=first.kv_cache[1].dtype,
             input_dtype=first.kv_cache[2].dtype,
             matrixA_dtype=first.A.dtype,
@@ -1095,6 +1242,11 @@ def _load_replayssm_materialize() -> Callable[..., None]:
             "FlashInfer ReplaySSM prefix caching requires "
             "flashinfer.mamba.replayssm_materialize"
         ) from e
+    if "active_request_indices" not in signature(replayssm_materialize).parameters:
+        raise ImportError(
+            "FlashInfer ReplaySSM prefix caching requires the ordered "
+            "active_request_indices materialization API"
+        )
     return replayssm_materialize
 
 
