@@ -26,8 +26,9 @@ fastsafetensors >= 0.3.3
 instanttensor >= 0.1.9
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
-nvidia-cutlass-dsl[cu13]==4.6.2
-quack-kernels==0.6.4  # Required for CUTLASS DSL 4.6 by MSA
+nvidia-cutlass-dsl[cu13]==4.7.0
+# Latest release (0.6.4) pins CUTLASS DSL 4.6.2; this commit pins 4.7.0.
+quack-kernels @ git+https://github.com/Dao-AILab/quack.git@d079eef082a4e625d1541cb0ade4c4cc8026841d  # Required by MSA
 
 # Tokenspeed_MLA for faster mla with spec decode
 tokenspeed-mla==0.1.8; platform_system == "Linux"
