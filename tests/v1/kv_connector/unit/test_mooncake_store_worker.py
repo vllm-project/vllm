@@ -46,8 +46,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     RSWASpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -339,6 +342,43 @@ def _make_kv_cache_config(
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
         prefix_cache_retention_interval=prefix_cache_retention_interval,
+    )
+
+
+def _make_qsa_hybrid_kv_cache_config():
+    return KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=800,
+                    num_kv_heads=8,
+                    head_size=64,
+                    dtype=None,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["qsa"],
+                CircularBufferSpec(
+                    block_size=8,
+                    num_kv_heads=1,
+                    head_size=64,
+                    head_size_v=0,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=800,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
     )
 
 
@@ -2105,6 +2145,31 @@ def test_recv_thread_reports_unsplittable_key_larger_than_budget():
 
     assert store.batch_get_into_multi_buffers.call_count == 0
     assert thread.get_and_clear_block_ids_with_load_errors() == {0, 1, 2}
+
+
+def test_worker_init_excludes_nonprefix_cache_groups(monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setattr(
+        worker.MooncakeStoreConfig,
+        "load_from_config",
+        staticmethod(lambda: _make_config()),
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.block_size = 800
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.cache_config.prefix_match_unit = None
+
+    store_worker = worker.MooncakeStoreWorker(
+        vllm_config, _make_qsa_hybrid_kv_cache_config()
+    )
+
+    assert [
+        group.kv_cache_spec.block_size for group in store_worker._kv_cache_groups
+    ] == [800, 800]
+    assert [db.block_size for db in store_worker.token_dbs] == [800, 800]
 
 
 def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
@@ -4057,6 +4122,31 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
         assert db.kv_caches_base_addr == [raw.data_ptr()]
         assert db.block_len == [num_layers * spec.page_size_bytes]
     worker.store.register_buffer.assert_called_once_with(raw.data_ptr(), raw.nbytes)
+
+
+def test_register_kv_caches_excludes_nonprefix_cacheable_layers():
+    num_blocks = 2
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    store_layout = MagicMock()
+    worker.token_dbs[0].store_layout = store_layout
+    full_cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+    qsa_cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+
+    _register_with_mocked_threads(
+        worker,
+        {"layer0": full_cache, "qsa": qsa_cache},
+    )
+
+    store_layout.register_kv_caches.assert_called_once()
+    registered_caches, registered_num_blocks = (
+        store_layout.register_kv_caches.call_args.args
+    )
+    assert registered_num_blocks == num_blocks
+    assert len(registered_caches) == 1
+    assert registered_caches[0] is full_cache
+    worker.store.register_buffer.assert_called_once_with(
+        full_cache.data_ptr(), full_cache.untyped_storage().nbytes()
+    )
 
 
 def test_register_kv_caches_separate_head_groups():

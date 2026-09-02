@@ -8,13 +8,16 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
+    mooncake_store_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -106,6 +109,28 @@ def _swa(block_size=16, sliding_window=32):
 
 def _hashes(n: int) -> list[BlockHash]:
     return [BlockHash(bytes([i + 1]) * 4) for i in range(n)]
+
+
+def test_mooncake_store_group_ids_exclude_nonprefix_and_nontransfer_groups():
+    circular = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=0,
+        dtype=torch.float16,
+    )
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], _full(800)),
+            KVCacheGroupSpec(["qsa"], circular),
+            KVCacheGroupSpec(["mamba"], _mamba_align(800)),
+            KVCacheGroupSpec(["disabled"], _full(800), enable_kv_transfer=False),
+        ],
+    )
+
+    assert mooncake_store_group_ids(config) == (0, 2)
 
 
 # ----- Single-group coordinator -----

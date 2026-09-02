@@ -46,6 +46,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
+from .coordinator import mooncake_store_group_ids
 from .data import MooncakeStoreConnectorMetadata
 from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
@@ -132,20 +133,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 
         unsupported: list[str] = []
-        cache_block_size = vllm_config.cache_config.block_size
-        for g_idx, g in enumerate(kv_cache_config.transfer_groups):
-            spec = g.kv_cache_spec
+        store_group_ids = mooncake_store_group_ids(kv_cache_config)
+        for group_id in store_group_ids:
+            spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
             if isinstance(spec, CrossAttentionSpec):
-                unsupported.append(f"group {g_idx}: CrossAttentionSpec")
-            # Enforce Mamba align mode
-            if isinstance(spec, MambaSpec) and spec.block_size != cache_block_size:
+                unsupported.append(f"group {group_id}: CrossAttentionSpec")
+            if isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align":
                 unsupported.append(
-                    f"group {g_idx}: MambaSpec with block_size="
-                    f"{spec.block_size} != cache_config.block_size="
-                    f"{cache_block_size} (mamba_cache_mode != 'align')"
+                    f"group {group_id}: mamba_cache_mode="
+                    f"{spec.mamba_cache_mode!r} != 'align'"
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
-        if len(kv_cache_config.transfer_groups) > 1 and pcp > 1:
+        if len(store_group_ids) > 1 and pcp > 1:
             unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(

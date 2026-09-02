@@ -17,12 +17,24 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+def mooncake_store_group_ids(
+    kv_cache_config: KVCacheConfig,
+) -> tuple[int, ...]:
+    group_ids = kv_cache_config.prefix_cacheable_transfer_group_ids
+    if not group_ids:
+        raise ValueError(
+            "MooncakeStore requires at least one prefix-cacheable KV cache group"
+        )
+    return group_ids
 
 
 class ExternalCachedBlockPool:
