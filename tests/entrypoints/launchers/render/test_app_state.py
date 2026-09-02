@@ -66,3 +66,21 @@ async def test_render_app_state_uses_config_resolved_reasoning_parser(monkeypatc
 
     assert _Renderer.captured[0]["reasoning_parser"] == "openai_gptoss"
     assert _Derenderer.captured[0]["reasoning_parser"] == "openai_gptoss"
+
+
+def test_explicit_reasoning_parser_flag_wins_over_model_default():
+    """An explicit --reasoning-parser must survive VllmConfig construction
+    for models that define their own default (gpt_oss); the default only
+    applies when the resolved value is empty."""
+    from vllm.engine.arg_utils import AsyncEngineArgs
+
+    engine_args = AsyncEngineArgs(
+        model="openai/gpt-oss-20b", reasoning_parser="deepseek_r1"
+    )
+    model_config = engine_args.create_model_config()
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        structured_outputs_config=engine_args.create_structured_outputs_config(),
+    )
+
+    assert vllm_config.structured_outputs_config.reasoning_parser == "deepseek_r1"
