@@ -1028,6 +1028,19 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
+    if vllm_config.attention_config.use_deepseek_v4_q8kv8_prefill:
+        if device_capability is None or device_capability.to_int() != 90:
+            raise ValueError("DeepSeek-V4 Q8KV8 prefill requires an SM90 NVIDIA GPU")
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            raise ValueError(
+                "DeepSeek-V4 Q8KV8 prefill requires bfloat16 model activations"
+            )
+        if backend in (
+            AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+            AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
+            AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4,
+        ):
+            raise ValueError("DeepSeek-V4 Q8KV8 prefill requires the FlashMLA backend")
     if backend in (
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
         AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,

@@ -11,10 +11,14 @@ from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    dequantize_and_gather_k_cache_fp8,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
+)
+from vllm.models.deepseek_v4.nvidia.ops.q8kv8_sparse_prefill import (
+    sparse_mla_q8kv8_prefill,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -33,6 +37,7 @@ from vllm.v1.attention.ops.flashmla import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
@@ -54,9 +59,29 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4FlashMLABackend
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, vllm_config: "VllmConfig", *args, **kwargs) -> None:
+        super().__init__(vllm_config, *args, **kwargs)
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
+        self._use_q8kv8_prefill = (
+            vllm_config.attention_config.use_deepseek_v4_q8kv8_prefill
+        )
+        if self._use_q8kv8_prefill and self.kv_cache_dtype != "fp8_ds_mla":
+            raise ValueError(
+                "DeepSeek-V4 Q8KV8 prefill requires kv_cache_dtype=fp8_ds_mla"
+            )
+        if self._use_q8kv8_prefill and not hasattr(
+            torch.ops._C, "sparse_mla_q8kv8_prefill_sm90"
+        ):
+            raise ValueError(
+                "DeepSeek-V4 Q8KV8 prefill was requested, but this vLLM build "
+                "does not include the SM90 Q8KV8 kernel"
+            )
+        identity_scale = (
+            torch.ones((), dtype=torch.float32, device=self.attn_sink.device)
+            if self._use_q8kv8_prefill
+            else None
+        )
+        self.register_buffer("_q8kv8_identity_scale", identity_scale, persistent=False)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return deep_gemm_fp8_o_proj(
@@ -84,6 +109,19 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
         return 64 if num_heads <= 64 else 128
 
+    def _q8kv8_workspace_specs(
+        self, num_kv_rows: int, combined_topk: int, head_dim: int
+    ) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+        max_tokens = self.max_num_batched_tokens
+        return (
+            ((num_kv_rows, head_dim), torch.float8_e4m3fn),
+            ((max_tokens, combined_topk), torch.int32),
+            ((max_tokens,), torch.int32),
+            ((max_tokens, self.padded_heads, head_dim), torch.float8_e4m3fn),
+            ((max_tokens, self.padded_heads), torch.float32),
+            ((max_tokens, self.padded_heads), torch.float32),
+        )
+
     def forward_mqa(
         self,
         q: torch.Tensor,
@@ -103,9 +141,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         attn_metadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # Warmup dummy run: no real metadata. Reserve the same bf16
-            # gather workspace _forward_prefill would; the dequantize / topk
-            # / sparse_fwd kernels are skipped this step.
+            # Warmup dummy run: no real metadata. Reserve the same gather and
+            # attention workspace _forward_prefill would; its kernels are
+            # skipped this step.
             swa_only = self.compress_ratio <= 1
             N = (
                 0
@@ -120,11 +158,20 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert self.topk_indices_buffer is not None
                 top_k = self.topk_indices_buffer.shape[-1]
             combined_topk = round_up(top_k + self.window_size, 128)
-            current_workspace_manager().get_simultaneous(
-                ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
+            if self._use_q8kv8_prefill:
+                current_workspace_manager().get_simultaneous(
+                    *self._q8kv8_workspace_specs(
+                        self.PREFILL_CHUNK_SIZE * M + 1,
+                        combined_topk,
+                        q.shape[-1],
+                    )
+                )
+            else:
+                current_workspace_manager().get_simultaneous(
+                    ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                    ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                    ((self.max_num_batched_tokens,), torch.int32),
+                )
             output.zero_()
             return
 
@@ -314,17 +361,46 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         combined_topk = round_up(top_k + self.window_size, 128)
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            workspace = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
+            query_start = (
+                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
             )
-            kv, combined_indices_out, combined_lens_out = workspace
+            query_end = (
+                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            )
+            num_chunk_queries = query_end - query_start
+
+            if self._use_q8kv8_prefill:
+                workspace = workspace_manager.get_simultaneous(
+                    *self._q8kv8_workspace_specs(
+                        chunk_size * chunk_M + 1,
+                        combined_topk,
+                        q.shape[-1],
+                    )
+                )
+                (
+                    kv_flat,
+                    combined_indices_out,
+                    combined_lens_out,
+                    q_fp8_out,
+                    max_logits_out,
+                    lse_out,
+                ) = workspace
+                kv = kv_flat[:-1].view(chunk_size, chunk_M, q.shape[-1])
+                gather_k_cache = dequantize_and_gather_k_cache_fp8
+            else:
+                workspace = workspace_manager.get_simultaneous(
+                    ((chunk_size, chunk_M, q.shape[-1]), torch.bfloat16),
+                    ((self.max_num_batched_tokens, combined_topk), torch.int32),
+                    ((self.max_num_batched_tokens,), torch.int32),
+                )
+                kv, combined_indices_out, combined_lens_out = workspace
+                gather_k_cache = dequantize_and_gather_k_cache
+
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                dequantize_and_gather_k_cache(
+                gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
@@ -336,7 +412,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
-            dequantize_and_gather_k_cache(
+            gather_k_cache(
                 kv[:chunk_size],
                 swa_k_cache,
                 seq_lens=seq_lens[chunk_start:chunk_end],
@@ -347,14 +423,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
-            query_start = (
-                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
-            )
-            query_end = (
-                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
-            )
-            combined_indices_out = combined_indices_out[: query_end - query_start]
-            combined_lens_out = combined_lens_out[: query_end - query_start]
+            combined_indices_out = combined_indices_out[:num_chunk_queries]
+            combined_lens_out = combined_lens_out[:num_chunk_queries]
+
+            if self._use_q8kv8_prefill:
+                sentinel_index = kv_flat.shape[0] - 1
+                kv_flat[sentinel_index].zero_()
+            else:
+                sentinel_index = -1
 
             combined_indices, combined_lens = combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
@@ -369,13 +445,32 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 chunk_M,
                 chunk_N,
                 out=(combined_indices_out, combined_lens_out),
+                padding_value=sentinel_index,
             )
-            flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
-            )
+            if self._use_q8kv8_prefill:
+                q_fp8 = q_fp8_out[:num_chunk_queries]
+                q_fp8.copy_(q[query_start:query_end])
+                assert self._q8kv8_identity_scale is not None
+                sparse_mla_q8kv8_prefill(
+                    q=q_fp8,
+                    kv=kv_flat.unsqueeze(1),
+                    indices=combined_indices.unsqueeze(1),
+                    q_scale=self._q8kv8_identity_scale,
+                    kv_scale=self._q8kv8_identity_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    sm_scale=self.scale,
+                    out=output[query_start:query_end],
+                    max_logits=max_logits_out[:num_chunk_queries],
+                    lse=lse_out[:num_chunk_queries],
+                )
+            else:
+                flash_mla_sparse_fwd(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=output[query_start:query_end],
+                )

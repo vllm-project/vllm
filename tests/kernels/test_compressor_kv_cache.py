@@ -21,6 +21,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
+    dequantize_and_gather_k_cache_fp8,
     quantize_and_insert_k_cache,
 )
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
@@ -467,6 +468,8 @@ def test_dequantize_and_gather_k_cache(
     out_shape = (num_reqs, offset + max_gather_len + 3, head_dim)
     ref_out = torch.empty(out_shape, dtype=torch.bfloat16, device=device)
     actual_out = torch.empty_like(ref_out)
+    ref_fp8_out = torch.empty(out_shape, dtype=torch.float8_e4m3fn, device=device)
+    actual_fp8_out = torch.empty_like(ref_fp8_out)
     seq_lens = torch.tensor(seq_lens_host, dtype=torch.int32, device=device)
     gather_lens = (
         torch.tensor(gather_lens_host, dtype=torch.int32, device=device)
@@ -478,8 +481,26 @@ def test_dequantize_and_gather_k_cache(
     _dequantize_and_gather_k_cache_reference(
         ref_out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
     )
+    _dequantize_and_gather_k_cache_reference(
+        ref_fp8_out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+    )
     dequantize_and_gather_k_cache(
         actual_out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+    )
+    dequantize_and_gather_k_cache_fp8(
+        actual_fp8_out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
     )
     torch.accelerator.synchronize()
 
@@ -491,6 +512,11 @@ def test_dequantize_and_gather_k_cache(
         actual = actual_out[req_id, offset : offset + gather_len]
         expected = ref_out[req_id, offset : offset + gather_len]
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        actual_fp8 = actual_fp8_out[req_id, offset : offset + gather_len]
+        expected_fp8 = ref_fp8_out[req_id, offset : offset + gather_len]
+        torch.testing.assert_close(
+            actual_fp8.float(), expected_fp8.float(), rtol=0, atol=0
+        )
 
 
 # ── Test C: Indexer path ────────────────────────────────────────────────────
