@@ -7,10 +7,7 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import (
-    is_aiter_mrope_strided_kv_cache_supported,
-    rocm_aiter_ops,
-)
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -324,17 +321,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_mrope_kvcache_supported(self) -> bool:
-        if self.attn_type != AttentionType.DECODER:
-            return False
-        if not rocm_aiter_ops.is_enabled():
-            return False
-        supported = is_aiter_mrope_strided_kv_cache_supported()
-        if not supported:
-            logger.warning_once(
-                "QK-Norm+MRoPE+KV-cache fusion requires "
-                "AITER strided KV-cache support."
-            )
-        return supported
+        return IS_AITER_FOUND
 
     def do_qk_norm_rope_kvcache_update(
         self,

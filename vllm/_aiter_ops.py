@@ -4,10 +4,8 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from importlib.metadata import PackageNotFoundError, version
 
 import torch
-from packaging.version import InvalidVersion, Version
 from torch._ops import OpOverload
 
 import vllm.envs as envs
@@ -54,28 +52,6 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
-_MIN_AITER_MROPE_STRIDED_0_1_20_VERSION = Version("0.1.20.dev1")
-_MIN_AITER_MROPE_STRIDED_KV_CACHE_VERSION = Version("0.1.21.dev0")
-
-
-def is_aiter_mrope_strided_kv_cache_supported() -> bool:
-    """Whether AITER contains the full-stride MRoPE cache fix from #4531."""
-    if not IS_AITER_FOUND:
-        return False
-    try:
-        installed = Version(version("amd_aiter"))
-    except (PackageNotFoundError, InvalidVersion):
-        return False
-
-    # v0.1.20.dev1 is the first tag containing ROCm/aiter#4531. The stable
-    # v0.1.20 and v0.1.20.post1 tags were cut earlier, so they must not pass
-    # a simple >= v0.1.20.dev1 comparison under PEP 440.
-    if installed.release == (0, 1, 20):
-        return (
-            installed.dev is not None
-            and installed >= _MIN_AITER_MROPE_STRIDED_0_1_20_VERSION
-        )
-    return installed >= _MIN_AITER_MROPE_STRIDED_KV_CACHE_VERSION
 
 
 class _DlInfo(ctypes.Structure):
