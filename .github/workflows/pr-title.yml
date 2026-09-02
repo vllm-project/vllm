@@ -2,14 +2,29 @@ name: PR title
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [labeled, edited, reopened, ready_for_review, synchronize]
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions: {}
 
 jobs:
   check-format:
     name: Check format
-    runs-on: ubuntu-latest
+    # Triggered when:
+    # - The `ready` label is added.
+    # - A ready PR's title is edited.
+    # - A ready PR is reopened.
+    # - A draft PR with the `ready` label is marked ready for review.
+    # - New commits are pushed to a ready PR (so its latest commit has a title check status).
+    if: >-
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'ready') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ready') &&
+      (github.event.action != 'edited' || github.event.changes.title != null)
+    runs-on: ubuntu-slim
     steps:
       - name: Validate title
         env:
