@@ -24,17 +24,11 @@ class DummyModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-
-        extra_config = load_config.model_loader_extra_config
-        if not isinstance(extra_config, dict):
+        if load_config.model_loader_extra_config:
             raise ValueError(
-                f"model_loader_extra_config must be a dict for load format "
-                f"{load_config.load_format}, got {type(extra_config).__name__}"
+                f"Model loader extra config is not supported for "
+                f"load format {load_config.load_format}"
             )
-
-        self.enable_weights_track: bool | None = extra_config.get(
-            "enable_weights_track", None
-        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         pass  # Nothing to download
