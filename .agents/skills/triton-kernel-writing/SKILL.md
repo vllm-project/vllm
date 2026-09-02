@@ -23,10 +23,9 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
   `triton.autotune` only when tuning is critical to performance, such as for a
   matrix multiplication. Otherwise prioritize simple code and fast startup.
 - Be careful to avoid unintended runtime JIT compilation. For example, put
-  unimportant runtime scalar parameters in `do_not_specialize`, especially
-  scalars whose values may frequently alternate between values such as 0 and
-  1. Do not use it for values that intentionally control compile-time code
-  generation.
+  unimportant runtime integer scalars in `do_not_specialize`, especially those
+  that may alternate between values such as 0 and 1, which can produce
+  different specialization keys.
 - The Triton compiler does not guarantee safe ordering when a kernel writes to
   a pointer and subsequently reads from the same pointer. This pattern must
   have a `tl.debug_barrier()` between the write and read. The barrier
