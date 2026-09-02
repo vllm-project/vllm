@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -1194,35 +1193,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
-    ),
-    "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
-        max_model_len=4096,
-        # NemotronH layers are constructed via `hybrid_override_pattern`
-        use_original_num_layers=True,
-        hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                video_temporal_patch_size=2,
-                # TODO(nhaber): This is `true` in the official `config.json`,
-                # but this causes a processor exception in the tests due to a known bug
-                # with mixed-resolution video when `true`. To be resolved.
-                video_maintain_aspect_ratio=False,
-            ),
-            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
-        },
-        trust_remote_code=True,
-    ),
-    "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
-    ),
-    # TODO: Change repo id once pertinent archs are public.
-    "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
