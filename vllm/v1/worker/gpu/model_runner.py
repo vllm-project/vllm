@@ -1433,7 +1433,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = all_to_all_logits(local_logits, shard_metadata)
             logits = logits[:, : self.vocab_size]
         else:
-            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            if (
+                input_batch.num_draft_tokens == 0
+                and not input_batch.has_prefill
+                and input_batch.num_tokens == input_batch.num_reqs
+                and input_batch.logits_indices.shape[0] == input_batch.num_reqs
+            ):
+                # Pure decode: each request's single scheduled token is its
+                # sampling position, so logits_indices is arange(num_reqs) and
+                # the gather kernel can be skipped.
+                sample_hidden_states = hidden_states[: input_batch.num_reqs]
+            else:
+                sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
 
         if grammar_output is not None:
