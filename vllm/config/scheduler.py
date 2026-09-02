@@ -169,6 +169,35 @@ class SchedulerConfig:
     state before force-allowing, whichever comes first with
     `prefill_delayer_max_delay_passes`."""
 
+    prefill_delayer_token_usage_low_watermark: float = Field(
+        default=0.0, ge=0.0, le=1.0
+    )
+    """When the KV-cache usage on a prefillable rank is below this fraction the
+    system is underutilized, so the PrefillDelayer force-allows the prefill
+    (holding it would only add TTFT latency for no packing benefit). 0.0 (the
+    default) disables the low-watermark override."""
+
+    prefill_delayer_max_consecutive_prefill_steps: int = Field(default=4, ge=1)
+    """Decode-progress bound for the global-prefill phase: after this many
+    consecutive global-prefill steps the PrefillDelayer forces a global-decode
+    step so held decodes cannot starve (and a KV-blocked prefill burst cannot
+    spin on empty steps)."""
+
+    prefill_delayer_max_prefill_bs: int = Field(default=0, ge=0)
+    """SGLang-style slot/queue trigger cap for the PrefillDelayer's aligned
+    (all ranks prefillable) branch. When > 0, hold prefills while the aggregate
+    free decode slots (`dp_size * max_num_seqs - running`) drop below this, or
+    (with `prefill_delayer_queue_min_ratio`) while the waiting queue is short, so
+    decode steps stay dominant. 0 (the default) keeps the token fill-fraction
+    coalescing gate (`prefill_delayer_target_fill`)."""
+
+    prefill_delayer_queue_min_ratio: float = Field(default=0.0, ge=0.0)
+    """SGLang-style queue-length trigger for the PrefillDelayer's aligned
+    branch: hold prefills while the aggregate waiting queue is shorter than
+    `min(running * ratio, prefill_delayer_max_prefill_bs)`. 0.0 (the default)
+    disables the queue trigger; only active when
+    `prefill_delayer_max_prefill_bs` > 0."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

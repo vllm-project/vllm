@@ -541,6 +541,102 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+def _make_running_decode(scheduler, req_id="dec0", num_tokens=8):
+    """Drive a short request through prefill+output into the running (decode)
+    queue and return it."""
+    (req,) = create_requests(
+        num_requests=1, num_tokens=num_tokens, req_ids=[req_id]
+    )
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    assert req_id in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[req_id],
+            req_id_to_index={req_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert req in scheduler.running and not req.is_prefill_chunk
+    return req
+
+
+def test_global_prefill_step_decode_only_rank_idles():
+    """On a global-prefill step a rank with ONLY decodes (no local prefill work)
+    defers all decodes and schedules an empty batch, so the DP busy loop routes
+    it to the coordinated idle forward and holds its decodes for the next step."""
+    scheduler = create_scheduler(enable_prefill_delayer=True)
+    _make_running_decode(scheduler, "dec0")
+
+    output = scheduler.schedule(global_prefill_step=True)
+    assert output.total_num_scheduled_tokens == 0
+    assert "dec0" not in output.num_scheduled_tokens
+
+    # Next non-prefill step: the held decode runs.
+    output = scheduler.schedule(global_prefill_step=False)
+    assert "dec0" in output.num_scheduled_tokens
+
+
+def test_global_prefill_step_prefill_rank_runs_pure_prefill():
+    """On a global-prefill step a rank WITH prefill work admits the prefill and
+    defers its decodes, so the step is pure-prefill."""
+    scheduler = create_scheduler(enable_prefill_delayer=True)
+    _make_running_decode(scheduler, "dec0")
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    output = scheduler.schedule(global_prefill_step=True)
+    assert "new0" in output.num_scheduled_tokens
+    assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
+    assert "dec0" not in output.num_scheduled_tokens
+
+
+def test_no_global_prefill_step_runs_decodes():
+    """When it is not a global-prefill step, decodes are not deferred (this is
+    the prefillable_count==0 / normal-decode case)."""
+    scheduler = create_scheduler(enable_prefill_delayer=True)
+    _make_running_decode(scheduler, "dec0")
+
+    output = scheduler.schedule(global_prefill_step=False)
+    assert "dec0" in output.num_scheduled_tokens
+
+
+def test_global_prefill_step_kv_blocked_runs_decodes():
+    """Anti-spin fallback: if this rank has a waiting prefill it could not admit
+    last release (predictor cleared), it runs its decodes on the global-prefill
+    step to free KV rather than idling on an empty step."""
+    scheduler = create_scheduler(enable_prefill_delayer=True)
+    dec = _make_running_decode(scheduler, "dec0")
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    # Simulate a prior release step that admitted no prefill (KV full).
+    scheduler._release_admitted_prefill = False
+
+    output = scheduler.schedule(global_prefill_step=True)
+    assert "dec0" in output.num_scheduled_tokens
+    assert dec in scheduler.running
+
+
+def test_global_prefill_step_disabled_when_flag_off():
+    """With the delayer flag off, a global-prefill step is inert: scheduling is
+    byte-identical to upstream (a mixed decode+prefill batch)."""
+    scheduler = create_scheduler(enable_prefill_delayer=False)
+    _make_running_decode(scheduler, "dec0")
+
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    output = scheduler.schedule(global_prefill_step=True)
+    assert "dec0" in output.num_scheduled_tokens
+    assert "new0" in output.num_scheduled_tokens
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(

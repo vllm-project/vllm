@@ -51,7 +51,9 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def schedule(self, throttle_prefills: bool = False) -> "SchedulerOutput":
+    def schedule(
+        self, throttle_prefills: bool = False, global_prefill_step: bool = False
+    ) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
 
         The scheduling decision is made at the iteration level. Each scheduling
@@ -75,6 +77,12 @@ class SchedulerInterface(ABC):
                 engine core on non-cadence-aligned steps), new prefill compute is
                 deferred to a later step so prefills stay aligned across DP ranks;
                 automatically overridden when the rank is saturated.
+            global_prefill_step: DP prefill balancing. When True (set by the DP
+                engine core on a release step where some rank is prefillable),
+                decodes are deferred on ALL ranks so prefill-ready ranks run a
+                pure prefill and decode-only ranks schedule an empty batch (routed
+                to the coordinated idle forward), holding their decodes for the
+                next global-decode step.
 
         Returns:
             A SchedulerOutput object containing information about the scheduled

@@ -595,6 +595,11 @@ class EngineCore:
         Overridden by the DP engine core; never throttles otherwise."""
         return False
 
+    def _global_prefill_step(self) -> bool:
+        """Whether this step is a global-prefill step (DP prefill balancing).
+        Overridden by the DP engine core; never a global-prefill step otherwise."""
+        return False
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -606,7 +611,9 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        scheduler_output = self.scheduler.schedule(
+            self._should_throttle_prefills(), self._global_prefill_step()
+        )
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -664,7 +671,9 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            scheduler_output = self.scheduler.schedule(
+                self._should_throttle_prefills(), self._global_prefill_step()
+            )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -2062,10 +2071,22 @@ class DPEngineCoreProc(EngineCoreProc):
             self._prefill_delayer = PrefillDelayer(
                 dp_size=self.dp_size,
                 prefill_token_budget=scheduler_config.max_num_batched_tokens,
+                max_running_requests=scheduler_config.max_num_seqs,
                 target_fill=scheduler_config.prefill_delayer_target_fill,
                 max_delay_passes=scheduler_config.prefill_delayer_max_delay_passes,
                 max_delay_ms=scheduler_config.prefill_delayer_max_delay_ms,
+                max_consecutive_prefill_steps=(
+                    scheduler_config.prefill_delayer_max_consecutive_prefill_steps
+                ),
+                max_prefill_bs=scheduler_config.prefill_delayer_max_prefill_bs,
+                queue_min_ratio=scheduler_config.prefill_delayer_queue_min_ratio,
             )
+        self._token_usage_low_watermark = (
+            scheduler_config.prefill_delayer_token_usage_low_watermark
+        )
+        # Phase-0 diagnostic: per-500-sync histogram of prefillable_count.
+        self._prefillable_hist: dict[int, int] = {}
+        self._prefillable_hist_total = 0
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2203,6 +2224,13 @@ class DPEngineCoreProc(EngineCoreProc):
             and self.step_counter % self.prefill_schedule_interval != 0
         )
 
+    def _global_prefill_step(self) -> bool:
+        # Content-aware path: the delayer's global-prefill decision, computed
+        # from the previous iteration's DP sync (see _has_global_unfinished_reqs).
+        if self._prefill_delayer is not None:
+            return self._prefill_delayer.is_global_prefill_step
+        return False
+
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
@@ -2302,29 +2330,45 @@ class DPEngineCoreProc(EngineCoreProc):
         if not should_sync_every_step and self.step_counter % 32 != 0:
             return True
 
-        local_prefillable = (
-            self._prefill_delayer is not None
-            and self.scheduler.get_request_counts()[1] > 0
-        )
+        delayer_active = self._prefill_delayer is not None
+        num_running, num_waiting = self.scheduler.get_request_counts()
+        local_prefillable = delayer_active and num_waiting > 0
         local_pending_prefill_tokens = (
-            self.scheduler.get_pending_prefill_tokens()
-            if self._prefill_delayer is not None
-            else 0
+            self.scheduler.get_pending_prefill_tokens() if delayer_active else 0
         )
-        has_unfinished, pause_consensus, prefillable_count, pending_prefill_tokens = (
-            ParallelConfig.sync_dp_state(
-                self.dp_group,
-                has_unfinished=local_unfinished,
-                pending_pause=self.pending_pause,
-                local_prefillable=local_prefillable,
-                local_pending_prefill_tokens=local_pending_prefill_tokens,
-            )
+        local_token_watermark_force_allow = (
+            local_prefillable
+            and self._token_usage_low_watermark > 0.0
+            and self.scheduler.get_kv_cache_usage() < self._token_usage_low_watermark
+        )
+        (
+            has_unfinished,
+            pause_consensus,
+            prefillable_count,
+            pending_prefill_tokens,
+            token_watermark_force_allow_count,
+            running_count,
+            waiting_count,
+        ) = ParallelConfig.sync_dp_state(
+            self.dp_group,
+            has_unfinished=local_unfinished,
+            pending_pause=self.pending_pause,
+            local_prefillable=local_prefillable,
+            local_pending_prefill_tokens=local_pending_prefill_tokens,
+            local_token_watermark_force_allow=local_token_watermark_force_allow,
+            local_running_count=num_running if delayer_active else 0,
+            local_waiting_count=num_waiting if delayer_active else 0,
         )
 
         if self._prefill_delayer is not None:
             self._prefill_delayer.update_throttle(
-                prefillable_count, pending_prefill_tokens
+                prefillable_count,
+                pending_prefill_tokens,
+                token_watermark_force_allow=token_watermark_force_allow_count > 0,
+                running_count=running_count,
+                waiting_count=waiting_count,
             )
+            self._log_prefillable_distribution(prefillable_count)
 
         if pause_consensus:
             self.ignore_start_dp_wave = True
@@ -2332,6 +2376,34 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
 
         return has_unfinished
+
+    def _log_prefillable_distribution(self, prefillable_count: int) -> None:
+        """Phase-0 diagnostic: how out-of-phase the DP ranks are.
+
+        Logs, per 500 syncs, the distribution of how many ranks were
+        prefill-ready and the fraction of syncs with none prefillable (the
+        candidate globally-all-decode steps).
+        """
+        self._prefillable_hist[prefillable_count] = (
+            self._prefillable_hist.get(prefillable_count, 0) + 1
+        )
+        self._prefillable_hist_total += 1
+        if self._prefillable_hist_total % 500 != 0:
+            return
+        total = self._prefillable_hist_total
+        dist = ", ".join(
+            f"{k}={self._prefillable_hist[k]} "
+            f"({100 * self._prefillable_hist[k] / total:.1f}%)"
+            for k in sorted(self._prefillable_hist)
+        )
+        all_decode_frac = 100 * self._prefillable_hist.get(0, 0) / total
+        logger.info(
+            "prefillable-rank distribution over %d syncs: %s; "
+            "all-decode (prefillable==0) fraction=%.1f%%",
+            total,
+            dist,
+            all_decode_frac,
+        )
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

@@ -511,7 +511,9 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+    def schedule(
+        self, throttle_prefills: bool = False, global_prefill_step: bool = False
+    ) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -560,20 +562,28 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
-        # DP prefill balancing: on a release step (not throttled), defer decodes
-        # so the step is pure-prefill.
+        # DP prefill balancing: on a global-prefill step, defer decodes on ALL
+        # ranks so prefill-ready ranks run a pure prefill and decode-only ranks
+        # schedule an empty batch (routed to the coordinated idle forward),
+        # holding their decodes for the next global-decode step.
         prefill_preferred = (
             self.scheduler_config.enable_prefill_delayer
+            and global_prefill_step
             and not throttle_prefills
             and not defer_prefills
         )
         has_inflight_prefill = any(r.is_prefill_chunk for r in self.running)
         # Capture before the loops mutate the queues.
         has_waiting_prefill = bool(self.waiting or self.skipped_waiting)
-        defer_decodes = prefill_preferred and (
-            has_inflight_prefill
-            or (has_waiting_prefill and self._release_admitted_prefill)
+        # Anti-spin fallback: if this rank has a waiting prefill it could not
+        # admit last release (KV-blocked), run its decodes to free KV rather than
+        # idling on an empty step.
+        kv_blocked_waiting_prefill = (
+            has_waiting_prefill
+            and not has_inflight_prefill
+            and not self._release_admitted_prefill
         )
+        defer_decodes = prefill_preferred and not kv_blocked_waiting_prefill
 
         # First, schedule the RUNNING requests.
         req_index = 0

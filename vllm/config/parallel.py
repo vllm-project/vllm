@@ -773,10 +773,13 @@ class ParallelConfig:
         pending_pause: bool,
         local_prefillable: bool = False,
         local_pending_prefill_tokens: int = 0,
-    ) -> tuple[bool, bool, int, int]:
+        local_token_watermark_force_allow: bool = False,
+        local_running_count: int = 0,
+        local_waiting_count: int = 0,
+    ) -> tuple[bool, bool, int, int, int, int, int]:
         """Combined all-reduce for DP state synchronization.
 
-        Uses a single SUM all-reduce on a 4-element tensor:
+        Uses a single SUM all-reduce on a 7-element tensor:
           [0] = 1 if this rank has unfinished work, else 0.
                 SUM > 0 ≡ logical OR across ranks → any rank has work.
           [1] = 1 if this rank has a pending pause request, else 0.
@@ -786,13 +789,20 @@ class ParallelConfig:
           [3] = this rank's pending prefill tokens, capped at the token budget.
                 SUM ≡ total queued prefill tokens across ranks (for the
                 PrefillDelayer's fill-based coalescing gate).
+          [4] = 1 if this rank is prefillable and under the KV low watermark.
+                SUM > 0 ≡ some rank is underutilized (PrefillDelayer force-allow).
+          [5] = this rank's running (decode) request count.
+                SUM ≡ aggregate decode batch (PrefillDelayer slot/queue triggers).
+          [6] = this rank's waiting request count.
+                SUM ≡ aggregate waiting queue (PrefillDelayer queue trigger).
 
         has_unfinished_global is true if any rank has unfinished work,
         or if some ranks are waiting for a pause consensus.
 
         Returns:
             (has_unfinished_global, pause_consensus, prefillable_count,
-             pending_prefill_tokens)
+             pending_prefill_tokens, token_watermark_force_allow_count,
+             running_count, waiting_count)
         """
         tensor = torch.tensor(
             [
@@ -800,6 +810,9 @@ class ParallelConfig:
                 int(pending_pause),
                 int(local_prefillable),
                 int(local_pending_prefill_tokens),
+                int(local_token_watermark_force_allow),
+                int(local_running_count),
+                int(local_waiting_count),
             ],
             dtype=torch.int32,
             device="cpu",
@@ -810,11 +823,17 @@ class ParallelConfig:
         has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
         prefillable_count = tensor[2].item()
         pending_prefill_tokens = tensor[3].item()
+        token_watermark_force_allow_count = tensor[4].item()
+        running_count = tensor[5].item()
+        waiting_count = tensor[6].item()
         return (
             has_unfinished_global,
             pause_count == dp_size,
             prefillable_count,
             pending_prefill_tokens,
+            token_watermark_force_allow_count,
+            running_count,
+            waiting_count,
         )
 
     @staticmethod
