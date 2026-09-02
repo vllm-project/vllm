@@ -432,7 +432,12 @@ class Scheduler(SchedulerInterface):
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
-        last_cache_position = request.num_tokens - request.num_tokens % block_size
+        # Floor from num_tokens - 1: a request always recomputes its last
+        # token, so that is the highest position any replay can match. A
+        # block-aligned prompt floored from num_tokens lands on the prompt's
+        # own end, one block above what a replay can reach.
+        ceiling = request.num_tokens - 1
+        last_cache_position = ceiling - ceiling % block_size
         if self.use_eagle_block_drop:
             last_cache_position = max(last_cache_position - block_size, 0)
 

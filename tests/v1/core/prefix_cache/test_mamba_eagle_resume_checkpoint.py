@@ -338,6 +338,26 @@ def test_enabling_never_reduces_reuse(eagle_group, num_prefill_lookahead):
     assert on >= off, f"enabling the flag cut the sibling's hit from {off} to {on}"
 
 
+@pytest.mark.parametrize("prompt_len", [2048, 4096])
+def test_a_block_aligned_prompt_is_still_reusable(prompt_len):
+    """A prompt ending exactly on a block boundary must still be reusable.
+
+    A replay is capped at ``num_tokens - 1``, so it can never reach a
+    check-point at the prompt's own end. Flooring the Mamba grid stop from
+    ``num_tokens`` put the only reachable state there, and an identical replay
+    got nothing at all -- not a shorter hit, zero.
+    """
+    block_size, hash_block_size = 512, 32
+    manager = _manager(block_size, hash_block_size, fine_grained=False)
+    stub = _stub(manager, block_size, hash_block_size)
+    assert prompt_len % block_size == 0, "the regression needs a block-aligned prompt"
+
+    producer = make_request("p", PREFIX[:prompt_len], hash_block_size, sha256)
+    _prefill(manager, stub, producer)
+    replay = make_request("r", PREFIX[:prompt_len], hash_block_size, sha256)
+    assert manager.get_computed_blocks(replay)[1] >= prompt_len - 2 * block_size
+
+
 def test_disabled_by_default():
     """Off, the junction is block-floored and no resume point is registered."""
     block_size, hash_block_size = 512, 32
