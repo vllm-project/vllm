@@ -285,3 +285,35 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_rename_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def validate_weights_loading(
+    model: nn.Module,
+    loaded_weights: set[str] | None,
+) -> None:
+    """
+    Raise an error if some weights in the model were not loaded,
+    usually indicating a weight mapping issue.
+    """
+    weights_to_load = {name for name, _ in model.named_parameters()}
+    if loaded_weights is not None:
+        # ignore online quantization scales
+        for name, module in model.named_modules():
+            quant_method = getattr(module, "quant_method", None)
+            has_online_quant = getattr(quant_method, "uses_meta_device", False)
+            has_postprocess_quant = getattr(
+                quant_method, "process_weights_after_loading", None
+            )
+            # ignore kv_cache scale and online quant scale,
+            # which can be missing in checkpoints
+            if has_online_quant or has_postprocess_quant:
+                for param_name, _ in module.named_parameters():
+                    full_name = f"{name}.{param_name}" if name else param_name
+                    loaded_weights.add(full_name)
+
+        weights_not_loaded = weights_to_load - loaded_weights
+        if weights_not_loaded:
+            raise ValueError(
+                "Following weights were not initialized from "
+                f"checkpoint: {weights_not_loaded}"
+            )
