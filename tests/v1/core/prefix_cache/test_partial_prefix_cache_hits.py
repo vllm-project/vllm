@@ -470,7 +470,13 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert num_computed == 0
-    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+
+    # Async chunked prefill may publish a new boundary while the preceding
+    # chunk is still in flight. This first registration must remain enabled.
+    req0.num_computed_tokens = 4
+    req0.num_in_flight_tokens = 4
+    assert manager.allocate_slots(req0, 2) is not None
 
     partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
     partial_mamba_block = manager.block_pool.get_cached_block(
@@ -480,8 +486,11 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     partial_mamba_block_id = partial_mamba_block[0].block_id
     assert manager.get_blocks("0").get_block_ids()[1][1] == partial_mamba_block_id
 
+    # The next run-ahead allocation moves the boundary to a durable CoW block.
+    # Its end-of-allocation cache pass must not reattach the same hash to the
+    # mutable request-table source.
     req0.num_computed_tokens = 6
-    req0.append_output_token_ids([3])
+    req0.num_in_flight_tokens = 6
     new_blocks = manager.allocate_slots(req0, 1)
     assert new_blocks is not None
 
@@ -504,6 +513,17 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert get_block_hash(moved[0].block_hash) == partial_mamba_hash
     assert get_group_id(moved[0].block_hash) == 1
     assert moved[0].block_hash_num_tokens == 6
+
+    # The output-time cache path can retry the same settled boundary while a
+    # later step remains in flight; that must remain idempotent too.
+    req0.num_in_flight_tokens = 1
+    manager.cache_blocks(req0, 6)
+    grouped_hash = moved[0].block_hash
+    assert grouped_hash is not None
+    cache = manager.block_pool.cached_block_hash_to_block
+    assert cache.contain(grouped_hash, cow_copy.dst_block_id)
+    assert not cache.contain(grouped_hash, partial_mamba_block_id)
+    assert partial_mamba_block[0].block_hash is None
 
 
 def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():

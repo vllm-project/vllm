@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler
+from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
 
 pytestmark = pytest.mark.cpu_test
 
@@ -64,6 +64,42 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert req1.num_output_tokens == max_tokens
     # Ensure we aren't scheduling more tokens than necessary.
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
+
+
+def test_finished_request_does_not_cache_in_flight_tokens():
+    """A terminal output must not publish KV from a later in-flight step."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=31,
+        max_tokens=10,
+        same_prompt=True,
+        block_size=16,
+    )
+    scheduler.add_request(request)
+
+    first_step = scheduler.schedule()
+    second_step = scheduler.schedule()
+    assert second_step.num_scheduled_tokens[request.request_id] == 1
+
+    model_output = _make_model_runner_output(first_step)
+    model_output.sampled_token_ids = [[EOS_TOKEN_ID]]
+    scheduler.update_from_output(first_step, model_output)
+    assert request.status == RequestStatus.FINISHED_STOPPED
+    assert request.num_in_flight_tokens == 1
+
+    (repeat,) = create_requests(
+        num_requests=1,
+        num_tokens=32,
+        same_prompt=True,
+        block_size=16,
+    )
+    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(repeat)
+    assert num_cached_tokens == 16
 
 
 def test_no_spec_decode_padding_up_to_max_model_len():

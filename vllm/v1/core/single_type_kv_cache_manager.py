@@ -1886,6 +1886,17 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
     ) -> BlockHashWithGroupId | None:
+        # With async run-ahead, a boundary at or behind the optimistic
+        # computed frontier may already have been moved to a durable CoW
+        # block. Do not reattach its hash to the request-table state block,
+        # which a later in-flight step can overwrite. A boundary beyond the
+        # frontier is a first publication by the current allocation and must
+        # remain eligible.
+        if (
+            request.num_in_flight_tokens > 0
+            and num_tokens <= request.num_computed_tokens
+        ):
+            return None
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return None
