@@ -123,8 +123,8 @@ def _qsa_mqa_paged_prefill_kernel(
     stride_logits_row,
     num_rows,
     query_offset,
+    page_table_width,
     PAGE_SIZE: tl.constexpr,
-    PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     TILE_R: tl.constexpr,
@@ -132,7 +132,7 @@ def _qsa_mqa_paged_prefill_kernel(
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
-    NUM_COLUMNS: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    num_columns = page_table_width * PAGE_SIZE
     NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
     # tl.dot requires a reduction dimension of at least 16.
     BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
@@ -163,7 +163,7 @@ def _qsa_mqa_paged_prefill_kernel(
     if k_tile_start * BLOCK_N >= max_visible:
         return
     k_tile_end = tl.minimum(k_tile_start + K_TILES, tl.cdiv(max_visible, BLOCK_N))
-    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(NUM_COLUMNS, BLOCK_N))
+    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(num_columns, BLOCK_N))
 
     dims = tl.arange(0, BLOCK_D)
     m = tl.arange(0, TILE_R * NUM_HEADS_PADDED)
@@ -184,7 +184,7 @@ def _qsa_mqa_paged_prefill_kernel(
     for tile in tl.range(k_tile_start, k_tile_end, num_stages=STAGES):
         columns = tile * BLOCK_N + column_offsets
         live = columns < max_visible
-        logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
+        logical_page = tl.minimum(columns // PAGE_SIZE, page_table_width - 1)
         page_offset = columns % PAGE_SIZE
         physical_page = tl.load(
             page_table_ptr + request * stride_table_req + logical_page,
@@ -206,7 +206,7 @@ def _qsa_mqa_paged_prefill_kernel(
         store_mask = (
             valid_rows[None, :]
             & (columns[:, None] < visible[None, :])
-            & (columns[:, None] < NUM_COLUMNS)
+            & (columns[:, None] < num_columns)
         )
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
@@ -405,8 +405,8 @@ def _prefill_logits(
         *logits.stride()[:-1],
         num_queries,
         query_offset,
+        page_table.shape[1],
         PAGE_SIZE=k_cache.shape[1],
-        PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
         TILE_R=TILE_R,
