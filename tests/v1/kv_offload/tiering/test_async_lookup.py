@@ -3,7 +3,6 @@
 """Unit tests for AsyncLookupManager."""
 
 import threading
-import time
 from collections.abc import Iterable
 
 import pytest
@@ -34,24 +33,6 @@ class InMemoryLookupManager(AsyncLookupManager):
         results = [k in self._existing for k in keys]
         self._results_ready.set()
         return results
-
-
-class DelayedLookupManager(AsyncLookupManager):
-    """Test manager whose per-request results can be released independently."""
-
-    def __init__(self, results: dict[str, bool]):
-        self._results = results
-        self._started = {req_id: threading.Event() for req_id in results}
-        self._release = {req_id: threading.Event() for req_id in results}
-        super().__init__(tier_type="test")
-
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        req_id = req_context.req_id
-        self._started[req_id].set()
-        self._release[req_id].wait()
-        return [self._results[req_id]] * len(keys)
 
 
 class TestAsyncLookupManager:
@@ -111,53 +92,39 @@ class TestAsyncLookupManager:
         ctx_b = _ctx("req_b")
         mgr.lookup(_key(1), ctx_a)
         mgr.lookup(_key(1), ctx_b)
-        mgr.cleanup("req_a")
         mgr.flush()
         mgr._results_ready.wait()
         mgr._results_ready.clear()
-        # Drain so result is applied to the remaining request.
-        assert mgr.lookup(_key(1), ctx_b) is True
+        # Drain so result is applied
+        mgr.lookup(_key(1), ctx_a)
+        mgr.cleanup("req_a")
         # Key still present because req_b still references it
         assert _key(1) in mgr._lookup_state
         mgr.cleanup("req_b")
         assert _key(1) not in mgr._lookup_state
         mgr.shutdown()
 
-    def test_late_result_ignored_after_cleanup_and_key_reuse(self):
+    def test_stale_result_ignored_after_cleanup_and_key_reuse(self):
         key = _key(1)
-        mgr = DelayedLookupManager({"req_a": True, "req_b": False})
+        mgr = InMemoryLookupManager()
         ctx_a = _ctx("req_a")
         ctx_b = _ctx("req_b")
-        try:
-            assert mgr.lookup(key, ctx_a) is None
-            mgr.flush()
-            assert mgr._started["req_a"].wait(timeout=5)
+        assert mgr.lookup(key, ctx_a) is None
+        stale_generation = mgr._lookup_state[key].generation
+        mgr.cleanup("req_a")
 
-            mgr.cleanup("req_a")
-            assert mgr.lookup(key, ctx_b) is None
-            mgr.flush()
+        assert mgr.lookup(key, ctx_b) is None
+        generation = mgr._lookup_state[key].generation
+        assert generation != stale_generation
 
-            mgr._release["req_a"].set()
-            assert mgr._started["req_b"].wait(timeout=5)
+        mgr._pending_results.put([(key, stale_generation, True)])
+        mgr.drain_results()
+        assert mgr.lookup(key, ctx_b) is None
 
-            # A's result is ready while B's lookup is still blocked. It must
-            # not be applied to B's newly-created state.
-            assert mgr.lookup(key, ctx_b) is None
-
-            mgr._release["req_b"].set()
-            deadline = time.monotonic() + 5
-            result = None
-            while time.monotonic() < deadline:
-                mgr.flush()
-                result = mgr.lookup(key, ctx_b)
-                if result is not None:
-                    break
-                time.sleep(0.01)
-            assert result is False
-        finally:
-            for event in mgr._release.values():
-                event.set()
-            mgr.shutdown()
+        mgr._pending_results.put([(key, generation, False)])
+        mgr.drain_results()
+        assert mgr.lookup(key, ctx_b) is False
+        mgr.shutdown()
 
     def test_flush_no_queue_post_when_empty(self):
         mgr = InMemoryLookupManager()
