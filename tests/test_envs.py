@@ -29,6 +29,23 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+@pytest.mark.parametrize("value", ["disabled", "stream"])
+def test_rocm_pp_transport_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("VLLM_ROCM_PP_TRANSPORT", value)
+    assert value == envs.VLLM_ROCM_PP_TRANSPORT
+
+
+def test_rocm_pp_transport_rejects_invalid_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_ROCM_PP_TRANSPORT", "invalid")
+    with pytest.raises(ValueError, match="VLLM_ROCM_PP_TRANSPORT"):
+        _ = envs.VLLM_ROCM_PP_TRANSPORT
+
+
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):

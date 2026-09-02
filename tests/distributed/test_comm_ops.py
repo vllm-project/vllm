@@ -24,6 +24,10 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators import flashinfer_all_reduce
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import has_aiter
+from vllm.v1.worker.gpu.pp_transport import PPTransport
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -660,6 +664,64 @@ def async_send_recv_tensor_test_worker(
         torch.testing.assert_close(received, expected)
 
 
+def _pp_transport_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    shape = (8, 256)
+    schema = IntermediateTensors(
+        {"hidden_states": torch.empty(shape, dtype=torch.bfloat16, device=device)}
+    )
+    transport = PPTransport(
+        schema,
+        chunk_tokens=shape[0],
+        ring_size=2,
+        device=device,
+    )
+
+    expected = [
+        torch.full(shape, value, dtype=torch.bfloat16, device=device)
+        for value in (1.0, 2.0)
+    ]
+    if get_pp_group().is_first_rank:
+        for value in expected:
+            transport.send(value)
+        tail = torch.full((4, 256), 3.0, dtype=torch.bfloat16, device=device)
+        transport.send_generic(
+            {"hidden_states": tail},
+            all_gather_group=None,
+            all_gather_tensors={},
+        )
+        transport.drain()
+    else:
+        for value in expected:
+            tensors, handles, postprocess = transport.receive()
+            for handle in handles:
+                handle.wait()
+            for fn in postprocess:
+                fn()
+            torch.testing.assert_close(tensors["hidden_states"], value)
+        tail = get_pp_group().recv_tensor_dict()
+        assert tail is not None
+        torch.testing.assert_close(
+            tail["hidden_states"],
+            torch.full((4, 256), 3.0, dtype=torch.bfloat16, device=device),
+        )
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def pp_stream_transport_test_worker(*args):
+    _pp_transport_test_worker(*args)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
@@ -690,6 +752,19 @@ def test_multi_process_pipeline_parallel(
     test_target: Callable[..., Any],
 ):
     multi_process_parallel(monkeypatch, 1, pp_size, test_target)
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not has_aiter(),
+    reason="requires ROCm and AITER",
+)
+@pytest.mark.parametrize("test_target", [pp_stream_transport_test_worker])
+def test_multi_process_pp_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    test_target: Callable[..., Any],
+):
+    multi_process_parallel(monkeypatch, 1, 2, test_target)
 
 
 @multi_gpu_test(num_gpus=4)
