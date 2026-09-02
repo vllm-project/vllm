@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, cast
 
 import torch
 
-from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.config.quantization import (
+    _ONLINE_SHORTHANDS,
+    QuantizationConfigArgs,
+    QuantSpec,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -50,6 +56,7 @@ from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.config_utils import (
+    find_matching_patterns,
     get_layer_name_after_index,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -88,6 +95,39 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
 }
 
 
+def _find_matching_targets(
+    prefix: str,
+    targets: Mapping[str, str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+) -> list[str]:
+    per_shard_matches = find_matching_patterns(
+        prefix, targets, fused_mapping, use_fnmatch=True
+    )
+    if all(len(matches) == 0 for matches in per_shard_matches):
+        return []
+    if any(len(matches) == 0 for matches in per_shard_matches):
+        raise ValueError(
+            f"Found unmatched shards for {prefix}: {per_shard_matches}. vLLM "
+            "requires all shards of a fused layer to match a target."
+        )
+    if any(len(matches) > 1 for matches in per_shard_matches):
+        raise ValueError(
+            f"Found multiple quantization_config.targets matches for the "
+            f"shards of {prefix}: {per_shard_matches}. Each shard may match "
+            "at most one target."
+        )
+
+    matched_patterns = [next(iter(matches)) for matches in per_shard_matches]
+    quant_key_strs = {targets[pattern] for pattern in matched_patterns}
+    if len(quant_key_strs) > 1:
+        raise ValueError(
+            f"Found different quantization_config.targets values for the "
+            f"shards of {prefix}: {matched_patterns}. vLLM requires all "
+            "shards of a fused layer to use the same target."
+        )
+    return [matched_patterns[0]]
+
+
 class OnlineQuantizationConfig(QuantizationConfig):
     """Model-level config for online quantization (quantize fp16/bf16 weights
     during model loading, without requiring a pre-quantized checkpoint)."""
@@ -97,6 +137,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
         args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
+        if args.linear is None and args.moe is None and args.targets is None:
+            raise ValueError(
+                "OnlineQuantizationConfig requires at least one of "
+                "quantization_config.linear, quantization_config.moe, or "
+                "quantization_config.targets to be set."
+            )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
         self.quantized_layers: dict[str, tuple[str, str, str | None]] = {}
@@ -210,23 +256,101 @@ class OnlineQuantizationConfig(QuantizationConfig):
         assert spec is not None
         return source, spec, cls
 
+    def _dispatch_target(
+        self, prefix: str, layer: torch.nn.Module
+    ) -> "QuantizeMethodBase | None":
+        assert self.args.targets is not None
+        ignored = should_ignore_layer(
+            prefix,
+            ignore=self.ignored_layers,
+            fused_mapping=self.packed_modules_mapping,
+            use_fnmatch=True,
+        )
+        matches = _find_matching_targets(
+            prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
+        )
+        if ignored and matches:
+            raise ValueError(
+                f"Layer {prefix} matches both quantization_config.ignore "
+                f"and quantization_config.targets ({matches}); a layer may "
+                f"not be referenced by both."
+            )
+        if ignored or not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                f"Layer {prefix} matches multiple quantization_config."
+                f"targets patterns: {matches}. Each layer may match at most "
+                f"one target."
+            )
+        quant_key_str = self.args.targets[matches[0]]
+        shorthand = _ONLINE_SHORTHANDS[quant_key_str]
+        if isinstance(layer, LinearBase):
+            quant_spec = shorthand.linear
+            table = _ONLINE_LINEAR_METHODS
+        elif isinstance(layer, RoutedExperts):
+            quant_spec = shorthand.moe
+            table = _ONLINE_MOE_METHODS
+        else:
+            raise ValueError(
+                f"Layer {prefix} was matched by quantization_config.targets "
+                f"({matches[0]}), but online quantization is not supported for "
+                f"{type(layer).__name__}."
+            )
+        if quant_spec is None:
+            raise ValueError(
+                f"targets pattern {matches[0]} = {quant_key_str} does "
+                f"not define a QuantSpec for {type(layer).__name__} layers "
+                f"(matched at {prefix})."
+            )
+        method = self._dispatch(quant_spec, table, layer)
+        if method is not None:
+            self.quantized_layers[prefix] = ("targets", quant_key_str, matches[0])
+        return method
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        target = self.get_quantization_target(layer, prefix)
-        if target is not None:
-            source, spec, _ = target
-            self.quantized_layers[prefix] = (source, str(spec), None)
-            cls = target[2]
+        # `targets` takes precedence over `moe` and `linear` and is exclusive.
+        if self.args.targets is not None:
+            method = self._dispatch_target(prefix, layer)
+            if method is not None:
+                return method
+
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
             if isinstance(layer, RoutedExperts):
-                assert issubclass(cls, FusedMoEMethodBase)
-                return cls(moe=layer.moe_config)
-            assert issubclass(cls, OnlineLinearBase)
-            linear_method_cls = cast(type[OnlineLinearBase], cls)
-            return linear_method_cls()
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+            return None
 
         if isinstance(layer, LinearBase):
+            if should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+                use_fnmatch=True,
+            ):
+                return UnquantizedLinearMethod()
+            method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
+            if method is not None:
+                self.quantized_layers[prefix] = (
+                    "linear",
+                    str(self.args.linear),
+                    None,
+                )
+                return method
             return UnquantizedLinearMethod()
-        if isinstance(layer, RoutedExperts):
+        elif isinstance(layer, RoutedExperts):
+            if should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+                use_fnmatch=True,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+            method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)
+            if method is not None:
+                self.quantized_layers[prefix] = ("moe", str(self.args.moe), None)
+                return method
             return UnquantizedFusedMoEMethod(layer.moe_config)
         return None
