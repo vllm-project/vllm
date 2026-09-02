@@ -284,7 +284,7 @@ def select_unquantized_moe_backend(
     if runner_backend not in ["auto", "humming"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            activation_format.is_batched
             and requested_backend == UnquantizedMoeBackend.TRITON
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
@@ -395,7 +395,7 @@ def make_unquantized_moe_kernel(
     logger.info_once("Using %s MoE backend", experts_cls.__name__)
 
     # Create Experts
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

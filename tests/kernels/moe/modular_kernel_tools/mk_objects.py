@@ -472,10 +472,7 @@ def make_fused_experts(
     num_dispatchers: int,
     N: int,
 ) -> mk.FusedMoEExpertsModular:
-    if (
-        fused_experts_type.activation_format()
-        == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
+    if fused_experts_type.activation_format().is_batched:
         kwargs = {
             "moe_config": moe,
             "quant_config": quant_config,

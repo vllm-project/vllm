@@ -543,7 +543,7 @@ def select_mxfp4_moe_backend(
         requested_backends = _get_requested_backends(
             runner_backend, requested_activation_key
         )
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -663,7 +663,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(runner_backend, None)
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -1966,7 +1966,7 @@ def make_mxfp4_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

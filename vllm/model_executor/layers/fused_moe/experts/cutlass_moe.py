@@ -370,9 +370,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         if expert_tokens_meta is not None:
             expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
 
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
@@ -1408,9 +1406,7 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
 
         expert_num_tokens = None
 
-        use_batched_format = (
-            self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
-        )
+        use_batched_format = self.activation_format().is_batched
         assert not use_batched_format, "batched format not supported"
 
         in_dtype = hidden_states.dtype

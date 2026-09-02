@@ -115,6 +115,11 @@ class FusedMoEActivationFormat(Enum):
             and pf_format == FusedMoEActivationFormat.Standard
         )
 
+    @property
+    def is_batched(self) -> bool:
+        """Whether this is the disjoint ``BatchedExperts`` format."""
+        return self == FusedMoEActivationFormat.BatchedExperts
+
 
 @dataclass
 class ExpertTokensMetadata:
@@ -514,7 +519,7 @@ class FusedMoEExperts(ABC):
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        is_batched = self.activation_format() == FusedMoEActivationFormat.BatchedExperts
+        is_batched = self.activation_format().is_batched
         if not is_batched and (
             max_num_tokens is not None or num_dispatchers is not None
         ):

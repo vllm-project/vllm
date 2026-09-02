@@ -36,7 +36,7 @@ def _make_eep_experts(
         "moe_config": moe_config,
         "quant_config": quant_method.moe_quant_config,
     }
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts_kwargs.update(

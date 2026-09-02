@@ -1391,11 +1391,7 @@ class FusedMoEConfig:
 
     @property
     def use_batched_activation_format(self):
-        from vllm.model_executor.layers.fused_moe.modular_kernel import (
-            FusedMoEActivationFormat,
-        )
-
-        return self.activation_format == FusedMoEActivationFormat.BatchedExperts
+        return self.activation_format.is_batched
 
     @property
     def activation_format(self) -> "FusedMoEActivationFormat":

@@ -361,7 +361,7 @@ def select_fp8_moe_backend(
     if runner_backend != "auto":
         requested_backend = map_fp8_backend(runner_backend)
         # For batched activation format, use batched variants if available.
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             if requested_backend == Fp8MoeBackend.DEEPGEMM:
                 requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
             elif requested_backend == Fp8MoeBackend.TRITON:
@@ -393,7 +393,7 @@ def select_fp8_moe_backend(
         else:
             backend = (
                 Fp8MoeBackend.BATCHED_DEEPGEMM
-                if activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+                if activation_format.is_batched
                 else Fp8MoeBackend.DEEPGEMM
             )
             return _return_or_raise(
@@ -736,7 +736,7 @@ def make_fp8_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

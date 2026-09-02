@@ -414,7 +414,7 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         extra_args["max_num_tokens"] = max_num_tokens

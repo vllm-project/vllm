@@ -299,7 +299,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @classmethod
     def is_batched(cls) -> bool:
-        return cls.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
+        return cls.activation_format().is_batched
 
     @staticmethod
     def _supports_quant_scheme(
