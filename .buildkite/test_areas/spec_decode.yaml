@@ -349,13 +349,19 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly"
   key: spec-decode-mtp-other-acceptance-nightly
-  timeout_in_minutes: 60
+  timeout_in_minutes: 35
   device: h200_35gb
   optional: true
+  parallelism: 3
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/conftest.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+    # Each Gemma4 parametrization is an indivisible ~23m floor. Keep them in
+    # separate shards and put the remaining tests in shard 0, where new tests
+    # land by default.
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]" --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"

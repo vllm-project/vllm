@@ -710,6 +710,7 @@ class EngineArgs:
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
     enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
+    enable_nccl_comm_suspend: bool = ModelConfig.enable_nccl_comm_suspend
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
@@ -931,6 +932,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
+        )
+        model_group.add_argument(
+            "--enable-nccl-comm-suspend",
+            **model_kwargs["enable_nccl_comm_suspend"],
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
@@ -1823,6 +1828,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
+            enable_nccl_comm_suspend=self.enable_nccl_comm_suspend,
             model_impl=self.model_impl,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
@@ -2427,6 +2433,19 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # Batch-invariant mode requires deterministic attention behavior.
+        # If no backend is explicitly requested, prefer Triton Attention.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and attention_config.backend is None
+            and current_platform.is_xpu()
+        ):
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "VLLM_BATCH_INVARIANT is enabled and no attention backend was "
+                "specified; defaulting to TRITON_ATTN."
             )
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert

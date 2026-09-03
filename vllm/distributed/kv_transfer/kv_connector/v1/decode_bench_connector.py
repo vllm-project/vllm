@@ -47,6 +47,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.kv_cache_utils import (
+    dcp_world_size_for_kv_cache_spec,
+    resolve_dcp_kv_block_size,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -69,8 +73,8 @@ class DecodeBenchConnectorMetadata(KVConnectorMetadata):
 
     # request_id -> (block_ids_per_group, num_tokens_to_fill)
     # block_ids_per_group is a tuple of lists, one per KV cache group
-    # For standard attention: single group, e.g., ([1, 2, 3],)
-    # For MLA: multiple groups, e.g., ([1, 2], [1, 2])
+    # One group: ([1, 2, 3],)
+    # Multiple groups: ([1, 2], [5, 6])
     reqs_to_fill: dict[str, tuple[tuple[list[int], ...], int]]
 
 
@@ -95,9 +99,13 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: DecodeBenchConnectorWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = DecodeBenchConnectorScheduler(vllm_config)
+            self.connector_scheduler = DecodeBenchConnectorScheduler(
+                vllm_config, kv_cache_config
+            )
         elif role == KVConnectorRole.WORKER:
-            self.connector_worker = DecodeBenchConnectorWorker(vllm_config)
+            self.connector_worker = DecodeBenchConnectorWorker(
+                vllm_config, kv_cache_config
+            )
 
     # ==============================
     # Worker-side methods
@@ -182,9 +190,18 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
 class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
-        self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.group_block_sizes = tuple(
+            resolve_dcp_kv_block_size(
+                group.kv_cache_spec,
+                dcp_world_size_for_kv_cache_spec(
+                    group.kv_cache_spec,
+                    dcp_world_size,
+                ),
+            )
+            for group in kv_cache_config.kv_cache_groups
+        )
 
         # Track which requests have already been filled
         self._filled_requests: set[str] = set()
@@ -236,8 +253,7 @@ class DecodeBenchConnectorScheduler:
         Called after blocks are allocated. Store the block IDs so we can
         fill them with dummy values.
 
-        Supports both standard attention (single KV cache group) and MLA
-        (multiple KV cache groups).
+        Supports both single- and multi-group KV cache configurations.
         """
         req_id = request.request_id
 
@@ -246,18 +262,14 @@ class DecodeBenchConnectorScheduler:
 
         # Get the block IDs that were allocated
         # block_groups is a tuple of lists, one per KV cache group
-        # For standard attention: 1 group
-        # For MLA: multiple groups (one per attention type)
         block_groups = blocks.get_block_ids()
 
-        # Calculate how many blocks we need to fill
-        # num_external_tokens are the tokens we said we'd provide
-        num_blocks_to_fill = cdiv(num_external_tokens, self.block_size)
-
-        # Extract the first num_blocks_to_fill blocks from each group
-        # All groups should have the same block IDs for the same request
+        # Extract the blocks covering the external tokens from each group
         block_ids_per_group = tuple(
-            group_blocks[:num_blocks_to_fill] for group_blocks in block_groups
+            group_blocks[: cdiv(num_external_tokens, group_block_size)]
+            for group_blocks, group_block_size in zip(
+                block_groups, self.group_block_sizes, strict=True
+            )
         )
 
         # Store the blocks to fill for all group. _pending_fills doesn't need cleanup
@@ -268,12 +280,14 @@ class DecodeBenchConnectorScheduler:
         )
         self._filled_requests.add(req_id)
 
+        block_counts = tuple(len(group) for group in block_ids_per_group)
         logger.debug(
-            "DecodeBenchConnector: Allocated %d blocks across %d KV cache groups "
-            "for request %s",
-            num_blocks_to_fill,
+            "DecodeBenchConnector: Selected %d total blocks across %d KV cache "
+            "groups for request %s (per-group counts: %s)",
+            sum(block_counts),
             len(block_groups),
             req_id,
+            ", ".join(map(str, block_counts)),
         )
 
     def build_connector_meta(
@@ -300,10 +314,7 @@ class DecodeBenchConnectorScheduler:
 class DecodeBenchConnectorWorker:
     """Worker-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
-        self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
-
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         # Get fill parameters from extra config
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
@@ -314,16 +325,14 @@ class DecodeBenchConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] | None = None
 
         # Mapping from KV cache group index to list of layer names in that group
-        self.group_to_layers: dict[int, list[str]] | None = None
+        self.group_to_layers = {
+            group_idx: list(group.layer_names)
+            for group_idx, group in enumerate(kv_cache_config.kv_cache_groups)
+        }
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """Store references to the KV cache tensors and build group mapping."""
+        """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
-
-        # For simplicity, assume all layers belong to group 0 (standard attention)
-        # For MLA models with multiple groups, the metadata will handle the mapping
-        # We just need to fill the blocks specified in the metadata
-        self.group_to_layers = {0: list(kv_caches.keys())}
 
         logger.debug(
             "DecodeBenchConnector: Registered %d KV cache layers",
@@ -337,26 +346,27 @@ class DecodeBenchConnectorWorker:
         This simulates having a populated KV cache from a prefill phase,
         allowing decode performance testing with larger context sizes.
 
-        Supports both standard attention (single group) and MLA (multiple groups).
+        Supports both single- and multi-group KV cache configurations.
         """
         if not metadata.reqs_to_fill:
             return
 
         assert self.kv_caches is not None, "KV caches must be registered before filling"
-        assert self.group_to_layers is not None, "Group mapping must be initialized"
 
         for req_id, (block_ids_per_group, num_tokens) in metadata.reqs_to_fill.items():
             # Fill blocks for each KV cache group
             for group_idx, block_ids in enumerate(block_ids_per_group):
                 self._fill_blocks(group_idx, block_ids, num_tokens)
 
+            block_counts = tuple(len(group) for group in block_ids_per_group)
             logger.debug(
-                "DecodeBenchConnector: Filled %d blocks (%d tokens) across %d groups "
-                "for request %s",
-                len(block_ids_per_group[0]) if block_ids_per_group else 0,
+                "DecodeBenchConnector: Filled %d total blocks (%d tokens) across "
+                "%d groups for request %s (per-group counts: %s)",
+                sum(block_counts),
                 num_tokens,
                 len(block_ids_per_group),
                 req_id,
+                ", ".join(map(str, block_counts)),
             )
 
     def _fill_blocks(self, group_idx: int, block_ids: list[int], num_tokens: int):
@@ -372,7 +382,6 @@ class DecodeBenchConnectorWorker:
             return
 
         assert self.kv_caches is not None
-        assert self.group_to_layers is not None
 
         # Get the layers that belong to this group
         layer_names = self.group_to_layers.get(group_idx, [])
