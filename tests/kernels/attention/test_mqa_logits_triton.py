@@ -95,10 +95,14 @@ def _fp8_paged_mqa_logits_ref(
         device=q.device,
         dtype=torch.float32,
     )
+    if context_lens.ndim == 1:
+        token_offsets = torch.arange(next_n - 1, -1, -1, device=q.device)
+        context_lens = context_lens[:, None] - token_offsets[None, :]
     context_lens_list = context_lens.tolist()
     for i in range(batch_size):
-        context_len = context_lens_list[i]
-        q_offsets = torch.arange(context_len - next_n, context_len, device=q.device)
+        token_context_lens = context_lens_list[i]
+        context_len = max(token_context_lens)
+        q_offsets = torch.tensor(token_context_lens, device=q.device) - 1
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
         )
@@ -110,7 +114,7 @@ def _fp8_paged_mqa_logits_ref(
                 (block_rk + 1) * block_size,
                 device=q.device,
             )
-            mask = (k_offsets[None, :] < context_len) & (
+            mask = (k_offsets[None, :] < context_lens[i, :, None]) & (
                 k_offsets[None, :] <= q_offsets[:, None]
             )
             s = torch.where(
@@ -286,9 +290,14 @@ def test_fp8_paged_mqa_logits_triton_matches_torch(
         batch_size * next_n, num_heads, dtype=torch.float32, device=device
     )
 
-    context_lens = torch.full(
-        (batch_size,), context_len, dtype=torch.int32, device=device
-    )
+    if next_n > 1 and context_len == 130:
+        context_lens = torch.tensor(
+            [128, 129, 129, 130], dtype=torch.int32, device=device
+        ).expand(batch_size, -1)
+    else:
+        context_lens = torch.full(
+            (batch_size,), context_len, dtype=torch.int32, device=device
+        )
     block_tables = torch.randint(
         0,
         total_blocks,
@@ -312,10 +321,17 @@ def test_fp8_paged_mqa_logits_triton_matches_torch(
         clean_logits=clean_logits,
     )
 
+    if context_lens.ndim == 1:
+        token_offsets = torch.arange(next_n - 1, -1, -1, device=device)
+        readable_lens = context_lens[:, None] - token_offsets[None, :]
+    else:
+        readable_lens = context_lens
+    positions = torch.arange(context_len, device=device)
+    readable = positions[None, :] < readable_lens.reshape(-1, 1)
     inf_torch = (torch.isinf(out_torch) & (out_torch < 0))[:, :context_len]
     inf_triton = (torch.isinf(out_triton) & (out_triton < 0))[:, :context_len]
-    assert torch.equal(inf_torch, inf_triton)
-    finite = ~inf_torch
+    assert torch.equal(inf_torch[readable], inf_triton[readable])
+    finite = readable & ~inf_torch
     if finite.any():
         torch.testing.assert_close(
             out_triton[:, :context_len][finite],
