@@ -394,7 +394,10 @@ def main() -> None:
         max_mnnvl_reduce_scatter_size=max_message_bytes,
         max_mnnvl_multimem_reduce_scatter_size=max_message_bytes,
     )
-    if comm.disabled or not comm.mnnvl_multimem_rs_multicast_ptr:
+    if comm.disabled:
+        raise RuntimeError("The production custom all-reduce backend is unavailable")
+    comm._init_mnnvl_multimem_reduce_scatter_buffer()
+    if not comm.mnnvl_multimem_rs_multicast_ptr:
         raise RuntimeError("The production TP8 multimem backend is unavailable")
 
     dtype = _DTYPES[args.dtype]

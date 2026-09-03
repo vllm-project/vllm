@@ -350,7 +350,9 @@ def _run_multimem_reduce_scatter_test(
 
         fa = get_tp_group().device_communicator.ca_comm
         assert fa is not None and not fa.disabled
-        assert fa.mnnvl_multimem_rs_multicast_ptr
+        assert fa.mnnvl_multimem_rs_supported
+        assert not fa.mnnvl_multimem_rs_initialized
+        assert not fa.mnnvl_multimem_rs_multicast_ptr
 
         message_bytes = {
             "mnnvl_lamport": 1 * 1024 * 1024,
@@ -374,6 +376,9 @@ def _run_multimem_reduce_scatter_test(
                     assert selected == backend
                     out = fa.custom_reduce_scatter(inp)
                     assert out is not None
+                    if backend == "mnnvl_multimem":
+                        assert fa.mnnvl_multimem_rs_initialized
+                        assert fa.mnnvl_multimem_rs_multicast_ptr
                 torch.testing.assert_close(out, torch.full_like(out, 36))
 
 

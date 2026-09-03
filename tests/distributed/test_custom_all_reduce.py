@@ -109,21 +109,21 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("same_node", "world_size", "device_capability", "expected"),
+    ("world_size", "device_capability", "local_multicast", "expected"),
     [
-        (True, 8, (10, 0), True),
-        (True, 8, (10, 3), True),
-        (False, 8, (10, 3), False),
-        (True, 4, (10, 3), False),
-        (True, 8, (10, 1), False),
-        (True, 8, (9, 0), False),
+        (8, (10, 0), True, True),
+        (8, (10, 3), True, True),
+        (4, (10, 3), True, False),
+        (8, (10, 1), True, False),
+        (8, (9, 0), True, False),
+        (8, (10, 3), False, False),
     ],
 )
 def test_mnnvl_multimem_reduce_scatter_platform_gate(
     monkeypatch,
-    same_node,
     world_size,
     device_capability,
+    local_multicast,
     expected,
 ):
     def is_device_capability(capability, device_id):
@@ -136,29 +136,42 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
         "is_device_capability",
         is_device_capability,
     )
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: local_multicast,
+    )
 
     supported = car._supports_mnnvl_multimem_reduce_scatter(
-        torch.device("cuda:3"), world_size, same_node
+        torch.device("cuda:3"), world_size
     )
     assert supported is expected
 
 
 @pytest.mark.parametrize(
-    ("message_bytes", "multimem_ptr", "batch_invariant", "expected"),
+    (
+        "message_bytes",
+        "multimem_ptr",
+        "multimem_initialized",
+        "batch_invariant",
+        "expected",
+    ),
     [
-        (16 * 1024 * 1024, 1, False, "mnnvl_lamport"),
-        (16 * 1024 * 1024 + 128, 1, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024, 1, False, "mnnvl_multimem"),
-        (64 * 1024 * 1024 + 128, 1, False, None),
-        (32 * 1024 * 1024, 0, False, None),
-        (8 * 1024 * 1024, 1, True, "mnnvl_lamport"),
-        (32 * 1024 * 1024, 1, True, None),
+        (16 * 1024 * 1024, 1, True, False, "mnnvl_lamport"),
+        (16 * 1024 * 1024 + 128, 1, True, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024, 1, True, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024 + 128, 1, True, False, None),
+        (32 * 1024 * 1024, 0, True, False, None),
+        (32 * 1024 * 1024, 0, False, False, "mnnvl_multimem"),
+        (8 * 1024 * 1024, 1, True, True, "mnnvl_lamport"),
+        (32 * 1024 * 1024, 1, True, True, None),
     ],
 )
 def test_mnnvl_reduce_scatter_backend_gate(
     monkeypatch,
     message_bytes,
     multimem_ptr,
+    multimem_initialized,
     batch_invariant,
     expected,
 ):
@@ -171,6 +184,8 @@ def test_mnnvl_reduce_scatter_backend_gate(
     communicator.mnnvl_only = False
     communicator.fully_connected = True
     communicator.mnnvl_multicast_ptr = 1
+    communicator.mnnvl_multimem_rs_supported = True
+    communicator.mnnvl_multimem_rs_initialized = multimem_initialized
     communicator.mnnvl_multimem_rs_multicast_ptr = multimem_ptr
     communicator.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
     communicator.max_mnnvl_multimem_reduce_scatter_size = 64 * 1024 * 1024
@@ -183,6 +198,49 @@ def test_mnnvl_reduce_scatter_backend_gate(
     assert communicator.should_mnnvl_multimem_reduce_scatter(inp) is (
         expected == "mnnvl_multimem"
     )
+
+
+def test_mnnvl_multimem_reduce_scatter_skips_rendezvous_after_peer_alloc_failure(
+    monkeypatch,
+):
+    events = []
+
+    class FakeSymmMem:
+        @staticmethod
+        def empty(*_args, **_kwargs):
+            events.append("empty")
+            return torch.empty(1, dtype=torch.uint8)
+
+        @staticmethod
+        def rendezvous(*_args, **_kwargs):
+            events.append("rendezvous")
+            return None
+
+    def report_peer_allocation_failure(group_value, **_kwargs):
+        events.append("all_reduce")
+        assert group_value.item() == 1
+        group_value.zero_()
+
+    monkeypatch.setattr(car, "torch_symm_mem", FakeSymmMem)
+    monkeypatch.setattr(car.dist, "all_reduce", report_peer_allocation_failure)
+
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = True
+    communicator._ptr = 0
+    communicator.group = object()
+    communicator.device = torch.device("cuda:0")
+    communicator.max_mnnvl_multimem_reduce_scatter_size = 64 * 1024 * 1024
+    communicator.mnnvl_multimem_rs_supported = True
+    communicator.mnnvl_multimem_rs_initialized = False
+    communicator.mnnvl_multimem_rs_buffer = None
+    communicator.mnnvl_multimem_rs_multicast_ptr = 0
+
+    communicator._init_mnnvl_multimem_reduce_scatter_buffer()
+
+    assert events == ["empty", "all_reduce"]
+    assert communicator.mnnvl_multimem_rs_initialized
+    assert communicator.mnnvl_multimem_rs_buffer is None
+    assert communicator.mnnvl_multimem_rs_multicast_ptr == 0
 
 
 @ray.remote(num_gpus=1, max_calls=1)
