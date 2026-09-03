@@ -590,6 +590,7 @@ class Base(
                     self.model_config.model_arch_config.head_size = qk_head_dim
 
         logits_soft_cap = getattr(text_config, "attn_logit_softcapping", None)
+        layer_types = getattr(text_config, "layer_types", None)
 
         pp_rank = self.pp_group.rank_in_group
         pp_size = self.pp_group.world_size
@@ -597,9 +598,11 @@ class Base(
 
         for i in range(start, end):
             if i not in self.attention_fusers:
+                in_range = layer_types and i < len(layer_types)
+                layer = f"{i} ({layer_types[i]})" if in_range else str(i)
                 raise ValueError(
-                    f"No module dispatching the Transformers attention interface was "
-                    f"found in layer {i}, so vLLM has nowhere to attach its attention."
+                    f"Layer {layer} does not dispatch through the Transformers "
+                    "attention interface and vLLM has no other way to handle it."
                 )
             prefix, attn_fuser = self.attention_fusers[i]
             attn_module = self.get_submodule(prefix)
@@ -653,10 +656,7 @@ class Base(
                 )
 
                 # Handle interleaved sliding window attention
-                if (
-                    hasattr(text_config, "layer_types")
-                    and text_config.layer_types[i] == "sliding_attention"
-                ):
+                if layer_types and layer_types[i] == "sliding_attention":
                     kwargs["per_layer_sliding_window"] = text_config.sliding_window
 
             attn_instance = attn_cls(**kwargs)
