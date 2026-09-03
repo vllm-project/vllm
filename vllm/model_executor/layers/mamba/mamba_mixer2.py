@@ -71,6 +71,13 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 logger = init_logger(__name__)
 
+
+def _view_mtp_decode_tensor(
+    tensor: torch.Tensor, decode_batch: int, spec_query_len: int
+) -> torch.Tensor:
+    return tensor.view(decode_batch, spec_query_len, *tensor.shape[1:])
+
+
 # Added by the IBM Team, 2024
 
 
@@ -1136,20 +1143,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         assert replayssm_state_indices_d is not None
                         decode_batch = replayssm_state_indices_d.size(0)
                         if num_decode_tokens == decode_batch * spec_query_len:
-                            hidden_states_d = hidden_states_d.view(
+                            hidden_states_d = _view_mtp_decode_tensor(
+                                hidden_states_d, decode_batch, spec_query_len
+                            )
+                            dt_d = _view_mtp_decode_tensor(
+                                dt_d, decode_batch, spec_query_len
+                            )
+                            B_d = _view_mtp_decode_tensor(
+                                B_d, decode_batch, spec_query_len
+                            )
+                            C_d = _view_mtp_decode_tensor(
+                                C_d, decode_batch, spec_query_len
+                            )
+                            preallocated_ssm_out_d = _view_mtp_decode_tensor(
+                                preallocated_ssm_out_d,
                                 decode_batch,
                                 spec_query_len,
-                                *hidden_states_d.shape[1:],
-                            )
-                            dt_d = dt_d.view(
-                                decode_batch, spec_query_len, *dt_d.shape[1:]
-                            )
-                            B_d = B_d.view(decode_batch, spec_query_len, *B_d.shape[1:])
-                            C_d = C_d.view(decode_batch, spec_query_len, *C_d.shape[1:])
-                            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
-                                decode_batch,
-                                spec_query_len,
-                                *preallocated_ssm_out_d.shape[1:],
                             )
                             fi_cu_seqlens = None
                             fi_max_seqlen = None
