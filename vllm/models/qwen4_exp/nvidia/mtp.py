@@ -280,8 +280,6 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | IntermediateTensors:
         hc_count = self.hc_count
         hidden_size = self.hidden_size
-        current_step_idx = spec_step_idx % self.num_mtp_layers
-        layer = self.layers[current_step_idx]
         prev_block_output: torch.Tensor | None = None
 
         if get_pp_group().is_first_rank:
@@ -309,6 +307,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
             prev_block_output=prev_block_output,

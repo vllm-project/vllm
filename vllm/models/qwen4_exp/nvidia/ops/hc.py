@@ -222,11 +222,10 @@ def _hc_combine_kernel(
 
     # Keeping HC as a broadcast dimension is faster here than four separate
     # residual load/store sequences.
+    block = block.to(tl.float32)[None, :]
     if inj_ptr is not None:
-        scale = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-    else:
-        scale = tl.full([HC_PAD], 1.0, tl.float32)
-    out = res.to(tl.float32) + block.to(tl.float32)[None, :] * scale[:, None]
+        block *= 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)[:, None]
+    out = res.to(tl.float32) + block
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -318,17 +317,13 @@ def _hc_combine_norm_kernel(
         block_ptr + row * stride_block + offs_inner,
         mask_inner,
         other=0.0,
-    )
+    ).to(tl.float32)
     if inj_ptr is not None:
         inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-        scale = tl.sum(tl.where(offs_hc == stream, inj, 0.0))
-    else:
-        scale = 1.0
+        block *= tl.sum(tl.where(offs_hc == stream, inj, 0.0))
     # Round the materialized combine result before normalization. This matches
     # the unfused combine -> RMSNorm boundary.
-    out = (res.to(tl.float32) + block.to(tl.float32) * scale).to(
-        out_ptr.dtype.element_ty
-    )
+    out = (res.to(tl.float32) + block).to(out_ptr.dtype.element_ty)
     if inj_ptr is None:
         w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
     tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
