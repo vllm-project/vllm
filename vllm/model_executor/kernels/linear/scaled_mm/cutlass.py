@@ -316,6 +316,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        """Blockwise FP8 GEMM; chunked along M where the platform needs it."""
         out_dtype = self.config.out_dtype
         chunk = blockwise_fp8_m_chunk()
         if chunk and A.shape[0] > chunk:

@@ -759,7 +759,7 @@ def test_cutlass_fp8_group_gemm(
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
 
 
-@pytest.mark.parametrize("m", [8192, 12288])
+@pytest.mark.parametrize("m", [8192, 8193, 12288])
 @pytest.mark.parametrize("n,k", [(2048, 2560), (2560, 6144)])
 @pytest.mark.parametrize("chunk", [4096, 2048])
 @pytest.mark.skipif(
