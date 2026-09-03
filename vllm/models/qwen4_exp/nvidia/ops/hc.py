@@ -222,10 +222,10 @@ def _hc_combine_kernel(
 
     # Keeping HC as a broadcast dimension is faster here than four separate
     # residual load/store sequences.
-    block = block.to(tl.float32)[None, :]
     if inj_ptr is not None:
-        block *= 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)[:, None]
-    out = res.to(tl.float32) + block
+        inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
+        block = block.to(tl.float32)[None, :] * inj[:, None]
+    out = res.to(tl.float32) + block.to(tl.float32)
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -289,16 +289,20 @@ def _hc_combine_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
-    HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
-    NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
-    NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
-
     row = tl.program_id(0)
     stream = tl.program_id(1)
-    offs_hc = tl.arange(0, HC_PAD)
-    mask_hc = offs_hc < HC
-    tile_ids = tl.arange(0, NUM_TILES_PAD)
-    offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
+    if inj_ptr is not None:
+        HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
+        NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
+        NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
+        offs_hc = tl.arange(0, HC_PAD)
+        mask_hc = offs_hc < HC
+        tile_ids = tl.arange(0, NUM_TILES_PAD)
+        offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
+    else:
+        # Unit injection needs no HC-axis broadcast; keep its norm tile flat.
+        UNIT_BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(HC_DIM)
+        offs_inner = tl.arange(0, UNIT_BLOCK_SIZE)
     mask_inner = offs_inner < HC_DIM
     offs = stream * HC_DIM + offs_inner
     # Shared norm weights repeat across streams; per-branch weights use the
@@ -317,21 +321,22 @@ def _hc_combine_norm_kernel(
         block_ptr + row * stride_block + offs_inner,
         mask_inner,
         other=0.0,
-    ).to(tl.float32)
+    )
     if inj_ptr is not None:
         inj = 2.0 * tl.sigmoid(inj.to(tl.float32) / HC)
-        block *= tl.sum(tl.where(offs_hc == stream, inj, 0.0))
+        block = block.to(tl.float32) * tl.sum(tl.where(offs_hc == stream, inj, 0.0))
     # Round the materialized combine result before normalization. This matches
     # the unfused combine -> RMSNorm boundary.
-    out = (res.to(tl.float32) + block).to(out_ptr.dtype.element_ty)
+    out = (res.to(tl.float32) + block.to(tl.float32)).to(out_ptr.dtype.element_ty)
     if inj_ptr is None:
         w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
     tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
 
     out = out.to(tl.float32)
-    # Keep the two-axis reduction: flattening the padded tile is ~40% slower
-    # at decode sizes.
-    sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
+    if inj_ptr is not None:
+        sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
+    else:
+        sum_sq = tl.sum(out * out)
     rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
 
     if launch_pdl:
