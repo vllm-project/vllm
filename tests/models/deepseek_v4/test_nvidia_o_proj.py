@@ -1,57 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
-import sys
 import types
-from pathlib import Path
 
+import pytest
 import torch
 import torch.nn as nn
 
+from vllm.models.deepseek_v4.nvidia.ops import o_proj
 
-def load_o_proj_module():
-    root = Path(__file__).parents[3]
-    module_path = (
-        root / "vllm" / "models" / "deepseek_v4" / "nvidia" / "ops" / "o_proj.py"
-    )
-
-    stub_names = (
-        "vllm.models.deepseek_v4.common.ops",
-        "vllm.platforms",
-        "vllm.utils.deep_gemm",
-    )
-    original_modules = {
-        name: sys.modules.get(name) for name in stub_names if name in sys.modules
-    }
-    missing_modules = {name for name in stub_names if name not in sys.modules}
-    try:
-        common_ops = types.ModuleType("vllm.models.deepseek_v4.common.ops")
-        common_ops.fused_inv_rope_fp8_quant = None
-        sys.modules["vllm.models.deepseek_v4.common.ops"] = common_ops
-
-        platforms = types.ModuleType("vllm.platforms")
-        platforms.current_platform = None
-        sys.modules["vllm.platforms"] = platforms
-
-        deep_gemm = types.ModuleType("vllm.utils.deep_gemm")
-        deep_gemm.fp8_einsum = None
-        sys.modules["vllm.utils.deep_gemm"] = deep_gemm
-
-        spec = importlib.util.spec_from_file_location("test_o_proj", module_path)
-        assert spec is not None
-        assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        for name, module in original_modules.items():
-            sys.modules[name] = module
-        for name in missing_modules:
-            sys.modules.pop(name, None)
-
-
-o_proj = load_o_proj_module()
 get_fp8_weight_scale = o_proj.get_fp8_weight_scale
 inv_rope_bf16_o_proj = o_proj.inv_rope_bf16_o_proj
 deep_gemm_fp8_o_proj = o_proj.deep_gemm_fp8_o_proj
@@ -128,6 +85,7 @@ class FakeGroupedWoA(nn.Module):
 class FakeSingleGroupWoA(nn.Module):
     def __init__(self):
         super().__init__()
+        self.input = None
         self.weight = nn.Parameter(
             torch.tensor(
                 [
@@ -138,6 +96,13 @@ class FakeSingleGroupWoA(nn.Module):
             ),
             requires_grad=False,
         )
+
+    def forward(self, x):
+        self.input = x
+        scale = getattr(self, "weight_scale", 1)
+        if isinstance(scale, torch.Tensor):
+            scale = scale.to(x.dtype)
+        return torch.einsum("bgi,ri->bgr", x, self.weight) * scale
 
 
 def test_inv_rope_bf16_o_proj_reshapes_flat_grouped_weight():
@@ -170,13 +135,24 @@ class FakeWoB(nn.Module):
         return x + 1
 
 
-def test_deep_gemm_fp8_o_proj_uses_bf16_fallback_without_scale():
+@pytest.mark.parametrize("with_weight_scale", [False, True])
+def test_deep_gemm_fp8_o_proj_uses_bf16_fallback(monkeypatch, with_weight_scale):
+    monkeypatch.setattr(
+        o_proj,
+        "current_platform",
+        types.SimpleNamespace(support_deep_gemm=lambda: False),
+    )
+    wo_a = FakeSingleGroupWoA()
+    factor = 2.0 if with_weight_scale else 1.0
+    if with_weight_scale:
+        wo_a.weight_scale = nn.Parameter(torch.tensor([factor]), requires_grad=False)
     wo_b = FakeWoB()
+
     out = deep_gemm_fp8_o_proj(
         torch.tensor([[[1.0, 2.0, 3.0, 4.0]]], dtype=torch.bfloat16),
         torch.tensor([0], dtype=torch.long),
         torch.tensor([[1.0, 0.0]], dtype=torch.float32),
-        FakeSingleGroupWoA(),
+        wo_a,
         wo_b,
         n_groups=1,
         heads_per_group=1,
@@ -187,8 +163,10 @@ def test_deep_gemm_fp8_o_proj_uses_bf16_fallback_without_scale():
         tma_aligned_scales=False,
     )
 
+    if with_weight_scale:
+        assert wo_a.input is not None
     assert wo_b.input is not None
-    torch.testing.assert_close(
-        wo_b.input, torch.tensor([[1.0, 2.0]], dtype=torch.bfloat16)
-    )
-    torch.testing.assert_close(out, torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16))
+    expected = torch.tensor([[factor, 2 * factor]], dtype=torch.bfloat16)
+    expected_out = expected + 1
+    torch.testing.assert_close(wo_b.input, expected)
+    torch.testing.assert_close(out, expected_out)

@@ -86,6 +86,13 @@ def inv_rope_bf16_o_proj(
     wo_a_groups = flattened_size // wo_a_input_size
     wo_a_input = projected.reshape(num_tokens, wo_a_groups, wo_a_input_size)
 
+    if get_fp8_weight_scale(wo_a) is not None:
+        z_all = maybe_unpack_linear_output(wo_a(wo_a_input)).reshape(
+            num_tokens, wo_a_groups, wo_a_groups, o_lora_rank
+        )
+        group = torch.arange(wo_a_groups, device=o.device)
+        return z_all[:, group, group]
+
     if (
         wo_a_weight is not None
         and wo_a_weight.ndim == 2
@@ -141,7 +148,7 @@ def deep_gemm_fp8_o_proj(
     the padding groups are sliced off.
     """
     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
-    if not use_fp8:
+    if not use_fp8 or not current_platform.support_deep_gemm():
         z = inv_rope_bf16_o_proj(
             o,
             positions,
