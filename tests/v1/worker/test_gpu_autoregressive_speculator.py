@@ -20,6 +20,7 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
@@ -160,6 +161,8 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.dtype = torch.float32
         speculator.draft_model_config = draft_model_config
         speculator.supports_mm_inputs = False
+        speculator.dp_size = 1
+        speculator.dp_rank = 0
 
     checked_configs = []
 
@@ -375,6 +378,156 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
 
     assert generate_draft.call_count == expected_eager_calls
     assert run_fullgraph.call_count == expected_graph_replays
+
+
+def _make_async_sync_propose_speculator(monkeypatch):
+    order = []
+    prefill_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.NONE,
+        num_tokens=2,
+        num_reqs=1,
+    )
+    decode_desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=2,
+        num_reqs=1,
+        uniform_token_count=1,
+    )
+    prefill_sync = DPSyncState(torch.tensor([2, 2]), 2, False)
+    decode_sync = DPSyncState(torch.tensor([2, 2]), 1, False)
+
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", Mock())
+    monkeypatch.setattr(
+        spec_module,
+        "prepare_decode_inputs",
+        Mock(side_effect=lambda *args, **kwargs: order.append("prepare_decode")),
+    )
+    monkeypatch.setattr(
+        spec_module,
+        "get_uniform_decode_token_count",
+        lambda *args, **kwargs: 2,
+    )
+    monkeypatch.setattr(
+        spec_module,
+        "dispatch_cg_and_sync_dp",
+        Mock(return_value=(prefill_desc, prefill_sync)),
+    )
+
+    future = Mock()
+
+    def finish_sync(manager):
+        order.append("finish")
+        return decode_desc, decode_sync
+
+    def start_sync(*args, **kwargs):
+        order.append("start")
+        return future
+
+    future.result.side_effect = finish_sync
+    future.release.side_effect = lambda: order.append("release")
+    coordinator = Mock()
+    coordinator.start.side_effect = start_sync
+
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 2
+    speculator.dp_size = 2
+    speculator.dp_rank = 0
+    speculator.max_model_len = 16
+    speculator.max_num_reqs = 1
+    speculator.hidden_states = torch.zeros(2, 3)
+    speculator.last_token_indices = torch.zeros(1, dtype=torch.int64)
+    speculator.current_draft_step = torch.tensor(0, dtype=torch.int64)
+    speculator.input_buffers = SimpleNamespace()
+    speculator.sample_src_positions = torch.zeros(1, dtype=torch.int64)
+    speculator.draft_tokens = torch.zeros((1, 2), dtype=torch.int64)
+    speculator.prefill_cudagraph_manager = Mock()
+    speculator.decode_cudagraph_manager = Mock()
+    speculator._decode_dp_sync = coordinator
+    speculator.use_fused_multi_step_decode = False
+    speculator._copy_request_inputs = Mock()
+    speculator._prepare_eplb_forward = Mock()
+    speculator.on_prefill_begin = Mock()
+    speculator.on_prefill_end = Mock()
+    speculator.on_multi_step_decode_begin = Mock()
+    speculator.on_multi_step_decode_end = Mock()
+    speculator._prefill = Mock(
+        side_effect=lambda *args, **kwargs: order.append("prefill")
+    )
+    speculator._multi_step_decode = Mock(
+        side_effect=lambda *args, **kwargs: order.append("decode")
+    )
+
+    input_batch = SimpleNamespace(
+        num_tokens=2,
+        num_tokens_after_padding=2,
+        num_reqs=1,
+        num_scheduled_tokens=torch.tensor([2]),
+        seq_lens_cpu_upper_bound=torch.tensor([2]),
+        seq_lens=torch.tensor([2]),
+        idx_mapping=torch.tensor([0]),
+        has_prefill=False,
+    )
+    return speculator, input_batch, future, order
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_propose_overlaps_decode_dp_sync_with_draft_prefill(monkeypatch):
+    speculator, input_batch, future, order = _make_async_sync_propose_speculator(
+        monkeypatch
+    )
+
+    output = speculator.propose(
+        input_batch=input_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.zeros(2, 3),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(1, dtype=torch.int32),
+        num_rejected=torch.zeros(1, dtype=torch.int32),
+        last_sampled=torch.zeros(1, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+        temperature=torch.ones(1),
+        seeds=torch.zeros(1, dtype=torch.int64),
+    )
+
+    assert torch.equal(output, speculator.draft_tokens)
+    assert order == [
+        "start",
+        "prefill",
+        "prepare_decode",
+        "finish",
+        "decode",
+        "release",
+    ]
+    future.release.assert_called_once_with()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_propose_releases_decode_dp_sync_when_prefill_fails(monkeypatch):
+    speculator, input_batch, future, order = _make_async_sync_propose_speculator(
+        monkeypatch
+    )
+    speculator._prefill.side_effect = RuntimeError("prefill failed")
+
+    with pytest.raises(RuntimeError, match="prefill failed"):
+        speculator.propose(
+            input_batch=input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=torch.zeros(2, 3),
+            aux_hidden_states=None,
+            num_sampled=torch.ones(1, dtype=torch.int32),
+            num_rejected=torch.zeros(1, dtype=torch.int32),
+            last_sampled=torch.zeros(1, dtype=torch.int64),
+            next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+            temperature=torch.ones(1),
+            seeds=torch.zeros(1, dtype=torch.int64),
+        )
+
+    assert order == ["start", "release"]
+    future.release.assert_called_once_with()
 
 
 def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(

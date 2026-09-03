@@ -14,7 +14,11 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import (
+    DPSyncCoordinator,
+    DPSyncState,
+    dispatch_cg_and_sync_dp,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
@@ -46,6 +50,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
+        self._decode_dp_sync = (
+            DPSyncCoordinator(self.dp_size, self.dp_rank) if self.dp_size > 1 else None
+        )
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -298,78 +305,99 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else None
         )
 
-        self._prepare_eplb_forward(num_tokens)
-
-        self.on_prefill_begin(num_reqs)
-        if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # Replay the full graph for draft prefill.
-            assert self.prefill_cudagraph_manager is not None
-            self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
-        else:
-            # The target model's attention metadata and slot mappings
-            # can directly be used for draft prefill, because of the
-            # identical batch shape and KV cache layout.
-            self._prefill(
+        decode_dp_future = None
+        if self.num_speculative_steps > 1 and self._decode_dp_sync is not None:
+            # The continuation shape depends only on num_reqs, so its CPU
+            # collective can overlap draft prefill and decode input preparation.
+            # It is resolved below before any continuation work is launched.
+            decode_dp_future = self._decode_dp_sync.start(
+                self.decode_cudagraph_manager,
                 num_reqs,
-                prefill_batch_desc.num_tokens,
-                attn_metadata,
-                slot_mappings,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
-                mm_inputs=mm_inputs,
+                num_reqs,
+                uniform_token_count=1,
+                need_eager=is_profile,
             )
-        self.on_prefill_end(num_reqs)
+        try:
+            self._prepare_eplb_forward(num_tokens)
 
-        if self.num_speculative_steps == 1:
-            # Early exit.
-            return self.draft_tokens[:num_reqs, :1]
+            self.on_prefill_begin(num_reqs)
+            if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
+                # Replay the full graph for draft prefill.
+                assert self.prefill_cudagraph_manager is not None
+                self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
+            else:
+                # The target model's attention metadata and slot mappings
+                # can directly be used for draft prefill, because of the
+                # identical batch shape and KV cache layout.
+                self._prefill(
+                    num_reqs,
+                    prefill_batch_desc.num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
+                    mm_inputs=mm_inputs,
+                )
+            self.on_prefill_end(num_reqs)
 
-        # Prepare the inputs for the decode steps.
-        prepare_decode_inputs(
-            self.draft_tokens[:num_reqs, 0],
-            input_batch.seq_lens,
-            num_rejected,
-            self.input_buffers,
-            self.sample_src_positions,
-            self.max_model_len,
-            self.max_num_reqs,
-            advance_draft_positions=self.advance_draft_positions,
-        )
+            if self.num_speculative_steps == 1:
+                # Early exit.
+                return self.draft_tokens[:num_reqs, :1]
 
-        # Each request produces exactly 1 token per draft generation step,
-        # enabling FULL graph replay.
-        decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
-            self.decode_cudagraph_manager,
-            num_reqs,
-            num_reqs,
-            uniform_token_count=1,
-            dp_size=self.dp_size,
-            dp_rank=self.dp_rank,
-            need_eager=is_profile,
-        )
-        num_tokens_across_dp = (
-            decode_batch_sync.num_tokens_across_dp
-            if decode_batch_sync is not None
-            else None
-        )
+            # Prepare the inputs for the decode steps.
+            prepare_decode_inputs(
+                self.draft_tokens[:num_reqs, 0],
+                input_batch.seq_lens,
+                num_rejected,
+                self.input_buffers,
+                self.sample_src_positions,
+                self.max_model_len,
+                self.max_num_reqs,
+                advance_draft_positions=self.advance_draft_positions,
+            )
 
-        self.on_multi_step_decode_begin(num_reqs)
-        # Generate the remaining num_speculative_steps - 1 draft tokens.
-        decode_fn = (
-            self._fused_multi_step_decode
-            if self.use_fused_multi_step_decode
-            else self._multi_step_decode
-        )
-        decode_fn(
-            num_reqs,
-            dummy_run and skip_attn_for_dummy_run,
-            decode_batch_desc,
-            num_tokens_across_dp,
-            input_batch.seq_lens_cpu_upper_bound,
-        )
-        self.on_multi_step_decode_end(num_reqs)
+            # Each request produces exactly 1 token per draft generation step,
+            # enabling FULL graph replay.
+            if decode_dp_future is None:
+                decode_batch_desc, decode_batch_sync = dispatch_cg_and_sync_dp(
+                    self.decode_cudagraph_manager,
+                    num_reqs,
+                    num_reqs,
+                    uniform_token_count=1,
+                    dp_size=self.dp_size,
+                    dp_rank=self.dp_rank,
+                    need_eager=is_profile,
+                )
+            else:
+                decode_batch_desc, decode_batch_sync = decode_dp_future.result(
+                    self.decode_cudagraph_manager
+                )
+            num_tokens_across_dp = (
+                decode_batch_sync.num_tokens_across_dp
+                if decode_batch_sync is not None
+                else None
+            )
 
-        return self.draft_tokens[:num_reqs]
+            self.on_multi_step_decode_begin(num_reqs)
+            # Generate the remaining num_speculative_steps - 1 draft tokens.
+            decode_fn = (
+                self._fused_multi_step_decode
+                if self.use_fused_multi_step_decode
+                else self._multi_step_decode
+            )
+            decode_fn(
+                num_reqs,
+                dummy_run and skip_attn_for_dummy_run,
+                decode_batch_desc,
+                num_tokens_across_dp,
+                input_batch.seq_lens_cpu_upper_bound,
+            )
+            self.on_multi_step_decode_end(num_reqs)
+
+            return self.draft_tokens[:num_reqs]
+        finally:
+            if decode_dp_future is not None:
+                decode_dp_future.release()
 
     @torch.inference_mode()
     def _run_model(
