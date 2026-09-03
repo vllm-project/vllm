@@ -70,7 +70,8 @@ def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     """
     if not kv_params:
         return None
-    return kv_params.get("remote_prefiller")
+    val = kv_params.get("remote_prefiller")
+    return val if isinstance(val, dict) else None
 
 
 def _remote_decoder_params(kv_params: dict | None) -> dict | None:
@@ -81,7 +82,8 @@ def _remote_decoder_params(kv_params: dict | None) -> dict | None:
     """
     if not kv_params:
         return None
-    return kv_params.get("remote_decoder")
+    val = kv_params.get("remote_decoder")
+    return val if isinstance(val, dict) else None
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
@@ -92,7 +94,8 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
     """
     if not kv_params:
         return None
-    return kv_params.get("remote_kv_source")
+    val = kv_params.get("remote_kv_source")
+    return val if isinstance(val, dict) else None
 
 
 def _peer_id_from_params(role_params: dict) -> str | None:
