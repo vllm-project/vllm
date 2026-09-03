@@ -1214,9 +1214,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.W_K = get_dcp_group().all_gather(
                     self.W_K.contiguous(), dim=0
                 )
-                self.W_K_scale = get_dcp_group().all_gather(
-                    self.W_K_scale.contiguous(), dim=0
-                )
+                self.W_K_scale = _dcp_all_gather_scale(self.W_K_scale, dim=0)
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
@@ -1482,6 +1480,12 @@ def dynamic_per_batched_tensor_quant(
     scale = DTYPE_MAX / amax
     x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+
+
+def _dcp_all_gather_scale(scale: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    if scale.dim() == 0:
+        scale = scale.reshape(1)
+    return get_dcp_group().all_gather(scale.contiguous(), dim=dim)
 
 
 @CustomOp.register(
