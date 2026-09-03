@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
 import torch
@@ -157,8 +157,13 @@ class CPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        super().initialize_kv_cache(kv_cache_config, is_profiling)
+        super().initialize_kv_cache(
+            kv_cache_config,
+            is_profiling,
+            kv_cache_allocation_context=kv_cache_allocation_context,
+        )
 
         if self.speculative_config:
             if self.speculative_config.use_eagle():

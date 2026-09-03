@@ -15,15 +15,15 @@ from vllm.entrypoints.chat_utils import (
     get_tool_call_id_type,
     make_tool_call_id,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -131,6 +131,17 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        if (
+            self._reasoning_parser is None
+            and self._tool_parser is not None
+            and hasattr(self._tool_parser, "skip_reasoning_parsing")
+        ):
+            # With no reasoning parser configured, reasoning markup is
+            # plain content: an engine-based tool parser should pass it
+            # through verbatim where its grammar allows, not consume or
+            # reclassify it. The engine ignores the flag for markers
+            # shared with non-reasoning structure.
+            self._tool_parser.skip_reasoning_parsing = True
         self._stream_state = StreamState(
             tool_call_id_type=(
                 get_tool_call_id_type(model_config)
@@ -508,6 +519,14 @@ class DelegatingParser(Parser):
                     or (isinstance(content, str) and not content.strip())
                 ):
                     return [], None
+                # No complete tool calls: for engine-based parsers, return
+                # the tool parser's content, which drops incomplete
+                # tool-call markup (e.g. a <tool_call> opener truncated by
+                # max_tokens or a stop string), so the non-streaming path
+                # matches streaming. Legacy parsers keep their existing
+                # behavior of returning the raw content.
+                if self._engine_based and tool_call_info is not None:
+                    return None, tool_call_info.content or None
                 return None, content
 
         return tool_calls, content

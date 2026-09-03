@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
 
 import deep_ep
 import torch
@@ -15,18 +13,58 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    swizzle_mxfp8_scale,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
 )
+
+
+def _quantize_before_dispatch(
+    quant_config: FusedMoEQuantConfig, defer_input_quant: bool
+) -> bool:
+    """
+    Do quantized dispatch for blockfp8 and mxfp8, unless the
+    subsequent moe kernel requires bf16 inputs.
+    """
+    if defer_input_quant:
+        return False
+    return quant_config.is_block_quantized or quant_config.quant_dtype == "mxfp8"
+
+
+def _pack_mxfp8_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Pack row-major [M, K/32] UE8M0 scales into [M, K/128] int32.
+
+    DeepEP moves scale factors as opaque 4-byte packs (`sf_pack_t` is a
+    float/UE8M0x4 union), so 1-byte UE8M0 scales must be packed 4-per-int32.
+    """
+    assert scale.dtype == torch.uint8 and scale.ndim == 2, (
+        f"expected 2D uint8 mxfp8 scales, got {scale.shape} {scale.dtype}"
+    )
+    assert scale.size(1) % 4 == 0, (
+        f"mxfp8 dispatch needs hidden_size % {MXFP8_BLOCK_SIZE * 4} == 0, "
+        f"got {scale.size(1)} scale columns"
+    )
+    return scale.contiguous().view(torch.int32)
+
+
+def _unpack_mxfp8_scale(
+    scale: torch.Tensor, hidden_size: int, is_scale_swizzled: bool
+) -> torch.Tensor:
+    """Inverse of `_pack_mxfp8_scale`, restoring the expert kernel's layout.
+
+    TRTLLM consumes the row-major [M, K/32] scales as-is; CUTLASS wants them
+    swizzled into F8_128x4, which can only happen here because the swizzle
+    interleaves scales across a 128-row tile (i.e. across tokens).
+    """
+    scale = scale.contiguous().view(torch.uint8)
+    if is_scale_swizzled:
+        scale = swizzle_mxfp8_scale(scale, M=scale.size(0), K=hidden_size)
+    return scale
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -41,7 +79,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
       - Worst-case tensor allocation; padding rows zeroed via
         handle.psum_num_recv_tokens_per_scaleup_rank
       - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta=None)
+      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -275,7 +313,26 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if self.use_cudagraph:
+            # Carry the per-rank prefix sum so SiTU can skip padding rows.
+            # expert_num_tokens stays None: count-based consumers (DeepGEMM,
+            # Triton) must treat a None field as "no counts" and derive their
+            # own, exactly as in the meta-absent decode case.
+            if expert_tokens_meta is None:
+                expert_tokens_meta = mk.ExpertTokensMetadata(
+                    expert_num_tokens=None,
+                    expert_num_tokens_cpu=None,
+                )
+            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
+
+        if _quantize_before_dispatch(quant_config, defer_input_quant):
+            if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
+                expert_x_scale = _unpack_mxfp8_scale(
+                    expert_x_scale,
+                    hidden_size=expert_x.size(-1),
+                    is_scale_swizzled=quant_config.is_scale_swizzled,
+                )
+        elif not defer_input_quant:
             expert_x_scale = None
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
@@ -316,16 +373,23 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized and not defer_input_quant:
+        if _quantize_before_dispatch(quant_config, defer_input_quant):
+            # Scales must be row-major [num_tokens, ...] here so each token's
+            # scales can be shuffled with it; any swizzling the expert kernel
+            # wants is applied post-dispatch in `_receiver`.
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                is_scale_swizzled=False,
+                mx_alignment=quant_config.mx_alignment,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
+            if quant_config.quant_dtype == "mxfp8":
+                a1q_scale = _pack_mxfp8_scale(a1q_scale)
             a1_post_scale = None
         else:
             a1q = a1
@@ -451,120 +515,29 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )
 
 
-class GlobalizeRecvTopkIdxKernel(
-    VllmJitKernel["GlobalizeRecvTopkIdxKernel.CompileKey"]
+@triton.jit
+def _globalize_recv_topk_idx_kernel(
+    topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
+    psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
+    P,
+    rank_expert_offset,
+    num_experts,
+    n_elements,  # N * topk
+    topk: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        n_elements: int
-        topk: int
-        p: int
-        rank_expert_offset: int
-        num_experts: int
-        block: int
-
-    @staticmethod
-    @triton.jit
-    def kernel(
-        topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
-        psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
-        P,
-        rank_expert_offset,
-        num_experts,
-        n_elements,  # N * topk
-        topk: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < n_elements
-        # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
-        num_recv = tl.load(psum_ptr + P - 1)
-        val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
-        g = val + rank_expert_offset
-        row = offs // topk
-        # Keep a slot iff: it is a local expert (val >= 0), its global id is in
-        # range, and its row is a real received token (< num_recv). Otherwise -1.
-        valid = (val >= 0) & (g < num_experts) & (row < num_recv)
-        tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
-
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        num_tokens: int,
-        topk: int,
-        P: int,
-        **compile_key_fields: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            **compile_key_fields,
-            n_elements=num_tokens * topk,
-            topk=topk,
-            p=P,
-            block=1024,
-        )
-
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "all2all_backend", None) != "deepep_v2":
-            return []
-
-        topk = vllm_config.model_config.hf_config.num_experts_per_tok
-        num_experts = vllm_config.model_config.hf_config.n_routed_experts
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        P = vllm_config.parallel_config.data_parallel_size
-        if topk <= 0 or num_experts <= 0 or max_tokens <= 0:
-            return []
-
-        return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, min(max_tokens, 1024) + 1),
-            topk=topk,
-            P=P,
-            rank_expert_offset=0,
-            num_experts=num_experts,
-        )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        warmup(
-            TritonWarmupTensor(torch.int64, shape=(compile_key.n_elements,)),
-            TritonWarmupTensor(torch.int32, shape=(compile_key.p,)),
-            compile_key.p,
-            compile_key.rank_expert_offset,
-            compile_key.num_experts,
-            compile_key.n_elements,
-            topk=compile_key.topk,
-            BLOCK=compile_key.block,
-            grid=(triton.cdiv(compile_key.n_elements, compile_key.block),),
-        )
-
-    def __call__(
-        self,
-        recv_topk_idx: torch.Tensor,
-        psum_recv_per_rank: torch.Tensor,
-        rank_expert_offset: int,
-        num_experts: int,
-    ) -> Any:
-        num_tokens, topk = recv_topk_idx.shape
-        compile_key = self.dispatch(
-            num_tokens=num_tokens,
-            topk=topk,
-            P=psum_recv_per_rank.shape[0],
-            rank_expert_offset=rank_expert_offset,
-            num_experts=num_experts,
-        )
-        grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
-        return self.kernel[grid](
-            recv_topk_idx,
-            psum_recv_per_rank,
-            compile_key.p,
-            rank_expert_offset,
-            num_experts,
-            compile_key.n_elements,
-            topk=topk,
-            BLOCK=compile_key.block,
-        )
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
+    num_recv = tl.load(psum_ptr + P - 1)
+    val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
+    g = val + rank_expert_offset
+    row = offs // topk
+    # Keep a slot iff: it is a local expert (val >= 0), its global id is in
+    # range, and its row is a real received token (< num_recv). Otherwise -1.
+    valid = (val >= 0) & (g < num_experts) & (row < num_recv)
+    tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
 
 
 def _globalize_recv_topk_idx(
@@ -573,13 +546,18 @@ def _globalize_recv_topk_idx(
     rank_expert_offset: int,
     num_experts: int,
 ) -> torch.Tensor:
-    _GLOBALIZE_RECV_TOPK_IDX_KERNEL(
+    N, topk = recv_topk_idx.shape
+    n = N * topk
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _globalize_recv_topk_idx_kernel[grid](
         recv_topk_idx,
         psum_recv_per_rank,
+        psum_recv_per_rank.shape[0],
         rank_expert_offset,
         num_experts,
+        n,
+        topk=topk,
+        BLOCK=BLOCK,
     )
     return recv_topk_idx
-
-
-_GLOBALIZE_RECV_TOPK_IDX_KERNEL = GlobalizeRecvTopkIdxKernel()

@@ -86,6 +86,7 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
 # The key is (compute capability, world size, node count).
 FI_MNNVL_ALLREDUCE_MAX_SIZE_MB: dict[tuple[int, int, int], float] = {
     (103, 4, 1): 80,
+    (103, 8, 1): 64,
     (103, 8, 2): 64,
     (103, 16, 4): 8,
 }

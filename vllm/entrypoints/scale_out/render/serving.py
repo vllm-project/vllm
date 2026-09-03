@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import cast
 
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
+from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -15,6 +16,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -50,6 +52,12 @@ class ServingRender(BaseServing):
         )
 
         self.online_renderer = online_renderer
+
+        self._merge_inline_system = (
+            AnthropicServingMessages._detect_merge_inline_system(
+                online_renderer.chat_template
+            )
+        )
 
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
@@ -148,6 +156,21 @@ class ServingRender(BaseServing):
             priority=request.priority,
             token_offsets=engine_input.get("prompt_token_offsets"),
         )
+
+    async def render_messages_request(
+        self,
+        request: AnthropicMessagesRequest,
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess an Anthropic Messages request.
+
+        Converts the request to the OpenAI chat format using the same
+        conversion as the /v1/messages server path, then delegates to
+        render_chat_request so the rendered tokens match the server exactly.
+        """
+        chat_req = AnthropicServingMessages.to_chat_completion_request(
+            request, merge_inline_system=self._merge_inline_system
+        )
+        return await self.render_chat_request(chat_req)
 
     async def render_completion_request(
         self,
