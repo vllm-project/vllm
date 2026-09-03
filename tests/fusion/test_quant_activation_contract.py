@@ -9,8 +9,11 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_INT8_KERNELS,
+    _POSSIBLE_MXFP4_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
 )
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+from vllm.model_executor.kernels.linear.mxfp4.base import MxFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -37,6 +40,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -46,6 +50,7 @@ SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    AiterMxfp4LinearKernel,
 }
 
 
@@ -55,6 +60,7 @@ def _all_kernel_classes() -> list[type]:
         _POSSIBLE_FP8_KERNELS,
         _POSSIBLE_FP8_BLOCK_KERNELS,
         _POSSIBLE_INT8_KERNELS,
+        _POSSIBLE_MXFP4_KERNELS,
         _POSSIBLE_NVFP4_KERNELS,
     ):
         for kernels in registry.values():
@@ -69,6 +75,8 @@ def _probe(cls: type):
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
+    elif issubclass(cls, MxFp4LinearKernel):
+        obj.use_asm_gemm = False
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
@@ -107,12 +115,54 @@ def test_bridge_marks_supporting_and_skips_others():
     layer = torch.nn.Module()
     expose_input_quant_key(layer, supported)
     assert layer.input_quant_key == kNvfp4Dynamic
+    assert layer.input_quant_layout is None
 
     unsupported = _probe(FlashInferTrtllmNvFp4LinearKernel)
     assert unsupported.input_quant_key() is None
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
     assert not hasattr(layer, "input_quant_key")
+    assert not hasattr(layer, "input_quant_layout")
+
+
+def test_bridge_aiter_mxfp4_layout():
+    triton = _probe(AiterMxfp4LinearKernel)
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, triton)
+    assert layer.input_quant_key == kMxfp4Dynamic
+    assert layer.input_quant_layout is None
+
+    asm = _probe(AiterMxfp4LinearKernel)
+    asm.use_asm_gemm = True
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, asm)
+    assert layer.input_quant_key == kMxfp4Dynamic
+    assert layer.input_quant_layout == "shuffled"
+
+
+def test_as_quantized_activation_validates_layout():
+    qa = QuantizedActivation(
+        data=torch.zeros(2, 4, dtype=torch.uint8),
+        scale=torch.zeros(2, 1, dtype=torch.uint8),
+        orig_dtype=torch.bfloat16,
+        orig_shape=torch.Size([2, 8]),
+        quant_key=kMxfp4Dynamic,
+        layout="shuffled",
+    )
+    with pytest.raises(AssertionError, match="layout"):
+        as_quantized_activation(qa, kMxfp4Dynamic, None)
+    assert as_quantized_activation(qa, kMxfp4Dynamic, "shuffled") is qa
+    plain = QuantizedActivation(
+        data=qa.data,
+        scale=qa.scale,
+        orig_dtype=qa.orig_dtype,
+        orig_shape=qa.orig_shape,
+        quant_key=kMxfp4Dynamic,
+        layout=None,
+    )
+    with pytest.raises(AssertionError, match="layout"):
+        as_quantized_activation(plain, kMxfp4Dynamic, "shuffled")
+    assert as_quantized_activation(plain, kMxfp4Dynamic) is plain
 
 
 def test_as_quantized_activation_validates_key():
