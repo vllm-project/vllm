@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Respons
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -19,6 +18,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
 )
 from vllm.logger import init_logger
 
+from ...serve.engine.protocol import ErrorResponse
 from .protocol import (
     GenerateRequest,
     GenerateResponse,

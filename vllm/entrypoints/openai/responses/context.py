@@ -24,11 +24,9 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-)
 from vllm.entrypoints.openai.parser.harmony_utils import render_for_completion
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
