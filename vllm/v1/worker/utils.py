@@ -279,6 +279,7 @@ def build_kv_block_zeroers(
             attn_groups_iter=(group for groups in attn_groups for group in groups),
             kernel_block_sizes=kernel_block_sizes,
             static_forward_context=static_forward_context,
+            num_blocks=kv_cache_config.num_blocks_by_pool[pool_id],
             runner_only_attn_layers=runner_only_attn_layers,
             zeroing_group_ids={
                 group_id
