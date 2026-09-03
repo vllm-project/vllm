@@ -519,8 +519,8 @@ class KVConnectorBase_V1(ABC):
     ) -> list[tuple[CacheHitSource, int]]:
         """Describe the source of externally cached prompt tokens.
 
-        The returned segments must be in prompt-token order, contain stable,
-        bounded source labels, and sum to ``num_external_tokens``. The
+        The returned segments must be in prompt-token order, contain canonical
+        ``CacheHitSource`` values, and sum to ``num_external_tokens``. The
         scheduler calls this only after accepting the external hit returned by
         :meth:`get_num_new_matched_tokens`, so connectors should report the
         source that actually supplied those tokens rather than a speculative

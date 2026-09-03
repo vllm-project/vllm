@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     _parse_tier_filter,
 )
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -500,8 +501,12 @@ class TestTieringOffloadingManager:
         # Lookup should find all chunks in primary
         assert count_hits(self.manager, chunks) == 3
 
-    def test_promotion_from_secondary(self, manager_setup):
+    @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
+    def test_promotion_from_secondary(self, manager_setup, monkeypatch, source):
         """Test promotion of chunks from secondary to primary tier."""
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
 
         # Manually add chunks to secondary tier (simulate previous cascade)
@@ -527,21 +532,24 @@ class TestTieringOffloadingManager:
 
         # The request that caused the promotion retains the secondary origin.
         assert all(
-            self.manager.get_load_source(block, _CTX) == "external" for block in blocks
+            self.manager.get_load_source(chunk, _CTX) == source for chunk in chunks
         )
 
-        # A later request sees the blocks as ordinary host-memory primary hits.
+        # A later request sees the chunks as ordinary host-memory primary hits.
         later_context = ReqContext(req_id="later")
         self.manager.on_new_request(later_context)
         assert all(
-            self.manager.lookup(block, later_context) is LookupResult.HIT
-            for block in blocks
+            self.manager.lookup(chunk, later_context) is LookupResult.HIT
+            for chunk in chunks
         )
         assert all(
-            self.manager.get_load_source(block, later_context) == "host"
-            for block in blocks
+            self.manager.get_load_source(chunk, later_context) == "host"
+            for chunk in chunks
         )
 
+    @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
     @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
         [
@@ -557,8 +565,9 @@ class TestTieringOffloadingManager:
         ids=["partial", "legacy-full-failure"],
     )
     def test_failed_promotion_keeps_only_successful_chunks(
-        self, manager_setup, successful_indices, expected_results
+        self, manager_setup, monkeypatch, source, successful_indices, expected_results
     ):
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         chunks = to_keys(range(3))
         for chunk in chunks:
             self.secondary_tier1.chunks[chunk] = True
@@ -591,7 +600,7 @@ class TestTieringOffloadingManager:
         expected_source_keys = (
             set()
             if successful_indices is None
-            else {blocks[i] for i in successful_indices}
+            else {chunks[i] for i in successful_indices}
         )
         assert set(self.manager._request_load_sources[_CTX.req_id]) == (
             expected_source_keys
