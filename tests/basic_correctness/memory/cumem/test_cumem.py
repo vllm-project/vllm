@@ -5,9 +5,11 @@ import pytest
 import torch
 
 import vllm.device_allocator.cumem as cumem
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
+from vllm.utils.mem_constants import MiB_bytes
 
 from ....utils import create_new_process_for_each_test
 
@@ -231,6 +233,45 @@ def test_discard_tags():
     allocator.sleep(offload_tags="weights")
     allocator.wake_up()
     assert torch.allclose(weights, torch.ones_like(weights))
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Pinned host memory stats are CUDA-only",
+)
+@pytest.mark.parametrize("release_host_memory", [False, True])
+def test_wake_up_host_memory_release(monkeypatch, release_host_memory: bool):
+    """Level-1 sleep backs weights up in pinned host memory. wake_up frees the
+    backup tensors, but PyTorch's host caching allocator keeps the pinned
+    blocks unless VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY asks for them to be
+    returned to the OS."""
+    from vllm.device_allocator.sleep_mode_backend import CuMemBackend
+
+    monkeypatch.setenv(
+        "VLLM_SLEEP_MODE_RELEASE_HOST_MEMORY", "1" if release_host_memory else "0"
+    )
+    envs.disable_envs_cache()
+
+    def pinned_host_bytes() -> int:
+        return torch.cuda.host_memory_stats().get("allocated_bytes.current", 0)
+
+    allocator = get_mem_allocator_instance()
+    with allocator.use_memory_pool("weights"):
+        weights = torch.ones(64 * MiB_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
+
+    backend = CuMemBackend()
+    baseline = pinned_host_bytes()
+    backend.suspend(level=1)
+    assert pinned_host_bytes() - baseline >= weights.nbytes
+
+    backend.resume()
+    assert torch.all(weights == 1)
+    still_pinned = pinned_host_bytes() - baseline
+    if release_host_memory:
+        assert still_pinned < weights.nbytes
+    else:
+        assert still_pinned >= weights.nbytes
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
