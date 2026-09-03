@@ -139,6 +139,7 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
     )
 
 
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     not HAS_FLASHINFER_CHECKPOINTING_SSU,
     reason="flashinfer.mamba.checkpointing_ssu not available",
@@ -151,6 +152,7 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         mamba_backend="flashinfer",
+        tensor_parallel_size=2,
         disable_log_stats=False,
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
     )

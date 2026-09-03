@@ -107,6 +107,7 @@ steps:
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
     - vllm/model_executor/models/nemotron_h.py
+    - vllm/model_executor/warmup/replayssm_warmup.py
     - vllm/v1/attention/backends/mamba_attn.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
