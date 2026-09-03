@@ -7,15 +7,21 @@ from typing import Any
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
 
-class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"]):
+class SavePartialStatesKernel(
+    VllmTritonJitKernel["SavePartialStatesKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         head_size: int
@@ -147,31 +153,41 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             _when=lambda *, enabled: enabled,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        warmup(
-            fp32_ptr,
-            compile_key.kv_stride,
-            fp32_ptr,
-            compile_key.score_stride,
-            fp32_ptr,
-            compile_key.ape_stride,
-            TritonWarmupTensor(torch.int64),
-            fp32_ptr,
-            compile_key.state_cache_stride0,
-            compile_key.state_cache_stride1,
-            TritonWarmupTensor(torch.int64),
-            compile_key.block_size,
-            HEAD_SIZE=compile_key.head_size,
-            TRITON_BLOCK_SIZE=compile_key.triton_block_size,
-            STATE_WIDTH=compile_key.state_width,
-            COMPRESS_RATIO=compile_key.compress_ratio,
-            launch_pdl=compile_key.launch_pdl,
-            grid=(1,),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            kv=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, compile_key.head_size),
+                strides=(compile_key.kv_stride, 1),
+            ),
+            score=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1),
+                strides=(compile_key.score_stride, 1),
+            ),
+            ape=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1),
+                strides=(compile_key.ape_stride, 1),
+            ),
+            positions=TritonWarmupTensor(torch.int64),
+            state_cache=TritonWarmupTensor(
+                torch.float32,
+                shape=(1, 1, compile_key.state_width),
+                strides=(
+                    compile_key.state_cache_stride0,
+                    compile_key.state_cache_stride1,
+                    1,
+                ),
+            ),
+            slot_mapping=TritonWarmupTensor(torch.int64),
+            block_size=compile_key.block_size,
+            state_width=compile_key.state_width,
+            compress_ratio=compile_key.compress_ratio,
+            pdl_kwargs=({"launch_pdl": True} if compile_key.launch_pdl else None),
         )
 
+    @kernel_launcher
     def __call__(
         self,
         kv: torch.Tensor,
@@ -184,7 +200,7 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
         state_width: int,
         compress_ratio: int,
         pdl_kwargs: dict | None = None,
-    ) -> None:
+    ) -> LaunchSpec:
         """Write packed [kv, score+ape] partial states into the compressor cache.
 
         One program per token; pads (slot_id == -1) are skipped.
@@ -203,19 +219,13 @@ class SavePartialStatesKernel(VllmJitKernel["SavePartialStatesKernel.CompileKey"
             block_size=block_size,
             launch_pdl=bool((pdl_kwargs or {}).get("launch_pdl", False)),
         )
-        self.kernel[(num_actual,)](
-            kv,
-            compile_key.kv_stride,
-            score,
-            compile_key.score_stride,
-            ape,
-            compile_key.ape_stride,
-            positions,
-            state_cache,
-            compile_key.state_cache_stride0,
-            compile_key.state_cache_stride1,
-            slot_mapping,
-            compile_key.block_size,
+        return (num_actual,), dict(
+            kv_stride=compile_key.kv_stride,
+            score_stride=compile_key.score_stride,
+            ape_stride=compile_key.ape_stride,
+            state_cache_stride0=compile_key.state_cache_stride0,
+            state_cache_stride1=compile_key.state_cache_stride1,
+            block_size=compile_key.block_size,
             HEAD_SIZE=compile_key.head_size,
             TRITON_BLOCK_SIZE=compile_key.triton_block_size,
             STATE_WIDTH=compile_key.state_width,

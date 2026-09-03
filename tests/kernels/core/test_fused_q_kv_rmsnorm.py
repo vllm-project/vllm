@@ -72,7 +72,7 @@ def test_fused_q_kv_rmsnorm_outputs_are_packed(num_tokens: int):
     kvw = torch.randn(kv_size, dtype=dtype, device=device)
     eps = 1e-6
 
-    qr_out, kv_out = fused_q_kv_rmsnorm(qr, kv, qw, kvw, eps)
+    qr_out, kv_out = _FUSED_Q_KV_RMSNORM_KERNEL(qr, kv, qw, kvw, eps)
 
     assert qr_out.stride() == (q_size, 1)
     assert kv_out.stride() == (kv_size, 1)
