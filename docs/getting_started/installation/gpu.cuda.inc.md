@@ -425,12 +425,14 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 #### [Preview] Building vLLM's Docker Image from Source for NVIDIA Rubin GPU Architecture
 
-At this time, the Rubin preview is available only to NVIDIA engineers and
-partners with access to NVIDIA's internal prerequisites. Set
-`INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path. It requires a
-`requirements/rubin-prerelease.txt` file containing pointers to NVIDIA's
-internal prerelease packages, plus NVIDIA-internal CUDA 13.4 or CUDA 13.5
-development images for `BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`.
+Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path. Two
+variants exist: an internal one, available only to NVIDIA engineers and
+partners with access to NVIDIA's internal prerequisites, and a fully public
+one requiring no NVIDIA-internal access at all (see "Public alternative"
+below). The internal variant requires a `requirements/rubin-prerelease.txt`
+file containing pointers to NVIDIA's internal prerelease packages, plus
+NVIDIA-internal CUDA 13.4 or CUDA 13.5 development images for
+`BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`.
 
 Triton must currently be installed from source for Rubin compatibility.
 Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty

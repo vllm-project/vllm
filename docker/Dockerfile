@@ -843,7 +843,9 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         fi \
         && if NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
             && [ -n "${NCCL_LIBRARY}" ]; then \
-            ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+            if [ "${NCCL_LIBRARY}" != "/usr/lib/libnccl.so.2" ]; then \
+                ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2; \
+            fi \
             && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
         fi \
         && ldconfig; \
