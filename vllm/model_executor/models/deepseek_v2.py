@@ -414,7 +414,7 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
-                mma_type="bf16xbf16",
+                mma_type="fp8xfp4" if source_nvfp4 else "bf16xbf16",
                 source_weight_block_size=source_weight_block_size,
                 source_nvfp4=source_nvfp4,
                 prefix=f"{prefix}.experts",
