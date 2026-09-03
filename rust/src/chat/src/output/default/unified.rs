@@ -13,7 +13,7 @@ use futures::{StreamExt as _, pin_mut};
 use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_parser::unified::{UnifiedParser, UnifiedParserEvent, UnifiedParserOutput};
-use vllm_text::output::{DecodedTextEvent, SampledDelta};
+use vllm_text::output::{DecodedText, DecodedTextEvent, SampledDelta};
 
 use crate::Result;
 use crate::error::Error;
@@ -63,14 +63,17 @@ impl UnifiedParserState {
     }
 
     /// Convert one decoded text delta into zero or more parsed assistant events.
-    fn process_delta(&mut self, delta: String) -> Result<Vec<AssistantEvent>> {
+    fn process_delta(&mut self, delta: DecodedText) -> Result<Vec<AssistantEvent>> {
         if self.parser_failed {
             self.open_call_index = None;
-            return Ok(text_event(AssistantBlockKind::Text, delta).into_iter().collect());
+            return Ok(text_event(AssistantBlockKind::Text, delta.text).into_iter().collect());
         }
 
         let mut output = UnifiedParserOutput::default();
-        match self.parser.parse_into(&delta, &mut output) {
+        // The parser consumes the delta; keep its text for the fallback path
+        // that re-emits it as plain text.
+        let fallback_text = delta.text.clone();
+        match self.parser.parse_into(delta, &mut output) {
             Ok(()) => {
                 let mut events = Vec::new();
                 self.process_parser_output(output, &mut events)?;
@@ -89,7 +92,7 @@ impl UnifiedParserState {
 
                 let recovered = self.parser.reset();
                 if recovered.is_empty() && events.is_empty() {
-                    push_text_delta(&mut events, AssistantBlockKind::Text, delta);
+                    push_text_delta(&mut events, AssistantBlockKind::Text, fallback_text);
                 } else {
                     push_text_delta(&mut events, AssistantBlockKind::Text, recovered);
                 }
@@ -137,7 +140,7 @@ impl UnifiedParserState {
                 }
                 UnifiedParserEvent::Reasoning(delta) => {
                     self.open_call_index = None;
-                    push_text_delta(events, AssistantBlockKind::Reasoning, delta);
+                    push_text_delta(events, AssistantBlockKind::Reasoning, delta.text);
                 }
                 UnifiedParserEvent::ToolCall(item) => {
                     self.process_tool_item(item, events)?;
@@ -245,7 +248,7 @@ pub(crate) async fn unified_event_stream(
                     },
                 finished,
             } => {
-                for next in state.process_delta(decoded.text)? {
+                for next in state.process_delta(decoded)? {
                     y.yield_ok(next).await;
                 }
                 if logprobs.is_some() || !token_ids.is_empty() {
@@ -284,7 +287,7 @@ mod tests {
     use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParserError, UnifiedParserOutput};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
-    use super::unified_event_stream;
+    use super::{DecodedText, unified_event_stream};
     use crate::event::AssistantBlockKind;
     use crate::output::AssistantEvent;
 
@@ -332,7 +335,7 @@ mod tests {
 
         fn parse_into(
             &mut self,
-            _delta: &str,
+            _delta: DecodedText,
             output: &mut UnifiedParserOutput,
         ) -> vllm_parser::unified::Result<()> {
             match self.steps.pop_front().expect("unexpected parser call") {
@@ -418,7 +421,7 @@ mod tests {
 
     fn reasoning(delta: &str) -> UnifiedParserOutput {
         let mut output = UnifiedParserOutput::default();
-        output.push_reasoning(delta.to_string());
+        output.push_reasoning(DecodedText::unattributed(delta));
         output
     }
 

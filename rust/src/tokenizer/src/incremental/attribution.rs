@@ -67,9 +67,63 @@ impl DecodedText {
         }
     }
 
+    /// Return true when both the text and the attributions are empty.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.attributions.is_empty()
+    }
+
+    /// Take the decoded text and attributions, leaving `self` empty.
+    pub fn take(&mut self) -> Self {
+        take(self)
+    }
+
+    /// Clear the text and attributions, keeping the allocations.
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.attributions.clear();
+    }
+
+    /// Split off and return the prefix `[0, len)`; the suffix stays in `self`,
+    /// with its token anchors rebased by `-len`.
+    ///
+    /// Anchors follow the first-byte ownership rule: a `Visible` token moves to
+    /// the prefix when its first byte lies inside the prefix, so a token
+    /// straddling the split belongs to the span holding its first byte. A
+    /// `ZeroWidth` token moves to the prefix when its offset is `<= len`,
+    /// matching the `take_ready` cutoff rule and letting
+    /// `drain_prefix(text.len())` take trailing zero-width tokens. Relative
+    /// order across anchor kinds is preserved.
+    ///
+    /// Panics if `len` is not a char boundary, via `String::drain`.
+    #[must_use]
+    pub fn drain_prefix(&mut self, len: usize) -> DecodedText {
+        let text: String = self.text.drain(..len).collect();
+        let len = offset_as_u32(len);
+
+        let mut prefix = DecodedText {
+            text,
+            attributions: SmallVec::new(),
+        };
+        for attribution in take(&mut self.attributions) {
+            let in_prefix = match attribution.anchor {
+                TokenAnchor::Visible { byte_offset } => byte_offset < len,
+                TokenAnchor::ZeroWidth { byte_offset } => byte_offset <= len,
+            };
+            if in_prefix {
+                prefix.attributions.push(attribution);
+            } else {
+                self.attributions.push(TokenAttribution {
+                    token_id: attribution.token_id,
+                    anchor: attribution.anchor.offset_by(-i64::from(len)),
+                });
+            }
+        }
+        prefix
+    }
+
     /// Append another decoded fragment, rebasing its token anchors.
     pub fn append(&mut self, other: Self) {
-        if self.text.is_empty() && self.attributions.is_empty() {
+        if self.is_empty() {
             *self = other;
             return;
         }

@@ -3,7 +3,7 @@
 
 //! Adapter that combines reasoning and tool parsers.
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::ReasoningParser;
@@ -87,9 +87,9 @@ impl UnifiedParser for CombinedParser {
         self.tool.as_ref().and_then(|parser| parser.tool_call_id(tool_index))
     }
 
-    fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(reasoning) = self.reasoning.as_mut() else {
-            return self.parse_tool(delta, output);
+            return self.parse_tool(&delta.text, output);
         };
 
         let reasoning_delta = reasoning.push(delta)?;
@@ -97,7 +97,11 @@ impl UnifiedParser for CombinedParser {
             output.push_reasoning(reasoning);
         }
         if let Some(content) = reasoning_delta.content {
-            self.parse_tool(&content, output)?;
+            // Content attributions stop at this boundary: the tool parser trait
+            // consumes plain text.
+            if !content.text.is_empty() {
+                self.parse_tool(&content.text, output)?;
+            }
         }
         Ok(())
     }
@@ -109,8 +113,10 @@ impl UnifiedParser for CombinedParser {
             if let Some(reasoning) = reasoning_delta.reasoning {
                 output.push_reasoning(reasoning);
             }
-            if let Some(content) = reasoning_delta.content {
-                self.parse_tool(&content, &mut output)?;
+            if let Some(content) = reasoning_delta.content
+                && !content.text.is_empty()
+            {
+                self.parse_tool(&content.text, &mut output)?;
             }
         }
         output.append(self.flush_tool()?);
@@ -127,6 +133,7 @@ mod tests {
     use std::sync::Arc;
 
     use vllm_tokenizer::test_utils::TestTokenizer;
+    use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
 
     use super::CombinedParser;
     use crate::reasoning::{Qwen3ReasoningParser, ReasoningDelta, ReasoningParser};
@@ -156,7 +163,7 @@ mod tests {
     fn collect(parser: &mut dyn UnifiedParser, chunks: &[&str]) -> UnifiedParserOutput {
         let mut output = UnifiedParserOutput::default();
         for chunk in chunks {
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output
@@ -178,10 +185,10 @@ mod tests {
             true
         }
 
-        fn push(&mut self, delta: &str) -> crate::reasoning::Result<ReasoningDelta> {
+        fn push(&mut self, delta: DecodedText) -> crate::reasoning::Result<ReasoningDelta> {
             Ok(ReasoningDelta {
                 reasoning: None,
-                content: Some(delta.to_string()),
+                content: Some(delta),
             })
         }
     }
@@ -259,7 +266,63 @@ mod tests {
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning("work".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("work")),
+                UnifiedParserEvent::Text("answer".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn combined_parser_reasoning_events_carry_token_attributions() {
+        let tokenizer = Arc::new(tokenizer());
+        let reasoning = Qwen3ReasoningParser::create(tokenizer).unwrap();
+        let mut parser = CombinedParser::new(Some(reasoning), None);
+
+        let chunk = |token_id: u32, text: &str| DecodedText {
+            text: text.to_string(),
+            attributions: [TokenAttribution {
+                token_id,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        };
+
+        let mut output = UnifiedParserOutput::default();
+        for (token_id, text) in [
+            (1, "<think>"),
+            (2, "reason"),
+            (3, "</think>"),
+            (4, "answer"),
+        ] {
+            parser.parse_into(chunk(token_id, text), &mut output).unwrap();
+        }
+        output.append(parser.finish().unwrap());
+
+        // The reasoning tokens keep their attributions through the combined
+        // parser; marker tokens (1 and 3) are dropped with their spans.
+        let reasoning_ids: Vec<u32> = output
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                UnifiedParserEvent::Reasoning(piece) => Some(piece),
+                _ => None,
+            })
+            .flat_map(|piece| piece.attributions.iter().map(|attr| attr.token_id))
+            .collect();
+        assert_eq!(reasoning_ids, [2]);
+        assert_eq!(
+            output.events,
+            vec![
+                UnifiedParserEvent::Reasoning(DecodedText {
+                    text: "reason".to_string(),
+                    attributions: [TokenAttribution {
+                        token_id: 2,
+                        anchor: TokenAnchor::Visible { byte_offset: 0 },
+                    }]
+                    .into_iter()
+                    .collect(),
+                }),
                 UnifiedParserEvent::Text("answer".to_string()),
             ]
         );
@@ -300,7 +363,7 @@ mod tests {
         let mut parser = CombinedParser::new(None, Some(Box::new(PartialThenErrorToolParser)));
         let mut output = UnifiedParserOutput::default();
 
-        let error = parser.parse_into("bad", &mut output).unwrap_err();
+        let error = parser.parse_into(DecodedText::unattributed("bad"), &mut output).unwrap_err();
 
         assert!(matches!(error, crate::unified::UnifiedParserError::Tool(_)));
         assert_eq!(
