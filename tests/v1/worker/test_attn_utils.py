@@ -232,7 +232,10 @@ def test_init_kv_cache_rolls_back_shared_region_on_bind_failure(monkeypatch):
     region = _FakeSharedHostRegion()
     vllm_config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=SimpleNamespace()),
-        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=1,
+            max_num_batched_tokens=1,
+        ),
     )
     monkeypatch.setattr(
         attn_utils_module,

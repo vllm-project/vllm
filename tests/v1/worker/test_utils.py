@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -215,8 +216,10 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+    page = mmap.PAGESIZE
+
     class FakeSharedOffloadRegion:
-        BLOCK_SIZE_ALIGNMENT = 4096
+        BLOCK_SIZE_ALIGNMENT = page
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -244,7 +247,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     monkeypatch.setattr(
         hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
     )
-    registration_ranges = MagicMock(return_value=((0, 4096), (4096, 16384)))
+    registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
     monkeypatch.setattr(
         hisparse_runtime_module,
         "_hisparse_registration_ranges",
@@ -270,7 +273,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         config,
         [24, 40],
         num_blocks=4,
-        host_block_stride=4096,
+        host_block_stride=page,
         use_shared_host_pool=True,
     )
 
@@ -278,25 +281,26 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert private_pools == []
     assert region.kwargs == {
         "engine_id": "hisparse_instance_dp3",
-        "num_blocks": 4,
+        "num_blocks": 1,
         "rank": 0,
-        "kv_bytes_per_block": 4096,
-        "cpu_page_size": 16,
+        "kv_bytes_per_block": 4 * page,
+        "cpu_page_size": 64,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
+        "populate_only_on_creator": True,
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with([24, 40], 4, 4096)
+    registration_ranges.assert_called_once_with([24, 40], 4, page)
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes, chunk_bytes)
         for tensor, chunk_bytes in pinned
-    ] == [(0, 4096, None), (4096, 12288, None)]
+    ] == [(0, page, None), (page, 3 * page, None)]
     assert region.is_pinned
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():
     """Registration seams must not bisect a DMA-addressable host block."""
-    page = 4096
+    page = mmap.PAGESIZE
     ranges = hisparse_runtime_module._hisparse_registration_ranges(
         tensor_sizes=[4 * 3 * page, 4 * 5 * page],
         num_blocks=4,
@@ -1206,6 +1210,8 @@ def test_hisparse_runtime_takes_eager_host_mirror_from_config(
 def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker = object.__new__(HiSparseConnectorWorker)
     worker._initialized = True
+    worker._slot_mapping_staging = None
+    worker.dma_stream = None
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
