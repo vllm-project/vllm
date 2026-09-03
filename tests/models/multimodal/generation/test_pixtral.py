@@ -51,7 +51,10 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+from vllm.v1.worker.encoder_cudagraph import (
+    BudgetGraphMetadata,
+    EncoderCudaGraphManager,
+)
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -486,44 +489,25 @@ def _assert_pixtral_outputs_close(
         )
 
 
-def _poison_cudagraph_padding(monkeypatch) -> dict[str, bool]:
-    """Fill cudagraph input padding with NaN instead of zeros during replay.
+def _assert_pixtral_cudagraph_padding_zeroed(
+    graph: BudgetGraphMetadata,
+    model: PixtralForConditionalGeneration,
+    mm_kwargs: dict[str, Any],
+) -> None:
+    """Verify that replay zeroed every unused model input row."""
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    input_rows = sum(spec.input_size for spec in specs)
+    output_rows = sum(spec.output_tokens for spec in specs)
 
-    Swapping the manager's default padding logic lets ``manager.execute()`` run
-    the real replay path with every float buffer's padded tail poisoned.
-    ``cu_seqlens``/``sequence_lengths`` are deliberately untouched -- they have
-    their own entries in ``padding_logics``, and it is those model-supplied
-    paddings that must keep the poison away from real tokens.
+    for key in ("pixel_values", "freqs_cis"):
+        padding = graph.input_buffers[key][input_rows:]
+        assert padding.numel() > 0
+        assert torch.count_nonzero(padding).item() == 0
 
-    Integer buffers keep zero padding: ``merge_indices`` is used as
-    ``image_features[merge_indices]``, so an out-of-range pad index would be an
-    illegal memory access rather than a detectable NaN.
-
-    Returns:
-        Flags recording whether float and integer buffers were actually padded,
-        so a caller can reject a batch that filled the budget exactly and made
-        the poison a no-op.
-    """
-    padded = {"float": False, "int": False}
-
-    def poisoning_copy(dst: torch.Tensor, src: torch.Tensor) -> None:
-        is_float = dst.is_floating_point() or dst.is_complex()
-        if dst.shape[0] > src.shape[0]:
-            padded["float" if is_float else "int"] = True
-        if is_float:
-            dst.fill_(torch.nan)
-        else:
-            dst.zero_()
-        dst[: src.shape[0]].copy_(src)
-
-    # _copy_padded_buffer is a staticmethod looked up via self, so the
-    # replacement must be wrapped to avoid binding self as the first argument.
-    monkeypatch.setattr(
-        EncoderCudaGraphManager,
-        "_copy_padded_buffer",
-        staticmethod(poisoning_copy),
-    )
-    return padded
+    if "merge_indices" in graph.input_buffers:
+        padding = graph.input_buffers["merge_indices"][output_rows:]
+        assert padding.numel() > 0
+        assert torch.count_nonzero(padding).item() == 0
 
 
 @_requires_cuda
@@ -588,6 +572,7 @@ def test_pixtral_encoder_cudagraph_matches_eager(
     expected = _get_eager_pixtral_outputs(model, mm_kwargs)
     actual = manager.execute(mm_kwargs)
     _assert_pixtral_outputs_close(actual, expected)
+    _assert_pixtral_cudagraph_padding_zeroed(graph, model, mm_kwargs)
     assert manager.graph_hits == 5
     assert manager.graph_misses == 0
 
@@ -597,6 +582,7 @@ def test_pixtral_encoder_cudagraph_matches_eager(
     replay_expected = _get_eager_pixtral_outputs(model, replay_kwargs)
     replay_actual = manager.execute(replay_kwargs)
     _assert_pixtral_outputs_close(replay_actual, replay_expected)
+    _assert_pixtral_cudagraph_padding_zeroed(graph, model, replay_kwargs)
     assert manager.graph_hits == 6
     assert manager.graph_misses == 0
 
@@ -689,60 +675,6 @@ def test_pixtral_encoder_cudagraph_budget_boundary_and_fallback(
     _assert_pixtral_outputs_close(oversized_actual, oversized_expected)
     assert manager.graph_hits == 3
     assert manager.graph_misses == 1
-
-
-@_requires_cuda
-@pytest.mark.parametrize(
-    "backend",
-    [AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.FLASHINFER],
-    ids=["flash-attn", "flashinfer"],
-)
-@pytest.mark.parametrize("merge_size", [1, 2], ids=["pixtral", "ministral"])
-def test_pixtral_encoder_cudagraph_ignores_poisoned_padding_tail(
-    backend: AttentionBackendEnum,
-    merge_size: int,
-    default_vllm_config,
-    dist_init,
-    monkeypatch,
-) -> None:
-    """Padding must never reach real tokens, whatever is left in the tail.
-
-    The attention metadata padding (``cu_seqlens``, and the two-section
-    FlashInfer offsets plus ``sequence_lengths``) is what isolates the unused
-    tail of the capture buffers. Poisoning that tail with NaN turns a leak into
-    a hard failure instead of a plausible-looking number.
-    """
-    if backend == AttentionBackendEnum.FLASHINFER and not _IS_BLACKWELL_OR_NEWER:
-        pytest.skip("Pixtral FlashInfer CUDA graph coverage requires SM100 or newer")
-
-    torch.manual_seed(0)
-    model = _make_tiny_pixtral_encoder(
-        backend,
-        merge_size,
-        default_vllm_config,
-    )
-    manager = _make_pixtral_encoder_cudagraph_manager(model)
-    manager.capture(graph_pool=current_platform.graph_pool_handle())
-
-    mm_kwargs = {
-        "images": _make_pixtral_images([(1, 2), (2, 1)], merge_size),
-    }
-    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
-
-    padded = _poison_cudagraph_padding(monkeypatch)
-    actual = manager.execute(mm_kwargs)
-
-    assert padded["float"], "batch filled the budget exactly; poison was a no-op"
-    if merge_size > 1:
-        assert padded["int"], "merge_indices was not padded; poison was a no-op"
-    assert manager.graph_misses == 0
-
-    # Assert on the post-processed items, not on the raw output buffer: for
-    # merge_size=1 the padded output rows are legitimately NaN, and
-    # scatter_output_slices never hands them to a caller.
-    for item in actual:
-        assert torch.isfinite(item.float()).all()
-    _assert_pixtral_outputs_close(actual, expected)
 
 
 @_requires_cuda

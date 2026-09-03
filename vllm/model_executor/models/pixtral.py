@@ -134,6 +134,11 @@ def _pad_pixtral_cumulative_seqlens(
     src: torch.Tensor,
     input_capacity: int,
 ) -> None:
+    """Pad cumulative offsets for fixed-shape CUDA graph replay.
+
+    Repeated offsets represent missing items as empty sequences. The final
+    offset assigns the unused input rows to a dummy sequence.
+    """
     dst.fill_(src[-1])
     dst[: src.shape[0]].copy_(src)
     dst[-1] = input_capacity
@@ -719,6 +724,8 @@ class PixtralForConditionalGeneration(
             pixel_values.device,
         )
         freqs_cis = gather_freqs_cis_2d(self.vision_encoder.freqs_cis, grid_sizes)
+        # No max_seqlen: capture uses the whole input capacity as its launch
+        # bound, which covers every replay sequence.
         values = {
             "pixel_values": pixel_values,
             "freqs_cis": freqs_cis,
