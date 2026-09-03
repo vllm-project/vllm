@@ -452,20 +452,23 @@ def test_bitmask_engine_reasoner_ends_midwindow_with_padding(backend):
 
 
 @pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
-def test_bitmask_legacy_multi_token_marker_constrains_bonus_row(backend):
-    """A legacy marker visible only on the whole window ends reasoning at the
-    window's last draft, so the bonus row is constrained (parity with
-    should_advance, which records that same index).
+def test_bitmask_legacy_order_sensitive_predicate_probed_per_token(backend):
+    """Legacy predicates are probed one draft at a time, never on the whole
+    window. A predicate that reports which marker is *newest* (KimiK3) would
+    otherwise answer False for a window that closes and then reopens
+    reasoning, leaving the post-marker drafts and the bonus row
+    unconstrained.
     """
     tokenizer, manager, request, prompt = _make_manager_and_request(backend)
     grammar = request.structured_output_request.grammar
 
     assert grammar.accept_tokens(request.request_id, prompt)
 
-    first = tokenizer.encode(" ")[0]
-    second = tokenizer.encode("\n")[0]
+    close = tokenizer.encode("\n")[0]
+    reopen = tokenizer.encode("#")[0]
+    assert close != reopen
 
-    class TwoTokenMarkerReasoner:
+    class NewestMarkerReasoner:
         def __init__(self, *_, **__):
             pass
 
@@ -473,16 +476,24 @@ def test_bitmask_legacy_multi_token_marker_constrains_bonus_row(backend):
             return self.is_reasoning_end_streaming(input_ids, input_ids)
 
         def is_reasoning_end_streaming(self, input_ids, delta_ids):
-            delta = list(delta_ids)
-            return any(
-                delta[i : i + 2] == [first, second] for i in range(len(delta) - 1)
-            )
+            for token in reversed(list(delta_ids)):
+                if token == close:
+                    return True
+                if token == reopen:
+                    return False
+            return False
 
-    manager.reasoner_cls = TwoTokenMarkerReasoner
-    request.structured_output_request.reasoner = TwoTokenMarkerReasoner()
+    manager.reasoner_cls = NewestMarkerReasoner
+    request.structured_output_request.reasoner = NewestMarkerReasoner()
     request.structured_output_request.reasoning_ended = False
 
-    drafts = [first, second]
+    pre = tokenizer.encode(" ")[0]
+    post = tokenizer.encode(",")[0]
+    drafts = [pre, close, post, reopen]
+    # Sanity: the whole window says "reopened", so only per-token probing
+    # can find the close marker.
+    assert not NewestMarkerReasoner().is_reasoning_end_streaming([], drafts)
+
     bitmask = manager.grammar_bitmask(
         requests={request.request_id: request},
         structured_output_request_ids=[request.request_id],
@@ -493,5 +504,6 @@ def test_bitmask_legacy_multi_token_marker_constrains_bonus_row(backend):
     assert bitmask.shape[0] == len(drafts) + 1
     assert (bitmask[0] == -1).all()
     assert (bitmask[1] == -1).all()
+    assert not (bitmask[2] == -1).all()
     assert not (bitmask[-1] == -1).all()
     assert not grammar.is_terminated()

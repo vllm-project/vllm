@@ -469,15 +469,17 @@ class StructuredOutputManager:
     ) -> int | None:
         """Locates the token that ends reasoning within ``delta_ids``.
 
-        ``delta_ids`` sit at positions ``start..`` of the output; they are
-        already appended to ``all_token_ids`` for accepted tokens and not yet
-        for speculative drafts (``delta_appended``). A legacy parser whose
-        marker is only recognized across the whole delta reports its final
-        token, conservatively treating the step as reasoning content.
+        ``delta_ids`` occupy positions ``start..``; ``delta_appended`` says
+        whether they are already in ``all_token_ids`` (accepted tokens) or
+        not (speculative drafts).
+
+        Legacy parsers are probed one token at a time. Accepted tokens get a
+        whole-delta check as well, and a marker seen only that way reports
+        the final token. Drafts skip it: some predicates are order-sensitive
+        over a multi-token window and would miss the marker.
 
         Returns:
-            Absolute index of the last reasoning token, or ``None`` when
-            reasoning does not end in this window.
+            Absolute index of the last reasoning token, or ``None``.
         """
         if (
             isinstance(reasoner, ParserEngineReasoningAdapter)
@@ -486,17 +488,18 @@ class StructuredOutputManager:
             offset = reasoner.find_reasoning_end_offset(delta_ids)
             return None if offset is None else start + offset
 
-        full: Sequence[int] = all_token_ids
-        if not delta_appended:
-            full = list(itertools.islice(all_token_ids, start)) + list(delta_ids)
-        if not reasoner.is_reasoning_end_streaming(full, delta_ids):
+        if delta_appended and not reasoner.is_reasoning_end_streaming(
+            all_token_ids, delta_ids
+        ):
             return None
         prefix = list(itertools.islice(all_token_ids, start))
         for offset, token in enumerate(delta_ids):
             prefix.append(token)
             if reasoner.is_reasoning_end_streaming(prefix, [token]):
                 return start + offset
-        return start + len(delta_ids) - 1
+        if delta_appended:
+            return start + len(delta_ids) - 1
+        return None
 
     def trim_reasoning_for_advance(
         self, request: "Request", new_token_ids: list[int]
