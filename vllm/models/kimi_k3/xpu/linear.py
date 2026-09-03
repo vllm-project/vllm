@@ -1027,6 +1027,7 @@ class KimiLinearForCausalLM(
 			"language_model.lm_head.": "lm_head.",
 			"vision_tower.": None,
 			"mm_projector.": None,
+
 		}
 	)
 
@@ -1119,12 +1120,7 @@ class KimiLinearForCausalLM(
 		return self.logits_processor(self.lm_head, hidden_states)
 
 	def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-		loader = AutoWeightsLoader(
-			self,
-			skip_prefixes=(
-				["lm_head."] if self.config.tie_word_embeddings else None
-			),
-		)
+		loader = AutoWeightsLoader(self)
 		return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 __all__ = [
