@@ -170,6 +170,55 @@ def test_finish_frees_immediately_when_no_inflight_step():
     assert pool.get_num_free_blocks() == num_free_initially
 
 
+@pytest.mark.parametrize("remaining_share_prefix", [False, True])
+def test_cascade_prefix_waits_for_deferred_refs(remaining_share_prefix):
+    """Deferred references must not make unrelated requests share a prefix."""
+    scheduler = create_scheduler(
+        model=MODEL, async_scheduling=True, enable_prefix_caching=True
+    )
+    scheduler.defer_block_free = True
+    shared = create_requests(
+        num_requests=8,
+        num_tokens=257,
+        same_prompt=True,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )
+    others = create_requests(
+        num_requests=8,
+        num_tokens=257,
+        same_prompt=remaining_share_prefix,
+        req_ids=[f"other-{i}" for i in range(8)],
+    )[1:]
+    for request in shared + others:
+        scheduler.add_request(request)
+
+    out0 = scheduler.schedule()
+    out1 = scheduler.schedule()
+    output = _make_model_runner_output(out0)
+    for request in shared[1:]:
+        output.sampled_token_ids[output.req_id_to_index[request.request_id]] = [
+            STOP_TOKEN_ID
+        ]
+    scheduler.update_from_output(out0, output)
+    assert len(scheduler.deferred_frees) == 7
+    first_blocks = {
+        scheduler.kv_cache_manager.get_block_ids(request.request_id)[0][0]
+        for request in [shared[0], *others]
+    }
+    assert len(first_blocks) == (1 if remaining_share_prefix else 8)
+
+    # Eight surviving requests can use cascade, but the finished requests'
+    # references still inflate the apparent sharing of the first prefix.
+    out2 = scheduler.schedule()
+    assert len(out2.num_scheduled_tokens) == 8
+    assert out2.num_common_prefix_blocks == [0]
+
+    scheduler.update_from_output(out1, _make_model_runner_output(out1))
+    assert not scheduler.deferred_frees
+    out3 = scheduler.schedule()
+    assert out3.num_common_prefix_blocks == [16 if remaining_share_prefix else 0]
+
+
 def test_abort_defers_free():
     scheduler = _create_deferring_scheduler()
     pool = scheduler.kv_cache_manager.block_pool
