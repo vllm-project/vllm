@@ -3,6 +3,7 @@
 
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -72,15 +73,7 @@ class RecordingKVCR:
         self.inventory_sink = None
         self.query_status = QueryStatus.MISS
         self.stats: OffloadingConnectorStats | None = None
-        self.submit_hint_calls: list[
-            tuple[
-                list[BlockKey],
-                str | None,
-                str,
-                object | None,
-                str | None,
-            ]
-        ] = []
+        self.submit_hint_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
         self.discard_hint_calls: list[str] = []
         self.deliver_calls: list[
             tuple[OpHandle, dict[BlockKey, MemDescriptor], str | None]
@@ -89,17 +82,8 @@ class RecordingKVCR:
         self.completed: list[tuple[OpHandle, dict[BlockKey, OpEntryResult]]] = []
         self._next_op_handle = 1
 
-    def submit_hint(
-        self,
-        block_key_list: Collection[BlockKey],
-        src: str | None = None,
-        mode: str = "copy",
-        hints: object | None = None,
-        request_id: str | None = None,
-    ) -> None:
-        self.submit_hint_calls.append(
-            (list(block_key_list), src, mode, hints, request_id)
-        )
+    def submit_hint(self, *args: Any, **kwargs: Any) -> None:
+        self.submit_hint_calls.append((args, kwargs))
 
     def discard_hint(self, request_id: str) -> None:
         self.discard_hint_calls.append(request_id)
@@ -285,28 +269,35 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
     router_hint = {
         "source_control_endpoint": "tcp://source:1234",
         "block_hashes": [123],
-        "target_cached_prefix_blocks": 0,
+        "framework_hint": {"opaque": True},
     }
-    ctx = ReqContext(req_id="req", kv_transfer_params={"router_hint": router_hint})
+    ctx = ReqContext(
+        req_id="req",
+        kv_transfer_params={"router_hint": router_hint, "unrelated": object()},
+    )
     key = make_offload_key((123).to_bytes(8, "big"), 0)
     same_hash_other_group = make_offload_key((123).to_bytes(8, "big"), 7)
     other_key = make_offload_key((124).to_bytes(8, "big"), 0)
 
     tier.on_new_request(ctx)
-    assert len(kvcr.submit_hint_calls) == 1
-    _, source, mode, hint, request_id = kvcr.submit_hint_calls[0]
-    assert (source, mode, request_id) == ("tcp://source:1234", "copy", "req")
+
+    assert kvcr.submit_hint_calls == [((), {"request_id": "req", "hints": router_hint})]
+
     bindings = kvcr.constructor_bindings
     assert bindings is not None
-    assert bindings.key_hint_adapter is not None
-    assert bindings.key_hint_adapter.matches(BlockKey(bytes(key)), hint)
-    assert bindings.key_hint_adapter.matches(
-        BlockKey(bytes(same_hash_other_group)), hint
-    )
-    assert not bindings.key_hint_adapter.matches(BlockKey(bytes(other_key)), hint)
+    assert bindings.key_adapter is not None
+    monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "0")
+    decode = bindings.key_adapter.decode
+    hash_123 = (123).to_bytes(8, "big")
+    assert decode(BlockKey(bytes(key))) == hash_123
+    assert decode(BlockKey(bytes(same_hash_other_group))) == hash_123
+    assert decode(BlockKey(bytes(other_key))) == (124).to_bytes(8, "big")
 
     tier.submit_load(_job(7, ctx, key=key, block_id=2))
 
+    # Here we verify that submitting a load for a hinted key asks KVCR to
+    # deliver that key into the expected primary memory slot and completes the
+    # vLLM transfer job successfully.
     assert len(kvcr.submit_hint_calls) == 1
     _, blocks, request_id = kvcr.deliver_calls[0]
     assert request_id == "req"
@@ -316,6 +307,8 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
     assert blocks[key].size == 16
     assert list(tier.get_finished_jobs()) == [JobResult(7, True)]
 
+    # Here we verify that request cleanup discards the request-scoped hint in
+    # KVCR.
     tier.on_request_finished(ctx)
     assert kvcr.discard_hint_calls == ["req"]
 
