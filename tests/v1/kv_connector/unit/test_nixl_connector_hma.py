@@ -413,7 +413,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     mock_plan = MagicMock(spec=TPMapping)
     mock_plan.all_source_ranks = ()
     mock_plan.source_ranks_per_group = ()
-    worker.tp_mappings = {remote_engine_id: mock_plan}
+    worker.tp_mappings = {(remote_engine_id, 0): mock_plan}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -1762,6 +1762,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
         patch.object(bw, "NixlWrapper"),
         patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
         patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_pp_group", return_value=MagicMock(rank_in_group=0)),
         patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
         patch.object(bw, "current_platform", fake_platform),
         patch(
@@ -1840,14 +1841,14 @@ def test_push_write_hybrid_mla_replicates_attention():
     # Read-oriented mapping collapses the replicated attention group to one
     # source rank; the SSM state is sharded across both covered D ranks.
     worker.tp_mappings = {
-        engine_id: TPMapping(
+        (engine_id, 0): TPMapping(
             source_ranks_per_group=((0,), (0, 1)),
             all_source_ranks=(0, 1),
             rank_to_attention_slot={0: 0, 1: 0},
             rank_offset_factor=0,
         )
     }
-    worker.dst_xfer_side_handles = {engine_id: {0: 100, 1: 101}}
+    worker.dst_xfer_side_handles = {engine_id: {(0, 0): 100, (0, 1): 101}}
     worker.src_xfer_handles_by_tp_ratio = {(-2, 4): [200, 201]}
     worker.src_xfer_handles_by_block_size = {4: 300}
     worker._sending_transfers = defaultdict(list)

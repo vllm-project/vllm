@@ -32,6 +32,13 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
+    # Reads are issued per producer stage, so a PP-sharded decode is supported.
+    _supports_consumer_pp = True
+
+    # A shard's descriptors are emitted per (region x member group), so pooled
+    # (HMA) regions of a PP producer are fully covered.
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -63,10 +70,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             # always store metadata for failure recovery
             self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
+            if not self._handshake_complete(remote_engine_id, meta.pp_size):
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
+                    if not self._handshake_complete(remote_engine_id, meta.pp_size):
                         self._background_nixl_handshake(req_id, remote_engine_id, meta)
                         continue
 
@@ -144,6 +151,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._handle_failed_transfer(req_id, None)
             return
 
+        # The handshake gate in start_load_kv only lets a request through once
+        # the handshake for meta.pp_size stages completed, so every stage that
+        # overlaps this consumer's layer slice is present in the per-stage
+        # structures below.
+        remote_pp_size = meta.pp_size
         if any(len(group) > 0 for group in meta.local_block_ids):
             # The scheduler waits for finished_recving from *every* worker.
             # Under DCP a rank's slice can legitimately come out empty when its
@@ -152,120 +164,171 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Seed the entry so this rank still reports completion.
             self._recving_transfers.setdefault(req_id, [])
 
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        # A request's KV is spread across the remote producer's PP stages; read
+        # each overlapping stage in turn (its own layer range, TP mapping and
+        # block geometry). A stage owning none of this consumer's layers was
+        # skipped at handshake and is read by the consumer(s) that own those
+        # layers. With PP=1 the loop runs once at remote_pp_rank 0.
+        for remote_pp_rank in range(remote_pp_size):
+            if (
+                remote_pp_size > 1
+                and (engine_id, remote_pp_rank) not in self.tp_mappings
+            ):
+                continue
+            plan = self.tp_mappings[(engine_id, remote_pp_rank)]
+            remote_info = self.transfer_topo.get_engine_info(engine_id, remote_pp_rank)
+            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        remote_logical_block_ids = meta.remote.block_ids
-        meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            remote_logical_block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
-        num_groups = len(meta.local_block_ids)
-        dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
-
-        def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
-            return [
-                list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
-                for g in range(num_groups)
-            ]
-
-        read_specs = []
-        for rank in plan.all_source_ranks:
-            if dcp_active:
-                # DCP interleaves at block granularity, so slicing happens
-                # here on logical blocks, before kernel-block expansion.
-                local_ids = group_ids(meta.local_block_ids, rank)
-                remote_ids = group_ids(remote_logical_block_ids, rank)
-                for g in range(num_groups):
-                    if not local_ids[g]:
-                        continue
-                    # Prefix cache hit may lead to skip some of the remote reads
-                    # TODO (NickLucche) consider unifying prefix cache handling on
-                    # logical blocks here for both dcp and non-dcp
-                    local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
-                        local_ids[g],
-                        remote_ids[g],
-                        remote_rank=rank,
-                        local_dcp_size=self.dcp_size,
-                        local_dcp_rank=self.dcp_rank,
-                        remote_dcp_size=remote_info.remote_dcp_size,
-                        local_num_computed_blocks=meta.local_num_computed_blocks[g],
-                    )
-                local_physical_ids = self._logical_to_kernel_block_ids(
-                    local_ids, self._physical_blocks_per_logical_kv_block
-                )
-                remote_physical_ids = self._logical_to_kernel_block_ids(
-                    remote_ids, remote_info.remote_physical_blocks_per_logical
-                )
-            else:
-                # No DCP realignment needed: reuse the already-expanded full
-                # physical lists instead of re-deriving them from logical ids.
-                local_physical_ids = group_ids(meta.local_physical_block_ids, rank)
-                remote_physical_ids = group_ids(meta.remote.block_ids, rank)
-            read_specs.append(
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=local_physical_ids,
-                    remote_block_ids=remote_physical_ids,
-                )
+            # Logical remote ids drive DCP realignment (interleaves at block
+            # granularity, before kernel-block expansion). With PP>1
+            # meta.remote.block_ids must stay logical so each stage can expand it
+            # with its own geometry; with PP=1 the single stage may expand it in
+            # place (pre-PP behavior).
+            remote_logical_block_ids = meta.remote.block_ids
+            remote_kernel_block_ids = self._logical_to_kernel_block_ids(
+                remote_logical_block_ids,
+                remote_info.remote_physical_blocks_per_logical,
             )
+            if remote_pp_size == 1:
+                meta.remote.block_ids = remote_kernel_block_ids
+            num_groups = len(meta.local_block_ids)
+            dcp_active = self.dcp_size > 1 or remote_info.remote_dcp_size > 1
 
-        # D may have to perform multiple reads from different remote ranks.
-        # Pure MLA reads once because its cache is replicated. Hybrid
-        # MLA+SSM still needs one read per SSM source rank. With DCP, pure
-        # MLA may also read from multiple ranks (disjoint token slices).
-        if self.use_mla and tp_ratio < 0 and not self._has_mamba and not dcp_active:
-            assert len(read_specs) == 1
-
-        for i, spec in enumerate(read_specs):
-            remote_block_size = remote_info.remote_block_size
-            logger.debug(
-                "Remote agent %s available, calling _read_blocks"
-                " on remote rank %s with remote block size %s for req %s",
-                meta.remote.engine_id,
-                spec.remote_rank,
-                remote_block_size,
-                req_id,
-            )
-            # Get side handles.
-            if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
-                # Remote tp_size > local tp_size: we must perform multiple
-                # reads. Get the memory chunk onto which we will write to.
-                split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
-            else:
-                # Single read from remote, we write to the whole memory region.
-                # Also handle remote block size different from local block size.
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
+            def group_ids(
+                block_ids: BlockIds, rank: int, plan=plan, num_groups=num_groups
+            ) -> list[list[int]]:
+                return [
+                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
+                    for g in range(num_groups)
                 ]
 
-            # Destination handle: remote_engine_id -> remote_rank -> handle.
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
-            ]
+            read_specs = []
+            for rank in plan.all_source_ranks:
+                if dcp_active:
+                    # DCP interleaves at block granularity, so slicing happens
+                    # here on logical blocks, before kernel-block expansion.
+                    local_ids = group_ids(meta.local_block_ids, rank)
+                    remote_ids = group_ids(remote_logical_block_ids, rank)
+                    for g in range(num_groups):
+                        if not local_ids[g]:
+                            continue
+                        # Prefix cache hit may lead to skip some of the remote
+                        # reads
+                        # TODO (NickLucche) consider unifying prefix cache
+                        # handling on logical blocks here for both dcp and non-dcp
+                        local_ids[g], remote_ids[g] = self._apply_dcp_prefix_caching(
+                            local_ids[g],
+                            remote_ids[g],
+                            remote_rank=rank,
+                            local_dcp_size=self.dcp_size,
+                            local_dcp_rank=self.dcp_rank,
+                            remote_dcp_size=remote_info.remote_dcp_size,
+                            local_num_computed_blocks=meta.local_num_computed_blocks[g],
+                        )
+                    local_physical_ids = self._logical_to_kernel_block_ids(
+                        local_ids, self._physical_blocks_per_logical_kv_block
+                    )
+                    remote_physical_ids = self._logical_to_kernel_block_ids(
+                        remote_ids, remote_info.remote_physical_blocks_per_logical
+                    )
+                else:
+                    # No DCP realignment needed: reuse the already-expanded full
+                    # physical lists instead of re-deriving them from logical ids.
+                    local_physical_ids = group_ids(meta.local_physical_block_ids, rank)
+                    remote_physical_ids = group_ids(remote_kernel_block_ids, rank)
+                read_specs.append(
+                    ReadSpec(
+                        remote_rank=rank,
+                        local_block_ids=local_physical_ids,
+                        remote_block_ids=remote_physical_ids,
+                    )
+                )
 
-            self._read_blocks(
-                read_spec=spec,
-                request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_xfer_side_handle=local_xfer_side_handle,
-                remote_xfer_side_handle=remote_xfer_side_handle,
-                expected_consumers=plan.local_consumers,
-            )
+            # D may have to perform multiple reads from different remote ranks.
+            # Pure MLA reads once because its cache is replicated. Hybrid
+            # MLA+SSM still needs one read per SSM source rank. With DCP, pure
+            # MLA may also read from multiple ranks (disjoint token slices).
+            if self.use_mla and tp_ratio < 0 and not self._has_mamba and not dcp_active:
+                assert len(read_specs) == 1
 
-        if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
-            # ..but we still need to notify the other remote ranks that we
-            # have the blocks we need so they can update the request state.
-            # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio already
-            # reflects whether any remote replica is left unchosen.
-            notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != (0, read_specs[0].remote_rank):
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+            for i, spec in enumerate(read_specs):
+                remote_block_size = remote_info.remote_block_size
+                logger.debug(
+                    "Remote agent %s available, calling _read_blocks on remote "
+                    "pp rank %s, tp rank %s with remote block size %s for req %s",
+                    meta.remote.engine_id,
+                    remote_pp_rank,
+                    spec.remote_rank,
+                    remote_block_size,
+                    req_id,
+                )
+                # Get side handles.
+                if tp_ratio < 0 and (not self.use_mla or len(read_specs) > 1):
+                    # Remote tp_size > local tp_size: we must perform multiple
+                    # reads. Get the memory chunk onto which we will write to.
+                    if remote_pp_size > 1:
+                        local_xfer_side_handle = (
+                            self.src_xfer_handles_by_shard_tp_ratio[
+                                (engine_id, remote_pp_rank, tp_ratio)
+                            ][i]
+                        )
+                    else:
+                        split_key = (tp_ratio, remote_block_size)
+                        local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[
+                            split_key
+                        ][i]
+                elif remote_pp_size > 1:
+                    # One handle per producer stage: it covers only the local
+                    # regions backing that stage's layer slice.
+                    local_xfer_side_handle = self.src_xfer_handles_by_remote[
+                        (engine_id, remote_pp_rank, remote_block_size)
+                    ]
+                else:
+                    # Single read from remote, we write to the whole memory region.
+                    # Also handle remote block size different from local block size.
+                    local_xfer_side_handle = self.src_xfer_handles_by_block_size[
+                        remote_block_size
+                    ]
+
+                # Destination handle:
+                # remote_engine_id -> (remote_pp_rank, remote_rank) -> handle.
+                remote_xfer_side_handle = self.dst_xfer_side_handles[
+                    meta.remote.engine_id
+                ][(remote_pp_rank, spec.remote_rank)]
+
+                self._read_blocks(
+                    read_spec=spec,
+                    request_id=req_id,
+                    dst_engine_id=meta.remote.engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    remote_pp_rank=remote_pp_rank,
+                    remote_pp_size=remote_pp_size,
+                    local_xfer_side_handle=local_xfer_side_handle,
+                    remote_xfer_side_handle=remote_xfer_side_handle,
+                    expected_consumers=plan.local_consumers,
+                )
+
+            if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
+                # ..but we still need to notify the other remote ranks that we
+                # have the blocks we need so they can update the request state.
+                # Same thing for DCP (tp_size == dcp_size), so the raw tp_ratio
+                # already reflects whether any remote replica is left unchosen.
+                # Every reader reports the same aggregate count (plan.local_consumers)
+                # so the producer's free-accounting agrees across ranks.
+                notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
+                remote_agents = self._remote_agents[meta.remote.engine_id]
+                for (pp_rank, rank_to_notify), agent in remote_agents.items():
+                    if (
+                        pp_rank == remote_pp_rank
+                        and rank_to_notify != read_specs[0].remote_rank
+                    ):
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+
+        if remote_pp_size > 1 and len(meta.local_physical_block_ids) == 0:
+            # Full prefix hit: no remote read happens, so no recv completion
+            # will report this request. Only the PP path needs this: with PP=1
+            # get_finished still pops the entry once the notification lands.
+            self._recving_metadata.pop(req_id, None)
 
     def _read_blocks(
         self,
@@ -273,6 +336,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
+        remote_pp_rank: int,
+        remote_pp_size: int,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
         expected_consumers: int,
@@ -280,13 +345,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """
         Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
+
+        ``remote_pp_rank``/``remote_pp_size`` identify which pipeline stage of
+        the producer is being read: a pipelined producer registers only its own
+        layer slice, so descriptor ids are relative to that shard's dlist.
         """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
         local_block_ids = read_spec.local_block_ids
         remote_block_ids = read_spec.remote_block_ids
 
-        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        remote_info = self.transfer_topo.get_engine_info(dst_engine_id, remote_pp_rank)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             remote_info.remote_block_size
         )
@@ -313,7 +382,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # just notify P worker that we have the blocks we need.
         if not any(len(group) > 0 for group in local_block_ids):
             # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][(0, remote_rank)]
+            agent_name = self._remote_agents[dst_engine_id][
+                (remote_pp_rank, remote_rank)
+            ]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             except Exception as e:
@@ -324,6 +395,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     req_id=request_id,
                     error=e,
                     dst_engine_id=dst_engine_id,
+                    remote_pp_rank=remote_pp_rank,
                     remote_rank=remote_rank,
                     remote_agent_name=agent_name,
                 )
@@ -353,19 +425,40 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Get descs ids.
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-        )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=block_size_ratio,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
+        # Get descs ids. A single-stage (pp_size == 1) producer registers all of
+        # the engine's KV regions, so compute ids against the whole-engine layout
+        # (which also covers Mamba FA/SSM and hetero physical-per-logical). Per-PP
+        # -stage descriptor sharding is only needed when the producer is pipelined.
+        if remote_pp_size == 1:
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=(
+                    remote_info.remote_physical_blocks_per_logical
+                ),
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            )
+        else:
+            remote_block_descs_ids = self._get_block_descs_ids_for_shard(
+                dst_engine_id,
+                remote_pp_rank,
+                self.dst_num_blocks[dst_engine_id],
+                remote_block_ids,
+                remote_info.remote_physical_blocks_per_logical,
+            )
+            local_block_descs_ids = self._get_block_descs_ids_for_shard(
+                dst_engine_id,
+                remote_pp_rank,
+                self.num_blocks * block_size_ratio,
+                local_block_ids,
+                self._physical_blocks_per_logical_kv_block,
+            )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
@@ -394,6 +487,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 msg="Marking blocks as invalid",
                 error=e,
                 dst_engine_id=dst_engine_id,
+                remote_pp_rank=remote_pp_rank,
                 remote_rank=remote_rank,
             )
             self._handle_failed_transfer(request_id, handle)
