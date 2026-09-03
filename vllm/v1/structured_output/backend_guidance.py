@@ -521,7 +521,12 @@ def serialize_guidance_grammar(
                         # _process_schema returns — llguidance silently
                         # treats that envelope as an empty schema, dropping
                         # every constraint on the tag's content.
-                        grammar=_process_schema(s["schema"]),
+                        grammar=_tag_schema(
+                            s["schema"],
+                            s,
+                            disable_any_whitespace,
+                            disable_additional_properties,
+                        ),
                         end=s["end"],
                     )
                 )

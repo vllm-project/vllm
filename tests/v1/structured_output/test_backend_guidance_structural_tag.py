@@ -190,3 +190,26 @@ def test_legacy_format_still_compiles(backend, tokenizer):
     grammar = backend.compile_grammar(StructuredOutputOptions.STRUCTURAL_TAG, spec)
     tokens = _encode(tokenizer, '<tool_call>{"city": "Paris"}')
     assert grammar.accept_tokens("", tokens)
+
+
+def test_legacy_format_enforces_schema(backend, tokenizer):
+    # Legacy structural tags used to hand llguidance the serialized
+    # {"grammars": [...]} envelope instead of the JSON schema itself, which
+    # llguidance silently interprets as an empty schema — leaving the tag
+    # content unconstrained.
+    spec = json.dumps(
+        {
+            "triggers": ["<tool_call>"],
+            "structures": [
+                {
+                    "begin": "<tool_call>",
+                    "schema": WEATHER_SCHEMA,
+                    "end": "</tool_call>",
+                }
+            ],
+        }
+    )
+    grammar = backend.compile_grammar(StructuredOutputOptions.STRUCTURAL_TAG, spec)
+    assert grammar.accept_tokens("", _encode(tokenizer, "<tool_call>"))
+    bad = _encode(tokenizer, '{"city": 5}')
+    assert grammar.validate_tokens(bad) != bad
