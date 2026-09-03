@@ -655,6 +655,10 @@ class ChunkedTokenDatabase:
     def block_len(self) -> list[int]:
         return self._rank_local_layout().block_len
 
+    @property
+    def block_stride(self) -> list[int]:
+        return self._rank_local_layout().block_stride
+
     def _rank_local_layout(self) -> RankLocalStoreLayout:
         if not isinstance(self.store_layout, RankLocalStoreLayout):
             raise RuntimeError("This operation requires a rank-local Store layout")
