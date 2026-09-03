@@ -54,11 +54,8 @@ fn decode_fastokens_byte_level(
     let tokens: Vec<&str> = token_ids
         .iter()
         .filter(|&&id| !(skip_special_tokens && t.is_special_token(id)))
-        .map(|&id| {
-            t.id_to_token(id)
-                .ok_or_else(|| tokenizer_error!("decoding failed: unknown token ID: {id}"))
-        })
-        .collect::<Result<_>>()?;
+        .filter_map(|&id| t.id_to_token(id))
+        .collect();
     Ok(decode_byte_level(tokens))
 }
 
@@ -337,6 +334,7 @@ mod tests {
     use tokenizers::{AddedToken, Tokenizer as HfTokenizer};
 
     use super::{HuggingFaceTokenizer, Tokenizer};
+    use crate::{TokenAnchor, TokenAttribution};
 
     const REGULAR_TOKEN: &str = "<|regular|>";
     const SPECIAL_TOKEN: &str = "<|special|>";
@@ -717,10 +715,50 @@ mod tests {
     }
 
     #[test]
-    fn fast_byte_level_errors_on_unknown_id() {
+    fn fast_byte_level_skips_undefined_ids() {
         let t = tiny_byte_level_bpe();
-        let err = super::decode_fastokens_byte_level(&t, &[999], false)
-            .expect_err("unknown id must error");
-        assert!(format!("{err:?}").contains("999"));
+        assert_eq!(
+            super::decode_fastokens_byte_level(&t, &[1, 2, 999, 3, 3, 4], false)
+                .expect("with the id"),
+            super::decode_fastokens_byte_level(&t, &[1, 2, 3, 3, 4], false)
+                .expect("without the id")
+        );
+    }
+
+    #[test]
+    fn decode_stream_anchors_undefined_ids_zero_width() {
+        let wrapper = HuggingFaceTokenizer::from_fastokens_backend(tiny_byte_level_bpe());
+        assert!(matches!(
+            wrapper.backend,
+            super::Backend::FastokensByteLevel(_)
+        ));
+
+        let mut stream = wrapper.create_decode_stream(&[], false, 0);
+        for id in [999, 1, 999, 2] {
+            stream.push_token(id).expect("push token");
+        }
+        let (_, full) = stream.flush(None).expect("flush");
+        assert_eq!(full.text, "He");
+        assert_eq!(
+            full.attributions.as_slice(),
+            [
+                TokenAttribution {
+                    token_id: 999,
+                    anchor: TokenAnchor::ZeroWidth { byte_offset: 0 }
+                },
+                TokenAttribution {
+                    token_id: 1,
+                    anchor: TokenAnchor::Visible { byte_offset: 0 }
+                },
+                TokenAttribution {
+                    token_id: 999,
+                    anchor: TokenAnchor::ZeroWidth { byte_offset: 1 }
+                },
+                TokenAttribution {
+                    token_id: 2,
+                    anchor: TokenAnchor::Visible { byte_offset: 1 }
+                },
+            ]
+        );
     }
 }
