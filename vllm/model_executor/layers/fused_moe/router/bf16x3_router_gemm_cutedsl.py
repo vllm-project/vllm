@@ -27,7 +27,11 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
@@ -438,7 +442,9 @@ class BF16x3RouterGemmKernel(VllmJitKernel["BF16x3RouterGemmKernel.CompileKey"])
         return out
 
 
-class BF16x3SplitKReduceKernel(VllmJitKernel["BF16x3SplitKReduceKernel.CompileKey"]):
+class BF16x3SplitKReduceKernel(
+    VllmTritonJitKernel["BF16x3SplitKReduceKernel.CompileKey"]
+):
     @dataclass(frozen=True)
     class CompileKey:
         m: int
@@ -517,36 +523,34 @@ class BF16x3SplitKReduceKernel(VllmJitKernel["BF16x3SplitKReduceKernel.CompileKe
             USE_PDL=True,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-        fp32_ptr = TritonWarmupTensor(torch.float32)
-        warmup(
-            fp32_ptr,
-            fp32_ptr,
-            1,
-            compile_key.m,
-            1,
-            1,
-            BN=compile_key.bn,
-            BM=compile_key.bm,
-            BS=compile_key.bs,
-            USE_PDL=compile_key.use_pdl,
-            grid=(1, 1),
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            partials=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.bs, compile_key.bn, compile_key.m),
+                strides=(
+                    triton_scalar_specialization_rep(compile_key.m),
+                    compile_key.m,
+                    1,
+                ),
+            ),
+            out=TritonWarmupTensor(
+                torch.float32,
+                shape=(compile_key.bn, compile_key.m),
+            ),
         )
 
-    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> None:
+    @kernel_launcher
+    def __call__(self, partials: torch.Tensor, out: torch.Tensor) -> LaunchSpec:
         split_k, N, M = partials.shape
         split_stride = partials.stride(0)
         compile_key = self.dispatch(M=M, split_k=split_k, USE_PDL=True)
         grid = (triton.cdiv(N, compile_key.bn), triton.cdiv(M, compile_key.bm))
-        self.kernel[grid](
-            partials,
-            out,
-            N,
-            M,
-            split_stride,
-            split_k,
+        return grid, dict(
+            N=N,
+            M=M,
+            split_stride=split_stride,
+            k_splits=split_k,
             BN=compile_key.bn,
             BM=compile_key.bm,
             BS=compile_key.bs,

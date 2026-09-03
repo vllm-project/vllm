@@ -136,12 +136,17 @@ class GateLinear(ReplicatedLinear):
 
         if self.allow_ll_bf16_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                _LL_BF16_GEMM_C1_PDL_KERNEL,
                 _LL_BF16_GEMM_KERNEL,
             )
 
+            _LL_BF16_GEMM_C1_PDL_KERNEL.register_warmup(
+                shapes=((input_size, output_size),),
+                m_values=(1,),
+            )
             _LL_BF16_GEMM_KERNEL.register_warmup(
                 shapes=((input_size, output_size),),
-                m_values=range(1, 17),
+                m_values=range(2, 17),
             )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
@@ -174,12 +179,18 @@ class GateLinear(ReplicatedLinear):
             )
             if self.allow_ll_bf16_gemm:
                 from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                    _LL_BF16_GEMM_C1_PDL_KERNEL,
                     _LL_BF16_GEMM_KERNEL,
                 )
 
+                shapes = ((self.weight.shape[1], self.weight.shape[0]),)
+                _LL_BF16_GEMM_C1_PDL_KERNEL.register_warmup(
+                    shapes=shapes,
+                    m_values=(1,),
+                )
                 _LL_BF16_GEMM_KERNEL.register_warmup(
-                    shapes=((self.weight.shape[1], self.weight.shape[0]),),
-                    m_values=range(1, 17),
+                    shapes=shapes,
+                    m_values=range(2, 17),
                 )
 
     def forward(
@@ -188,10 +199,14 @@ class GateLinear(ReplicatedLinear):
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                _LL_BF16_GEMM_C1_PDL_KERNEL,
                 _LL_BF16_GEMM_KERNEL,
             )
 
-            output = _LL_BF16_GEMM_KERNEL(x, self.weight)
+            kernel = (
+                _LL_BF16_GEMM_C1_PDL_KERNEL if x.shape[0] == 1 else _LL_BF16_GEMM_KERNEL
+            )
+            output = kernel(x, self.weight)
             return output, None
 
         # Tier 2: fp32 specialized kernel (H=3072, E=256, M<=32)
