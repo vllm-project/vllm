@@ -214,10 +214,60 @@ class ParserEngine(Parser):
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
 
+    @property
+    def tool_call_stop(self) -> str | None:
+        """The literal that closes a tool-call block, if the format has one.
+
+        Formats whose tool payload is delimited (DeepSeek's
+        ``</｜DSML｜tool_calls>``, Qwen's ``</tool_calls>``, ...) expose it
+        here so the request path can hand it to the sampler as a stop
+        string. Formats without a distinct closer return ``None``.
+        """
+        return self.parser_engine_config.terminals.get("TOOL_END")
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request.skip_special_tokens = False
+        return self._add_tool_call_stop(request)
+
+    def _add_tool_call_stop(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Stop generating once a tool-call block is closed.
+
+        The parser treats the closing tag as a state transition back to
+        CONTENT and keeps consuming, but nothing tells the *sampler* to
+        stop. A model that has just closed a tool-call block is free to
+        open another one, and in agentic workloads (long transcripts, many
+        tools) it does -- repeatedly, until it hits ``max_tokens``.
+        Observed in production on DeepSeek-V4-Flash: 32k output tokens and
+        ~400s spent re-emitting the same block shape, with
+        ``finish_reason`` still reported as ``tool_use``.
+
+        A tool call is a turn boundary: the client has to run the tool and
+        send the result back, so nothing generated after the closer can be
+        used. Handing the closer to the sampler ends the turn where it
+        logically ends.
+        """
+        closer = self.tool_call_stop
+        if not closer or not getattr(request, "tools", None):
+            return request
+        stop = getattr(request, "stop", None)
+        if stop is None:
+            request.stop = [closer]
+        elif isinstance(stop, str):
+            if stop == closer:
+                return request
+            request.stop = [stop, closer]
+        elif closer in stop:
+            return request
+        else:
+            stop.append(closer)
+        # The parser needs to *see* the closer to finish the tool call, and
+        # stop strings are stripped from the output by default.
+        if hasattr(request, "include_stop_str_in_output"):
+            request.include_stop_str_in_output = True
         return request
 
     def _preprocess_feed(
