@@ -761,14 +761,20 @@ def test_qsa_block_expansion_correctness() -> None:
 
 @requires_qsa_kernels
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size"),
+    ("num_rows", "num_query_heads", "num_kv_heads", "page_size", "is_prefill"),
     [
         # Kernel-visible pages with --block-size 256 and hybrid-cache alignment.
-        pytest.param(1, 24, 2, 1792, id="tp1_split64"),
-        pytest.param(16, 12, 1, 1792, id="tp2_split32"),
-        pytest.param(32, 6, 1, 1024, id="tp4_split8"),
-        pytest.param(257, 6, 1, 1024, id="tp4_split4"),
-        pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        # The shape sweep spans the wrapper's profile regions (base_programs =
+        # rows x kv_heads), including both top-region is_prefill variants.
+        pytest.param(1, 24, 2, 1792, True, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1792, True, id="tp2_r16"),
+        pytest.param(32, 6, 1, 1024, True, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1792, True, id="tp1_r128"),
+        pytest.param(257, 6, 1, 1024, True, id="tp4_r257"),
+        pytest.param(513, 6, 1, 1024, True, id="tp4_r513"),
+        pytest.param(1024, 24, 2, 1792, True, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1792, True, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1792, False, id="tp1_r2048_uniform"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -776,6 +782,7 @@ def test_qsa_sparse_paged_attention_correctness(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
+    is_prefill: bool,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -867,7 +874,7 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_positions=query_positions,
         seq_lens=sequence_lengths,
         compress_ratio=indexer_compress_ratio,
-        is_prefill=True,
+        is_prefill=is_prefill,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
