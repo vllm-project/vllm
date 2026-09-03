@@ -12,7 +12,6 @@ from torch._ops import OpOverload
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
@@ -23,11 +22,6 @@ if TYPE_CHECKING:
     from aiter import ActivationType, QuantType
 
 logger = init_logger(__name__)
-
-try:
-    import pandas as pd
-except ImportError:
-    pd = PlaceholderModule("pandas")
 
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
@@ -173,27 +167,42 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     return False
 
 
-@functools.cache
-def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
-) -> set[tuple[int, int, int]]:
-    try:
-        df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
-        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
-    except Exception:
-        return set()
+def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
+    from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
+
+    # any M shape under 1024 should be tuned
+    M_TUNE_PROBE = 128
+
+    return get_gemm_config(config_name, M_TUNE_PROBE, N, K)[1]
 
 
-def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+def _ck_gemm_shape_is_tuned(
+    N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
+) -> bool:
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
         + [1024, 1536]
         + [2**i for i in range(11, 19)]
     )
-    return any((N, K, M) in configs for M in l_m)
+    try:
+        from aiter.ops.gemm_op_a8w8 import (
+            AITER_CONFIGS,
+            get_GEMM_config_with_quant_type,
+        )
+
+        csv_path = getattr(AITER_CONFIGS, csv_attr)
+        return any(
+            get_GEMM_config_with_quant_type(M, N, K, q_dtype_w, csv_path) is not None
+            for M in l_m
+        )
+    except (AttributeError, ImportError, OSError):
+        logger.warning_once(
+            "Could not read aiter CK GEMM configs from AITER_CONFIGS.%s; "
+            "treating all shapes as untuned.",
+            csv_attr,
+        )
+        return False
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -3037,89 +3046,41 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx950, on_rdna4
-
-        gfx950_tuned = {
-            (1024, 8192),
-            (2112, 7168),
-            (3072, 1536),
-            (32768, 8192),
-            (4096, 7168),
-            (4608, 7168),
-            (512, 7168),
-            (7168, 2048),
-            (7168, 256),
-            (8192, 1024),
-            (8192, 32768),
-        }
-        rdna4_tuned = gfx950_tuned | {
-            (2048, 2048),
-            (2624, 6144),
-            (3072, 6144),
-            (3584, 512),
-            (4096, 512),
-            (6144, 1536),
-            (6144, 2048),
-            (7168, 2304),
-            (7168, 16384),
-            (7168, 18432),
-            (8192, 8192),
-            (16384, 1536),
-            (24576, 1536),
-            (32768, 512),
-            (36864, 7168),
-        }
-        if on_rdna4():
-            return (n, k) in rdna4_tuned
-        if on_gfx950():
-            return (n, k) in gfx950_tuned
-        return False
+        try:
+            return _triton_gemm_config_is_tuned("GEMM-A8W8_BLOCKSCALE", n, k)
+        except (AssertionError, ImportError):
+            return False
 
     @staticmethod
-    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
-        return (n, k) in [
-            (8192, 4096),
-            (1280, 8192),
-            (16384, 53248),
-            (106496, 16384),
-            (57344, 8192),
-            (8192, 2048),
-            (2560, 8192),
-            (10240, 8192),
-            (16384, 16384),
-            (8192, 28672),
-            (28672, 8192),
-            (18432, 16384),
-            (8192, 1024),
-            (7168, 8192),
-            (5120, 8192),
-            (8192, 8192),
-            (8192, 7168),
-            (14336, 8192),
-            (8192, 14336),
-            (8192, 3584),
-        ]
+    @functools.cache
+    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k_bytes: int) -> bool:
+        if not current_platform.is_rocm():
+            return False
+        # Input = weight.shape[1] (bytes); *4 for fp4 and aiter config 2*k
+        try:
+            return _triton_gemm_config_is_tuned(
+                "GEMM-AFP4WFP4_PRESHUFFLED", n, 4 * k_bytes
+            )
+        except (AssertionError, ImportError):
+            return False
 
     @staticmethod
+    @functools.cache
     def is_shuffled_per_token_w8a8_gemm_tuned(
         N: int, K: int, q_dtype_w: torch.dtype
     ) -> bool:
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = (
-            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
+        return _ck_gemm_shape_is_tuned(
+            N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE"
         )
-        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
     @staticmethod
+    @functools.cache
     def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
-        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+        return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
     def shuffle_weight(
