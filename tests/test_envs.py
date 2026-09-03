@@ -43,7 +43,6 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
-=======
 def test_custom_allreduce_max_size_mb_parse(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB", raising=False)
     assert envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB is None
