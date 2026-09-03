@@ -5,7 +5,6 @@ import mmap
 import os
 import socket
 import struct
-import sys
 import tempfile
 import time
 import uuid
@@ -15,11 +14,33 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import current_stream
 
 from .xpu_communicator import XpuCommunicator
 
 logger = init_logger(__name__)
+
+try:
+    from vllm_xpu_kernels import p2p as xpu_p2p
+except ImportError:
+    # A vllm_xpu_kernels release predating the p2p ops; the paths below then
+    # degrade to oneCCL like any other unavailable-path case.
+    xpu_p2p = None  # type: ignore[assignment]
+
+_IPC_OPS = (
+    "xpu_ipc_export_handle",
+    "xpu_ipc_release_handle",
+    "xpu_ipc_open_handle",
+    "xpu_ipc_close_handle",
+    "xpu_p2p_memcpy",
+    "xpu_p2p_queue_sync",
+)
+
+
+def _ops_available(*names: str) -> bool:
+    """Whether this vllm_xpu_kernels build registers all of `names`."""
+    return xpu_p2p is not None and all(
+        hasattr(torch.ops._xpu_C, name) for name in names
+    )
 
 
 class XpuP2pCommunicator(XpuCommunicator):
@@ -33,8 +54,8 @@ class XpuP2pCommunicator(XpuCommunicator):
     2x Arc B70, a 10 KiB bf16 all-reduce drops from 56.0us (oneCCL) to
     17.2us. The per-call handshake runs on the host: publish a sequence
     number in a small /dev/shm control page, spin until the peer catches
-    up. There is no Python API for cross-process XPU memory sharing, so a
-    small C++ extension (xpu_zeipc.cpp) is JIT-compiled on first use.
+    up. There is no Python API for cross-process XPU memory sharing, so the
+    Level Zero interop lives in vllm_xpu_kernels as the xpu_ipc_* ops.
 
     This class is the fallback layer beneath XpuP2pDevCommunicator (which
     moves the handshake into a device kernel) and also serves messages too
@@ -65,10 +86,6 @@ class XpuP2pCommunicator(XpuCommunicator):
     # or diverged - raising beats a silent deadlock.
     _SPIN_S = 0.001
     _TIMEOUT_S = 60.0
-
-    # Lets a subclass extend the exported staging region (the device-sync
-    # variant appends its own slots and signal pages).
-    _EXTRA_SHARED_BYTES = 0
 
     def __init__(
         self,
@@ -135,44 +152,40 @@ class XpuP2pCommunicator(XpuCommunicator):
                 self.unique_name,
             )
             return
+        if not _ops_available(*_IPC_OPS):
+            # Every rank runs the same wheel, so this is as symmetric as the
+            # checks above and needs no all-ranks agreement to return on.
+            logger.debug(
+                "p2p all-reduce disabled for %s: this vllm_xpu_kernels build "
+                "does not provide the Level Zero IPC ops",
+                self.unique_name,
+            )
+            return
         self._open_ctrl_page()
 
         ok = False
         try:
-            self._ext = self._load_ext()
-            # All copies are enqueued on the queue behind vLLM's cached
-            # current stream, so they order correctly against torch ops as
-            # long as the worker stays on this stream (vLLM XPU uses the
-            # default stream). On XPU that cache is written once, at the
-            # first current_stream() call on this thread, and never
-            # updated (torch.xpu.set_stream is not patched), so pin it here
-            # and refuse to start if it already disagrees with torch.
-            cached, actual = current_stream(), torch.xpu.current_stream()
-            if cached.sycl_queue != actual.sycl_queue:
-                raise RuntimeError(
-                    "vLLM's cached current stream (stream_id="
-                    f"{cached.stream_id}) is not the current XPU stream "
-                    f"(stream_id={actual.stream_id}); something populated "
-                    "the cache inside a stream context before the "
-                    "communicator was built"
-                )
-            self._ext.init(cached.sycl_queue)
+            # Every op below enqueues on the queue behind torch's current
+            # stream, so they order against torch ops with no extra
+            # synchronization and no queue for this class to hold.
+            #
             # Fixed device buffers make the IPC handle exchange a one-time
             # cost; activations are staged into them per call, one slot per
             # sequence parity.
             self._stage = torch.empty(
-                2 * self.MAX_BYTES + self._EXTRA_SHARED_BYTES,
+                2 * self.MAX_BYTES + self._extra_shared_bytes(),
                 dtype=torch.uint8,
                 device=self.device,
             )
             self._recv = torch.empty(
                 self.MAX_BYTES, dtype=torch.uint8, device=self.device
             )
-            handle, fd, offset = self._ext.export_buf(self._stage.data_ptr())
+            handle_t, fd, offset = xpu_p2p.export_handle(self._stage.data_ptr())
+            handle = handle_t.numpy().tobytes()
             ok = True
         except Exception:
             logger.warning(
-                "Level Zero IPC extension unavailable for %s",
+                "Level Zero IPC setup failed for %s",
                 self.unique_name,
                 exc_info=True,
             )
@@ -226,8 +239,14 @@ class XpuP2pCommunicator(XpuCommunicator):
         try:
             peer_off = struct.unpack_from("<Q", data)[0]
             self._peer_fd = fds[0]
-            peer_ptr = self._ext.open_buf(data[8:], fds[0], peer_off)
-            self._peer_alloc = peer_ptr - peer_off  # base, for close_buf
+            # bytearray: torch.frombuffer warns on the read-only buffer a
+            # bytes object exposes.
+            peer_ptr = xpu_p2p.open_handle(
+                torch.frombuffer(bytearray(data[8:]), dtype=torch.uint8),
+                fds[0],
+                peer_off,
+            )
+            self._peer_alloc = peer_ptr - peer_off  # base, for close_handle
             self._peer_stage = peer_ptr
             ok = True
         except Exception:
@@ -241,6 +260,22 @@ class XpuP2pCommunicator(XpuCommunicator):
         if not self._all_ranks_ok(ok):
             self._close_p2p()
             return
+
+        # Both ranks hold a live mapping now, which is the earliest point
+        # this can run: the release drops the export reference the peer's
+        # open resolves against. Without it the exporter keeps its dma-buf
+        # fd and the driver's export bookkeeping for the life of the
+        # process. The driver may close that fd here, so `fd` is never
+        # closed separately. Cleanup only - a failure leaves a bounded leak
+        # rather than a broken path, so it is logged, not degraded on.
+        try:
+            xpu_p2p.release_handle(handle_t)
+        except Exception:
+            logger.warning(
+                "Level Zero IPC handle release failed for %s",
+                self.unique_name,
+                exc_info=True,
+            )
 
         # Smoke-test the actual data path before trusting it: opening the
         # handle can succeed even when device-to-device access does not
@@ -292,32 +327,13 @@ class XpuP2pCommunicator(XpuCommunicator):
         self._my_seq_off = self.rank_in_group * self._SEQ_STRIDE
         self._peer_seq_off = (1 - self.rank_in_group) * self._SEQ_STRIDE
 
-    @staticmethod
-    def _load_ext():
-        from torch.utils.cpp_extension import load
+    def _extra_shared_bytes(self) -> int:
+        """Extra bytes to append to the exported staging region.
 
-        # Host-only interop code: sycl.hpp is included for get_native<>,
-        # not for kernels, so the default C++ compiler is enough (no icpx
-        # needed at runtime). Headers/libs come from the intel-sycl-rt
-        # wheel in the environment prefix.
-        prefix = sys.prefix
-        return load(
-            name="vllm_xpu_zeipc",
-            sources=[os.path.join(os.path.dirname(__file__), "xpu_zeipc.cpp")],
-            extra_cflags=[
-                "-std=c++17",
-                "-Wno-deprecated-declarations",
-                "-DSYCL_DISABLE_FSYCL_SYCLHPP_WARNING",
-            ],
-            extra_include_paths=[os.path.join(prefix, "include")],
-            extra_ldflags=[
-                f"-L{os.path.join(prefix, 'lib')}",
-                f"-Wl,-rpath,{os.path.join(prefix, 'lib')}",
-                "-lsycl",
-                "-lze_loader",
-            ],
-            with_cuda=False,
-        )
+        Zero here; the device-sync variant appends its own slots and signal
+        pages, sized from what its kernels report.
+        """
+        return 0
 
     def _wait_peer(self, seq: int) -> None:
         mm = self._mm
@@ -350,15 +366,15 @@ class XpuP2pCommunicator(XpuCommunicator):
         my_slot = self._stage[off : off + nbytes].view(input_.dtype)
         my_slot.view(input_.shape).copy_(input_)
         # Host-synchronize before signaling so the peer's read sees the
-        # staged data. q.wait() through the extension, not
-        # torch.xpu.synchronize(): the latter adds ~19us per call.
-        self._ext.wait()
+        # staged data. The op waits on the current stream's queue itself,
+        # unlike torch.xpu.synchronize(), which adds ~19us per call.
+        xpu_p2p.queue_sync()
         mm = self._mm
         assert mm is not None  # only called while _p2p_ready
         struct.pack_into("<Q", mm, self._my_seq_off, seq)
         self._wait_peer(seq)
 
-        self._ext.copy(self._recv.data_ptr(), self._peer_stage + off, nbytes)
+        xpu_p2p.memcpy(self._recv.data_ptr(), self._peer_stage + off, nbytes)
         peer_slot = self._recv[:nbytes].view(input_.dtype)
         output = torch.empty_like(input_)
         # In-order queue: the add is sequenced after the p2p copy. A single
@@ -385,7 +401,7 @@ class XpuP2pCommunicator(XpuCommunicator):
         self._p2p_ready = False
         if self._peer_alloc is not None:
             try:
-                self._ext.close_buf(self._peer_alloc)
+                xpu_p2p.close_handle(self._peer_alloc)
                 os.close(self._peer_fd)
             except Exception:
                 pass

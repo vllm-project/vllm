@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-import sys
-
 import torch
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import current_stream
 
-from .xpu_p2p_communicator import XpuP2pCommunicator
+from .xpu_p2p_communicator import XpuP2pCommunicator, _ops_available, xpu_p2p
 
 logger = init_logger(__name__)
+
+_COLLECTIVE_OPS = (
+    "xpu_p2p_signal_page_bytes",
+    "xpu_p2p_all_reduce",
+    "xpu_p2p_all_gather",
+)
 
 
 class XpuP2pDevCommunicator(XpuP2pCommunicator):
@@ -29,15 +31,11 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     - the host is free for the difference, which host-side sync can never
     give (its call blocks for 19.6us of the 42.1us).
 
-    The kernel is OpenCL C compiled at runtime by the driver (SYCL
-    kernel_compiler extension), so no SYCL device compiler is needed - the
-    same g++-only JIT as the parent. If the runtime cannot compile it, or
-    any rank fails the smoke test, this class degrades to the parent's
-    host-sync protocol, and beyond that to oneCCL.
+    The kernels ship in vllm_xpu_kernels as the xpu_p2p_all_reduce and
+    xpu_p2p_all_gather ops. If a build does not carry them, or any rank
+    fails the smoke test, this class degrades to the parent's host-sync
+    protocol, and beyond that to oneCCL.
     """
-
-    _MAX_WGS = 64
-    _WG_SIZE = 256
 
     # Eager crossover. The kernel's vectorized PCIe reads reach ~12 GB/s,
     # below the ~28 GB/s of the copy engine the host-sync parent uses, so
@@ -72,17 +70,6 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
     # all-gather and those sizes only occur in prefill.
     _AG_SLOT_BYTES = 4 << 20
 
-    # Appended to the parent's exported staging region, in this order: a
-    # pair of staging slots for the all-reduce kernel, a pair for the
-    # all-gather kernel, then per kernel one page of per-workgroup
-    # handshake flags (uint32 each on its own cache line, written by the
-    # peer) and one page of per-workgroup sequence counters (same indexing,
-    # written only by this rank's kernels). The two kernels share nothing:
-    # each has its own slots and its own counter, so their interleaving
-    # needs no reasoning.
-    _PAGE_BYTES = 4096
-    _EXTRA_SHARED_BYTES = 2 * _DEV_SLOT_BYTES + 2 * _AG_SLOT_BYTES + 4 * _PAGE_BYTES
-
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -109,16 +96,46 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         if self._dev_ready:
             logger.info("Using device-synchronized p2p all-reduce for %s", unique_name)
 
+    def _extra_shared_bytes(self) -> int:
+        # Appended to the parent's exported staging region, in this order: a
+        # pair of staging slots for the all-reduce kernel, a pair for the
+        # all-gather kernel, then per kernel one page of per-workgroup
+        # handshake flags (uint32 each on its own cache line, written by the
+        # peer) and one page of per-workgroup sequence counters (same
+        # indexing, written only by this rank's kernels). The two kernels
+        # share nothing: each has its own slots and its own counter, so their
+        # interleaving needs no reasoning.
+        #
+        # The kernels report the page size rather than this side fixing it:
+        # it follows their maximum workgroup count, and a page sized smaller
+        # than they expect would be overrun. A build without them reserves
+        # nothing and leaves _open_dev to degrade to the host-sync path.
+        if not _ops_available(*_COLLECTIVE_OPS):
+            return 0
+        return (
+            2 * self._DEV_SLOT_BYTES
+            + 2 * self._AG_SLOT_BYTES
+            + 4 * xpu_p2p.signal_page_bytes()
+        )
+
     def _open_dev(self) -> None:
+        have_ops = _ops_available(*_COLLECTIVE_OPS)
+        if not have_ops:
+            logger.debug(
+                "device-sync all-reduce disabled for %s: this "
+                "vllm_xpu_kernels build does not provide the p2p collectives",
+                self.unique_name,
+            )
         # Device-side signaling still needs everything the parent set up
-        # (exported staging buffer, mapped peer pointer).
-        if not self._all_ranks_ok(self._p2p_ready):
+        # (exported staging buffer, mapped peer pointer). Both ranks must
+        # agree before either launches: the kernel handshake spins with no
+        # timeout, so a rank that skipped it would leave the other spinning.
+        if not self._all_ranks_ok(self._p2p_ready and have_ops):
             return
 
         ok = False
         try:
-            self._dev_ext = self._load_dev_ext()
-            self._dev_ext.init(current_stream().sycl_queue)
+            page_bytes = xpu_p2p.signal_page_bytes()
             # Same offsets on both ranks, so the peer's slots and flags are
             # visible at the same offsets of the mapped peer buffer. Flags
             # and counters are monotonic sequence numbers and must start
@@ -126,22 +143,27 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             slots_off = 2 * self.MAX_BYTES
             ag_slots_off = slots_off + 2 * self._DEV_SLOT_BYTES
             flags_off = ag_slots_off + 2 * self._AG_SLOT_BYTES
-            counters_off = flags_off + self._PAGE_BYTES
-            ag_flags_off = counters_off + self._PAGE_BYTES
-            ag_counters_off = ag_flags_off + self._PAGE_BYTES
+            counters_off = flags_off + page_bytes
+            ag_flags_off = counters_off + page_bytes
+            ag_counters_off = ag_flags_off + page_bytes
             self._stage[flags_off:].zero_()
             torch.xpu.synchronize()
+            # XPU device addresses sit above 2**63, which torch's `int`
+            # schema type cannot carry; as_fptr is the two's-complement
+            # reinterpretation the ops undo. Done once here rather than per
+            # call, which would put a Python frame in a 6.8us collective.
             mine, peer = self._stage.data_ptr(), self._peer_stage
-            self._dev_slots = mine + slots_off
-            self._peer_dev_slots = peer + slots_off
-            self._my_flags = mine + flags_off
-            self._peer_flags = peer + flags_off
-            self._counters = mine + counters_off
-            self._ag_slots = mine + ag_slots_off
-            self._peer_ag_slots = peer + ag_slots_off
-            self._ag_my_flags = mine + ag_flags_off
-            self._ag_peer_flags = peer + ag_flags_off
-            self._ag_counters = mine + ag_counters_off
+            fptr = xpu_p2p.as_fptr
+            self._dev_slots = fptr(mine + slots_off)
+            self._peer_dev_slots = fptr(peer + slots_off)
+            self._my_flags = fptr(mine + flags_off)
+            self._peer_flags = fptr(peer + flags_off)
+            self._counters = fptr(mine + counters_off)
+            self._ag_slots = fptr(mine + ag_slots_off)
+            self._peer_ag_slots = fptr(peer + ag_slots_off)
+            self._ag_my_flags = fptr(mine + ag_flags_off)
+            self._ag_peer_flags = fptr(peer + ag_flags_off)
+            self._ag_counters = fptr(mine + ag_counters_off)
             ok = True
         except Exception:
             logger.warning(
@@ -190,65 +212,24 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
         if self._all_ranks_ok(ok):
             self._ag_ready = True
 
-    @staticmethod
-    def _load_dev_ext():
-        from torch.utils.cpp_extension import load
-
-        prefix = sys.prefix
-        return load(
-            name="vllm_xpu_zeipc_dev",
-            sources=[os.path.join(os.path.dirname(__file__), "xpu_zeipc_dev.cpp")],
-            extra_cflags=[
-                "-std=c++17",
-                "-Wno-deprecated-declarations",
-                "-DSYCL_DISABLE_FSYCL_SYCLHPP_WARNING",
-            ],
-            extra_include_paths=[os.path.join(prefix, "include")],
-            extra_ldflags=[
-                f"-L{os.path.join(prefix, 'lib')}",
-                f"-Wl,-rpath,{os.path.join(prefix, 'lib')}",
-                "-lsycl",
-            ],
-            with_cuda=False,
-        )
-
-    _DTYPE_CODE = {torch.bfloat16: 0, torch.float16: 1, torch.float32: 2}
-
-    def _launch_cfg(self, numel: int, vec: int = 8) -> tuple[int, int]:
-        # Both ranks must compute the identical grid (numel matches by
-        # collective contract); chunk is aligned to the vector width.
-        nwg = max(1, min(self._MAX_WGS, (numel + 2047) // 2048))
-        chunk = (((numel + nwg - 1) // nwg) + vec - 1) // vec * vec
-        return (numel + chunk - 1) // chunk, chunk
-
     def _dev_all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if not input_.is_contiguous():
             input_ = input_.contiguous()
-        numel = input_.numel()
-        nwg, chunk = self._launch_cfg(numel)
         output = torch.empty_like(input_)
         # Every argument is a function of the tensor alone; the sequence
         # number and slot parity come from a device-side counter, so a
-        # launch recorded into an XPU graph stays correct on replay.
-        # vLLM's cached current_stream() is the queue its graph capture
-        # records on (cuda_graph.py passes it explicitly), and it costs a
-        # TLS read where torch.xpu.current_stream() builds a Stream object
-        # per call (1.5us, a fifth of this collective).
-        self._dev_ext.launch(
-            current_stream().sycl_queue,
-            self._DTYPE_CODE[input_.dtype],
-            output.data_ptr(),
-            input_.data_ptr(),
+        # launch recorded into an XPU graph stays correct on replay. The op
+        # submits to the queue behind torch's current stream, which under
+        # capture is the recording one.
+        torch.ops._xpu_C.xpu_p2p_all_reduce(
+            output,
+            input_,
             self._dev_slots,
             self._peer_dev_slots,
             self._my_flags,
             self._peer_flags,
             self._counters,
-            numel,
-            chunk,
-            self._DEV_SLOT_BYTES // input_.element_size(),
-            nwg,
-            self._WG_SIZE,
+            self._DEV_SLOT_BYTES,
         )
         return output
 
@@ -261,26 +242,18 @@ class XpuP2pDevCommunicator(XpuP2pCommunicator):
             dtype=input_.dtype,
             device=input_.device,
         )
-        nbytes = input_.nbytes
-        if nbytes:
-            nwg, chunk = self._launch_cfg(nbytes, vec=16)
-            self._dev_ext.launch_ag(
-                current_stream().sycl_queue,
-                output.data_ptr(),
-                input_.data_ptr(),
-                self._ag_slots,
-                self._peer_ag_slots,
-                self._ag_my_flags,
-                self._ag_peer_flags,
-                self._ag_counters,
-                nbytes,
-                chunk,
-                self._AG_SLOT_BYTES,
-                self.rank_in_group * nbytes,
-                (1 - self.rank_in_group) * nbytes,
-                nwg,
-                self._WG_SIZE,
-            )
+        # An empty input is a no-op inside the op, on both ranks alike.
+        torch.ops._xpu_C.xpu_p2p_all_gather(
+            output,
+            input_,
+            self._ag_slots,
+            self._peer_ag_slots,
+            self._ag_my_flags,
+            self._ag_peer_flags,
+            self._ag_counters,
+            self._AG_SLOT_BYTES,
+            self.rank_in_group,
+        )
         # Same concat-then-move layout as the base class.
         output = output.reshape((2,) + input_size).movedim(0, dim)
         return output.reshape(
