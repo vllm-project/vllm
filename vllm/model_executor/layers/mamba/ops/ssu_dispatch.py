@@ -54,6 +54,8 @@ def _update_replayssm_ring_trackers_kernel(
     if RESET:
         tl.store(ring_start + slots, 0, mask=valid)
         tl.store(prev_num_accepted + slots, 0, mask=valid)
+        # MTP alone reads prev_query_len. Standard decode deliberately leaves
+        # it unchanged; reset clears the pending MTP window after prefill.
         tl.store(prev_query_len + slots, 0, mask=valid)
     else:
         prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
@@ -96,29 +98,37 @@ def _commit_replayssm_ring_trackers_kernel(
         other=pad_slot_id,
     )
     valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
-    prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
-    start = tl.load(ring_start + slots, mask=valid, other=0)
-    previous_query_len = tl.load(prev_query_len + slots, mask=valid, other=0)
-    accepted = tl.load(num_accepted_tokens + offsets, mask=mask, other=0)
-    must_checkpoint = (previous_query_len > 0) & (
-        prev + previous_query_len > logical_window
+    accepted_since_checkpoint = tl.load(prev_num_accepted + slots, mask=valid, other=0)
+    current_ring_start = tl.load(ring_start + slots, mask=valid, other=0)
+    previous_speculative_query_len = tl.load(
+        prev_query_len + slots, mask=valid, other=0
+    )
+    accepted_from_previous_query = tl.load(
+        num_accepted_tokens + offsets, mask=mask, other=0
+    )
+    must_checkpoint = (previous_speculative_query_len > 0) & (
+        accepted_since_checkpoint + previous_speculative_query_len > logical_window
     )
     next_start = tl.where(
         must_checkpoint,
-        (start + prev) % ring_buffer_len,
-        start,
+        (current_ring_start + accepted_since_checkpoint) % ring_buffer_len,
+        current_ring_start,
     )
     next_prev = tl.where(
-        previous_query_len == 0,
+        previous_speculative_query_len == 0,
         0,
-        tl.where(must_checkpoint, accepted, prev + accepted),
+        tl.where(
+            must_checkpoint,
+            accepted_from_previous_query,
+            accepted_since_checkpoint + accepted_from_previous_query,
+        ),
     )
-    current_query_len = tl.load(
+    current_speculative_query_len = tl.load(
         query_start_loc + offsets + 1, mask=mask, other=0
     ) - tl.load(query_start_loc + offsets, mask=mask, other=0)
     tl.store(ring_start + slots, next_start, mask=valid)
     tl.store(prev_num_accepted + slots, next_prev, mask=valid)
-    tl.store(prev_query_len + slots, current_query_len, mask=valid)
+    tl.store(prev_query_len + slots, current_speculative_query_len, mask=valid)
 
 
 def update_replayssm_ring_trackers(
@@ -191,7 +201,18 @@ def commit_replayssm_ring_trackers(
     ring_buffer_len: int,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
-    """Commit the preceding speculative window and record the current one."""
+    """Commit the preceding speculative window and record the current one.
+
+    MTP evaluates a target token and its draft tokens together, but the number
+    accepted from that query is available only on the next forward pass. This
+    function then advances the per-request ring by the accepted prefix and
+    records the current query length for the following pass. A zero
+    ``prev_query_len`` means that reset/prefill left no prior MTP query to
+    commit; slot validity is handled independently by the kernel mask.
+
+    Standard single-token decode needs no delayed commit: its ReplaySSM kernel
+    advances the shared ring trackers directly after every token.
+    """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
     n_slots = state_batch_indices.numel()

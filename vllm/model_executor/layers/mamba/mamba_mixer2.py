@@ -720,6 +720,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
+        use_spec_decode = self.num_spec > 0
         ring_start = prev_num_accepted = prev_query_len = None
 
         attn_metadata: AttentionMetadata | None = None
@@ -1015,7 +1016,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if has_decode:
             assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
-                if self.num_spec > 0:
+                if use_spec_decode:
                     assert block_idx_last_scheduled_token_prev_step_d is not None
                     input_indices = (
                         block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
@@ -1046,7 +1047,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if (
                 self.use_replayssm
                 and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
-                and self.num_spec > 0
+                and use_spec_decode
                 and self._commits_replayssm_trackers
             ):
                 assert ring_start is not None
@@ -1057,6 +1058,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert query_start_loc_d is not None
                 assert x_cache is not None
                 assert self.replayssm_buffer_len is not None
+                # The previous MTP query's accepted prefix is known only now.
+                # Commit it once, before this cache group's layers evaluate the
+                # current speculative query with the shared ring positions.
                 commit_replayssm_ring_trackers(
                     ring_start,
                     prev_num_accepted,
@@ -1084,7 +1088,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # decode call still processes the full target + draft window.
                 max_query_len=(
                     1 + self.num_spec
-                    if self.use_replayssm and self.num_spec > 0
+                    if self.use_replayssm and use_spec_decode
                     else state_indices_tensor_d.size(-1)
                 ),
             )
@@ -1124,35 +1128,39 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     assert prev_num_accepted is not None
                     assert prev_query_len is not None
                     assert attn_metadata.replayssm_scratch is not None
-                    fi_x = hidden_states_d
-                    fi_dt = dt_d
-                    fi_B = B_d
-                    fi_C = C_d
-                    fi_out = preallocated_ssm_out_d
                     fi_cu_seqlens = query_start_loc_d
                     fi_max_seqlen = None
-                    if self.num_spec > 0:
+                    if use_spec_decode:
                         spec_query_len = 1 + self.num_spec
                         fi_max_seqlen = spec_query_len
                         assert replayssm_state_indices_d is not None
                         decode_batch = replayssm_state_indices_d.size(0)
                         if num_decode_tokens == decode_batch * spec_query_len:
-                            fi_shape = (decode_batch, spec_query_len)
-                            fi_x = fi_x.view(*fi_shape, *fi_x.shape[1:])
-                            fi_dt = fi_dt.view(*fi_shape, *fi_dt.shape[1:])
-                            fi_B = fi_B.view(*fi_shape, *fi_B.shape[1:])
-                            fi_C = fi_C.view(*fi_shape, *fi_C.shape[1:])
-                            fi_out = fi_out.view(*fi_shape, *fi_out.shape[1:])
+                            hidden_states_d = hidden_states_d.view(
+                                decode_batch,
+                                spec_query_len,
+                                *hidden_states_d.shape[1:],
+                            )
+                            dt_d = dt_d.view(
+                                decode_batch, spec_query_len, *dt_d.shape[1:]
+                            )
+                            B_d = B_d.view(decode_batch, spec_query_len, *B_d.shape[1:])
+                            C_d = C_d.view(decode_batch, spec_query_len, *C_d.shape[1:])
+                            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
+                                decode_batch,
+                                spec_query_len,
+                                *preallocated_ssm_out_d.shape[1:],
+                            )
                             fi_cu_seqlens = None
                             fi_max_seqlen = None
                     selective_state_update_replayssm_flashinfer(
                         ssm_state,
-                        fi_x,
-                        fi_dt,
+                        hidden_states_d,
+                        dt_d,
                         A_d,
-                        fi_B,
-                        fi_C,
-                        fi_out,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
                         x_cache,
                         B_cache,
                         dt_cache,
@@ -1166,7 +1174,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         state_batch_indices=replayssm_state_indices_d,
                         scratch=attn_metadata.replayssm_scratch,
                         update_trackers=(
-                            self._updates_replayssm_trackers and self.num_spec == 0
+                            self._updates_replayssm_trackers and not use_spec_decode
                         ),
                         enable_stochastic_rounding=(
                             self.mamba_config.enable_stochastic_rounding
