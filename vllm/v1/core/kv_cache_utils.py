@@ -16,7 +16,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import select_common_block_size_from_constraints
@@ -2036,7 +2036,6 @@ def get_kv_cache_config_from_groups(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
         )
-
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
@@ -2517,7 +2516,8 @@ def _largest_divisor_at_most(value: int, limit: int) -> int:
 def _get_hisparse_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec] | None:
-    if vllm_config.attention_config.hisparse_config is None:
+    attention_config = getattr(vllm_config, "attention_config", None)
+    if attention_config is None or attention_config.hisparse_config is None:
         return None
 
     mla_specs: dict[str, KVCacheSpec] = {
@@ -2736,7 +2736,6 @@ def _max_memory_usage_bytes_from_groups(
         if tail_names:
             total_blocks += 1
         return total_blocks * (len(mla_names) * mla_page + len(idx_names) * idx_page)
-
     bytes_per_block = _pool_bytes_per_block(kv_cache_groups)
     total_blocks = 0
     for group in kv_cache_groups:

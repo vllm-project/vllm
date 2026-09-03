@@ -1266,6 +1266,8 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.region_group_ids = [0, 1, 2, 3]
+        w.dst_region_group_ids[engine_id] = [0, 1, 2, 3]
         w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 

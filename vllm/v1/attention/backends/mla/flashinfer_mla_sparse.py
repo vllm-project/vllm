@@ -483,7 +483,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         kv_cache = kv_cache.view(q.dtype)
-        topk_tokens = topk_indices.shape[1]
 
         # Single-token sparse decode. trtllm-gen requires the q_len_per_request
         # dim, but the sparse attention mask is fully per-token (each query token
@@ -514,9 +513,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             # valid indices into a contiguous prefix, which is what the kernel
             # requires of the page table.
             empty_rows = seq_lens == 0
-            topk_indices[:, 0] = topk_indices[:, 0].masked_fill(
-                empty_rows, 0
-            )
+            topk_indices[:, 0] = topk_indices[:, 0].masked_fill(empty_rows, 0)
             extra_kwargs["sparse_mla_top_k_lens"] = seq_lens.clamp(min=1)
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(

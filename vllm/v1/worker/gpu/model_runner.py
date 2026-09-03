@@ -173,7 +173,6 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     build_kv_block_zeroers,
     clear_layer_kv_caches,
-    copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
@@ -642,6 +641,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_modes=slot_mapping_modes,
+            slot_mapping_enabled=[
+                mode is not SlotMappingMode.NONE for mode in slot_mapping_modes
+            ],
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
