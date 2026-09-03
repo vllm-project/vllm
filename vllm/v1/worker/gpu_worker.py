@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -139,7 +139,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.worker.gpu.pp_transport import PPTransport
+    from vllm.v1.worker.gpu.pp_transport import PPTransport, PPTransportMode
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -516,11 +516,6 @@ class Worker(WorkerBase):
         mode = envs.VLLM_ROCM_PP_TRANSPORT
         if mode == "disabled":
             return
-        if mode != "stream":
-            raise ValueError(
-                f"Unsupported VLLM_ROCM_PP_TRANSPORT mode {mode!r}; "
-                "only 'disabled' and 'stream' are supported"
-            )
         if not current_platform.is_rocm():
             raise ValueError("VLLM_ROCM_PP_TRANSPORT is only supported on ROCm")
         if self.parallel_config.pipeline_parallel_size <= 1:
@@ -529,6 +524,15 @@ class Worker(WorkerBase):
             raise ValueError("VLLM_ROCM_PP_TRANSPORT currently requires TP=1")
         if self.model_config.dtype != torch.bfloat16:
             raise ValueError("VLLM_ROCM_PP_TRANSPORT requires BF16 hidden states")
+        if mode == "fp8":
+            from vllm.utils.import_utils import has_aiter
+
+            if not current_platform.supports_fp8():
+                raise ValueError("FP8 PP transport requires FP8-capable hardware")
+            if not envs.VLLM_ROCM_USE_AITER or not has_aiter():
+                raise ValueError(
+                    "FP8 PP transport requires VLLM_ROCM_USE_AITER and AITER"
+                )
 
         from vllm.v1.worker.gpu.pp_transport import PPTransport
 
@@ -540,13 +544,15 @@ class Worker(WorkerBase):
             device=self.device,
         )
         self._pp_transport = PPTransport(
+            mode=cast("PPTransportMode", mode),
             schema=schema,
             chunk_tokens=chunk_tokens,
             ring_size=self.parallel_config.pipeline_parallel_size,
             device=self.device,
         )
         logger.info(
-            "Enabled ROCm streamed BF16 PP transport with %d-token chunks",
+            "Enabled ROCm %s PP transport with %d-token chunks",
+            mode,
             chunk_tokens,
         )
 

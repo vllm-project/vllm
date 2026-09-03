@@ -29,7 +29,7 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
-@pytest.mark.parametrize("value", ["disabled", "stream"])
+@pytest.mark.parametrize("value", ["disabled", "stream", "fp8"])
 def test_rocm_pp_transport_modes(
     monkeypatch: pytest.MonkeyPatch,
     value: str,

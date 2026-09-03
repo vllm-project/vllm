@@ -27,7 +27,7 @@ from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_aiter
-from vllm.v1.worker.gpu.pp_transport import PPTransport
+from vllm.v1.worker.gpu.pp_transport import PPTransport, PPTransportMode
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -670,6 +670,7 @@ def _pp_transport_test_worker(
     pp_size: int,
     rank: int,
     distributed_init_port: str,
+    mode: PPTransportMode,
 ):
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
@@ -681,6 +682,7 @@ def _pp_transport_test_worker(
         {"hidden_states": torch.empty(shape, dtype=torch.bfloat16, device=device)}
     )
     transport = PPTransport(
+        mode,
         schema,
         chunk_tokens=shape[0],
         ring_size=2,
@@ -708,7 +710,12 @@ def _pp_transport_test_worker(
                 handle.wait()
             for fn in postprocess:
                 fn()
-            torch.testing.assert_close(tensors["hidden_states"], value)
+            torch.testing.assert_close(
+                tensors["hidden_states"],
+                value,
+                rtol=0.15 if mode == "fp8" else 0,
+                atol=0.15 if mode == "fp8" else 0,
+            )
         tail = get_pp_group().recv_tensor_dict()
         assert tail is not None
         torch.testing.assert_close(
@@ -719,7 +726,12 @@ def _pp_transport_test_worker(
 
 @ray.remote(num_gpus=1, max_calls=1)
 def pp_stream_transport_test_worker(*args):
-    _pp_transport_test_worker(*args)
+    _pp_transport_test_worker(*args, mode="stream")
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def pp_fp8_transport_test_worker(*args):
+    _pp_transport_test_worker(*args, mode="fp8")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -759,7 +771,10 @@ def test_multi_process_pipeline_parallel(
     not current_platform.is_rocm() or not has_aiter(),
     reason="requires ROCm and AITER",
 )
-@pytest.mark.parametrize("test_target", [pp_stream_transport_test_worker])
+@pytest.mark.parametrize(
+    "test_target",
+    [pp_stream_transport_test_worker, pp_fp8_transport_test_worker],
+)
 def test_multi_process_pp_transport(
     monkeypatch: pytest.MonkeyPatch,
     test_target: Callable[..., Any],
