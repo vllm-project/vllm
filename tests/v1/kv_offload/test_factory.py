@@ -62,7 +62,7 @@ def _make_offloading_config(
         normalized_extra_config["cpu_bytes_to_use"] = cpu_bytes_to_use
 
     if groups is None:
-        groups = (OffloadingGroupConfig(16, ("layer",)),)
+        groups = (OffloadingGroupConfig(16, ("layer",), group_idx=0),)
 
     return OffloadingConfig(
         groups=groups,
@@ -493,8 +493,8 @@ def test_offloading_spec_has_replicated_layout_default():
 
 def test_offloading_spec_uses_normalized_chunk_geometry():
     groups = (
-        OffloadingGroupConfig(12, ("full_layer",)),
-        OffloadingGroupConfig(16, ("mla_layer",)),
+        OffloadingGroupConfig(12, ("full_layer",), group_idx=0),
+        OffloadingGroupConfig(16, ("mla_layer",), group_idx=1),
     )
     spec = _create_spec(
         groups=groups,

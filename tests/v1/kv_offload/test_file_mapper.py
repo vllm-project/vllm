@@ -26,8 +26,11 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             OffloadingGroupConfig(
                 tokens_per_block=tokens_per_block,
                 layer_names=(layer_name,),
+                group_idx=group_idx,
             )
-            for tokens_per_block, layer_name in kwargs.get("groups", ())
+            for group_idx, (tokens_per_block, layer_name) in enumerate(
+                kwargs.get("groups", ())
+            )
         ),
         worker_kv_bytes_per_block=0,
         enable_kv_cache_events=False,
