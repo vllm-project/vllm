@@ -31,6 +31,7 @@ disagg_proxy_pushconnector_demo.py \
 """
 
 import argparse
+import asyncio
 import contextlib
 import ipaddress
 import itertools
@@ -259,17 +260,24 @@ class PushProxy:
         decode_instance = self.schedule(self.decode_cycler)
         headers = self._common_headers(request_id)
 
-        # Fire prefill; we don't read its body but must drain the
-        # connection so the upstream server can free its slot.
-        async for _ in self.forward_request(
-            f"http://{prefill_instance}{path}", prefill_request, headers
-        ):
-            continue
+        async def drain_prefill():
+            async for _ in self.forward_request(
+                f"http://{prefill_instance}{path}", prefill_request, headers
+            ):
+                continue
 
-        generator = self.forward_request(
-            f"http://{decode_instance}{path}", decode_request, headers
-        )
-        return StreamingResponse(generator, media_type="application/json")
+        prefill_task = asyncio.create_task(drain_prefill())
+
+        async def stream_decode():
+            try:
+                async for chunk in self.forward_request(
+                    f"http://{decode_instance}{path}", decode_request, headers
+                ):
+                    yield chunk
+            finally:
+                await prefill_task
+
+        return StreamingResponse(stream_decode(), media_type="application/json")
 
     async def create_completion(self, raw_request: Request):
         try:
