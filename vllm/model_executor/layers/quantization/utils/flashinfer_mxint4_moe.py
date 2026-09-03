@@ -190,6 +190,7 @@ def flashinfer_trtllm_mxint4_moe(
     topk_group: int | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     routing_method_type: int | None = None,
+    routing_replay_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Apply FlashInfer TensorRT-LLM MxInt4 MoE kernel.
@@ -262,6 +263,7 @@ def flashinfer_trtllm_mxint4_moe(
         do_finalize=True,
         output=None,
         tune_max_num_tokens=8192,
+        routing_replay_out=routing_replay_out,
     )
     if isinstance(out, (tuple, list)):
         out = out[0]

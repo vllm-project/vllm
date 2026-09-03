@@ -10,7 +10,8 @@ from vllm.distributed import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
 from .utils import supports_pdl, supports_tma
 
@@ -432,6 +433,14 @@ def _run_fused_moe_lora_one_shot(
         block_n, nw, ns = 128, 8, 3
     else:
         block_n, nw, ns = 128, 4, 3
+
+    # Devices with max shmem size less than 68KB can't support 3-stage
+    # pipeline. Fall back to a 2-stage on such devices
+    if current_platform.is_cuda_alike():
+        max_shmem_bytes = 68 * 1024
+        if get_max_shared_memory_bytes(device.index) < max_shmem_bytes:
+            ns = min(ns, 2)
+
     # BLOCK_K choice: for hidden-sized K (≥256, i.e. the K=hidden_size
     # shrink input on w13) force BLOCK_K=128 -- the wider tile halves the
     # K-loop trip count and removes the scoreboard stalls that dominated
@@ -857,7 +866,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     tensor_ptrs = []
     for lora_weight in lora_weights:
         tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+    ptr_tensor = async_tensor_h2d(tensor_ptrs, dtype=torch.uint64, device=device)
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)

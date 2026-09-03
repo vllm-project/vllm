@@ -73,6 +73,12 @@ class _PromptOptions(TypedDict):
     if the model supports it.
     """
 
+    media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]
+    """
+    Optional per-modality media loading and decoding arguments.
+    Used only for hash derivation when using multi-modal UUIDs.
+    """
+
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the
@@ -114,6 +120,12 @@ class TokensPrompt(_PromptOptions):
 
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
+
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when offsets were requested
+    AND a Fast (Rust-backed) tokenizer was used AND no multimodal data
+    was present. The list length equals the length of `prompt_token_ids`."""
 
 
 class EmbedsPrompt(_PromptOptions):

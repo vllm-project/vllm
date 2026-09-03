@@ -12,6 +12,7 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
 IS_ROCM = current_platform.is_rocm()
 """ROCm needs shape normalization before calling some vLLM C kernels."""
+GPGPU_DEVICE = CUDA_ALIKE or current_platform.is_xpu()
 
 rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
     variance_size is None and (weight is None or weight.dtype == x.dtype)
@@ -20,14 +21,11 @@ rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
 
 
 @ir.ops.rms_norm.register_impl(
-    "vllm_c", supports_args=rms_no_var_size, supported=CUDA_ALIKE
+    "vllm_c", supports_args=rms_no_var_size, supported=GPGPU_DEVICE
 )
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     # ROCm's vLLM C RMSNorm kernel operates on contiguous 2D tensors.
     # Higher-rank callers still normalize over the last dimension, so flatten
@@ -35,7 +33,9 @@ def rms_norm(
     if IS_ROCM and (x.dim() > 2 or not x.is_contiguous()):
         original_shape = x.shape
         x = x.reshape(-1, original_shape[-1])
-        output = torch.empty_like(x)
+        # empty_like preserves the strides of transposed inputs, but the
+        # libtorch-stable kernel requires a contiguous output tensor.
+        output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
         torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.reshape(original_shape)
 
@@ -54,7 +54,7 @@ matching input/weight dtype."""
 @ir.ops.fused_add_rms_norm.register_impl(
     "vllm_c",
     supports_args=rms_add_no_var_size,
-    supported=CUDA_ALIKE,
+    supported=GPGPU_DEVICE,
     inplace=True,
 )
 def fused_add_rms_norm(
@@ -64,10 +64,6 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-
     assert variance_size is None
     if IS_ROCM and (not x.is_contiguous() or not x_residual.is_contiguous()):
         output, residual = ir.ops.fused_add_rms_norm.impls["native"].impl_fn(

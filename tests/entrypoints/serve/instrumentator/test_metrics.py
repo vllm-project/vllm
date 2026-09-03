@@ -85,6 +85,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
         "vllm:request_inference_time_seconds": [("_count", num_requests)],
         "vllm:request_prefill_time_seconds": [("_count", num_requests)],
         "vllm:request_decode_time_seconds": [("_count", num_requests)],
+        "vllm:request_num_preemptions": [("_count", num_requests)],
         "vllm:request_prompt_tokens": [
             ("_sum", num_requests * num_prompt_tokens),
             ("_count", num_requests),
@@ -225,6 +226,9 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_sum",
     "vllm:request_decode_time_seconds_bucket",
     "vllm:request_decode_time_seconds_count",
+    "vllm:request_num_preemptions_sum",
+    "vllm:request_num_preemptions_bucket",
+    "vllm:request_num_preemptions_count",
 ]
 
 EXPECTED_METRICS_MM = [
@@ -288,6 +292,17 @@ async def test_metrics_exist(
         if metric in HIDDEN_DEPRECATED_METRICS and not server.show_hidden_metrics:
             continue
         assert metric in response.text
+
+    cache_config_samples = [
+        sample
+        for family in text_string_to_metric_families(response.text)
+        if family.name == "vllm:cache_config_info"
+        for sample in family.samples
+    ]
+    assert cache_config_samples
+    for sample in cache_config_samples:
+        assert sample.labels.get("kv_cache_size_tokens") not in (None, "None", "")
+        assert sample.labels.get("kv_cache_max_concurrency") not in (None, "None", "")
 
 
 @pytest.mark.asyncio
@@ -439,7 +454,7 @@ def test_metrics_exist_run_batch():
             [
                 sys.executable,
                 "-m",
-                "vllm.entrypoints.openai.run_batch",
+                "vllm.entrypoints.launchers.run_batch",
                 "-i",
                 input_file.name,
                 "-o",

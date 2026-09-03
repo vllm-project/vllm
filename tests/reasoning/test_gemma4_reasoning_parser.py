@@ -54,7 +54,7 @@ NO_REASONING = {
     "output": "This is content",
     "reasoning": None,
     "content": "This is content",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 REASONING_WITH_CHANNEL = {
     "output": "<|channel>This is a reasoning section<channel|>This is the rest",
@@ -83,15 +83,15 @@ CHANNEL_NO_END = {
 EMPTY = {
     "output": "",
     "reasoning": None,
-    "content": "",
-    "is_reasoning_end": False,
+    "content": None,
+    "is_reasoning_end": True,
 }
 NEW_LINE_NONSTREAMING = {
     "output": (
         "Before\n<|channel>This is a reasoning section<channel|>\nThis is the rest"
     ),
     "reasoning": "This is a reasoning section",
-    "content": "\nThis is the rest",
+    "content": "Before\n\nThis is the rest",
     "is_reasoning_end": True,
 }
 NEW_LINE_STREAMING = {
@@ -111,7 +111,7 @@ THOUGHT_PREFIX = {
 }
 THOUGHT_PREFIX_ONLY = {
     "output": "<|channel>thought\n<channel|>",
-    "reasoning": "",
+    "reasoning": None,
     "content": None,
     "is_reasoning_end": True,
 }
@@ -262,14 +262,27 @@ def test_gemma4_adjust_request(generic_tokenizer):
     assert result is request
 
 
-def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
+@pytest.mark.parametrize(
+    ("chat_template_kwargs", "expected_is_reasoning_end"),
+    [
+        pytest.param({}, True, id="omitted_enable_thinking"),
+        pytest.param({"enable_thinking": False}, True, id="thinking_disabled"),
+        pytest.param({"enable_thinking": True}, False, id="thinking_enabled"),
+    ],
+)
+def test_gemma4_new_turn_reasoning_end_matches_enable_thinking(
+    generic_tokenizer,
+    chat_template_kwargs,
+    expected_is_reasoning_end,
+):
     output = (
         "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"
         "<|turn>user\nThanks<|turn>model\n"
     )
     output_tokens = gemma4_encode_output(generic_tokenizer, output)
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        generic_tokenizer
+        generic_tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
-    assert not is_reasoning_end
+    assert is_reasoning_end is expected_is_reasoning_end

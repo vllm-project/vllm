@@ -78,8 +78,6 @@ def tokenize(sample):
 ds = ds.map(tokenize, remove_columns=ds.column_names)
 ```
 
-</details>
-
 ### 3. Applying Quantization
 
 Now, apply the quantization algorithms:

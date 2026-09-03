@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
+    NCCL_UNIQUE_ID_BYTES,
     NCCLLibrary,
     buffer_type,
     cudaStream_t,
@@ -26,6 +27,8 @@ from vllm.utils.torch_utils import current_stream
 logger = init_logger(__name__)
 
 _NCCL_SYMM_OPS_REGISTERED = False
+
+_NCCL_SUSPEND_MEM = 0x01
 
 
 def register_nccl_symmetric_ops(pynccl_comm):
@@ -58,6 +61,9 @@ def register_nccl_symmetric_ops(pynccl_comm):
 
 
 class PyNcclCommunicator:
+    # None for communicators built via `from_unique_id_bytes` (no process group).
+    group: ProcessGroup | StatelessProcessGroup | None
+
     def __init__(
         self,
         group: ProcessGroup | StatelessProcessGroup,
@@ -105,6 +111,7 @@ class PyNcclCommunicator:
 
         self.available = True
         self.disabled = False
+        self._suspended = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
         if self.rank == 0:
@@ -125,6 +132,14 @@ class PyNcclCommunicator:
                 self.unique_id.internal[i] = byte
         else:
             self.unique_id = group.broadcast_obj(self.unique_id, src=0)
+        self._init_comm(device)
+
+    def _init_comm(self, device: int | str | torch.device) -> None:
+        """Create the communicator on `device` from the already-resolved
+        `self.unique_id` / `self.rank` / `self.world_size`, then run the
+        one-element warm-up all_reduce. Shared by `__init__` and
+        `from_unique_id_bytes` so the init handshake stays identical on both.
+        """
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
@@ -144,6 +159,62 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    @classmethod
+    def from_unique_id_bytes(
+        cls,
+        unique_id_bytes: bytes,
+        rank: int,
+        world_size: int,
+        device: int | str | torch.device,
+        library_path: str | None = None,
+    ) -> "PyNcclCommunicator":
+        """Build a communicator from pre-shared ``ncclUniqueId`` bytes.
+
+        For peers that cannot join a ``StatelessProcessGroup`` / TCPStore (e.g. a
+        torch-free JAX trainer): every rank passes the same id, minted once via
+        ``ncclGetUniqueId`` and shared out of band. There is no barrier, so all
+        ranks must enter init concurrently or ``ncclCommInitRank`` hangs.
+
+        Warm-up handshake: immediately after ``ncclCommInitRank`` this issues a
+        one-element ``all_reduce`` (mirroring ``__init__``). It is a collective,
+        so every peer -- including a foreign, non-vLLM rank -- must issue a
+        matching one-element ``all_reduce`` before any other collective, or all
+        ranks deadlock.
+        """
+        if len(unique_id_bytes) != NCCL_UNIQUE_ID_BYTES:
+            raise ValueError(
+                f"expected a {NCCL_UNIQUE_ID_BYTES}-byte NCCL unique id, "
+                f"got {len(unique_id_bytes)} bytes"
+            )
+        if not 0 <= rank < world_size:
+            raise ValueError(f"rank {rank} out of range for world_size {world_size}")
+
+        self = cls.__new__(cls)
+        self.rank = rank
+        self.world_size = world_size
+        self.group = None
+
+        if self.world_size == 1 or envs.VLLM_DISABLE_PYNCCL:
+            self.available = False
+            self.disabled = True
+            return self
+        try:
+            self.nccl = NCCLLibrary(library_path)
+        except Exception as e:
+            # Unlike the TCPStore path, silently disabling here leaves the peer
+            # blocked in ncclCommInitRank until timeout. The caller explicitly
+            # asked to join from a unique id, so fail loudly instead.
+            raise RuntimeError(
+                "failed to load the NCCL library for unique-id rendezvous"
+            ) from e
+
+        self.available = True
+        self.disabled = False
+        self.nccl_version = self.nccl.ncclGetRawVersion()
+        self.unique_id = self.nccl.unique_id_from_bytes(unique_id_bytes)
+        self._init_comm(device)
+        return self
 
     def destroy(self):
         if self.available and not self.disabled:
@@ -319,6 +390,66 @@ class PyNcclCommunicator:
             split_offset += split_size
         self.nccl.ncclGroupEnd()
 
+    def reduce(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        root: int,
+        op: ReduceOp = ReduceOp.SUM,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclReduce(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()),
+            input_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op),
+            root,
+            self.comm,
+            cudaStream_t(stream.cuda_stream),
+        )
+
+    def scatter(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        sizes: list[int],
+        root: int = 0,
+        stream=None,
+    ):
+        if self.disabled:
+            return
+        assert output_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the output tensor is on {output_tensor.device}"
+        )
+        if stream is None:
+            stream = current_stream()
+        self.nccl.ncclGroupStart()
+        if self.rank == root:
+            split_offset = 0
+            for dst, split_size in enumerate(sizes):
+                if split_size == 0:
+                    continue
+
+                chunk = input_tensor[split_offset : split_offset + split_size, ...]
+                if dst == root:
+                    output_tensor.copy_(chunk)
+                else:
+                    self.send(chunk, dst, stream)
+                split_offset += split_size
+        elif sizes[self.rank] > 0:
+            self.recv(output_tensor, root, stream)
+        self.nccl.ncclGroupEnd()
+
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return
@@ -418,6 +549,27 @@ class PyNcclCommunicator:
 
     def deregister_comm_window(self, window):
         return self.nccl.ncclCommWindowDeregister(self.comm, window)
+
+    def suspend(self):
+        """Release comm GPU memory (collective, idempotent); keeps topology."""
+        if self.disabled or self._suspended:
+            return
+        if not self.nccl.has_symbol("ncclCommSuspend"):
+            logger.warning_once(
+                "ncclCommSuspend is not available in the loaded NCCL/RCCL "
+                "library (requires NCCL >= 2.29.7); skipping communicator "
+                "memory suspension."
+            )
+            return
+        self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
+        self._suspended = True
+
+    def resume(self):
+        """Restore a suspended comm (collective); no-op unless suspended."""
+        if self.disabled or not self._suspended:
+            return
+        self.nccl.ncclCommResume(self.comm)
+        self._suspended = False
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:

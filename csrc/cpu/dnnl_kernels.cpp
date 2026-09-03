@@ -202,7 +202,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
-  const int64_t thread_num = omp_get_max_threads();
+  const int64_t thread_num = cpu_utils::get_max_threads();
   if (num_tokens > thread_num) {
 #pragma omp parallel for
     for (int64_t i = 0; i < num_tokens; ++i) {

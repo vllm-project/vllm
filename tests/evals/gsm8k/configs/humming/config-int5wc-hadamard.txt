@@ -1,0 +1,3 @@
+Qwen3-30B-A3B-int5wc-hadamard-humming.yaml
+Qwen3-30B-A3B-int5wc-hadamard-humming-act-fp8.yaml
+Qwen3-30B-A3B-int5wc-hadamard-humming-act-int8.yaml

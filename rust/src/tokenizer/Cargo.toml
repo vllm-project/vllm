@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-utils = []
+
 [dependencies]
 base64.workspace = true
 fastokens.workspace = true
@@ -11,6 +14,7 @@ riptoken.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smallvec.workspace = true
 tekken.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
@@ -21,7 +25,9 @@ tracing.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 hf-hub.workspace = true
+reqwest.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [[bench]]
 name = "hf"

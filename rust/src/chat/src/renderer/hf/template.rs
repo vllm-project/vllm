@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Chat template support for tokenizers using Jinja2 templates.
 //!
 //! This module is inlined from SMG's tokenizer crate with local adaptations:
@@ -19,7 +22,6 @@ use super::format::{
 };
 use super::tojson::hf_tojson_filter;
 use crate::renderer::hf::{TemplateMessage, TemplateTool};
-use crate::request::ReasoningEffort;
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
@@ -50,9 +52,6 @@ pub(super) struct TemplateContext<'a> {
     pub(super) special_tokens: Option<&'a HfSpecialTokens>,
     #[serde(flatten)]
     pub(super) template_kwargs: Option<&'a HashMap<String, serde_json::Value>>,
-    // By putting top-level `reasoning_effort` after `template_kwargs`, this overrides any
-    // `reasoning_effort` value that might be present there.
-    pub(super) reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Load chat template from a file (`.jinja` or `.json` containing Jinja).
@@ -151,6 +150,26 @@ mod tests {
         assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn test_midchain_dotted_integer_lookup() {
+        let template = CompiledChatTemplate::new(
+            "{{ values.0.name }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+        let mut kwargs = HashMap::new();
+        kwargs.insert("values".to_string(), serde_json::json!([{"name": "first"}]));
+
+        let result = template
+            .apply(TemplateContext {
+                template_kwargs: Some(&kwargs),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(result, "first");
     }
 
     #[test]

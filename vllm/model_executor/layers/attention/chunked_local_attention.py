@@ -20,7 +20,6 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     ChunkedLocalAttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
@@ -42,7 +41,7 @@ def create_chunked_local_attention_backend(
         def get_cudagraph_support(
             cls: type["AttentionMetadataBuilder"],
             vllm_config: VllmConfig,
-            kv_cache_spec: AttentionSpec,
+            kv_cache_spec: KVCacheSpec,
         ) -> AttentionCGSupport:
             # Explicit override in case the underlying builder specialized this getter.
             # @override omitted only because of mypy limitation due to type variable.

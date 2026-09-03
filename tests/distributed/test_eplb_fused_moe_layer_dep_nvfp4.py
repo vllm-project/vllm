@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# Test that the interaction between EPLB and FusedMoE Layer is okay for DP w/ NVFP4
+# Test that the interaction between EPLB and MoERunner Layer is okay for DP w/ NVFP4
 
 from dataclasses import dataclass
 
@@ -19,7 +19,7 @@ from vllm.distributed.parallel_state import (
     get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory, MoERunner
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
     ModelOptNvFp4FusedMoE,
@@ -37,13 +37,14 @@ class TestConfig:
     hidden_size: int
     intermediate_size: int
     num_tokens: int
+    moe_backend: str
 
 
 def make_fused_moe_layer(
     rank: int,
     layer_idx: int,
     test_config: TestConfig,
-) -> FusedMoE:
+) -> MoERunner:
     quant_config = None
 
     device = torch.device(f"cuda:{rank}")
@@ -54,7 +55,7 @@ def make_fused_moe_layer(
         exclude_modules=[],
     )
 
-    fml = FusedMoE(
+    fml = FusedMoEFactory(
         num_experts=test_config.num_experts,
         top_k=test_config.num_topk,
         hidden_size=test_config.hidden_size,
@@ -114,6 +115,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     vllm_config = VllmConfig()
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.kernel_config.moe_backend = test_config.moe_backend
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -223,6 +225,12 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 logical_to_physical_map,
                 logical_replica_count,
             )
+            fml.router.eplb_state.should_record_tensor = torch.ones(
+                (), dtype=torch.bool, device=device
+            )
+            fml.router.eplb_state.num_unpadded_tokens_tensors = [
+                torch.tensor(0, dtype=torch.int32, device=device)
+            ]
 
         out_after_shuffle = []
         with set_forward_context(
@@ -250,7 +258,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("intermediate_size", [256])
 @pytest.mark.parametrize("num_tokens", [256])
-@pytest.mark.parametrize("backend", ["latency", "throughput"])
+@pytest.mark.parametrize("moe_backend", ["flashinfer_trtllm", "flashinfer_cutlass"])
 def test_eplb_fml(
     world_size: int,
     num_layers: int,
@@ -258,12 +266,8 @@ def test_eplb_fml(
     hidden_size: int,
     intermediate_size: int,
     num_tokens: int,
-    backend: str,
-    monkeypatch,
+    moe_backend: str,
 ):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
@@ -278,6 +282,7 @@ def test_eplb_fml(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         num_tokens=num_tokens,
+        moe_backend=moe_backend,
     )
 
     distributed_run(

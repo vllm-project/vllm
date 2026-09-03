@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+import socket
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +10,6 @@ import pytest
 import torch
 import zmq
 
-from tests.conftest import _find_free_port
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -23,11 +23,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
+    resolve_host_ip,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     KVConnectorRole,
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
 from vllm.platforms import current_platform
@@ -35,13 +38,45 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 from .utils import create_request, create_scheduler
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    layer_names = ["layer0", "layer1", "layer2"]
+    num_blocks = 2
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    page = spec.page_size_bytes
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=len(layer_names) * num_blocks * page,
+                layers=layer_names,
+                layer_stride=num_blocks * page,
+                block_stride=page,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)],
+    )
 
 
 aiter_available = importlib.util.find_spec("aiter") is not None
@@ -100,6 +135,16 @@ def _setup_kv_transfer_request(
     return request
 
 
+def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = tp_size
+    scheduler._reqs_need_recv = {}
+    scheduler.unmap_request_id = MagicMock()
+    return scheduler
+
+
 class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
@@ -156,7 +201,14 @@ class FakeMoRIIOWrapper:
     def _handle_completion_message(self, msg: str):
         pass
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def send_notify(
+        self,
+        req_ids,
+        remote_ip,
+        remote_port,
+        message_type=None,
+        message_fields=None,
+    ):
         pass
 
     def pop_finished_req_ids(self):
@@ -174,9 +226,18 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self,
+        vllm_config,
+        engine_id,
+        *args,
+        hand_shake_latency: float = 1.8,
+        kv_cache_layout="LBHNC",
+        kv_cache_config=None,
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            vllm_config, engine_id, kv_cache_config or _make_test_kv_cache_config()
+        )
 
 
 def create_vllm_config(
@@ -404,6 +465,67 @@ def test_read_mode_loads_remote_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
+@pytest.mark.parametrize(
+    ("transfer_id", "extra_params", "expected_notifications"),
+    [
+        pytest.param(
+            "xfer-7",
+            {"remote_host": "127.0.0.1", "remote_notify_port": 7000},
+            [
+                ("xfer-7", "127.0.0.1", 7000),
+                ("xfer-7", "127.0.0.1", 7001),
+            ],
+            id="address-available",
+        ),
+        pytest.param("xfer-8", {}, [], id="address-unavailable-plain-id"),
+    ],
+)
+def test_write_mode_finished_before_alloc_releases_prefill_blocks(
+    transfer_id, extra_params, expected_notifications
+):
+    scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
+    notifications = []
+    scheduler._send_transfer_release = lambda transfer_id, host, port: (
+        notifications.append((transfer_id, host, port))
+    )
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": transfer_id,
+    } | extra_params
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert not delay_free
+    assert new_params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert scheduler._reqs_need_recv == {}
+    assert notifications == expected_notifications
+
+
+def test_send_transfer_release_sends_structured_release_message():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    path = make_zmq_path("tcp", "127.0.0.1", 7000)
+    sock = MagicMock()
+    scheduler.paths = {path: sock}
+
+    scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
+
+    payload = sock.send.call_args.args[0]
+    # WRITE-mode release advertises the consumer (decode) TP size so the prefill
+    # side counts the right number of ACKs via get_moriio_expected_ack_count,
+    # mirroring the READ-mode release in _pop_done_transfers (see
+    # test_read_completion_sends_structured_release_with_consumer_tp_size). The
+    # fixture's tp_size is 2, so consumer_tp_size == 2.
+    assert msgspec.msgpack.decode(payload) == {
+        "type": "release",
+        "transfer_id": "xfer-7",
+        "consumer_tp_size": 2,
+    }
+
+
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
@@ -415,16 +537,15 @@ def test_register_kv_caches(mock_parallel_groups):
     DEFAULT_PORT = 6301
     TP_RANK = 0
     DP_RANK = 0
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_layer_kv_cache_shape_bytes(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -511,16 +632,15 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
-    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
-
-    backend_cls = AiterFlashAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using KVCacheSpec layout
+    shape = compute_layer_kv_cache_shape_bytes(
+        FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
+        ),
+        2,
     )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -568,3 +688,14 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
             assert isinstance(metadata, MoRIIOAgentMetadata), (
                 "Decoded metadata is not MoRIIOAgentMetadata"
             )
+
+
+def test_resolve_host_ip_prefers_extra_config():
+    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    (so an external router can advertise a routable/internal address); an
+    absent or empty value falls back to get_ip()."""
+    assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
+
+    fallback = get_ip()
+    assert resolve_host_ip({}) == fallback
+    assert resolve_host_ip({"host_ip": ""}) == fallback

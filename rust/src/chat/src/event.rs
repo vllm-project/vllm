@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::ops::Deref;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use vllm_llm::TokenUsage;
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -197,13 +201,12 @@ pub enum ChatEvent {
     /// metadata.
     Done {
         message: AssistantMessage,
-        /// Number of prompt tokens actually sent to the engine after chat
-        /// template rendering and tokenization.
-        prompt_token_count: usize,
-        /// Number of output tokens generated.
-        output_token_count: usize,
+        usage: TokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
+        /// Connector-specific encoder cache transfer parameters for
+        /// disaggregated serving.
+        ec_transfer_params: Option<serde_json::Value>,
     },
 }
