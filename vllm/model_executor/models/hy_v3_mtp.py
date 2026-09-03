@@ -52,9 +52,11 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
 from .hy_v3 import HYV3DecoderLayer
+from .interfaces import SupportsPP
 from .utils import (
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
 
@@ -205,7 +207,7 @@ class HYV3MultiTokenPredictor(nn.Module):
         return logits
 
 
-class HYV3MTP(nn.Module):
+class HYV3MTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -213,10 +215,15 @@ class HYV3MTP(nn.Module):
         self.model = HYV3MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
         self.sampler = Sampler()
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

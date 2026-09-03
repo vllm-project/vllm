@@ -272,6 +272,11 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         )
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
         self.set_moe_parameters()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size

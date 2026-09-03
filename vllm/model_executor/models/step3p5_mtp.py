@@ -21,8 +21,13 @@ from vllm.model_executor.model_loader.mtp_validation import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsPP
 from .step3p5 import Step3p5DecoderLayer
-from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
+from .utils import (
+    get_spec_layer_idx_from_weight_name,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -151,7 +156,7 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         return self.embed_tokens(input_ids)
 
 
-class Step3p5MTP(nn.Module):
+class Step3p5MTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -159,11 +164,16 @@ class Step3p5MTP(nn.Module):
         self.model = Step3p5AMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
