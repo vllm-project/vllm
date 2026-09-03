@@ -801,14 +801,22 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             out_arg = output.view(num_decodes, next_n, *output.shape[1:])
             # Companion tensors must match the [batch, next_n, ...] layout the
             # 4-D query implies (flashinfer validates indices against it).
-            swa_indices = swa_indices.reshape(num_decodes, next_n, -1)
-            swa_lens = swa_lens.reshape(num_decodes, next_n)
+            # .contiguous() is required, not cosmetic: c128a_global_decode_
+            # topk_indices can be a slice of a larger, alignment-padded
+            # workspace buffer (kept fixed-size for CUDA graph capture), so
+            # its reshape()-compatible view may not satisfy flashinfer's
+            # CHECK_INPUT_AND_TYPE contiguity check on the C++ side even
+            # though the shape matches.
+            swa_indices = swa_indices.reshape(num_decodes, next_n, -1).contiguous()
+            swa_lens = swa_lens.reshape(num_decodes, next_n).contiguous()
             if extra_sparse_indices is not None:
                 extra_sparse_indices = extra_sparse_indices.reshape(
                     num_decodes, next_n, -1
-                )
+                ).contiguous()
             if extra_sparse_lengths is not None:
-                extra_sparse_lengths = extra_sparse_lengths.reshape(num_decodes, next_n)
+                extra_sparse_lengths = extra_sparse_lengths.reshape(
+                    num_decodes, next_n
+                ).contiguous()
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
             query=q,
             swa_kv_cache=swa_cache,
