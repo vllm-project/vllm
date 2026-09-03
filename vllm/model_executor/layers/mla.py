@@ -147,6 +147,24 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
         self.prefix = prefix
 
+        # Eager fused q/kv RMSNorm (AITER fused_qk_rmsnorm).
+        # Kimi-K3 (and other MLA models on ROCm that run *eager*, i.e. without
+        # the @support_torch_compile decorator) never hit the compiler-side
+        # MLADualRMSNormFusionPass, so the paired q_a_layernorm + kv_a_layernorm
+        # stay as two separate AITER add_rmsnorm kernels. When AITER is enabled
+        # and the q latent exists, fuse them into a single
+        # ``fused_mla_dual_rms_norm`` (AITER ``fused_qk_rmsnorm`` HIP kernel).
+        # Guarded by ``torch.compiler.is_compiling()`` at call time so compiled
+        # models are untouched and keep relying on the fusion pass.
+        self._eager_qk_rmsnorm_fusion = False
+        if self.q_lora_rank is not None and self.q_a_layernorm is not None:
+            try:
+                from vllm._aiter_ops import rocm_aiter_ops
+
+                self._eager_qk_rmsnorm_fusion = rocm_aiter_ops.is_enabled()
+            except Exception:
+                self._eager_qk_rmsnorm_fusion = False
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -172,9 +190,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
+            # q_a_layernorm is applied below, fused with kv_a_layernorm when
+            # the eager AITER fused_qk_rmsnorm path is active.
+            fuse_q_norm = True
             q_proj_layer = self.q_b_proj
-            q_proj_input = q_c
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -183,11 +202,34 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 "q_proj is required when q_lora_rank is None"
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            fuse_q_norm = False
             q_proj_layer = self.q_proj
             q_proj_input = hidden_states
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        if (
+            fuse_q_norm
+            and self._eager_qk_rmsnorm_fusion
+            and not torch.compiler.is_compiling()
+        ):
+            # Single AITER fused_qk_rmsnorm launch for both q and kv latents
+            # (replaces the two separate add_rmsnorm kernels). bf16 in/out,
+            # matching the ATOM fused_qk_rmsnorm_kernel path; the quantized
+            # q_b_proj/kv_b_proj GEMMs quantize their inputs downstream.
+            q_c, kv_c_normed = torch.ops.vllm.fused_mla_dual_rms_norm(
+                q_c,
+                self.q_a_layernorm.weight,
+                kv_c,
+                self.kv_a_layernorm.weight,
+                self.q_a_layernorm.variance_epsilon,
+                self.kv_a_layernorm.variance_epsilon,
+            )
+            q_proj_input = q_c
+        else:
+            if fuse_q_norm:
+                q_c = self.q_a_layernorm(q_c)
+                q_proj_input = q_c
+            kv_c_normed = self.kv_a_layernorm(kv_c)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
