@@ -52,6 +52,8 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "flashinfer_ep_low_latency",  # flashinfer.moe_ep low-latency
+    "flashinfer_ep_high_throughput",  # flashinfer.moe_ep high-throughput
 ]
 
 
@@ -202,7 +204,14 @@ class ParallelConfig:
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
+    - "flashinfer_ep_low_latency": flashinfer.moe_ep low-latency
+    - "flashinfer_ep_high_throughput": flashinfer.moe_ep high-throughput
+
+    The flashinfer_ep_* backends run over either the NCCL-EP or the NIXL-EP
+    transport, selected with VLLM_FLASHINFER_EP_TRANSPORT (default "nccl_ep");
+    flashinfer.moe_ep presents the same API over both. "nixl_ep" is
+    low-latency only."""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -728,11 +737,17 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Batched-activation-format (BatchedExperts) backends: the whole per-rank
+        # batch lands in a padded [local_experts, max_tokens*world, hidden] buffer,
+        # so the scheduler budget must stay small (256) — otherwise every fill/
+        # activation/GEMM pads to the full budget (e.g. 8192*8 rows) and the EP
+        # transport sizes its slot buffers to match.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "flashinfer_ep_low_latency",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1
