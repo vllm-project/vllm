@@ -625,6 +625,29 @@ class VllmConfig:
         return 0
 
     @property
+    def num_prefill_lookahead_tokens(self) -> int:
+        """Prefill tokens past the computed range that the drafter reads.
+
+        Mid-prefill the drafter consumes tokens the target model has not been
+        scheduled for yet, so every component that has to keep them available
+        must apply this margin: the scheduler, which never ends a chunk within
+        it and shifts encoder scheduling by it, and the KV cache manager, which
+        treats the trailing `this - 1` tokens as re-prefillable rather than
+        finalized. Consumers must read this property rather than re-deriving
+        their own per-method lookahead, so those components cannot drift apart.
+        """
+        speculative_config = self.speculative_config
+        if speculative_config is None or not speculative_config.use_eagle():
+            return 0
+        if speculative_config.use_multi_module_mtp():
+            # Each MTP module reads one token further ahead than the one before
+            # it, so the chain needs num_speculative_tokens of runway at a
+            # chunked-prefill boundary.
+            return self.num_speculative_tokens
+        # Eagle-family drafters read only the immediate next token.
+        return 1
+
+    @property
     def uniform_decode_query_len(self) -> int:
         """Query length of every request in a uniform decode batch.
 

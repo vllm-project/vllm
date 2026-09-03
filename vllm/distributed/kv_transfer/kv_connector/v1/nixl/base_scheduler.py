@@ -381,9 +381,20 @@ class NixlBaseConnectorScheduler:
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
+        always recomputes the last token and must start from h(N-1).
+
+        The drafter's prefill lookahead backs off further: the trailing
+        re-prefillable tokens are drafted from the prefiller's own unverified
+        draft tokens, and the decoder never rebuilds them because the repair is
+        sized by a rejection count that is zero for a remotely prefilled
+        request. Recompute them locally instead.
+        """
+        backoff = max(
+            1 if self._has_mamba else 0,
+            self.vllm_config.num_prefill_lookahead_tokens - 1,
+        )
+        if backoff and num_prompt_tokens > backoff:
+            return num_prompt_tokens - backoff
         return num_prompt_tokens
 
     def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
