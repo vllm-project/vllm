@@ -155,6 +155,20 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
     assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID, PAD_SLOT_ID, 30]
 
 
+def test_prepare_dflash_inputs_pads_context_tail_past_the_batch():
+    # A context-KV precompute captured at a padded token count reads context
+    # rows past the live batch (4 target tokens here): they must be PAD slots
+    # (no KV write) with position 0, not the poison this harness pre-fills
+    # (standing in for stale values from an earlier, larger batch).
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 0, 7, 8, 9, 10, 11, 12],
+    )
+
+    assert out.context_slot_mapping[4:].tolist() == [PAD_SLOT_ID] * 12
+    assert out.context_positions[4:].tolist() == [0] * 12
+
+
 def test_prepare_dflash_inputs_never_writes_the_null_block():
     # The valid context uses logical block 0 and the replacement query uses
     # logical block 1. Both map to the null block and must remain unwritable.

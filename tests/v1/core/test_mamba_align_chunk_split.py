@@ -83,6 +83,7 @@ def _split(
     use_eagle_block_drop: bool | None = None,
     partial_hit: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    elide_final_split: bool = False,
 ) -> int:
     """Call the real `Scheduler._mamba_block_aligned_split` on a stub self."""
     if use_eagle_block_drop is None:
@@ -98,6 +99,8 @@ def _split(
         mamba_has_prefill_checkpoint_blocks=(
             num_prefill_checkpoint_blocks > 0 and not use_eagle
         ),
+        # VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT (opt-in, default OFF).
+        mamba_elide_final_split=elide_final_split,
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 
@@ -142,7 +145,10 @@ def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
 
 
 def _run_chunked_prefill(
-    manager: KVCacheManager, request: Request, budgets: list[int]
+    manager: KVCacheManager,
+    request: Request,
+    budgets: list[int],
+    **split_kwargs,
 ) -> dict[int, int]:
     """Prefill `request`, one step per entry in `budgets`.
 
@@ -161,7 +167,9 @@ def _run_chunked_prefill(
         if computed >= request.num_tokens:
             break
         budget = budgets[step] if step < len(budgets) else request.num_tokens
-        num_new = _split(request, min(request.num_tokens - computed, budget))
+        num_new = _split(
+            request, min(request.num_tokens - computed, budget), **split_kwargs
+        )
         if num_new == 0:
             continue
         assert (
@@ -307,3 +315,123 @@ def test_unaligned_resume_never_runs_past_its_block(
             f"intermediate chunk end {end} is neither block-aligned nor the "
             f"partial-tail boundary"
         )
+
+
+def _cached_state_claims(manager: KVCacheManager, request: Request) -> set[int]:
+    """Token offsets that hash-cached mamba slots claim to hold state for."""
+    mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
+    return {
+        block.block_hash_num_tokens
+        for block in mamba_manager.req_to_blocks[request.request_id]
+        if not block.is_null and block.block_hash is not None
+    }
+
+
+def test_elide_final_split_env_flag_defaults_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT is opt-in; unset means inert."""
+    from vllm import envs
+
+    monkeypatch.delenv("VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT", raising=False)
+    assert envs.VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT is False
+
+
+@pytest.mark.parametrize("use_eagle_block_drop", [False, True])
+def test_elide_final_split_merges_final_remainder(
+    use_eagle_block_drop: bool,
+) -> None:
+    """A chunk that finishes the prefill within budget skips the
+    `last_cache_position` stop: the final-chunk exemption already allows an
+    unaligned end, so the split-off remainder chunk is pure boundary cost."""
+    prompt_len = 3602
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    split_off = _split(request, prompt_len, use_eagle_block_drop=use_eagle_block_drop)
+    assert split_off < prompt_len  # default: stops at last_cache_position
+    assert (
+        _split(
+            request,
+            prompt_len,
+            use_eagle_block_drop=use_eagle_block_drop,
+            elide_final_split=True,
+        )
+        == prompt_len
+    )
+
+
+def test_elide_only_applies_to_the_prefill_final_chunk() -> None:
+    """Fail-closed: a budget that cannot finish the prefill keeps every
+    alignment stop, byte-identical to the flag-off split."""
+    prompt_len = 3602
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    for budget in (1000, 1600, 3000, 3601):
+        assert _split(request, budget, elide_final_split=True) == _split(
+            request, budget
+        )
+
+
+def test_elide_never_runs_a_mid_block_start_past_its_boundary() -> None:
+    """Fail-closed: elision drops only the `last_cache_position` stop. A chunk
+    resuming mid-block still re-aligns at the next boundary even when the
+    remainder would finish the prefill."""
+    prompt_len = 3602
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = 331
+    num_new = _split(request, prompt_len - 331, elide_final_split=True)
+    assert num_new == MAMBA_BLOCK_SIZE - 331
+
+
+@pytest.mark.parametrize("partial_hit", [True])
+def test_elide_keeps_the_partial_tail_registration_stop(partial_hit: bool) -> None:
+    """Fail-closed: the partial-tail entry can only be registered by a chunk
+    ending exactly at the prompt's last hash boundary; elision must not skip
+    that stop (only the block-boundary snapshot is forfeited)."""
+    prompt_len = 3602
+    tail_boundary = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE  # 3600
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    num_new = _split(
+        request,
+        prompt_len,
+        use_eagle_block_drop=False,
+        partial_hit=partial_hit,
+        elide_final_split=True,
+    )
+    assert num_new == tail_boundary
+
+
+def test_elide_final_split_state_at_merged_boundary_stays_coherent() -> None:
+    """Mamba state at the merged boundary: crossing `last_cache_position`
+    mid-chunk must leave its block null and unhashed. No cached slot may claim
+    the boundary state that was never written (registration coherence); the
+    only cost is that a same-prefix extension resumes one block earlier."""
+    prompt_len = 3602
+    boundary = 2 * MAMBA_BLOCK_SIZE  # last_cache_position (no EAGLE drop)
+
+    # Control (elide OFF): the split stops at the boundary and its state is
+    # written and registered.
+    manager = _make_hybrid_kv_cache_manager()
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    state_at = _run_chunked_prefill(
+        manager, request, [prompt_len], use_eagle_block_drop=False
+    )
+    assert sorted(state_at.values()) == [boundary, prompt_len]
+    assert boundary in _cached_state_claims(manager, request)
+    _count_cached_boundary_states(manager, request, state_at)
+
+    # Elide ON: one merged chunk; the boundary block stays null so nothing can
+    # register a state that was never written.
+    manager = _make_hybrid_kv_cache_manager()
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    state_at = _run_chunked_prefill(
+        manager,
+        request,
+        [prompt_len],
+        use_eagle_block_drop=False,
+        elide_final_split=True,
+    )
+    assert sorted(state_at.values()) == [prompt_len]
+    assert boundary not in _cached_state_claims(manager, request)
+    _count_cached_boundary_states(manager, request, state_at)
+    mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
+    blocks = mamba_manager.req_to_blocks[request.request_id]
+    assert blocks[boundary // MAMBA_BLOCK_SIZE - 1].is_null

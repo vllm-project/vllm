@@ -13,6 +13,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -1167,6 +1168,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
         mamba_has_prefill_checkpoint_blocks=False,
+        mamba_elide_final_split=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
@@ -2663,6 +2665,34 @@ def test_emit_cached_block_events_zero_cached():
     )
 
     assert pool.take_events() == []
+
+
+@pytest.mark.parametrize(
+    ("method", "default_drop"),
+    [
+        ("eagle", True),
+        ("eagle3", True),
+        ("mtp", True),
+        ("dflash", False),
+        ("dspark", False),
+    ],
+)
+def test_eagle_block_drop_default_follows_drafter_kv_provenance(
+    method: str, default_drop: bool
+):
+    """EAGLE-family drafters cache chunk-boundary KV mixed with the prefill
+    lookahead token, so their hits must drop the last block by default.
+    dflash/dspark cache context KV derived from target hidden states and
+    positions only, so they keep it. An explicit user setting always wins."""
+    spec_config = object.__new__(SpeculativeConfig)
+    object.__setattr__(spec_config, "method", method)
+    object.__setattr__(spec_config, "disable_eagle_block_drop", None)
+    assert spec_config.use_eagle()
+    assert spec_config.use_eagle_block_drop() is default_drop
+    object.__setattr__(spec_config, "disable_eagle_block_drop", False)
+    assert spec_config.use_eagle_block_drop() is True
+    object.__setattr__(spec_config, "disable_eagle_block_drop", True)
+    assert spec_config.use_eagle_block_drop() is False
 
 
 def test_eagle_enabled_removes_last_block():

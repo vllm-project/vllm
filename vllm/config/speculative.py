@@ -436,11 +436,15 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    disable_eagle_block_drop: bool = False
+    disable_eagle_block_drop: bool | None = None
     """Disable dropping the trailing prefix-cache block for EAGLE-like
-    speculative methods. This is an experimental option for measuring the
-    acceptance-rate impact of reusing that block. It does not disable the
-    speculative drafter itself."""
+    speculative methods. If `None`, resolved from the drafter method:
+    dflash/dspark disable the drop (their cached context KV is projected from
+    target hidden states and positions only, so the trailing block is never
+    polluted by the prefill-lookahead token), while eagle/eagle3/mtp keep it.
+    An explicit value always wins; explicitly disabling the drop for
+    eagle/eagle3/mtp is experimental and may affect acceptance rates. It does
+    not disable the speculative drafter itself."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1846,7 +1850,13 @@ class SpeculativeConfig:
 
     def use_eagle_block_drop(self) -> bool:
         """Whether volatile trailing cache blocks should be discarded."""
-        return self.use_eagle() and not self.disable_eagle_block_drop
+        if not self.use_eagle():
+            return False
+        if self.disable_eagle_block_drop is None:
+            # Fail closed: new eagle-family methods keep the drop until their
+            # drafter KV provenance is audited.
+            return self.method not in ("dflash", "dspark")
+        return not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

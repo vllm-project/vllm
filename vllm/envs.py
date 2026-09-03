@@ -165,6 +165,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_INCREMENTAL_ENCODING: bool = True
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -185,6 +186,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
+    VLLM_MARLIN_LARGE_M_BF16: int = 0
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
@@ -326,6 +328,7 @@ if TYPE_CHECKING:
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_ENABLE_HPC_OPS: bool = False
+    VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT: bool = False
 
 
 def get_default_cache_root():
@@ -1174,6 +1177,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
     ),
+    # Mamba "align" prefix caching: finish a prefill in one chunk instead of
+    # splitting a final remainder off at the last cacheable block boundary.
+    # The boundary state is then never cached, so a same-prefix extension
+    # recomputes one extra mamba block of the prompt. Off by default.
+    "VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT": lambda: bool(
+        int(os.getenv("VLLM_MAMBA_ALIGN_ELIDE_FINAL_SPLIT", "0"))
+    ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
@@ -1430,6 +1440,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    # Kill switch for exact incremental prompt encoding in the renderer
+    # (on by default; also gated by `--enable-incremental-encoding`).
+    "VLLM_INCREMENTAL_ENCODING": lambda: bool(
+        int(os.getenv("VLLM_INCREMENTAL_ENCODING", "1"))
+    ),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -1523,6 +1538,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # Opt-in per-M dispatch for dense FP8/NVFP4 Marlin layers: GEMMs with
+    # M >= threshold dequantize the weight into a reused 16-bit workspace
+    # and run a full-rate 16-bit GEMM instead of the Marlin kernel.
+    # 0 disables (default), 1 enables at the default threshold (512),
+    # values >= 16 set the threshold directly. Enabling retains a second
+    # quantized copy of each dispatched dense layer plus the workspace.
+    "VLLM_MARLIN_LARGE_M_BF16": lambda: int(
+        os.environ.get("VLLM_MARLIN_LARGE_M_BF16", "0")
     ),
     # The online quantization dtype for humming kernel
     "VLLM_HUMMING_ONLINE_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(

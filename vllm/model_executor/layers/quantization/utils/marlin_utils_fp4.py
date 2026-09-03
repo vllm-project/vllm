@@ -22,6 +22,12 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_unpad_output,
     should_use_atomic_add_reduce,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+    MarlinLargeMContext,
+    marlin_large_m_fits_workspace,
+    marlin_large_m_threshold,
+    reserve_large_m_workspace,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.math_utils import round_up
@@ -172,6 +178,31 @@ def apply_fp4_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
 
+    large_m_ctx = getattr(weight, "marlin_large_m_ctx", None)
+    if large_m_ctx is not None:
+        # Attached only for NVFP4 with 16-bit activations. Constant per
+        # layer at trace time; the M-vs-threshold branch is decided
+        # inside the opaque custom op, never by dynamo.
+        output = torch.ops.vllm.marlin_large_m_gemm(
+            reshaped_x,
+            weight,
+            weight_scale,
+            weight_global_scale,
+            bias,
+            workspace,
+            large_m_ctx.weight,
+            large_m_ctx.scales,
+            large_m_ctx.bias,
+            large_m_ctx.workspace.buf,
+            large_m_ctx.threshold,
+            size_k,
+            size_n,
+            large_m_ctx.wtype,
+            large_m_ctx.k_first,
+            use_fp32_reduce,
+        )
+        return output.reshape(out_shape)
+
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=4)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
@@ -218,6 +249,27 @@ def apply_fp4_marlin_linear(
     return output.reshape(out_shape)
 
 
+def nvfp4_large_m_dequant_scales(
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+    scale_factor: float,
+    param_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequant-ready [N, K // 16] multipliers reproducing Marlin's
+    effective NVFP4 dequantization: the processed-scale clamp-to-zero
+    (scale * scale_factor * 2^7 < 2), the global scale, and the 2^6
+    factor of the packed-nibble e4m3 reinterpretation used by
+    the large-M dequant path of vllm::marlin_large_m_gemm."""
+    s = weight_scale.to(torch.half)
+    if scale_factor > 1.0:
+        s = (s.float() * scale_factor).to(torch.half)
+    s = s * (2**7)
+    s[s < 2] = 0
+    g = weight_global_scale.to(torch.float32)
+    s = s.float() * (g * (2**6) / (2**7 * scale_factor))
+    return s.to(param_dtype)
+
+
 def prepare_fp4_layer_for_marlin(
     layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
@@ -236,6 +288,14 @@ def prepare_fp4_layer_for_marlin(
     param_dtype = layer.params_dtype
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
+
+    large_m_threshold = marlin_large_m_threshold()
+    orig_weight = layer.weight.data
+    orig_scales = layer.weight_scale.data
+    orig_global_scale = layer.weight_global_scale.data if is_nvfp4 else None
+    orig_bias = None
+    if hasattr(layer, "bias") and layer.bias is not None:
+        orig_bias = layer.bias.data
 
     device = layer.weight.device
 
@@ -294,6 +354,32 @@ def prepare_fp4_layer_for_marlin(
         layer.weight_global_scale = torch.nn.Parameter(
             weight_global_scale, requires_grad=False
         )
+
+        if (
+            large_m_threshold is not None
+            and (input_dtype is None or input_dtype.itemsize == 2)
+            and orig_weight.element_size() == 1
+            and orig_scales.dtype == torch.float8_e4m3fn
+            and orig_scales.shape == (part_size_n, part_size_k // 16)
+            and orig_global_scale is not None
+            and orig_global_scale.numel() == 1
+            and marlin_large_m_fits_workspace(part_size_k, part_size_n)
+        ):
+            layer.weight.marlin_large_m_ctx = MarlinLargeMContext(
+                threshold=large_m_threshold,
+                wtype="nvfp4",
+                weight=orig_weight.view(torch.uint8),
+                scales=nvfp4_large_m_dequant_scales(
+                    orig_scales, orig_global_scale, scale_factor, param_dtype
+                ),
+                bias=orig_bias,
+                k_first=False,
+                size_k=part_size_k,
+                size_n=part_size_n,
+                workspace=reserve_large_m_workspace(
+                    part_size_k * part_size_n, device, param_dtype
+                ),
+            )
     else:
         weight_scale = mxfp4_marlin_process_scales(
             weight_scale, input_dtype=input_dtype
