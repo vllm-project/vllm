@@ -331,7 +331,6 @@ class DequantGatherKCacheKernel:
             gather_lens,
             block_table,
             Int32(0),
-            Int32(1024),
             stream,
             options="--enable-tvm-ffi",
         )
