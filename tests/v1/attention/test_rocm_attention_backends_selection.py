@@ -51,6 +51,41 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     )
 
 
+def test_rocm_attention_reuses_persistent_draft_metadata():
+    from vllm.v1.attention.backends.rocm_attn import (
+        RocmAttentionMetadata,
+        RocmAttentionMetadataBuilder,
+    )
+
+    seq_lens = torch.tensor([8, 12], dtype=torch.int32)
+    slot_mapping = torch.tensor([3, 7], dtype=torch.int64)
+    metadata = RocmAttentionMetadata(
+        num_actual_tokens=2,
+        max_query_len=1,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        max_seq_len=12,
+        seq_lens=seq_lens,
+        block_table=torch.zeros((2, 1), dtype=torch.int32),
+        slot_mapping=slot_mapping,
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+    )
+    builder = object.__new__(RocmAttentionMetadataBuilder)
+
+    seq_lens.add_(1)
+    slot_mapping.add_(2)
+    builder.update_draft_decode_metadata(metadata)
+
+    assert builder.supports_draft_decode_metadata_update
+    assert metadata.seq_lens is seq_lens
+    assert metadata.slot_mapping is slot_mapping
+    assert torch.equal(metadata.seq_lens, torch.tensor([9, 13], dtype=torch.int32))
+    assert torch.equal(metadata.slot_mapping, torch.tensor([5, 9], dtype=torch.int64))
+
+
 def test_aiter_unified_attention_capture_preserves_query_start_locations():
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionMetadataBuilder,

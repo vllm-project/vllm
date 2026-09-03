@@ -472,6 +472,27 @@ def warmup_kernels(
             decode_steps.append(([0], [False]))
 
         for step_indices, step_spec_flags in decode_steps:
+            # Feature-rich warmup sampling materializes processed FP32 logits,
+            # while ordinary greedy decoding sends the model's native logits
+            # dtype directly to rejection sampling. Triton specializes on that
+            # pointer dtype, so reuse the existing singleton speculative step
+            # to load the native-dtype kernels before serving.
+            if (
+                model_runner.is_last_pp_rank
+                and step_spec_flags == [True]
+                and len(step_indices) == 1
+            ):
+                sampler = model_runner.sampler
+                assert sampler is not None
+                req_idx = model_runner.req_states.req_id_to_index[
+                    req_ids[step_indices[0]]
+                ]
+                sampler.add_request(
+                    req_idx,
+                    prompt_len,
+                    SamplingParams(temperature=0.0),
+                )
+                sampler.apply_staged_writes()
             _run_decode_step(step_indices, step_spec_flags)
 
     # Clean up - process finish_req_ids.

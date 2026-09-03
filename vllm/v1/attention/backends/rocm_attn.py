@@ -75,6 +75,10 @@ class RocmAttentionMetadata:
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    # Decode metadata consists only of persistent input-buffer tensor views.
+    # The fused draft loop updates seq_lens, slot_mapping, and block tables in
+    # place, so no per-step host rebuild or scheduler refresh is required.
+    supports_draft_decode_metadata_update = True
 
     def __init__(
         self,
@@ -158,6 +162,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             causal=common_attn_metadata.causal,
         )
         return attn_metadata
+
+    def update_draft_decode_metadata(
+        self, _metadata: RocmAttentionMetadata
+    ) -> None:
+        pass
 
 
 class RocmAttentionBackend(AttentionBackend):

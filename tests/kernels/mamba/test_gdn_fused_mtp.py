@@ -13,9 +13,11 @@ import torch
 
 from vllm.platforms import current_platform
 
-if not (current_platform.is_cuda() and current_platform.has_device_capability(80)):
+if not current_platform.is_cuda_alike() or (
+    current_platform.is_cuda() and not current_platform.has_device_capability(80)
+):
     pytest.skip(
-        reason="Fused GDN MTP decode requires CUDA compute capability 8.0+.",
+        reason="Fused GDN MTP decode requires CUDA compute capability 8.0+ or ROCm.",
         allow_module_level=True,
     )
 
@@ -172,6 +174,43 @@ def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
         num_decodes=0,
         num_spec_decodes=1,
     )
+
+    assert (
+        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(
+            cast(QwenGatedDeltaNetAttention, layer),
+            cast(GDNAttentionMetadata, attn_metadata),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "num_requests,state_width,expected_rocm",
+    [
+        pytest.param(1, 6, True, id="singleton-wide"),
+        pytest.param(8, 4, True, id="production-mtp3-b8"),
+        pytest.param(8, 5, False, id="wide-b8"),
+        pytest.param(24, 4, False, id="production-mtp3-b24"),
+    ],
+)
+def test_fused_mtp_rocm_profitable_shape_guard(
+    num_requests: int, state_width: int, expected_rocm: bool
+) -> None:
+    layer = types.SimpleNamespace(
+        num_k_heads=16,
+        num_v_heads=48,
+        kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),
+        gdn_decode_kernel="cuda",
+    )
+    attn_metadata = types.SimpleNamespace(
+        spec_state_indices_tensor=torch.ones(
+            num_requests, state_width, dtype=torch.int32, device="cuda"
+        ),
+        spec_sequence_masks=object(),
+        num_decodes=0,
+        num_spec_decodes=num_requests,
+    )
+    expected = expected_rocm if current_platform.is_rocm() else True
 
     assert (
         QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(

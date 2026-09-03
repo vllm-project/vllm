@@ -445,6 +445,10 @@ class Attention(nn.Module, AttentionLayerBase):
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
+        # Whether this layer belongs to a speculative-decoding drafter (set by
+        # draft models at construction); carried onto the FullAttentionSpec so
+        # drafter layers keep their own KV cache group. Default False.
+        self.is_draft_kv_cache = False
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -652,6 +656,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                is_draft_kv_cache=getattr(self, "is_draft_kv_cache", False),
             )
 
 

@@ -124,6 +124,12 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             for idx in range(self.num_mtp_layers)
         )
         vllm_config.quant_config = original_quant
+        # These layers belong to the drafter only; flag them so the engine core
+        # keeps their KV cache in a draft group with the EAGLE/MTP trailing
+        # volatile-block semantics instead of the conservative flag-all
+        # fallback that also marks the target's Mamba groups.
+        for layer in self.layers:
+            layer.self_attn.attn.is_draft_kv_cache = True
         self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,

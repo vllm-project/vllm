@@ -1200,6 +1200,34 @@ def _run_two_identical_prefills(
     return num_computed_tokens
 
 
+def test_qwen35_mtp_hybrid_prefix_cache_hit_not_globally_disabled():
+    # With the draft group correctly annotated, a repeated prompt must still
+    # produce a cache hit: the flag-all fallback (which marks the Mamba group
+    # as a draft group and widens every lookup window) must not engage.
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_qwen35_mtp_kv_cache_config(block_size, 100, annotate_draft=True),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    # Only the draft group may carry the annotation; the Mamba and target
+    # groups must stay clean (the flag-all fallback would flag {0, 1, 2}).
+    assert manager.coordinator.eagle_group_ids == {2}
+
+    num_computed_tokens = _run_two_identical_prefills(
+        manager, block_size, use_eagle=True
+    )
+    assert num_computed_tokens > 0, (
+        "Repeated prompt got no prefix-cache hit; the draft-group annotation "
+        "must keep reuse enabled on hybrid MTP models."
+    )
+    # The MTP draft group matches one block past the aligned boundary and
+    # drops it, so the reconciled hit is aligned and excludes one block.
+    assert num_computed_tokens % block_size == 0
+
+
 def test_group_local_block_ids_are_scoped_by_physical_pool():
     block_size = 16
     config = _make_qwen35_mtp_kv_cache_config(block_size, 10, annotate_draft=True)
@@ -1317,6 +1345,86 @@ def test_ungrouped_eviction_fails_explicitly_with_physical_subpools():
 
     with pytest.raises(RuntimeError, match="Ungrouped block-ID eviction"):
         manager.evict_blocks({1})
+
+
+def test_qwen35_mtp_hybrid_mamba_group_hit_matches_no_spec_baseline():
+    # The Mamba group's hit behavior must be identical with and without the
+    # EAGLE/draft annotation: Mamba groups are never draft groups, so their
+    # single-state lookup window is unchanged. The baseline here carries no
+    # draft group at all, so the coordinator's conservative flag-all fallback
+    # would engage in the eagle run -- exactly the old-world behavior.
+    block_size = 16
+
+    def baseline_hit_length(use_eagle: bool) -> int:
+        config = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["target_full"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1, 1),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                ),
+            ],
+        )
+        manager = make_kv_cache_manager(
+            config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=use_eagle,
+            num_prefill_lookahead=1 if use_eagle else 0,
+        )
+        return _run_two_identical_prefills(manager, block_size, use_eagle=use_eagle)
+
+    def annotated_hit_length() -> int:
+        manager = make_kv_cache_manager(
+            _make_qwen35_mtp_kv_cache_config(block_size, 100, annotate_draft=True),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+            use_eagle=True,
+            num_prefill_lookahead=1,
+        )
+        assert manager.coordinator.eagle_group_ids == {2}
+        return _run_two_identical_prefills(manager, block_size, use_eagle=True)
+
+    assert baseline_hit_length(use_eagle=False) > 0
+    # With the draft correctly isolated, the reconciled hit length matches the
+    # baseline under the same EAGLE trailing-block semantics; the flag-all
+    # fallback (old world) is the only alternative and it zeroes Mamba reuse.
+    assert annotated_hit_length() == baseline_hit_length(use_eagle=True)
+
+
+def test_qwen35_mtp_no_spec_decode_prefix_cache_unchanged():
+    # Without speculative decoding the draft flag is inert: nothing may be
+    # annotated as a draft group and the layout must hit like a plain no-MTP
+    # run (no volatile trailing-block drop).
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_qwen35_mtp_kv_cache_config(block_size, 100),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=False,
+    )
+    assert manager.coordinator.eagle_group_ids == set()
+
+    num_computed_tokens = _run_two_identical_prefills(manager, block_size)
+    assert num_computed_tokens == 3 * block_size
 
 
 def test_hybrid_cache_mamba_align_shared_prefix_detection():

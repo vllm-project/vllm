@@ -3613,3 +3613,117 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def _qwen35_mtp_hybrid_specs():
+    """A Qwen3.8/Qwen3.5-shaped hybrid: GDN/Mamba layers with distinct page
+    sizes (so they form separate groups, as on Qwen3.8-27B), a set of target
+    full-attention layers with an identical spec, and one Qwen3_5MTP draft
+    full-attention layer marked is_draft_kv_cache.
+
+    The MTP layer's spec equals the target full-attention spec in every field
+    except the draft marker -- that marker is the only thing separating the
+    draft group from the target group.
+    """
+    specs = {
+        "mamba.layers.0": new_mamba_spec(block_size=64, mamba_cache_mode="align"),
+        "mamba.layers.1": new_mamba_spec(block_size=32, mamba_cache_mode="align"),
+        "mamba.layers.2": new_mamba_spec(block_size=16, mamba_cache_mode="align"),
+    }
+    target_full = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    for i in range(12):
+        specs[f"model.layers.{i}.self_attn.attn"] = target_full
+    specs["mtp.layers.0.self_attn.attn"] = replace(target_full, is_draft_kv_cache=True)
+    return specs
+
+
+def test_qwen35_mtp_draft_group_annotated():
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp"), _qwen35_mtp_hybrid_specs()
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert flagged[0].layer_names == ["mtp.layers.0.self_attn.attn"]
+
+
+def test_qwen35_mtp_mamba_and_target_groups_not_flagged():
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp"), _qwen35_mtp_hybrid_specs()
+    )
+
+    for group in groups:
+        if group.layer_names != ["mtp.layers.0.self_attn.attn"]:
+            assert not group.is_eagle_group
+    mamba_groups = [
+        g
+        for g in groups
+        if any(isinstance(s, MambaSpec) for s in iter_layer_specs(g.kv_cache_spec))
+    ]
+    assert len(mamba_groups) == 3
+    assert not any(g.is_eagle_group for g in mamba_groups)
+    target_full_groups = [g for g in groups if len(g.layer_names) == 12]
+    assert len(target_full_groups) == 1
+    assert not target_full_groups[0].is_eagle_group
+
+
+def test_qwen35_mtp_group_count_no_warning(caplog_vllm):
+    # The lone draft bucket must not drag the group-size heuristic down to 1;
+    # the expected layout is 3 Mamba groups + 1 target full group + 1 draft
+    # group, and the unannotated-eagle-mamba warning must stay silent.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp"), _qwen35_mtp_hybrid_specs()
+    )
+
+    assert len(groups) == 5
+    draft_group = next(
+        group
+        for group in groups
+        if group.layer_names == ["mtp.layers.0.self_attn.attn"]
+    )
+    assert draft_group.physical_bytes_per_block is None
+    assert "no KV cache group could be identified as the draft model's" not in (
+        caplog_vllm.text
+    )
+
+
+def test_qwen35_mtp_marker_inert_without_spec_decode():
+    config = _spec_decode_grouping_config()
+    config.speculative_config = None
+    groups = get_kv_cache_groups(config, _qwen35_mtp_hybrid_specs())
+
+    assert not any(g.is_eagle_group for g in groups)
+    # Grouping itself is unchanged: the draft layer still gets its own group
+    # (the marker is part of the spec), but nothing is annotated.
+    assert any(
+        g.layer_names == ["mtp.layers.0.self_attn.attn"] and not g.is_eagle_group
+        for g in groups
+    )
+
+
+def test_draft_flag_merge_propagates_and_mixed_raises():
+    common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
+    unmarked = FullAttentionSpec(block_size=4, **common)
+    marked = replace(unmarked, is_draft_kv_cache=True)
+
+    assert not FullAttentionSpec.merge([unmarked, unmarked]).is_draft_kv_cache
+    assert FullAttentionSpec.merge([marked, marked]).is_draft_kv_cache
+    with pytest.raises(AssertionError, match="is_draft_kv_cache"):
+        FullAttentionSpec.merge([marked, unmarked])
+
+
+def test_draft_marker_separates_uniform_type_buckets():
+    # UniformTypeKVCacheSpecs.is_uniform_type (used by the packed grouping
+    # path) is isinstance-based; the spec must still keep a marked draft layer
+    # out of a bucket of identical unmarked target layers.
+    common = dict(num_kv_heads=1, head_size=1, dtype=torch.float32)
+    target = FullAttentionSpec(block_size=4, **common)
+    draft = replace(target, is_draft_kv_cache=True)
+
+    assert UniformTypeKVCacheSpecs.is_uniform_type({"a": target, "b": replace(target)})
+    assert not UniformTypeKVCacheSpecs.is_uniform_type({"a": target, "b": draft})

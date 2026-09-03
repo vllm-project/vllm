@@ -260,7 +260,13 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import (
+        on_gfx1x,
+        on_gfx9,
+        on_gfx950,
+        on_gfx1151,
+        on_gfx1250,
+    )
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -330,7 +336,10 @@ def rocm_unquantized_gemm_impl(
         # The skinny kernels assume contiguous K elements. A shape-preserving
         # reshape can retain a transposed activation's non-contiguous strides.
         x_view = x.reshape(-1, x.size(-1)).contiguous()
-        if m > 8 and 0 < n <= 5:
+        # MTP=5 expands a singleton verifier forward to six tokens. gfx1151's
+        # tuned wvSplitK kernel remains profitable for that exact shape.
+        max_wvsplitk_tokens = 6 if on_gfx1151() else 5
+        if m > 8 and 0 < n <= max_wvsplitk_tokens:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])

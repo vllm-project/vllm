@@ -9,6 +9,7 @@ hand-builds its `SchedulerOutput`s, so it has to reserve the same blocks.
 """
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -38,7 +39,8 @@ NUM_SPEC_STEPS = 3
 
 # `warmup_kernels` ends on `torch.accelerator.synchronize()`.
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="warmup synchronizes on the accelerator"
+    not current_platform.is_cuda_alike(),
+    reason="warmup synchronizes on the accelerator",
 )
 
 
@@ -102,6 +104,13 @@ def _make_runner(
         ),
         vllm_config=SimpleNamespace(
             num_lookahead_tokens=num_lookahead_tokens, is_mm_encoder_only=False
+        ),
+        req_states=SimpleNamespace(
+            req_id_to_index={f"_warmup_{i}_": i for i in range(4)}
+        ),
+        sampler=SimpleNamespace(
+            add_request=lambda *args: None,
+            apply_staged_writes=lambda: None,
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
@@ -222,6 +231,28 @@ def test_warmup_reserves_mamba_speculative_blocks(mamba_cache_mode):
             f"{mamba_cache_mode}: {num_blocks[1]} mamba blocks for "
             f"{num_computed}+{num_scheduled} tokens and {lookahead} lookahead"
         )
+
+
+def test_spec_warmup_switches_singleton_request_to_greedy():
+    """Greedy rejection consumes native-dtype logits, unlike the FP32
+    processed logits produced by the feature-rich sampler warmup.
+    """
+    runner = _make_runner([_attention_group()], NUM_SPEC_STEPS)
+    runner.sampler = Mock()
+    recorder = _StepRecorder()
+
+    warmup_kernels(
+        runner,
+        recorder.execute_model,
+        recorder.sample_tokens,
+    )
+
+    runner.sampler.add_request.assert_called_once()
+    req_idx, prompt_len, sampling_params = runner.sampler.add_request.call_args.args
+    assert req_idx == 0
+    assert prompt_len == runner.decode_query_len + 1
+    assert sampling_params.temperature == 0.0
+    runner.sampler.apply_staged_writes.assert_called_once_with()
 
 
 def _hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:

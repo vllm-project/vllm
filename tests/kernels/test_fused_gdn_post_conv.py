@@ -265,6 +265,44 @@ def test_fused_post_conv_l0():
             torch.bfloat16,
             id="ratio4-tp4-max-fp32",
         ),
+        pytest.param(
+            3, 1, (1,), torch.float32, torch.bfloat16, id="qwen27b-regular-b1"
+        ),
+        pytest.param(
+            3,
+            1,
+            (1,) * 8,
+            torch.float32,
+            torch.bfloat16,
+            id="qwen27b-regular-b8",
+        ),
+        pytest.param(
+            3,
+            1,
+            (1,) * 24,
+            torch.float32,
+            torch.bfloat16,
+            id="qwen27b-regular-b24",
+        ),
+        pytest.param(
+            3, 1, (4,), torch.float32, torch.bfloat16, id="qwen27b-mtp3-b1"
+        ),
+        pytest.param(
+            3,
+            1,
+            (4,) * 8,
+            torch.float32,
+            torch.bfloat16,
+            id="qwen27b-mtp3-b8",
+        ),
+        pytest.param(
+            3,
+            1,
+            (4,) * 24,
+            torch.float32,
+            torch.bfloat16,
+            id="qwen27b-mtp3-b24",
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
@@ -310,8 +348,9 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     value = value.view(1, num_tokens, HV, V)
     ba = torch.randn(num_tokens, 2 * HV, dtype=torch.bfloat16, device=device)
     b, a = ba.chunk(2, dim=-1)
-    assert not a.is_contiguous()
-    assert not b.is_contiguous()
+    if num_tokens > 1:
+        assert not a.is_contiguous()
+        assert not b.is_contiguous()
     A_log = 0.5 * torch.randn(HV, dtype=torch.float32, device=device)
     dt_bias = 0.1 * torch.randn(HV, dtype=torch.float32, device=device)
     output_gate = torch.randn(num_tokens, HV, V, dtype=torch.bfloat16, device=device)

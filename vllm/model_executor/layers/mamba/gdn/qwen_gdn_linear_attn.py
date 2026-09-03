@@ -527,6 +527,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self, vllm_config: VllmConfig
     ) -> str | None:
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        is_supported_gpu = current_platform.has_device_capability(80)
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx1151
+
+            is_supported_gpu = on_gfx1151()
         if (
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
@@ -535,13 +540,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
-            or not current_platform.has_device_capability(80)
+            or not is_supported_gpu
         ):
             return (
-                "the fused CUDA kernel requires a BF16 GDN model with "
+                "the fused GPU kernel requires a BF16 GDN model with "
                 "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
                 "layout, BF16 convolution cache, BF16 or FP32 recurrent "
-                "state, and a GPU with compute capability 8.0+"
+                "state, and CUDA compute capability 8.0+ or ROCm gfx1151"
             )
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
@@ -1817,6 +1822,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self, attn_metadata: GDNAttentionMetadata
     ) -> bool:
         state_indices = attn_metadata.spec_state_indices_tensor
+        # On gfx1151 the native kernel wins for every measured singleton
+        # width, and through B=8 for widths up to the production MTP=3 shape.
+        # Wider/larger batches remain faster in the Triton recurrence.
+        rocm_profitable_shape = (
+            not current_platform.is_rocm()
+            or attn_metadata.num_spec_decodes == 1
+            or (
+                attn_metadata.num_spec_decodes <= 8
+                and state_indices is not None
+                and state_indices.size(1) <= 4
+            )
+        )
         return (
             attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
@@ -1827,6 +1844,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.num_v_heads // self.num_k_heads in (1, 2, 3, 4, 8)
             and state_indices is not None
             and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
+            and rocm_profitable_shape
             and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
         )
 

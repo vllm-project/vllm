@@ -1327,9 +1327,29 @@ def _get_kv_cache_groups_uniform_page_size(
     # is the minimum number of layers among all attention types. Need a better
     # strategy if we want to support more complex patterns (e.g., 20 full + 30
     # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
+
+    def _is_draft_bucket(specs: list[KVCacheSpec]) -> bool:
+        # Drafter buckets (all layers marked is_draft_kv_cache) are emitted
+        # whole: they hold few layers by construction and must not drag the
+        # group-size heuristic down to their count.
+        return bool(specs) and all(
+            isinstance(spec, FullAttentionSpec) and spec.is_draft_kv_cache
+            for spec in specs
+        )
+
+    non_draft_buckets = [
+        (layers, specs)
+        for layers, specs in zip(layer_buckets, spec_buckets)
+        if not _is_draft_bucket(specs)
+    ]
+    if non_draft_buckets:
+        bucket_counts = [len(layers) for layers, _ in non_draft_buckets]
+        min_num_layers = min(bucket_counts)
+        max_num_layers = max(bucket_counts)
+    else:
+        min_num_layers = min(len(layers) for layers in layer_buckets)
+        max_num_layers = max(len(layers) for layers in layer_buckets)
     group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
     if max_num_layers < min_num_layers * 1.5:
         # If the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
@@ -1340,7 +1360,10 @@ def _get_kv_cache_groups_uniform_page_size(
         # extra layers to one attention type.
         group_size = max_num_layers
     grouped_layers = []
-    for layers in layer_buckets:
+    for layers, specs in zip(layer_buckets, spec_buckets):
+        if _is_draft_bucket(specs):
+            grouped_layers.append(layers)
+            continue
         num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
@@ -1894,7 +1917,14 @@ def _get_packed_kv_cache_groups(
         # supported; counts sharing a gcd > 1 (e.g. 2:1) could in principle
         # repeat too, but such buckets are emitted whole instead.
         balanced = len(set(map(len, page_size_layers.values()))) == 1
-        bucketed.append((uniform_spec, page_size_layers, balanced))
+        # Drafter buckets (all layers marked is_draft_kv_cache) are emitted
+        # whole: they hold few layers by construction and must not participate
+        # in the repeat-pattern split.
+        is_draft = all(
+            isinstance(s, FullAttentionSpec) and s.is_draft_kv_cache
+            for s in uniform_spec.kv_cache_specs.values()
+        )
+        bucketed.append((uniform_spec, page_size_layers, balanced, is_draft))
 
     # Balanced buckets that mix page sizes must stay whole, so the largest one
     # sets a floor on the repeats per group; larger single-size buckets are
@@ -1902,8 +1932,8 @@ def _get_packed_kv_cache_groups(
     min_repeats_per_group = max(
         (
             spec.get_max_layers_per_page_size()
-            for spec, page_size_layers, balanced in bucketed
-            if balanced and len(page_size_layers) > 1
+            for spec, page_size_layers, balanced, is_draft in bucketed
+            if balanced and len(page_size_layers) > 1 and not is_draft
         ),
         default=0,
     )
@@ -1911,8 +1941,8 @@ def _get_packed_kv_cache_groups(
         _approximate_gcd(
             [
                 spec.get_max_layers_per_page_size()
-                for spec, _, balanced in bucketed
-                if balanced
+                for spec, _, balanced, is_draft in bucketed
+                if balanced and not is_draft
             ],
             lower_bound=min_repeats_per_group,
         )
@@ -1920,10 +1950,12 @@ def _get_packed_kv_cache_groups(
         else None
     )
 
-    def num_groups_for(spec: UniformTypeKVCacheSpecs, balanced: bool) -> int:
-        if balanced and repeats_per_group is not None:
-            return cdiv(spec.get_max_layers_per_page_size(), repeats_per_group)
-        return 1
+    def num_groups_for(
+        spec: UniformTypeKVCacheSpecs, balanced: bool, is_draft: bool
+    ) -> int:
+        if is_draft or not balanced or repeats_per_group is None:
+            return 1
+        return cdiv(spec.get_max_layers_per_page_size(), repeats_per_group)
 
     def widest_group_bytes(page_size_layers: dict[int, list[str]], n: int) -> int:
         """Page bytes of the largest of the n groups a bucket splits into."""
@@ -1940,16 +1972,16 @@ def _get_packed_kv_cache_groups(
                 page_size_layers,
                 len(spec.kv_cache_specs)
                 if isinstance(spec.first_spec, MambaSpec)
-                else num_groups_for(spec, balanced),
+                else num_groups_for(spec, balanced, is_draft),
             )
-            for spec, page_size_layers, balanced in bucketed
+            for spec, page_size_layers, balanced, is_draft in bucketed
         ),
         default=0,
     )
 
     groups = []
-    for spec, page_size_layers, balanced in bucketed:
-        num_groups = num_groups_for(spec, balanced)
+    for spec, page_size_layers, balanced, is_draft in bucketed:
+        num_groups = num_groups_for(spec, balanced, is_draft)
         # `_align_hybrid_block_size` pads a mamba state up to one attention
         # page, so cap a mamba group at the states a block already fits rather
         # than let it widen the block.
@@ -1981,6 +2013,7 @@ def _get_packed_kv_cache_groups(
         use_deepseek_v4_fallback=_is_deepseek_v4_eagle(vllm_config),
     )
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
+    _log_kv_cache_group_layout(vllm_config, groups)
     return groups
 
 
@@ -2004,13 +2037,14 @@ def _annotate_eagle_groups(
 
     Two detection rules, in order of preference:
 
-    1. Spec-driven. ``non_causal_multi_token_decode`` is declared on
-       MLAAttentionSpec and set by drafter attention layers that run a
-       non-causal multi-token decode (today only Kimi-K3 DSpark). It survives
-       MLAAttentionSpec.merge, so it still identifies a group after per-group
-       spec merging, wherever grouping happens to land. It is sufficient but
-       not necessary: a drafter whose spec is indistinguishable from the
-       target's cannot be found this way.
+    1. Spec-driven. A drafter attention layer carries a marker on its KV cache
+       spec: ``non_causal_multi_token_decode`` (declared on MLAAttentionSpec,
+       set by Kimi-K3 DSpark) or ``is_draft_kv_cache`` (declared on
+       FullAttentionSpec, set by drafters whose attention spec is otherwise
+       identical to the target's, e.g. Qwen3_5MTP). Markers survive spec
+       merge, so they still identify a group after per-group spec merging,
+       wherever grouping happens to land. They are sufficient but not
+       necessary: a drafter with no marker cannot be found this way.
     2. Model-scoped positional fallback for DeepseekV4, whose MTP block reuses
        the target's own decoder layer and so carries no spec marker. Its draft
        attention layer is always the last registered layer, so flag whichever
@@ -2035,6 +2069,7 @@ def _annotate_eagle_groups(
     for group in kv_cache_groups:
         if any(
             getattr(spec, "non_causal_multi_token_decode", False)
+            or getattr(spec, "is_draft_kv_cache", False)
             for spec in iter_layer_specs(group.kv_cache_spec)
         ):
             group.is_eagle_group = True
@@ -2088,6 +2123,29 @@ def _warn_if_unannotated_eagle_mamba(
         spec_config.method,
         mamba_groups,
     )
+
+
+def _log_kv_cache_group_layout(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> None:
+    """Log the per-group draft annotation once, for hybrid + spec-decode runs.
+
+    Makes the resulting group layout visible at startup so mis-annotation
+    (e.g. a Mamba group wrongly marked as a draft group) can be checked
+    without attaching a debugger.
+    """
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or not spec_config.use_eagle():
+        return
+    if len(kv_cache_groups) <= 1:
+        return
+    for idx, group in enumerate(kv_cache_groups):
+        logger.info_once(
+            "KV cache group %d: layers=%s draft/eagle=%s",
+            idx,
+            tuple(group.layer_names),
+            group.is_eagle_group,
+        )
 
 
 def _largest_divisor_at_most(value: int, limit: int) -> int:
@@ -2181,6 +2239,7 @@ def get_kv_cache_groups(
 
     _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
     _warn_if_unannotated_eagle_mamba(vllm_config, groups)
+    _log_kv_cache_group_layout(vllm_config, groups)
     return groups
 
 

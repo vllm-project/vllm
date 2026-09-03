@@ -440,6 +440,17 @@ class AttentionSpec(KVCacheSpec):
         kv_shard_count = parallel_config.decode_context_parallel_size
         return cdiv(max_len, self.block_size * kv_shard_count)
 
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        # Drafter layers whose spec is otherwise identical to the target's must
+        # not be collected into the same bucket/group as target layers.
+        return all(
+            isinstance(spec, FullAttentionSpec)
+            and spec.is_draft_kv_cache == self.is_draft_kv_cache
+            for spec in kv_cache_specs.values()
+        )
+
 
 @dataclass(frozen=True, kw_only=True)
 class FullAttentionSpec(AttentionSpec):

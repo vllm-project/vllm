@@ -1197,6 +1197,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS
         "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
     endif()
+
+    set(FUSED_GDN_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_GDN_DECODE_HIP_ARCHS INCLUDE REGEX "gfx1151")
+    if(FUSED_GDN_DECODE_HIP_ARCHS)
+      set(FUSED_GDN_DECODE_HIP_SRC
+        "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_GDN_DECODE_HIP_SRC}")
+      message(STATUS
+        "Building fused GDN decode for HIP archs: ${FUSED_GDN_DECODE_HIP_ARCHS}")
+    endif()
   endif()
 
   message(STATUS "Enabling C_stable extension.")
@@ -1246,6 +1256,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_GDN_DECODE_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_GDN_DECODE=1)
     endif()
   endif()
 
