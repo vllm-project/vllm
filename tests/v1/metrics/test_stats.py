@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
@@ -360,7 +361,7 @@ def test_prefill_stats_truncates_failed_external_source_segments():
     }
 
 
-def test_prefill_stats_normalizes_external_source_segments():
+def test_prefill_stats_coalesces_external_source_segments():
     prefill_stats = PrefillStats()
     prefill_stats.set(
         num_prompt_tokens=16,
@@ -384,29 +385,34 @@ def test_prefill_stats_normalizes_external_source_segments():
     assert prefill_stats.num_computed_tokens == 12
 
 
-@pytest.mark.parametrize(
-    ("sources", "expected"),
-    [
-        (
-            [("fs", 4), ("disk", 4), ("obj", 4), ("custom", 4)],
-            [("disk", 8), ("external", 8)],
-        ),
-        (
-            [("cpu", 4), ("dram", 4), ("host", 4), ("CPU", 4)],
-            [("host", 16)],
-        ),
-    ],
-)
-def test_prefill_stats_canonicalizes_connector_tier_names(sources, expected):
+@pytest.mark.parametrize("source", list(CacheHitSource))
+@pytest.mark.parametrize("as_string", [False, True])
+def test_prefill_stats_accepts_canonical_sources(source, as_string):
     prefill_stats = PrefillStats()
     prefill_stats.set(
         num_prompt_tokens=16,
         num_local_cached_tokens=0,
         num_external_cached_tokens=16,
-        external_cached_token_sources=sources,
+        external_cached_token_sources=[(source.value if as_string else source, 16)],
     )
 
-    assert prefill_stats.external_cached_token_sources == expected
+    assert prefill_stats.external_cached_token_sources == [(source.value, 16)]
+
+
+@pytest.mark.parametrize(
+    "source", ["gpu", "cpu", "dram", "file", "fs", "nvme", "HOST", "obj", "custom"]
+)
+@pytest.mark.parametrize("num_tokens", [0, 8])
+def test_prefill_stats_rejects_noncanonical_sources(source, num_tokens):
+    prefill_stats = PrefillStats()
+
+    with pytest.raises(ValueError):
+        prefill_stats.set(
+            num_prompt_tokens=16,
+            num_local_cached_tokens=0,
+            num_external_cached_tokens=num_tokens,
+            external_cached_token_sources=[(source, num_tokens)],
+        )
 
 
 @pytest.mark.parametrize(

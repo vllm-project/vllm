@@ -31,10 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.logger import init_logger
-from vllm.v1.cache_hit_source import (
-    CacheHitSource,
-    normalize_cache_hit_source,
-)
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
@@ -305,11 +302,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         load_sources = self._request_load_sources.get(transfer_job.req_context.req_id)
         if load_sources is not None:
-            tier_type = normalize_cache_hit_source(
-                self.secondary_tiers[job_metadata.tier_idx].tier_type
-            )
+            source = self.secondary_tiers[job_metadata.tier_idx].cache_hit_source
             for key in failed_keys:
-                if load_sources.get(key) == tier_type:
+                if load_sources.get(key) == source:
                     del load_sources[key]
 
         if successful_keys:
@@ -530,9 +525,9 @@ class TieringOffloadingManager(OffloadingManager):
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
         load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
-        tier_type = normalize_cache_hit_source(self.secondary_tiers[tier_idx].tier_type)
+        source = self.secondary_tiers[tier_idx].cache_hit_source
         for promoted_key in primary_write_result.keys_to_store:
-            load_sources[promoted_key] = tier_type
+            load_sources[promoted_key] = source
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's chunks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier_idx, {})
