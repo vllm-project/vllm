@@ -41,6 +41,10 @@ if os.getenv("VLLM_TEST_MODEL"):
         BACKENDS = ["TRITON_MLA"]
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
+    elif getattr(config, "model_type", "") == "granite_swa":
+        # FLEX_ATTENTION does not support attention sinks used by GraniteSWA
+        # sliding-window models.
+        BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
