@@ -7,14 +7,15 @@ import mmap
 import socket
 import time
 import uuid
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kvcr import (
     DURATION_METRIC,
     KVCR,
+    ROUTER_HINT_CAPABILITIES,
+    ROUTER_HINT_KEY,
     STATE_METRIC,
     TRANSFER_BLOCKS_METRIC,
     TRANSFER_BYTES_METRIC,
@@ -23,7 +24,7 @@ from kvcr import (
 from kvcr.config import (
     FrameworkDramInput,
     G3Options,
-    KeyHintAdapter,
+    KeyAdapter,
     KVCRBackendConfigs,
     KVCRConfig,
     KVCRGuardConfig,
@@ -57,7 +58,6 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    ExternalBlockHash,
     maybe_convert_block_hash,
 )
 from vllm.v1.kv_offload.base import (
@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 
-_REQUIRED_ROUTER_CAPABILITIES = {"router_hint"}
+_REQUIRED_ROUTER_CAPABILITIES = ROUTER_HINT_CAPABILITIES
 
 logger = init_logger(__name__)
 
@@ -244,48 +244,17 @@ class _FrameworkPinAdapter:
         return results
 
 
-@dataclass(frozen=True)
-class _RouterHint:
-    source: str
-    block_hashes: frozenset[ExternalBlockHash]
-
-
-def _parse_router_hint(
-    kv_transfer_params: dict[str, Any] | None,
-) -> _RouterHint | None:
-    if not kv_transfer_params:
-        return None
-    router_hint = kv_transfer_params.get("router_hint")
-    if not isinstance(router_hint, dict):
-        return None
-    location = router_hint.get("source_control_endpoint")
-    if not isinstance(location, str) or not location:
-        return None
-    block_hashes = router_hint.get("block_hashes")
-    if not isinstance(block_hashes, list) or not block_hashes:
-        return None
-
-    planned_hashes: set[ExternalBlockHash] = set()
-    for block_hash in block_hashes:
-        if isinstance(block_hash, bool) or not isinstance(block_hash, (bytes, int)):
-            return None
-        planned_hashes.add(block_hash)
-    return _RouterHint(location, frozenset(planned_hashes))
-
-
-class _VllmKeyHintAdapter:
-    """Adapt vLLM's local key format to router-hint membership."""
+class _VllmKeyAdapter:
+    """Adapt vLLM's local key format to KVCR."""
 
     def encode(self, framework_key: object) -> BlockKey:
         if not isinstance(framework_key, bytes):
             raise TypeError("vLLM offload keys must be bytes")
         return BlockKey(framework_key)
 
-    def matches(self, key: BlockKey, hint: object) -> bool:
-        if not isinstance(hint, _RouterHint):
-            return False
+    def decode(self, key: BlockKey) -> int | bytes:
         block_hash = BlockHash(get_offload_block_hash(OffloadKey(key)))
-        return maybe_convert_block_hash(block_hash) in hint.block_hashes
+        return maybe_convert_block_hash(block_hash)
 
 
 # Job ID, remaining blocks, aggregate success, and successful load keys.
@@ -352,7 +321,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             raise ValueError(
                 "KVCR local G2/G3 inventory requires self_describing_kv_events"
             )
-        self._key_hint_adapter: KeyHintAdapter = _VllmKeyHintAdapter()
+        self._key_adapter: KeyAdapter = _VllmKeyAdapter()
         advertise_host = control_advertise_host or socket.gethostname()
         dp_local_rank = offloading_spec.config.parallel.data_parallel_rank_local
         if dp_local_rank is None:
@@ -443,7 +412,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                     release_pin=self._framework_pin_adapter.release_pin,
                     cancel_pin_request=(self._framework_pin_adapter.cancel_pin_request),
                     framework_control=control,
-                    key_hint_adapter=self._key_hint_adapter,
+                    key_adapter=self._key_adapter,
                     inventory_sink=(self._record_inventory if events_enabled else None),
                     stats_factory=(
                         OffloadingConnectorStats if enable_telemetry else None
@@ -475,7 +444,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        block_key = self._key_hint_adapter.encode(key)
+        block_key = self._key_adapter.encode(key)
         status, _ = self._kvcr.query((block_key,), req_context.req_id)[0]
         if status is QueryStatus.FETCHING:
             return LookupResult.RETRY
@@ -486,7 +455,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_hint_adapter.encode(key): self._make_descriptor(int(block_id))
+            self._key_adapter.encode(key): self._make_descriptor(int(block_id))
             for key, block_id in zip(
                 job_metadata.keys, job_metadata.block_ids, strict=True
             )
@@ -510,7 +479,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         blocks = {
-            self._key_hint_adapter.encode(key): self._make_descriptor(int(block_id))
+            self._key_adapter.encode(key): self._make_descriptor(int(block_id))
             for key, block_id in zip(
                 job_metadata.keys, job_metadata.block_ids, strict=True
             )
@@ -596,15 +565,14 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        hint = _parse_router_hint(req_context.kv_transfer_params)
-        if hint is not None:
-            self._kvcr.submit_hint(
-                (),
-                src=hint.source,
-                mode="copy",
-                request_id=req_context.req_id,
-                hints=hint,
-            )
+        params = getattr(req_context, "kv_transfer_params", None)
+        if isinstance(params, Mapping):
+            hint = params.get(ROUTER_HINT_KEY)
+            if hint is not None:
+                self._kvcr.submit_hint(
+                    request_id=req_context.req_id,
+                    hints=hint,
+                )
         return RequestOffloadingContext()
 
     @override
