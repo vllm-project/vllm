@@ -141,6 +141,31 @@ def test_modelopt_mixed_precision_resolves_layerwise_kv_cache_dtype():
 
 
 @pytest.mark.parametrize(
+    ("quant_algo", "expected_dtype"),
+    [("FP8", "fp8_e4m3"), ("NVFP4", "nvfp4")],
+)
+def test_modelopt_mixed_precision_loads_uniform_layerwise_kv_cache(
+    quant_algo, expected_dtype
+):
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quant_method": "modelopt",
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": "MIXED_PRECISION",
+            "kv_cache_schema_version": 1,
+            "kv_cache_quantized_layers": {
+                f"model.layers.{index}.self_attn": {"quant_algo": quant_algo}
+                for index in range(2)
+            },
+        }
+    )
+
+    assert config.quantized_layers == {}
+    assert config.get_kv_cache_dtype("model.layers.0.self_attn.attn") == expected_dtype
+    assert config.get_kv_cache_dtype("model.layers.1.self_attn.attn") == expected_dtype
+
+
+@pytest.mark.parametrize(
     ("schema_version", "quant_algo", "error"),
     [
         (2, "FP8", "kv_cache_schema_version=1"),
