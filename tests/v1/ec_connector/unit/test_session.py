@@ -451,14 +451,29 @@ def test_consumer_session_poll_not_ready_nack_goes_to_retryable():
     assert not results.completed
 
 
+def test_consumer_session_ack_timeout_goes_to_retryable():
+    """A late XferAck means a busy producer, not a broken one.
+
+    The producer answers XferReqs from its scheduler step, so the reply can
+    lag a whole encoder forward pass. Tombstoning on that admits the request
+    with no embedding, which is fatal.
+    """
+    s = _make_consumer_session()
+    s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
+    s.poll([], time.monotonic())
+    results = s.take_results()
+    assert "h1" in results.retryable
+    assert not results.tombstoned
+
+
 def test_consumer_session_take_results_clears_state():
     s = _make_consumer_session()
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
     s.poll([], time.monotonic())
     r1 = s.take_results()
-    assert "h1" in r1.tombstoned
+    assert "h1" in r1.retryable
     r2 = s.take_results()
-    assert not r2.tombstoned  # cleared after first take
+    assert not r2.retryable  # cleared after first take
 
 
 def test_consumer_session_on_peer_down_cancels_waiting_ack():

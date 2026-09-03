@@ -261,6 +261,22 @@ class ECConnectorBase(ABC):
         """
         return True
 
+    def get_unrecoverable_requests(self) -> set[str]:
+        """Requests that can never be scheduled and must be failed.
+
+        A remote encoding has no local fallback: unlike KV, which is always
+        recomputable from the prompt, an encoding announced by a producer
+        exists only there, because the media never reached this instance.
+        A connector reports a request here once it is certain the encoding
+        will not arrive, and the scheduler finishes it with an error reason —
+        the same treatment an unrecoverable KV load gets — rather than
+        running the model without its encoder outputs.
+
+        Returns:
+            Request IDs to fail. The set is drained by the call.
+        """
+        return set()
+
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):
         """

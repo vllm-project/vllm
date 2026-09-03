@@ -34,6 +34,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# How long a transient condition (a settling DMA, a full pool) may hold a
+# request back before it is failed rather than deferred indefinitely.
+_ADMIT_DEFER_TIMEOUT_S = 60.0
+
 
 class ECCPUScheduler:
     """Scheduler delegate for the ECCPUConnector."""
@@ -91,6 +95,13 @@ class ECCPUScheduler:
         self._in_flight: set[str] = set()
         self._tombstones: set[str] = set()
         self._step_completed: set[str] = set()
+        # mm_hash -> when a transient condition first held a request back, so
+        # one that never clears fails the request instead of deferring it
+        # forever. Cleared as soon as the encoding lands.
+        self._deferred_since: dict[str, float] = {}
+        # Requests needing a remote encoding that will not arrive. Drained by
+        # get_unrecoverable_requests(); the scheduler aborts them.
+        self._unrecoverable: set[str] = set()
         self._peer_host: str | None = None
         self._peer_port: int | None = None
         # Model shape for size checks + compat hash; only set by
@@ -201,66 +212,128 @@ class ECCPUScheduler:
     ) -> bool:
         """Admit a request only once all its remote encodings are cached.
 
-        Returns True when every encoding the request needs is either already
-        ready in the local cache or has no remote source. Any encoding whose
-        NIXL READ is still in flight (or was just started this step) defers
-        the request, which the scheduler re-presents on a later step.
+        An item announced with a producer address lives only on that producer.
+        Unlike KV, it cannot be recomputed from the request: the media never
+        reached this instance. Scheduling a request whose remote item is
+        missing therefore hands the model an empty multimodal batch, so such
+        an item defers the request while it may still arrive, and fails the
+        request once it cannot.
         """
+        import time
+
         params: dict[str, dict[str, Any]] = (
             getattr(request, "ec_transfer_params", None) or {}
         )
         if not params:
             return True
+        now = time.monotonic()
         pending = False
         for feature in request.mm_features:
             pos = feature.mm_position
             if pos.offset + pos.length <= num_computed_tokens:
                 continue
             mm_hash = feature.identifier
+            announced = params.get(mm_hash)
+            # Without a producer address there is nothing to fetch: the request
+            # carries what the model needs and the encoder runs locally.
+            remote: dict[str, Any] | None = (
+                announced
+                if announced is not None and "peer_host" in announced
+                else None
+            )
+
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:
                 # Local hit: upstream's update_state_after_alloc pins and
                 # loads it through the same path as a natively cached entry.
+                self._deferred_since.pop(mm_hash, None)
                 continue
-            if mm_hash in self._in_flight:
+            if mm_hash in self._in_flight or mm_hash in self._step_completed:
                 pending = True
                 continue
-            if mm_hash in self._step_completed:
-                pending = True
-                continue
+
             if mm_hash in self._tombstones:
                 self._tombstones.discard(mm_hash)
-                continue
+                if remote is None:
+                    continue
+                self._fail(request, mm_hash, "the remote read failed")
+                return False
+
             if entry is not None:
                 # Present but not ready and not being fetched: its blocks are
                 # held by a quarantined/settling DMA and cannot be reused.
-                # Fall back to local compute this step; never re-alloc a
-                # mm_hash already in the cache.
+                if remote is None:
+                    continue
+                if not self._defer(request, mm_hash, now, "a DMA was settling"):
+                    return False
+                pending = True
                 continue
-            info = params.get(mm_hash)
-            # Absent entirely, or present with only placeholder metadata (no
-            # cache entry existed on the producer side at request_finished
-            # time): nothing to fetch, fall back to local compute.
-            if not info or "peer_host" not in info:
+
+            if remote is None:
                 continue
+
             expected = pos.length * self._hidden_dim * self._element_size
-            if int(info.get("size_bytes", -1)) != expected:
+            size = int(remote.get("size_bytes", -1))
+            if size != expected:
                 logger.warning(
-                    "EC consumer: size mismatch mm_hash=%s; local encode", mm_hash
+                    "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
+                    mm_hash,
+                    size,
+                    expected,
                 )
-                continue
+                self._fail(request, mm_hash, "the announced size was wrong")
+                return False
+
             try:
-                started = self._start_xfer(mm_hash, info, expected)
+                started = self._start_xfer(mm_hash, remote, expected)
             except Exception:
                 logger.exception(
                     "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
                 )
-                continue
+                self._fail(request, mm_hash, "the read could not be started")
+                return False
             if not started:
+                # The local pool is full; it drains as other reads complete.
+                if not self._defer(request, mm_hash, now, "the pool was full"):
+                    return False
+                pending = True
                 continue
             self._in_flight.add(mm_hash)
+            self._deferred_since.pop(mm_hash, None)
             pending = True
         return not pending
+
+    def _defer(self, request: "Request", mm_hash: str, now: float, why: str) -> bool:
+        """Hold a request back while a transient condition clears.
+
+        Returns False once the condition has outlived its budget, having
+        marked the request unschedulable.
+        """
+        since = self._deferred_since.setdefault(mm_hash, now)
+        waited = now - since
+        if waited <= _ADMIT_DEFER_TIMEOUT_S:
+            return True
+        self._fail(request, mm_hash, f"{why} for {waited:.0f}s")
+        return False
+
+    def _fail(self, request: "Request", mm_hash: str, why: str) -> None:
+        self._deferred_since.pop(mm_hash, None)
+        self._unrecoverable.add(request.request_id)
+        logger.error(
+            "EC consumer: request %s needs remote encoding mm_hash=%s but %s. "
+            "The media never reached this instance, so it cannot be encoded "
+            "locally; failing the request.",
+            request.request_id,
+            mm_hash,
+            why,
+        )
+
+    def get_unrecoverable_requests(self) -> set[str]:
+        if not self._unrecoverable:
+            return set()
+        failed = self._unrecoverable
+        self._unrecoverable = set()
+        return failed
 
     def _start_xfer(
         self, mm_hash: str, info: "dict[str, Any]", size_bytes: int

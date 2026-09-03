@@ -71,7 +71,7 @@ class XferState(enum.Enum):
     WAITING_ACK = "waiting_ack"  # XferReq sent, awaiting XferAck
     READING = "reading"  # NIXL READ in flight
     DONE = "done"  # READ completed; promote to local cache
-    ACK_TIMEOUT = "ack_timeout"  # XferAck never arrived; free blocks + tombstone
+    ACK_TIMEOUT = "ack_timeout"  # XferAck never arrived; free blocks + retry
     READ_FAILED = "read_failed"  # Unexpected NIXL state; free blocks + tombstone
     QUARANTINED = "quarantined"  # Read timed out, NIXL unabortable; keep blocks
     SETTLED = "settled"  # Quarantined DMA done; safe to free blocks
@@ -500,7 +500,21 @@ class ConsumerSession:
             if state == XferState.DONE:
                 self._completed.add(mm_hash)
                 del self._xfers[mm_hash]
-            elif state in (XferState.ACK_TIMEOUT, XferState.READ_FAILED):
+            elif state == XferState.ACK_TIMEOUT:
+                # A busy producer is a transient condition, not a broken one:
+                # drop every trace of the attempt so a later admit pass can
+                # re-issue the read as if it were the first. This is also the
+                # only path to a tombstone that would otherwise log nothing.
+                logger.warning(
+                    "EC consumer: no XferAck for mm_hash=%s from %s:%d in time; "
+                    "will re-request",
+                    mm_hash,
+                    self._addr[0],
+                    self._addr[1],
+                )
+                self._retryable.add(mm_hash)
+                del self._xfers[mm_hash]
+            elif state == XferState.READ_FAILED:
                 self._tombstoned.add(mm_hash)
                 del self._xfers[mm_hash]
             elif state == XferState.QUARANTINED:

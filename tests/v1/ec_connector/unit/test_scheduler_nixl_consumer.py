@@ -156,7 +156,13 @@ def test_no_params_is_ready(monkeypatch):
     s.shutdown()
 
 
-def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
+def test_tombstoned_read_fails_the_request(monkeypatch):
+    """A failed remote read must fail the request, not admit it.
+
+    The media reached the producer only, so an admitted request has no
+    embedding and no way to compute one: the model would receive an empty
+    multimodal batch and assert.
+    """
     s = _consumer_sched(monkeypatch)
     fake = _FakeSession()
 
@@ -177,16 +183,13 @@ def test_tombstoned_read_discards_and_blocks_retry(monkeypatch):
     fake._results.tombstoned.add("h1")
     s._sessions[("h", 1)] = fake
 
-    # Step 2: poll discards the entry and records a tombstone; the tombstone
-    # is consumed by admit so the request proceeds to local compute.
-    assert s.ensure_cache_available(req, 0) is True
+    # Step 2: the entry is discarded and the request is reported unschedulable.
+    assert s.ensure_cache_available(req, 0) is False
     assert s._cache.get("h1") is None
     assert "h1" not in s._in_flight
-    s.build_connector_meta(scheduler_output=None)
-
-    # Step 3: tombstone was consumed, so a fresh transfer starts again.
-    assert s.ensure_cache_available(req, 0) is False
-    assert "h1" in s._in_flight
+    assert s.get_unrecoverable_requests() == {"r1"}
+    # Drained by the read, so the scheduler cannot abort it twice.
+    assert s.get_unrecoverable_requests() == set()
     s.shutdown()
 
 
@@ -225,14 +228,16 @@ def test_retryable_read_re_requests_without_admitting(monkeypatch):
     s.shutdown()
 
 
-def test_size_mismatch_skips_transfer(monkeypatch):
+def test_size_mismatch_fails_the_request(monkeypatch):
+    """A bad announcement is terminal: there is no second source to try."""
     s = _consumer_sched(monkeypatch)
     # Advertised size disagrees with pos.length * hidden_dim * element_size.
     bad = {"h1": {"peer_host": "h", "peer_port": 1, "size_bytes": 999}}
     req = _Request([_Feature("h1", 1)], params=bad)
-    assert s.ensure_cache_available(req, 0) is True
+    assert s.ensure_cache_available(req, 0) is False
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
+    assert s.get_unrecoverable_requests() == {"r1"}
     s.shutdown()
 
 
@@ -250,7 +255,7 @@ def test_metadata_only_entry_admits_without_transfer(monkeypatch):
     s.shutdown()
 
 
-def test_orphan_not_ready_entry_falls_back_no_realloc(monkeypatch):
+def test_orphan_not_ready_entry_defers_no_realloc(monkeypatch):
     # Post-quarantine, post-tombstone-consumed orphan: a not-ready cache
     # entry exists for the mm_hash, but the hash is tracked in none of
     # _in_flight / _step_completed / _tombstones. Its blocks are held by a
@@ -274,25 +279,42 @@ def test_orphan_not_ready_entry_falls_back_no_realloc(monkeypatch):
     monkeypatch.setattr(s._cache, "alloc", _spy_alloc)
     req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
 
-    # Must not raise; request falls back to local compute (admitted True),
-    # the orphan entry is untouched, and alloc is never called again.
-    assert s.ensure_cache_available(req, 0) is True
+    # Must not raise; the request is deferred while the DMA settles, the
+    # orphan entry is untouched, and alloc is never called again.
+    assert s.ensure_cache_available(req, 0) is False
     assert calls == []
     assert s._cache.get("h1") is entry
     assert not entry.ready
+    assert s.get_unrecoverable_requests() == set()
     s.shutdown()
 
 
-def test_alloc_failure_falls_back_to_local(monkeypatch):
+def test_full_pool_defers_then_fails_the_request(monkeypatch):
+    """A full pool is transient, so defer — but not forever.
+
+    Deferring without a budget would hold the request until the client gave
+    up, with no record of why.
+    """
+    import time as _time
+
     s = _consumer_sched(monkeypatch)
 
     # Force the cache to reject the allocation.
     monkeypatch.setattr(s._cache, "alloc", lambda key, n: None)
     req = _Request([_Feature("h1", 1)], params=_params("h1", 1))
 
-    # _start_xfer returns False -> request admitted for local recompute.
-    assert s.ensure_cache_available(req, 0) is True
+    t0 = _time.monotonic()
+    monkeypatch.setattr(_time, "monotonic", lambda: t0)
+    assert s.ensure_cache_available(req, 0) is False
     assert "h1" not in s._in_flight
+    assert s.get_unrecoverable_requests() == set()
+
+    # Still full once the budget has elapsed: fail rather than defer again.
+    monkeypatch.setattr(
+        _time, "monotonic", lambda: t0 + sched_mod._ADMIT_DEFER_TIMEOUT_S + 1
+    )
+    assert s.ensure_cache_available(req, 0) is False
+    assert s.get_unrecoverable_requests() == {"r1"}
     s.shutdown()
 
 
