@@ -33,13 +33,32 @@ steps:
   num_devices: 2
   device: h100
   source_file_dependencies:
-  - csrc/minimax_reduce_rms_kernel.cu
-  - csrc/minimax_reduce_rms_kernel.h
-  - vllm/model_executor/layers/mamba/linear_attn.py
-  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.cu
+  - csrc/libtorch_stable/minimax_reduce_rms_kernel.h
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
   - tests/kernels/core/test_minimax_reduce_rms.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) MiniMax Reduce RMS Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/minimax_rms_norm/
+      - vllm/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/core/test_minimax_reduce_rms.py
+      - tests/utils.py
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
