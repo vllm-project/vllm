@@ -57,13 +57,9 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        # Must be zero-initialized: the swizzled scale buffer is padded to
-        # (round_up(m, 128), round_up(scale_n, 4) // 4) but the NVFP4 quant
-        # kernel does not write every padded element that the downstream
-        # NVFP4 GEMM reads. torch.empty leaves those padded scale factors
-        # uninitialized, which corrupts dequantization and causes a severe
-        # Blackwell NVFP4 decode throughput/output-length regression.
-        return torch.zeros(
+        # The NVFP4 quant kernel explicitly zeroes every padded scale entry,
+        # so no separate zero-initialization kernel is required here.
+        return torch.empty(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
@@ -174,6 +170,31 @@ def mla_decode_kvcache_cpu(
     torch.ops._C.mla_decode_kvcache(out, query, kv_cache, scale, block_tables, seq_lens)
 
 
+def gather_mla_context_cache_cpu(
+    *,
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    starts: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    page_size = src_cache.shape[1]
+    flat_cache = src_cache.view(-1, src_cache.shape[-1])
+    seq_lens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+    out_start = 0
+    for req_idx, (start, seq_len) in enumerate(zip(starts.tolist(), seq_lens.tolist())):
+        if seq_len <= 0:
+            continue
+        positions = torch.arange(start, start + seq_len, device=block_table.device)
+        block_ids = block_table[req_idx, positions // page_size].to(torch.long)
+        offsets = positions % page_size
+        slots = block_ids * page_size + offsets
+        out_end = out_start + seq_len
+        dst[out_start:out_end].copy_(flat_cache[slots])
+        out_start = out_end
+
+
 # merge attn states ops
 def merge_attn_states(
     output: torch.Tensor,
@@ -233,6 +254,49 @@ def rms_norm(
     epsilon: float,
 ) -> None:
     torch.ops._C.rms_norm(out, input, weight, epsilon)
+
+
+# Fused vocab-parallel embedding lookup
+# (see csrc/.../vocab_parallel_embedding_kernels.cu).
+def vocab_parallel_embedding(
+    input_ids: torch.Tensor,
+    weight: torch.Tensor,
+    org_vocab_start_index: int,
+    org_vocab_end_index: int,
+    num_org_vocab_padding: int,
+    added_vocab_start_index: int,
+    added_vocab_end_index: int,
+) -> torch.Tensor:
+    """Gather the embedding rows owned by this rank, zeros for the others.
+
+    Fuses the range mask, id shift, gather and output masking of the TP > 1
+    embedding path into a single kernel. Out-of-shard tokens produce zero rows,
+    so an all-reduce over the ranks yields the full embedding.
+
+    Args:
+        input_ids: ``[num_tokens]`` int32 or int64 token ids.
+        weight: ``[num_embeddings_per_partition, embedding_dim]`` shard.
+
+    Returns:
+        ``[num_tokens, embedding_dim]`` partial embeddings.
+    """
+    out = torch.empty(
+        input_ids.shape[0],
+        weight.shape[1],
+        dtype=weight.dtype,
+        device=weight.device,
+    )
+    torch.ops._C.vocab_parallel_embedding(
+        out,
+        input_ids,
+        weight,
+        org_vocab_start_index,
+        org_vocab_end_index,
+        num_org_vocab_padding,
+        added_vocab_start_index,
+        added_vocab_end_index,
+    )
+    return out
 
 
 # LongCat n-gram embedding index kernel (see csrc/.../ngram_embedding_kernels.cu).
@@ -2359,21 +2423,6 @@ def moe_wna16_gemm(
     )
 
 
-def dsv3_router_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
-    output_dtype: torch.dtype,
-) -> torch.Tensor:
-    output = torch.empty(
-        hidden_states.shape[0],
-        router_weight.shape[0],
-        device=hidden_states.device,
-        dtype=output_dtype,
-    )
-    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
-    return output
-
-
 def fp32_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2792,6 +2841,7 @@ def fused_gdn_decode_post_conv_mtp(
     out: torch.Tensor | None = None,
     scale: float = 128**-0.5,
     norm_eps: float = 1e-5,
+    output_gate_activation: str = "silu",
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(output_gate)
@@ -2810,6 +2860,7 @@ def fused_gdn_decode_post_conv_mtp(
         out,
         scale,
         norm_eps,
+        output_gate_activation,
     )
     return out
 
@@ -2849,12 +2900,13 @@ def concat_and_cache_mla_grouped(
 
 def kimi_k3_attn_res(
     prefix: torch.Tensor,
-    delta: torch.Tensor,
+    delta: torch.Tensor | None,
     blocks: torch.Tensor,
     norm_weight: torch.Tensor,
     qk_weight: torch.Tensor,
-    output_norm_weight: torch.Tensor,
+    output_norm_weight: torch.Tensor | None,
     num_blocks: int,
+    block_write_idx: int,
     eps: float,
     output_norm_eps: float,
 ) -> torch.Tensor:
@@ -2868,6 +2920,7 @@ def kimi_k3_attn_res(
         output_norm_weight,
         output,
         num_blocks,
+        block_write_idx,
         eps,
         output_norm_eps,
     )
@@ -3022,6 +3075,31 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, workspace_starts, batch_size, seq_starts
+    )
+
+
+def cp_gather_and_upconvert_nvfp4_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+) -> None:
+    """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
+
+    Args:
+        src_cache: NVFP4 KV cache [num_blocks, block_size, 352] (uint8)
+        dst: BF16 output workspace [total_tokens, 576]
+        block_table: Block indices [num_reqs, max_blocks]
+        workspace_starts: Workspace start offsets [num_reqs]
+        batch_size: Number of requests
+    """
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
+        src_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        batch_size,
     )
 
 
@@ -3316,18 +3394,17 @@ def dsv3_fused_a_gemm(
     torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b, enable_pdl)
 
 
-if hasattr(torch.ops._C, "weight_packed_linear"):
-
-    @register_fake("_C::weight_packed_linear")
-    def weight_packed_linear_fake(
-        mat1: torch.Tensor,
-        mat2: torch.Tensor,
-        bias: torch.Tensor | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty(
-            (mat1.size(0), mat2.size(0)), dtype=mat1.dtype, device=mat2.device
-        )
+def weight_packed_linear_cpu(
+    x: torch.Tensor,
+    packed_weight: torch.Tensor,
+    n: int,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    output = torch.empty((*x.shape[0:-1], n), dtype=x.dtype)
+    torch.ops._C.weight_packed_linear(
+        output.reshape(-1, n), x.reshape(-1, x.size(-1)), packed_weight, bias, True
+    )
+    return output
 
 
 class CPUQuantMethod(IntEnum):

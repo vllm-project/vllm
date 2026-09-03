@@ -161,6 +161,7 @@ class HYV3MoEFused(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_mlp: HYV3FeedForward | None
         if config.num_shared_experts > 0:
             self.shared_mlp = HYV3FeedForward(
                 hidden_size=config.hidden_size,
@@ -467,28 +468,27 @@ class HYV3Model(nn.Module, MixtureOfExperts):
         # Set MoE hyperparameters
         self.num_expert_groups = 1
         self.moe_layers = []
-        example_layer = None
+        example_layer: HYV3MoEFused | None = None
         for layer in self.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
 
             assert isinstance(layer, HYV3DecoderLayer)
             if layer.block_type == "moe":
+                assert isinstance(layer.mlp, HYV3MoEFused)
                 example_layer = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
+                self.moe_layers.append(example_layer.experts)
 
         if example_layer is None:
             self.num_moe_layers = 0
             raise RuntimeError("No MoE layer found in model.layers.")
 
         self.num_moe_layers = len(self.moe_layers)
-        self.num_logical_experts = getattr(example_layer, "n_logical_experts", None)
-        self.num_physical_experts = getattr(example_layer, "n_physical_experts", None)
-        self.num_local_physical_experts = getattr(
-            example_layer, "n_local_physical_experts", None
-        )
-        self.num_routed_experts = getattr(example_layer, "n_routed_experts", None)
-        self.num_redundant_experts = getattr(example_layer, "n_redundant_experts", None)
+        self.num_logical_experts = example_layer.n_logical_experts
+        self.num_physical_experts = example_layer.n_physical_experts
+        self.num_local_physical_experts = example_layer.n_local_physical_experts
+        self.num_routed_experts = example_layer.n_routed_experts
+        self.num_redundant_experts = example_layer.n_redundant_experts
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -572,9 +572,10 @@ class HYV3Model(nn.Module, MixtureOfExperts):
                 continue
             if "scale" in name:
                 # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
             is_found = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
