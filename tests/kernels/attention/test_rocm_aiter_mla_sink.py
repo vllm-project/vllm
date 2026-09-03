@@ -114,12 +114,17 @@ def test_sparse_mla_sink_matches_ragged_reference(
         reduce_indptr=None,
         reduce_final_map=None,
         reduce_partial_map=None,
+        num_prefills=0,
+        num_decodes=batch_size,
+        num_decode_tokens=batch_size,
+        max_query_len=1,
     )
     sinks = torch.linspace(-2.0, 6.0, real_heads, device=device)
 
     impl = object.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = real_heads
     impl.kv_lora_rank = V_HEAD_DIM
+    impl.kv_cache_dtype = cache_kind
     impl.scale = SM_SCALE
     impl.sinks = sinks
 
@@ -205,9 +210,16 @@ def test_sparse_mla_sink_rejects_unsupported_gfx942_h64_at_runtime(
     impl = object.__new__(ROCMAiterMLASparseImpl)
     impl.num_heads = real_heads
     impl.kv_lora_rank = V_HEAD_DIM
+    impl.kv_cache_dtype = "bfloat16"
     impl.scale = SM_SCALE
     impl.sinks = torch.zeros(real_heads, dtype=torch.float32, device=device)
-    metadata = SimpleNamespace(attn_out_dtype=torch.bfloat16)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=1,
+        num_decode_tokens=1,
+        max_query_len=1,
+    )
     padded_heads = AiterMLAHelper.get_actual_mla_num_heads(real_heads)
 
     with pytest.raises(ValueError, match="increase tensor_parallel_size"):
