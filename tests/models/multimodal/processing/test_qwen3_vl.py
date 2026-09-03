@@ -15,6 +15,7 @@ from vllm.config import ModelConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.model_executor.models.qwen3_vl import Qwen3VLProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing.context import BaseProcessingInfo
 
 from ...registry import HF_EXAMPLE_MODELS
@@ -336,65 +337,83 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
     ("hf_mm_kwargs", "scalar_kwargs"),
     [
         ({"num_frames": [8, 16]}, [{"num_frames": 8}, {"num_frames": 16}]),
-        ({"fps": [4.0, 12.0]}, [{"fps": 4.0}, {"fps": 12.0}]),
+        ({"fps": [2.0, 4.0]}, [{"fps": 2.0}, {"fps": 4.0}]),
     ],
 )
+@pytest.mark.parametrize("model_kwargs", [False, True])
+@pytest.mark.parametrize("use_uuids", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.skip_global_cleanup
 def test_processor_multi_video_list_kwargs(
     model_id: str,
     hf_mm_kwargs: dict[str, Any],
     scalar_kwargs: list[dict[str, Any]],
+    model_kwargs: bool,
+    use_uuids: bool,
+    scoped: bool,
 ) -> None:
-    """List-valued video kwargs must be scalarized per item without mutation.
-
-    Each video in the multi-video request must match processing the same input
-    independently with its corresponding scalar ``fps``/``num_frames`` value.
-    """
+    """Per-video options must survive duplicate items and partial cache hits."""
+    if scoped:
+        hf_mm_kwargs = {"videos_kwargs": hf_mm_kwargs}
+    hf_mm_kwargs_before = deepcopy(hf_mm_kwargs)
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=hf_mm_kwargs if model_kwargs else None,
+        mm_processor_cache_gb=1,
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-
-    prompt = (
-        "<|vision_start|><|video_pad|><|vision_end|>"
-        "<|vision_start|><|video_pad|><|vision_end|>"
-    )
-    mm_data = {
-        "video": [
-            _build_video_mm_data(num_frames=32)["video"][0],
-            _build_video_mm_data(num_frames=32)["video"][0],
-        ]
-    }
-
-    hf_mm_kwargs_before = deepcopy(hf_mm_kwargs)
-    processed = processor(
-        prompt,
-        mm_items=processor.info.parse_mm_data(mm_data),
-        hf_processor_mm_kwargs=hf_mm_kwargs,
-    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>" * 2
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(3)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
 
     def process_single(hf_kwargs: dict[str, Any]) -> torch.Tensor:
         single_prompt = "<|vision_start|><|video_pad|><|vision_end|>"
-        single_mm_data = _build_video_mm_data(num_frames=32)
         single = processor(
             single_prompt,
-            mm_items=processor.info.parse_mm_data(single_mm_data),
+            mm_items=processor.info.parse_mm_data({"video": [videos[0]]}),
             hf_processor_mm_kwargs=hf_kwargs,
         )
         return single["mm_kwargs"].get_data()["video_grid_thw"][0]
 
     expected_grids = [process_single(kwargs) for kwargs in scalar_kwargs]
-    multi_grids = processed["mm_kwargs"].get_data()["video_grid_thw"]
-
     assert not torch.equal(expected_grids[0], expected_grids[1])
-    assert torch.equal(multi_grids[0], expected_grids[0])
-    assert torch.equal(multi_grids[1], expected_grids[1])
-    assert hf_mm_kwargs == hf_mm_kwargs_before
 
-    video_phs = processed["mm_placeholders"].get("video", [])
-    assert len(video_phs) == 2, (
-        f"Expected exactly 2 video placeholders, got {len(video_phs)}"
-    )
+    def run(indices, *, cache=None, cached_only=False):
+        return processor(
+            prompt,
+            mm_items=processor.info.parse_mm_data(
+                {"video": [None if cached_only else videos[i] for i in indices]}
+            ),
+            mm_uuid_items=(
+                {"video": [f"video-{i}" for i in indices]} if use_uuids else None
+            ),
+            hf_processor_mm_kwargs={} if model_kwargs else hf_mm_kwargs,
+            cache=cache,
+        )
+
+    for indices in ([0, 0], [0, 1], [0, 2], [2, 0]):
+        expected = run(indices)
+        actual = run(indices, cache=cache)
+        assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
+        assert actual["mm_placeholders"] == expected["mm_placeholders"]
+        assert actual["mm_kwargs"] == expected["mm_kwargs"]
+        assert actual["mm_hashes"] == expected["mm_hashes"]
+        assert len(set(actual["mm_hashes"]["video"])) == 2
+        multi_grids = actual["mm_kwargs"].get_data()["video_grid_thw"]
+        assert torch.equal(multi_grids[0], expected_grids[0])
+        assert torch.equal(multi_grids[1], expected_grids[1])
+
+    if use_uuids:
+        cached_only = run([2, 0], cache=cache, cached_only=True)
+        assert cached_only["prompt_token_ids"] == actual["prompt_token_ids"]
+        assert cached_only["mm_kwargs"] == actual["mm_kwargs"]
+    assert hf_mm_kwargs == hf_mm_kwargs_before
 
 
 def _build_video_embeds_mm_data(
