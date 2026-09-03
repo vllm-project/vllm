@@ -375,9 +375,11 @@ mbstrdecoder==1.1.5
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==2.0.0
-    # via -r requirements/test/../common.txt
-mcp-types==2.0.0
+mcp==2.1.1
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
+mcp-types==2.1.1
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py
@@ -908,7 +910,7 @@ tiktoken==0.14.0
     #   mistral-common
 timm==1.0.28
     # via -r requirements/test/xpu.in
-tokenizers==0.22.2
+tokenizers==0.23.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -946,7 +948,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.15.0
+transformers==5.16.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
