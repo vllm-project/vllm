@@ -312,7 +312,16 @@ class KimiK3ReasoningParser(ReasoningParser):
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
         # if there is no think channel at all, everything is content
-        if m_open is None and self._think_close_re.search(model_output) is None:
+        if m_open is None and not any(
+            matcher.search(model_output)
+            for matcher in (
+                self._think_close_re,
+                self._tools_open_re,
+                self._response_open_re,
+                self._response_close_re,
+                self._message_close_re,
+            )
+        ):
             return None, self._content_after_reasoning(model_output, request)
 
         end_matches = [

@@ -97,6 +97,24 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
+def test_extract_reasoning_with_generation_prefix_consumed_before_tools():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+    )
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"step{TOOLS_OPEN}tool call",
+        request,
+    )
+
+    assert reasoning == "step"
+    assert content == f"{TOOLS_OPEN}tool call"
+
+
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     parser = ReasoningOnlyParser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
