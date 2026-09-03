@@ -71,6 +71,37 @@ LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 # ---------------------------------------------------------------------------
 
 
+@triton.constexpr_function
+def _target_is_gfx11() -> bool:
+    """True when the kernel is being compiled for RDNA3 (gfx11)."""
+    target = tl.target_info.current_target()
+    if target is None or target.backend != "hip":
+        return False
+    return str(target.arch).startswith("gfx11")
+
+
+@triton.jit
+def _int4_pair_to_fp16x2(x):
+    """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes,
+    each equal to 1024 + nibble, with one ``v_and_or_b32``
+    (``(x & 0x000F000F) | 0x64006400``).
+
+    OR-ing a 4-bit nibble into the low mantissa of fp16 1024.0 (0x6400)
+    bitcasts to exactly 1024+n. Doing it on a full 32-bit lane dequants two
+    nibbles per instruction, vs the scalar v_and_b16 + v_or_b16 pair Triton
+    emits from the elementwise form.
+    """
+    mask = tl.full(x.shape, 0x000F000F, tl.int32)
+    return tl.inline_asm_elementwise(
+        asm="v_and_or_b32 $0, $1, $2, 0x64006400",
+        constraints="=v,v,v",
+        args=[x, mask],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    )
+
+
 @triton.jit
 def _triton_w4a16_skinny_fmt_kernel(
     # Pointers
@@ -106,6 +137,11 @@ def _triton_w4a16_skinny_fmt_kernel(
     When HAS_ZP=True, raw zero-points zp_raw are loaded from zp_ptr [N, K//G]
     and subtracted directly: (nibble - zp_raw) * scale.
     When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
+
+    On the fp16 path the nibble arrives as ``b_raw`` = 1024 + nibble (the
+    magic-constant unpack), so the subtrahend absorbs the 1024: the arithmetic
+    is unchanged and every intermediate stays exact, since fp16 represents every
+    integer below 2048.
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -137,10 +173,30 @@ def _triton_w4a16_skinny_fmt_kernel(
         mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
         b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
 
-        b = tl.interleave(b_packed, b_packed)
-        b = tl.interleave(b, b)
-        b = tl.interleave(b, b)
-        b = (b >> shifts_full) & 0xF
+        if a.dtype == tl.float16 and _target_is_gfx11():
+            # The ExLlama int32 holds the paired nibbles val[2p] @ bits[4p:4p+4]
+            # and val[2p+1] @ bits[16+4p:20+4p], so for pre-shift 4p (p=0..3),
+            #   (x >> 4p) & 0x000F000F | 0x64006400
+            # is one v_and_or_b32 producing a half2 = (1024+val[2p],
+            # 1024+val[2p+1]) in K order (signed shift is fine: the sign fill
+            # lands above bit 20 and is masked out). The interleave(lo, hi) lays
+            # b_raw out as half2 so the downstream affine also packs into
+            # v_pk_fma_f16. The dequant inner loop is VALU-issue-bound on gfx11,
+            # so this ~halves the dequant instruction count per WMMA.
+            shifts4 = (tl.arange(0, 4) * 4)[None, None, :]
+            bp_shift = tl.reshape(
+                b_packed[:, :, None] >> shifts4, (BLOCK_N, BLOCK_K // 2)
+            )
+            packed_hl = _int4_pair_to_fp16x2(bp_shift)  # u32 half2: 1024+nibble
+            lo = (packed_hl & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
+            hi = (packed_hl >> 16).to(tl.uint16).to(tl.float16, bitcast=True)
+            b_raw = tl.interleave(lo, hi)  # [BLOCK_N, BLOCK_K] fp16 = 1024+nibble
+        else:
+            # ExLlama unshuffle: replicate each int32 8x then per-lane shift+mask.
+            b = tl.interleave(b_packed, b_packed)
+            b = tl.interleave(b, b)
+            b = tl.interleave(b, b)
+            b = (b >> shifts_full) & 0xF  # [BLOCK_N, BLOCK_K]
 
         g_idx = (k_start * BLOCK_K) // group_size
         scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
@@ -150,9 +206,24 @@ def _triton_w4a16_skinny_fmt_kernel(
         if HAS_ZP:
             zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
             zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
-            b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+
+        if a.dtype == tl.float16:
+            # The magic unpack yields b_raw = 1024 + nibble, so fold the 1024
+            # into the subtrahend: (b_raw - (1024 + zp)) == (nibble - zp),
+            # exactly, and the multiply that follows rounds once as before.
+            if not _target_is_gfx11():
+                b_raw = (b | 0x6400).to(tl.uint16).to(tl.float16, bitcast=True)
+            c1024 = tl.full((), 1024.0, tl.float16)
+            if HAS_ZP:
+                b_fp = (b_raw - (c1024 + zp_raw)[:, None]) * scales[:, None]
+            else:
+                b_fp = (b_raw - (c1024 + ZP_BIAS)) * scales[:, None]
         else:
-            b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
+            # bf16 keeps the scalar int-domain subtract before the cast.
+            if HAS_ZP:
+                b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+            else:
+                b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
 
         b_fp_t = tl.trans(b_fp)
         accumulator += tl.dot(a, b_fp_t, out_dtype=tl.float32)
@@ -164,11 +235,15 @@ def _triton_w4a16_skinny_fmt_kernel(
 
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
-# num_stages) tile-config overrides for prefill (M <= 128) on gfx1x.
+# num_stages) tile-config overrides for prefill (M <= 128) on gfx1151. Applies
+# to the SCALAR (bf16) dequant path only; the packed fp16 path is tuned by the
+# ladder in _select_skinny_gfx1151_config and needs no per-shape entries.
 # Picked by sweeping benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py + a
 # per-config sweep script; only added when better than the generic heuristic
 # by > 20% at M=128. Re-run benchmarks after edits.
-_GFX1X_PREFILL_OVERRIDES: dict[tuple[int, int, int], tuple[int, int, int, int, int]] = {
+_GFX1151_BF16_PREFILL_OVERRIDES: dict[
+    tuple[int, int, int], tuple[int, int, int, int, int]
+] = {
     # SmolLM2-1.7B-Instruct-AWQ (gs=32, K=2048; gs forces BLOCK_K to 32 so
     # widen BLOCK_M and let Triton pipeline 4 stages to amortize the small
     # K-tile).
@@ -184,6 +259,122 @@ _GFX1X_PREFILL_OVERRIDES: dict[tuple[int, int, int], tuple[int, int, int, int, i
     (128, 4096, 24576): (64, 32, 128, 2, 1),  # gate_up_proj
     (128, 12288, 4096): (128, 64, 128, 8, 1),  # down_proj
 }
+
+
+# Explicit gfx1151 prefill tile selection -- DTYPE-AWARE. The kernel takes the
+# packed v_and_or/v_pk_fma dequant for fp16 and the scalar dequant for bf16, and
+# the two paths want different tiles (most visibly BLOCK_N at deep M: 256 for
+# packed fp16 vs 64 for scalar bf16).
+#
+# fp16 (packed) -- tuned under do_bench_cudagraph with rotating cold weights
+# over a broad shape catalog:
+#   * M <= 16: BLOCK_M=16 (more M-tiles fill the CUs at tiny M).
+#   * 17..64: BLOCK_M=32; small BLOCK_N keeps the grid large (a wide BLOCK_N
+#     leaves only ceil(N/BN) workgroups -- an M-blind BLOCK_N=256 was a 1.6-3x
+#     regression here). Square mid shapes take BLOCK_N=128/BLOCK_K=64.
+#   * 65..256: square -> BLOCK_N=128 (BLOCK_K=32 nw=8 at M>=128); tall -> 128.
+#   * 257..2047: the wide distilled BLOCK_N=256/BLOCK_M=128 tile.
+#   * M >= 2048: distilled BLOCK_N=256; BLOCK_M=64 for narrow+deep K (N<=2048
+#     and K>=4096), else 128.
+#
+# bf16 (scalar) -- byte-for-byte the pre-existing scalar-tuned ladder, its
+# per-shape overrides, and its pipeline depth, so bf16 is bit-for-bit unchanged:
+# the packed fp16 table regresses bf16 by up to ~40% at deep M, where scalar bf16
+# wants BLOCK_N=64, not 256. num_stages=1 is deliberately NOT applied here --
+# measured at -15.8% end-to-end prefill on an asymmetric bf16 model. The packed
+# fp16 path issues one per-group load and does not miss the pipelining; the
+# scalar asymmetric path issues two (scale and zero point) and needs the software
+# pipeline to hide the second gather.
+#
+# BLOCK_K is capped to group_size so a K-block never straddles a quant group
+# (scale aliasing); gs=128 -- the bulk -- passes the table BLOCK_K through.
+def _select_skinny_gfx1151_config(
+    M: int, N: int, K: int, group_size: int, dtype: torch.dtype
+) -> tuple[int, int, int, int, int | None]:
+    """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) for gfx1151.
+
+    num_stages None means "leave Triton's default pipeline depth alone".
+    """
+    num_stages: int | None = None
+    if dtype == torch.float16:
+        # The packed path issues a single per-group load, so the pipeline buys
+        # nothing and only costs registers. Not applied to bf16 -- see above.
+        num_stages = 1
+        tall = K >= 2 * N  # tall-K (down_proj-like)
+        # Very wide N with small K (e.g. gemma gate_up 32768x2048): memory-bound,
+        # wants the small square tile at tiny M, not BLOCK_M=16.
+        vwide_smallk = N >= 8192 and K <= 2048
+        if M <= 16:  # BLOCK_M=16: more M-tiles fill the CUs at tiny M
+            if N <= 1024 or vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 16, 64, 128, 4
+        elif M <= 32:
+            if vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+        elif M <= 64:
+            if tall or N >= 4 * K:  # tall or very wide
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # square mid
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+        elif M <= 128:
+            if tall:
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+            elif N >= 32768 and K <= 2048:
+                # Extremely wide + tiny K (e.g. gemma gate_up 32768x2048):
+                # BLOCK_N=128 collapses to 0.6x, needs 64.
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            elif N >= 16384:  # very wide N (K>2048): BLOCK_N=128 wins
+                block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+            elif K <= 2048:  # small-K square needs BLOCK_K=128
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # larger square
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        elif M <= 256:
+            block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+        elif M < 2048:  # 257..2047 (mostly 512, 1024): wide distilled tile
+            block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        else:  # M >= 2048 (deep prefill)
+            if N <= 2048 and K >= 4096:  # narrow + deep: halved BM saturates
+                block_m, block_n, block_k, num_warps = 64, 256, 32, 8
+            else:
+                block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        # Very narrow N at small/mid M: a wide BLOCK_N leaves too few N-tiles to
+        # fill the CUs, so clamp it. At M>=1024 the M-tiles already saturate.
+        if N <= 1024 and M <= 512:
+            block_n = min(block_n, 32)
+    else:
+        # Scalar-dequant path (bf16): the pre-existing scalar-tuned ladder.
+        key = (group_size, K, N)
+        override = _GFX1151_BF16_PREFILL_OVERRIDES.get(key) if M <= 128 else None
+        if override is not None:
+            block_m, block_n, block_k, num_warps, num_stages = override
+        elif M <= 32:
+            block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+        elif M <= 64:
+            block_m, block_n, block_k, num_warps = 64, 64, 32, 4
+        elif M <= 128:
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 16, 64, 1
+            elif N > K:  # wide N (qkv / gate_up)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            else:  # N ~= K (o_proj)
+                block_m, block_n, block_k, num_warps = 64, 32, 64, 4
+        elif M <= 1024:
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            elif N >= 4 * K:  # very wide N (gate_up)
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            else:
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        else:  # M > 1024
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 128, 512, 32, 16
+            else:
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+    return block_m, block_n, min(block_k, group_size), num_warps, num_stages
 
 
 def triton_w4a16_skinny_fmt_gemm(
@@ -232,8 +423,8 @@ def triton_w4a16_skinny_fmt_gemm(
 
     c = torch.empty((M, N), dtype=a.dtype, device=a.device)
 
-    # num_stages stays None unless a per-shape override sets it, so the
-    # generic heuristics fall back to Triton's default pipeline depth.
+    # num_stages stays None unless the tile table sets it, so the generic
+    # heuristics fall back to Triton's default pipeline depth.
     num_stages: int | None = None
     if _on_gfx12x():
         # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
@@ -269,39 +460,14 @@ def triton_w4a16_skinny_fmt_gemm(
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
     elif _on_gfx1151():
-        # Tuned on gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts)
-        # using Qwen3-4B weight shapes with group_size=128.
-        # Per-shape overrides for known prefill regressions live in a small
-        # lookup table — see _GFX1X_PREFILL_OVERRIDES below. Re-run
+        # gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts): per-(M, N, K) tile
+        # config from the dtype-aware table, since the packed fp16 dequant and
+        # the scalar bf16 dequant want different tiles. See
+        # _select_skinny_gfx1151_config; re-run
         # benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py after edits.
-        override = (
-            _GFX1X_PREFILL_OVERRIDES.get((group_size, K, N)) if M <= 128 else None
+        BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = (
+            _select_skinny_gfx1151_config(M, N, K, group_size, a.dtype)
         )
-        if override is not None:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = override
-        elif M <= 32:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 32, 32, 128, 4
-        elif M <= 64:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 32, 4
-        elif M <= 128:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 16, 64, 1
-            elif N > K:  # wide N (e.g. qkv_proj, gate_up_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 4
-            else:  # N ~= K (e.g. o_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 64, 4
-        elif M <= 1024:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 4
-            elif N >= 4 * K:  # very wide N (e.g. gate_up_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
-            else:
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 128, 32, 4
-        else:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 512, 32, 16
-            else:
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
     else:
         num_warps = 4
         if M <= 32:
