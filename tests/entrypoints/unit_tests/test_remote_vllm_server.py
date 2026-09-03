@@ -10,6 +10,23 @@ from tests.utils import RemoteLaunchRenderServer, RemoteOpenAIServer
 
 
 @pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--api-key", "key1", "key2"], ["--api-key", "***", "***"]),
+        (["--api_key", "key1", "key2"], ["--api_key", "***", "***"]),
+        (["--api-key=key1", "key2"], ["--api-key=***", "***"]),
+        (["--api_key=key1", "key2"], ["--api_key=***", "***"]),
+        (["--hf-token", "token"], ["--hf-token", "***"]),
+        (["--hf_token", "token"], ["--hf_token", "***"]),
+        (["--hf-token=token"], ["--hf-token=***"]),
+        (["--hf_token=token"], ["--hf_token=***"]),
+    ],
+)
+def test_redact_sensitive_cli_arg_variants(args: list[str], expected: list[str]):
+    assert test_utils._redact_sensitive_cli_args(args) == expected
+
+
+@pytest.mark.parametrize(
     ("server_cls", "command"),
     [
         (RemoteOpenAIServer, ["vllm", "serve"]),
@@ -27,7 +44,7 @@ def test_server_redacts_sensitive_values(
     monkeypatch.setattr(test_utils.subprocess, "Popen", popen)
     monkeypatch.setenv("INHERITED_SECRET", "inherited-secret")
     serve_args = [
-        "--api-key",
+        "--api_key",
         "api-secret-1",
         "api-secret-2",
         "--hf-token=hf-secret",
@@ -45,7 +62,7 @@ def test_server_redacts_sensitive_values(
     assert "hf-secret" not in stdout
     assert "inherited-secret" not in stdout
     assert "override-secret" not in stdout
-    assert "--api-key *** ***" in stdout
+    assert "--api_key *** ***" in stdout
     assert "--hf-token=***" in stdout
     assert "--max-num-seqs 2" in stdout
     assert popen.call_args.args[0] == [*command, "test-model", *serve_args]

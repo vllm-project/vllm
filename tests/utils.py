@@ -156,7 +156,7 @@ def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
     index = 0
     while index < len(args):
         name, separator, _ = args[index].partition("=")
-        nargs = _SENSITIVE_CLI_ARG_NARGS.get(name)
+        nargs = _SENSITIVE_CLI_ARG_NARGS.get(name.replace("_", "-"))
         if nargs is None:
             index += 1
             continue
