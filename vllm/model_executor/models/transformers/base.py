@@ -558,7 +558,6 @@ class Base(
                         register_fusion(fuser, qual_name, child_module)
                         new_module = fuser.fuse(new_module, qual_name, self.vllm_config)
                         logger.info_once(fuser.info(child_name))
-                    _recursive_replace(new_module, prefix=qual_name)
                 elif not isinstance(child_module, MoERunner):
                     # MoERunner can contain aliases of shared experts and gates,
                     # so we don't want to recurse into it and break weight loading.
