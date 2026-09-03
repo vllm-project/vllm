@@ -830,9 +830,7 @@ class HfRunner:
                 # token id can be looked up once the model is released.
                 full_logprobs_lst.append(tok_logprobs[0].cpu())
 
-        full_logprobs = (
-            torch.stack(full_logprobs_lst) if full_logprobs_lst else None
-        )
+        full_logprobs = torch.stack(full_logprobs_lst) if full_logprobs_lst else None
 
         return (
             seq_logprobs_lst,

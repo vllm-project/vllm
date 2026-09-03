@@ -229,9 +229,7 @@ def test_models(
 
             # vLLM is still resident, so score HF's sequence directly.
             prompt_ids = list(
-                vllm_model.llm.get_tokenizer()(example_prompts[prompt_idx])[
-                    "input_ids"
-                ]
+                vllm_model.llm.get_tokenizer()(example_prompts[prompt_idx])["input_ids"]
             )
             (hf_seq_in_vllm,) = vllm_model.score_forced_continuations(
                 prompt_ids, [hf_ids[: hf_idx + 1]]

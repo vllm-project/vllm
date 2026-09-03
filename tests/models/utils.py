@@ -257,7 +257,7 @@ def check_logprobs_close(
                 assert logprobs_elem_0 is not None, fail_msg
                 assert logprobs_elem_1 is not None, fail_msg
 
-                is_top_k_mismatch = (
+                fails_inclusion_test = (
                     output_id_0 not in logprobs_elem_1
                     or output_id_1 not in logprobs_elem_0
                 )
@@ -265,7 +265,7 @@ def check_logprobs_close(
                 # Score each model's sequence under the other one: if both rate
                 # the other's output alike, the disagreement is a tie.
                 rescued = False
-                if is_top_k_mismatch and cross_scorer is not None:
+                if fails_inclusion_test and cross_scorer is not None:
                     scores = cross_scorer(
                         prompt_idx,
                         idx + num_outputs_0_skip_tokens,
