@@ -141,6 +141,24 @@ class VideoLoader:
         return source
 
     @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        from vllm.multimodal.video_decoders.opencv import OpenCVVideoBackendMixin
+
+        return OpenCVVideoBackendMixin.read_frames(
+            cap,
+            frame_idx,
+            total_frames_num,
+            frame_recovery=frame_recovery,
+        )
+
+    @classmethod
     @abstractmethod
     def load_bytes(
         cls,
@@ -662,6 +680,100 @@ class GLM46VVideoBackend(VideoBackend):
             backend=backend,
             **kwargs,
         )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "glm5next",
+    # Both spellings: the borrowed-config type string (``Glm5Next...``) and
+    # the dedicated transformers classes landing with the new checkpoint
+    # (``Glm5nextVideoProcessor``, matching ``Glm5nextImageProcessor``).
+    video_processor=("Glm5NextVideoProcessor", "Glm5nextVideoProcessor"),
+)
+class Glm5NextVideoBackend(VideoBackend):
+    """GLM-5.3-Flash fps-interval video backend.
+
+    Selects frames with the same ``glm_sample_frame_indices`` sampler the
+    processor falls back to, so only the sampled frames are
+    materialized. ``fps_interval`` semantics (default 2.0) with a
+    temporal-patch-scaled greedy walk, frame count capped at 2048, temporal
+    pairs kept even. Request overrides: ``fps`` -> fps interval,
+    ``max_frames`` -> frame cap, ``temporal_patch_size`` (default 2).
+    """
+
+    _SEEK_GAP_THRESHOLD: ClassVar[int] = 64
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Lazy import: the processor module sits behind the
+        # transformers_utils package init, which multimodal must not pull in.
+        from vllm.transformers_utils.processors.glm5next import (
+            glm_sample_frame_indices,
+        )
+
+        return glm_sample_frame_indices(
+            source.total_frames_num,
+            source.original_fps,
+            source.duration or 0,
+            target_fps=target.fps if target.fps > 0 else None,
+            max_frame_count=kwargs.get("max_frames"),
+            temporal_patch_size=kwargs.get("temporal_patch_size", 2),
+        )
+
+    @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        if frame_recovery:
+            return super().read_frames(
+                cap, frame_idx, total_frames_num, frame_recovery=frame_recovery
+            )
+
+        wanted = sorted(set(frame_idx))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(wanted), height, width, 3), dtype=np.uint8)
+        valid_frame_indices: list[int] = []
+        current: int | None = None
+        for target in wanted:
+            gap = target - current if current is not None else None
+            if gap is not None and 2 <= gap <= cls._SEEK_GAP_THRESHOLD:
+                for _ in range(gap - 1):
+                    if not cap.grab():
+                        current = None
+                        break
+                else:
+                    current = target - 1
+            if current != target - 1:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                current = target - 1
+            ok, frame = cap.read()
+            if ok:
+                frames[len(valid_frame_indices)] = cv2.cvtColor(
+                    frame, cv2.COLOR_BGR2RGB
+                )
+                valid_frame_indices.append(target)
+                current = target
+            else:
+                current = None
+
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < len(wanted):
+            logger.warning(
+                "GLM video loading expected %d sampled frames but only loaded %d.",
+                len(wanted),
+                valid_num_frames,
+            )
+        return frames[:valid_num_frames], valid_frame_indices
 
 
 @VIDEO_LOADER_REGISTRY.register(
