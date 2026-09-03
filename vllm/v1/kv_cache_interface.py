@@ -885,10 +885,6 @@ class MambaSpec(KVCacheSpec):
         )
 
     @property
-    def real_page_size_bytes(self) -> int:
-        return self.state_content_size_bytes
-
-    @property
     def page_size_bytes(self) -> int:
         page_size = sum(
             prod(shape) * get_dtype_size(dtype)

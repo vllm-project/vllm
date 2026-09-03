@@ -333,10 +333,7 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
-            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
-            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
-            # their small block_size would otherwise drag the global block_size
-            # below the real allocator block size and desync it from mamba.
+            # Scratch groups (per-request rings) must not drag the block size down.
             participating = [
                 g.kv_cache_spec.block_size
                 for g in kv_cache_groups
