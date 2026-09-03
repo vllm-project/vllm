@@ -9,10 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -314,7 +311,7 @@ def build_c128a_topk_metadata(
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
     Writes into pre-allocated buffers for CUDA graph address stability.
-    Returns slices of the buffers.
+    Returns views of the buffers.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
@@ -326,7 +323,13 @@ def build_c128a_topk_metadata(
     )
     assert global_decode_buffer.stride(-1) == prefill_buffer.stride(-1) == 1
 
-    global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
+    # TODO: support adaptive-width decode on SM120 (needs the FlashInfer
+    # SM120 kernel to accept a real row stride for eidx).
+    capability = current_platform.get_device_capability()
+    if capability is not None and capability.major == 12:
+        global_decode = global_decode_buffer[:num_decode_tokens]
+    else:
+        global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
     prefill_local = prefill_buffer[:num_prefill_tokens, :max_compressed_tokens]
     assert global_decode.stride(0) == global_decode_buffer.stride(0)
@@ -335,192 +338,90 @@ def build_c128a_topk_metadata(
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
-    _BUILD_C128A_TOPK_METADATA_KERNEL(
+    _build_c128a_topk_metadata_kernel[(num_tokens,)](
         global_decode_buffer,
+        global_decode_buffer.stride(0),
         decode_lens_buffer,
         prefill_buffer,
+        prefill_buffer.stride(0),
         positions,
         compress_ratio,
         max_compressed_tokens,
         num_decode_tokens,
         token_to_req_indices,
         block_table,
+        block_table.stride(0),
         block_size,
         slot_mapping,
+        BLOCK_SIZE=1024,
     )
     return global_decode, decode_lens, prefill_local
 
 
-class BuildC128ATopkMetadataKernel(
-    VllmJitKernel["BuildC128ATopkMetadataKernel.CompileKey"]
+@triton.jit
+def _build_c128a_topk_metadata_kernel(
+    # Decode outputs
+    global_decode_ptr,
+    global_decode_stride,
+    decode_lens_ptr,
+    # Prefill output
+    prefill_local_ptr,
+    prefill_local_stride,
+    # Inputs
+    positions_ptr,
+    compress_ratio,
+    max_compressed_tokens,
+    num_decode_tokens,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    slot_mapping_ptr,
+    BLOCK_SIZE: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        compress_ratio: int
-        max_compressed_tokens: int
-        block_size: int
-        triton_block_size: int
+    token_idx = tl.program_id(0)
+    position = tl.load(positions_ptr + token_idx)
+    num_compressed = (position + 1) // compress_ratio
+    num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
+    is_decode = token_idx < num_decode_tokens
 
-    @staticmethod
-    @triton.jit(
-        do_not_specialize=[
-            "global_decode_stride",
-            "prefill_local_stride",
-            "num_decode_tokens",
-            "block_table_stride",
-        ]
-    )
-    def kernel(
-        # Decode outputs
-        global_decode_ptr,
-        global_decode_stride,
-        decode_lens_ptr,
-        # Prefill output
-        prefill_local_ptr,
-        prefill_local_stride,
-        # Inputs
-        positions_ptr,
-        compress_ratio,
-        max_compressed_tokens,
-        num_decode_tokens,
-        token_to_req_indices_ptr,
-        block_table_ptr,
-        block_table_stride,
-        block_size,
-        slot_mapping_ptr,
-        BLOCK_SIZE: tl.constexpr,
-    ):
-        token_idx = tl.program_id(0)
-        position = tl.load(positions_ptr + token_idx)
-        num_compressed = (position + 1) // compress_ratio
-        num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
-        is_decode = token_idx < num_decode_tokens
+    if is_decode:
+        # --- Decode: block-table lookup → global slot ids + count ---
+        is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        count = tl.zeros((), dtype=tl.int32)
+        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < max_compressed_tokens
+            is_valid = offset < num_compressed
 
-        if is_decode:
-            # --- Decode: block-table lookup → global slot ids + count ---
-            is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
-            req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-            count = tl.zeros((), dtype=tl.int32)
-            for i in range(0, max_compressed_tokens, BLOCK_SIZE):
-                offset = i + tl.arange(0, BLOCK_SIZE)
-                mask = offset < max_compressed_tokens
-                is_valid = offset < num_compressed
-
-                block_indices = offset // block_size
-                block_numbers = tl.load(
-                    block_table_ptr + req_idx * block_table_stride + block_indices,
-                    mask=mask & is_valid,
-                )
-                block_offsets = offset % block_size
-                slot_ids = block_numbers * block_size + block_offsets
-                slot_ids = tl.where(is_valid, slot_ids, -1)
-                tl.store(
-                    global_decode_ptr + token_idx * global_decode_stride + offset,
-                    slot_ids,
-                    mask=mask,
-                )
-                count += tl.sum(is_valid.to(tl.int32), axis=0)
-
-            tl.store(
-                decode_lens_ptr + token_idx,
-                tl.where(is_valid_token, count, 0),
+            block_indices = offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=mask & is_valid,
             )
-        else:
-            # --- Prefill: write local indices ---
-            pfx_idx = token_idx - num_decode_tokens
-            for i in range(0, max_compressed_tokens, BLOCK_SIZE):
-                offset = i + tl.arange(0, BLOCK_SIZE)
-                mask = offset < max_compressed_tokens
-                tl.store(
-                    prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
-                    tl.where(offset < num_compressed, offset, -1),
-                    mask=mask,
-                )
+            block_offsets = offset % block_size
+            slot_ids = block_numbers * block_size + block_offsets
+            slot_ids = tl.where(is_valid, slot_ids, -1)
+            tl.store(
+                global_decode_ptr + token_idx * global_decode_stride + offset,
+                slot_ids,
+                mask=mask,
+            )
+            count += tl.sum(is_valid.to(tl.int32), axis=0)
 
-    def dispatch(  # type: ignore[override]
-        self,
-        **compile_key_fields: int,
-    ) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
-
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        hf_config = vllm_config.model_config.hf_config
-        if getattr(hf_config, "model_type", None) != "deepseek_v4":
-            return []
-
-        compress_ratio = 128
-        max_model_len = vllm_config.model_config.max_model_len
-        if max_model_len <= 0:
-            return []
-        max_compressed_tokens = cdiv(max_model_len, compress_ratio)
-        max_compressed_tokens = (
-            cdiv(max_compressed_tokens, _C128A_TOPK_ALIGNMENT) * _C128A_TOPK_ALIGNMENT
+        tl.store(
+            decode_lens_ptr + token_idx,
+            tl.where(is_valid_token, count, 0),
         )
-        return self._trace_dispatch(self.dispatch)(
-            compress_ratio=compress_ratio,
-            max_compressed_tokens=max_compressed_tokens,
-            # DeepSeek V4 sparse MLA uses 256-token KV pages; C128A metadata
-            # works in compressed-token units.
-            block_size=256 // compress_ratio,
-            triton_block_size=1024,
-        )
-
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
-
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        warmup(
-            int32_ptr,
-            1,  # do not specialize global_decode_stride
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize prefill_local_stride
-            int64_ptr,
-            compile_key.compress_ratio,
-            compile_key.max_compressed_tokens,
-            0,  # do not specialize num_decode_tokens
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize block_table_stride
-            compile_key.block_size,
-            int64_ptr,
-            BLOCK_SIZE=compile_key.triton_block_size,
-            grid=(1,),
-        )
-
-    def __call__(
-        self,
-        global_decode_buffer: torch.Tensor,
-        decode_lens_buffer: torch.Tensor,
-        prefill_buffer: torch.Tensor,
-        positions: torch.Tensor,
-        compress_ratio: int,
-        max_compressed_tokens: int,
-        num_decode_tokens: int,
-        token_to_req_indices: torch.Tensor,
-        block_table: torch.Tensor,
-        block_size: int,
-        slot_mapping: torch.Tensor,
-    ) -> None:
-        self.kernel[(positions.shape[0],)](
-            global_decode_buffer,
-            global_decode_buffer.stride(0),
-            decode_lens_buffer,
-            prefill_buffer,
-            prefill_buffer.stride(0),
-            positions,
-            compress_ratio,
-            max_compressed_tokens,
-            num_decode_tokens,
-            token_to_req_indices,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            slot_mapping,
-            BLOCK_SIZE=1024,
-        )
-
-
-_BUILD_C128A_TOPK_METADATA_KERNEL = BuildC128ATopkMetadataKernel()
+    else:
+        # --- Prefill: write local indices ---
+        pfx_idx = token_idx - num_decode_tokens
+        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < max_compressed_tokens
+            tl.store(
+                prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
+                tl.where(offset < num_compressed, offset, -1),
+                mask=mask,
+            )

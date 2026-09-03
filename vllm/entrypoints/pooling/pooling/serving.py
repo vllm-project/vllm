@@ -74,7 +74,7 @@ class ServingPooling(PoolingBaseServing):
         assert request.task is not None
         pooling_task = request.task
 
-        # plugin task uses io_processor.parse_request to verify inputs
+        # plugin task uses io_processor.parse_data to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
                 raise VLLMValidationError(

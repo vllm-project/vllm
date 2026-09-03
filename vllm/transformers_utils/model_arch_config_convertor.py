@@ -320,6 +320,8 @@ class ModelArchConfigConvertorBase:
             "dots3_note",
             "deepseek_mtp",
             "k3_dspark",
+            "glm5_next",
+            "glm5_next_text",
             "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",
@@ -332,6 +334,8 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
+            "hy_v4",
+            "hy_v4_mtp",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -373,7 +377,6 @@ class ModelArchConfigConvertorBase:
             "molmo2",
             "moondream3",
             "paligemma",
-            "umm",
         )
         if not hasattr(self.hf_config, "model_type"):
             return False
@@ -545,13 +548,6 @@ class FalconModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return super().get_total_num_kv_heads()
 
 
-class MPTModelArchConfigConvertor(ModelArchConfigConvertorBase):
-    def get_total_num_kv_heads(self) -> int:
-        if "kv_n_heads" in self.hf_text_config.attn_config:
-            return self.hf_text_config.attn_config["kv_n_heads"]
-        return self.hf_text_config.num_attention_heads
-
-
 class DbrxModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_total_num_kv_heads(self) -> int:
         return getattr(
@@ -583,6 +579,40 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
+class DeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PretrainedConfig,
+        hf_text_config: PretrainedConfig,
+        revision: str | None = None,
+    ):
+        # DeepSeek-V4-Flash-Vision-Exp ships the same architectures/model_type
+        # as the text-only DeepSeek-V4-Flash; route to the VL wrapper class
+        # when the config carries a vision tower. Mutate (not just override
+        # get_architectures) because model-class resolution reads the raw
+        # hf_config.architectures (get_model_architecture).
+        # Only rewrite the stock text architecture: speculative-draft configs
+        # (DSparkDraftModel / DeepSeekV4MTPModel) keep their own classes, and
+        # the VL wrapper marks the config copy it hands to the inner text
+        # backbone with _dsv4_vl_inner so this rewrite does not recurse.
+        if (
+            getattr(hf_config, "vision_n_layers", 0) > 0
+            and getattr(hf_config, "architectures", None) == ["DeepseekV4ForCausalLM"]
+            and not getattr(hf_config, "_dsv4_vl_inner", False)
+        ):
+            hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
+        super().__init__(hf_config, hf_text_config, revision)
+
+    def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+        # The vision variant needs the mm-prefix plumbing: it makes the
+        # scheduler prefill image spans atomically (disable_chunked_mm_input)
+        # and routes per-request image ranges to the sparse-SWA metadata
+        # builder, which widens the sliding window bidirectionally in-kernel.
+        if not supports_multimodal:
+            return False
+        return getattr(self.hf_config, "vision_n_layers", 0) > 0
 
 
 class MimoMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -646,6 +676,15 @@ class ErnieMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Qwen3NextMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
+class Qwen4ExpMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(
+            self.hf_text_config,
+            "mtp_num_hidden_layers",
+            getattr(self.hf_text_config, "num_nextn_predict_layers", 0),
+        )
 
 
 class BailingHybridMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -772,6 +811,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
+    "deepseek_v4": DeepseekV4ModelArchConfigConvertor,
     "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
@@ -792,12 +832,12 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
     "moss_audio": MossAudioModelArchConfigConvertor,
-    "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "bailing_hybrid_v3_mtp": BailingHybridV3MTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
+    "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
