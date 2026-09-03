@@ -36,6 +36,8 @@ DEFAULT_VOCAB_PADDING_SIZE = 64
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
 
+    supports_pre_processed_weights = True
+
     def create_weights(
         self,
         layer: torch.nn.Module,

@@ -74,7 +74,11 @@ from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
@@ -248,6 +252,8 @@ class Fp8LinearMethod(LinearMethodBase):
         quant_config: The quantization config.
     """
 
+    supports_pre_processed_weights = True
+
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
@@ -366,6 +372,15 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; the only state tensor
+            # export cannot carry is the `input_scale = None` stamp that dynamic
+            # activation quantization relies on, since create_weights never
+            # registered that parameter.
+            if not self.act_q_static and not hasattr(layer, "input_scale"):
+                layer.input_scale = None
+            return
+
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
@@ -412,14 +427,6 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         self.fp8_linear.process_weights_after_loading(layer)
-
-    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
-        # The block-quant kernels only transform tensors, which the daemon
-        # already exported. The one piece tensor export cannot carry is the
-        # `input_scale = None` stamp that dynamic activation quantization
-        # relies on, since create_weights never registered that parameter.
-        if not self.act_q_static and not hasattr(layer, "input_scale"):
-            layer.input_scale = None
 
     def apply(
         self,
@@ -479,6 +486,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     Args:
         quant_config: The quantization config.
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -736,12 +745,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
 
-    def init_kernels_after_ipc_load(self, layer: RoutedExperts) -> None:
-        # The daemon exported weights already in kernel format, so only the
-        # kernel itself has to be rebuilt.
-        self._init_moe_kernel(layer)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in kernel format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
+
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight

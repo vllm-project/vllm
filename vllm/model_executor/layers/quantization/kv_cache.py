@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
@@ -51,6 +52,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         quant_config: the appropriate QuantizationConfig
     """
 
+    supports_pre_processed_weights = True
+
     def __init__(self, quant_config: QuantizationConfig):
         self.quant_config = quant_config
 
@@ -72,6 +75,20 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            # Scale buffers were exported with post-processed values; drop the
+            # consumed scale placeholders and rebuild the host-side copies.
+            for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+                if hasattr(layer, name):
+                    delattr(layer, name)
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = layer._k_scale.item()
+                layer._v_scale_float = layer._v_scale.item()
+                layer._q_scale_float = layer._q_scale.item()
+                layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
+                layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
+            return
+
         # skip if there are no weights to process (for example, weight reloading)
         if not hasattr(layer, "q_scale"):
             assert not hasattr(layer, "k_scale")
@@ -193,23 +210,3 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         del layer.v_scale
         del layer.q_scale
         del layer.prob_scale
-
-    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
-        # process_weights_after_loading consumes the checkpoint scale
-        # parameters and deletes them, so a weight cache daemon never exports
-        # them and the client is left with empty placeholders. Drop those.
-        for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
-            if hasattr(layer, name):
-                delattr(layer, name)
-
-        # The registered _k/_v/_q/_prob_scale buffers are exported by the daemon
-        # with the post-processed values, but the derived host-side copies (the
-        # plain float attrs and the CPU tensors read by FlashInfer/AITER
-        # backends) are not tensors and are not carried over IPC. Rebuild them
-        # from the exported buffers so fp8 kv cache scales are honored.
-        if hasattr(layer, "_k_scale"):
-            layer._k_scale_float = layer._k_scale.item()
-            layer._v_scale_float = layer._v_scale.item()
-            layer._q_scale_float = layer._q_scale.item()
-            layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
-            layer._v_scale_cpu = layer._v_scale.detach().to("cpu")

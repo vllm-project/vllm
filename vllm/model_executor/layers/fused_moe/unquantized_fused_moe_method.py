@@ -27,7 +27,11 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -42,6 +46,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     # --8<-- [end:unquantized_fused_moe]
+
+    supports_pre_processed_weights = True
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -177,13 +183,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             routing_tables=layer._expert_routing_tables(),
         )
 
-    def init_kernels_after_ipc_load(self, layer: "RoutedExperts") -> None:
-        # The daemon exported weights already shuffled to runtime format, so
-        # only the kernel itself has to be rebuilt.
-        self._init_moe_kernel(layer)
-
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
+
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
 
         # Padding the weight for better performance on ROCm.
         # _maybe_pad_weight is idempotent: on the first call it allocates a

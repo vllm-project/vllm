@@ -375,7 +375,7 @@ def main() -> None:
                 for proc in procs:
                     proc.join()
                 sys.exit(max((p.exitcode or 0) for p in procs))
-    logger.info(
+    logger.info_once(
         "===== Weight cache daemon READY: all %d ranks serving in %s =====",
         tp_size,
         args.weight_cache_socket_dir or "the default socket dir",

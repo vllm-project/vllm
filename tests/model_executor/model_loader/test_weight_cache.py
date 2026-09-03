@@ -268,11 +268,29 @@ def test_check_supported_rejects_quantized_kv_cache():
         loader._check_supported(vllm_config, model_config)
 
 
-def test_init_kernels_reports_unsupported_layer():
-    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
-        _init_kernels_after_ipc_load,
+def _make_model_with_method(method) -> torch.nn.Module:
+    model = torch.nn.Module()
+    model.linear = torch.nn.Linear(2, 2)
+    model.linear.quant_method = method
+    return model
+
+
+def _fake_model_config():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False,
+        quantization=None,
+        dtype=torch.float32,
     )
+
+
+def test_pre_processed_mode_rejects_undeclared_method():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import weights_already_processed
 
     class _Method(QuantizeMethodBase):
         def create_weights(self, *args, **kwargs):
@@ -281,35 +299,43 @@ def test_init_kernels_reports_unsupported_layer():
         def apply(self, *args, **kwargs):
             pass
 
-        def init_kernels_after_ipc_load(self, layer):
-            raise NotImplementedError("kernel is built during post-load")
+    model = _make_model_with_method(_Method())
 
-    model = torch.nn.Module()
-    model.experts = torch.nn.Module()
-    model.experts.quant_method = _Method()
-
-    with pytest.raises(UnsupportedQuantForIPCError, match="experts"):
-        _init_kernels_after_ipc_load(model)
+    with (
+        weights_already_processed(),
+        pytest.raises(RuntimeError, match="_Method"),
+    ):
+        process_weights_after_loading(model, _fake_model_config(), torch.device("cpu"))
 
 
-def test_init_kernels_is_noop_for_stateless_methods():
-    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
-        _init_kernels_after_ipc_load,
+def test_pre_processed_mode_allows_declared_method():
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.utils import (
+        is_weights_pre_processed,
+        weights_already_processed,
     )
 
     class _Method(QuantizeMethodBase):
+        supports_pre_processed_weights = True
+
         def create_weights(self, *args, **kwargs):
             pass
 
         def apply(self, *args, **kwargs):
             pass
 
-    model = torch.nn.Module()
-    model.linear = torch.nn.Module()
-    model.linear.quant_method = _Method()
+        def process_weights_after_loading(self, layer):
+            layer.saw_pre_processed_flag = is_weights_pre_processed()
 
-    _init_kernels_after_ipc_load(model)
+    model = _make_model_with_method(_Method())
+    with weights_already_processed():
+        process_weights_after_loading(model, _fake_model_config(), torch.device("cpu"))
+
+    assert model.linear.saw_pre_processed_flag is True
+
 
 
 def _ipc_producer(conn, done) -> None:
