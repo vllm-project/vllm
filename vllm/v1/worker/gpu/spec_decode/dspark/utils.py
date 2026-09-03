@@ -37,7 +37,10 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
 
     pp_group = get_pp_group()
-    if pp_group.world_size != 1 and not speculative_config.is_dspark_prefill_only():
+    if (
+        pp_group.world_size != 1
+        and not speculative_config.use_dspark_last_stage_drafter()
+    ):
         raise NotImplementedError("DSpark does not support pipeline parallelism.")
 
     target_language_model = (
@@ -62,7 +65,10 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.compilation.backends import set_model_tag
     from vllm.model_executor.model_loader import get_model
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
-    from vllm.model_executor.models.utils import get_draft_quant_config
+    from vllm.model_executor.models.utils import (
+        PPMissingLayer,
+        get_draft_quant_config,
+    )
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
@@ -104,6 +110,11 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     if not speculative_config.is_dspark_prefill_only():
         target_embed = getattr(target_inner, "embed_tokens", None)
+        if isinstance(target_embed, PPMissingLayer):
+            # Under PP the target's embedding table only exists on the first
+            # pipeline stage; the last-stage drafter keeps and loads its own
+            # copy from the checkpoint instead.
+            target_embed = None
         draft_embed = getattr(draft_inner, "embed_tokens", None)
         if (
             target_embed is not None

@@ -273,7 +273,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
-                if self.use_pp and not self.dspark_prefill_only:
+                if (
+                    self.use_pp
+                    and not self.speculative_config.use_dspark_last_stage_drafter()
+                ):
                     raise ValueError(
                         f"{self.speculative_config.method} with pipeline parallel "
                         "is not supported."

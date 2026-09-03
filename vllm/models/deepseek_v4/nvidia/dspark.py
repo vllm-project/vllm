@@ -21,6 +21,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -478,11 +479,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         head_start = n_local_head * tp_rank
         head_end = n_local_head * (tp_rank + 1)
 
+        # Under pipeline parallelism the drafter only exists on the last stage,
+        # where the target's embedding table is a PPMissingLayer placeholder, so
+        # the draft loads its own copy of the shared embedding weight.
+        load_own_embed = get_pp_group().world_size > 1
         for name, loaded_weight in weights:
-            mapped = self._remap_dspark_name(name)
-            if mapped is None:
-                continue
-            name = mapped
+            if load_own_embed and name == "embed.weight":
+                name = "model.embed_tokens.weight"
+            else:
+                mapped = self._remap_dspark_name(name)
+                if mapped is None:
+                    continue
+                name = mapped
             if "confidence_head." in name:
                 loaded_confidence_head = True
 
