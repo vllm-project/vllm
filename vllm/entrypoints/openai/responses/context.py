@@ -45,6 +45,8 @@ from vllm.utils import random_uuid
 if TYPE_CHECKING:
     from mcp.client import ClientSession
 
+    from vllm.v1.metrics.stats import RequestStateStats
+
 logger = logging.getLogger(__name__)
 
 # This is currently needed as the tool type doesn't 1:1 match the
@@ -102,6 +104,8 @@ class TurnMetrics:
 
 class ConversationContext(ABC):
     response_parser: Parser | None = None
+    request_metrics: "RequestStateStats | None" = None
+    request_metrics_attributable: bool = True
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:

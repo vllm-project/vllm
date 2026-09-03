@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.responses.context import (
     SimpleContext,
 )
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
     ResponsesRequest,
@@ -67,6 +68,7 @@ from vllm.renderers.online_renderer import (
     _extract_allowed_tools_from_mcp_requests,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.metrics.stats import RequestStateStats
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -1160,7 +1162,21 @@ class TestHarmonyPreambleStreaming:
             assert "response.output_item.done" in type_names
 
 
-def _make_simple_context_with_output(text, token_ids, response_parser=None):
+_PER_REQUEST_STATS = RequestStateStats(
+    queued_ts=1.0,
+    scheduled_ts=1.5,
+    first_token_ts=2.0,
+    last_token_ts=3.0,
+    num_generation_tokens=2,
+)
+
+
+def _make_simple_context_with_output(
+    text,
+    token_ids,
+    response_parser=None,
+    metrics: RequestStateStats | None = None,
+):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext(response_parser=response_parser)
     completion = CompletionOutput(
@@ -1179,14 +1195,19 @@ def _make_simple_context_with_output(text, token_ids, response_parser=None):
         prompt_logprobs=None,
         outputs=[completion],
         finished=False,
+        metrics=metrics,
         num_cached_tokens=0,
     )
     ctx.append_output(req_output)
+    ctx.request_metrics = metrics
     return ctx
 
 
-def _make_serving_instance_with_reasoning():
-    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+def _make_serving_instance(
+    *,
+    reasoning_parser: str = "",
+    enable_per_request_metrics: bool = False,
+) -> OpenAIServingResponses:
     engine_client = MagicMock()
     model_config = MagicMock()
     model_config.max_model_len = 100
@@ -1197,18 +1218,140 @@ def _make_serving_instance_with_reasoning():
     engine_client.input_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
-    models = MagicMock()
-
-    serving = OpenAIServingResponses(
+    return OpenAIServingResponses(
         engine_client=engine_client,
-        models=models,
+        models=MagicMock(),
         online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
-        reasoning_parser="qwen3",
+        reasoning_parser=reasoning_parser,
+        enable_per_request_metrics=enable_per_request_metrics,
     )
-    return serving
+
+
+async def _empty_context_generator():
+    if False:
+        yield
+
+
+async def _make_full_metrics_response(
+    enable_per_request_metrics: bool,
+    metrics: RequestStateStats | None = _PER_REQUEST_STATS,
+):
+    serving = _make_serving_instance(
+        enable_per_request_metrics=enable_per_request_metrics
+    )
+    request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
+    context = _make_simple_context_with_output("hello", [10, 20], metrics=metrics)
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=SamplingParams(max_tokens=16),
+        result_generator=_empty_context_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="req"),
+    )
+    assert isinstance(response, ResponsesResponse)
+    return response
+
+
+@pytest.mark.asyncio
+async def test_responses_per_request_metrics_follow_server_flag():
+    disabled_response = await _make_full_metrics_response(False)
+    assert disabled_response.metrics is None
+    assert "metrics" not in disabled_response.model_dump(mode="json")
+
+    enabled_response = await _make_full_metrics_response(True)
+    assert enabled_response.metrics is not None
+    assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.generation_time_ms == pytest.approx(1000.0)
+    assert enabled_response.metrics.queue_time_ms == pytest.approx(500.0)
+    assert enabled_response.metrics.mean_itl_ms == pytest.approx(1000.0)
+    assert enabled_response.metrics.tokens_per_second == pytest.approx(4.0 / 3.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_per_request_metrics_without_engine_stats():
+    response = await _make_full_metrics_response(True, metrics=None)
+
+    assert response.metrics is not None
+    assert response.metrics.time_to_first_token_ms is None
+    assert response.metrics.generation_time_ms is None
+    assert response.metrics.queue_time_ms is None
+    assert response.metrics.mean_itl_ms is None
+    assert response.metrics.tokens_per_second is None
+
+
+@pytest.mark.asyncio
+async def test_responses_streaming_metrics_only_on_completed_event():
+    serving = _make_serving_instance(enable_per_request_metrics=True)
+    request = ResponsesRequest(input="hi", tools=[], stream=True, store=False)
+    context = _make_simple_context_with_output(
+        "hello", [10, 20], metrics=_PER_REQUEST_STATS
+    )
+
+    events = [
+        event
+        async for event in serving.responses_stream_generator(
+            request=request,
+            sampling_params=SamplingParams(max_tokens=16),
+            result_generator=_empty_context_generator(),
+            context=context,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=RequestResponseMetadata(request_id="req"),
+        )
+    ]
+
+    assert "metrics" not in events[0].response.model_dump(mode="json")
+    assert "metrics" not in events[1].response.model_dump(mode="json")
+    assert isinstance(events[-1], ResponseCompletedEvent)
+    assert events[-1].response.metrics is not None
+    assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_responses_metrics_suppressed_for_multiple_generation_streams(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    serving = _make_serving_instance(enable_per_request_metrics=True)
+    context = MockConversationContext()
+    monkeypatch.setattr(
+        context, "need_builtin_tool_call", MagicMock(side_effect=[True, False])
+    )
+
+    async def generate(*args, **kwargs):
+        yield RequestOutput(
+            request_id="req",
+            prompt=None,
+            prompt_token_ids=[],
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+            metrics=_PER_REQUEST_STATS,
+        )
+
+    monkeypatch.setattr(serving.engine_client, "generate", generate)
+
+    results = [
+        result
+        async for result in serving._generate_with_builtin_tools(
+            request_id="req",
+            engine_input=tokens_input([1]),
+            sampling_params=SamplingParams(max_tokens=8),
+            context=context,
+        )
+    ]
+
+    assert len(results) == 2
+    assert context.request_metrics_attributable is False
+
+
+def _make_serving_instance_with_reasoning():
+    """Create an OpenAIServingResponses with a mocked reasoning parser."""
+    return _make_serving_instance(reasoning_parser="qwen3")
 
 
 def _identity_increment(event):
