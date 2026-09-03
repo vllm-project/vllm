@@ -33,6 +33,9 @@ class DPSyncState:
     # Whether the ranks agreed to run eager. A dispatch reusing this must run
     # eager too; no shape was agreed, so picking a graph per rank would diverge.
     eager: bool
+    # Agreed upper bound on any rank's request count. Holds the padded count when
+    # a FULL descriptor imposed one, else the most any rank scheduled.
+    num_reqs: int
 
 
 def sync_cudagraph_and_dp_padding(
@@ -53,17 +56,19 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
+    tensor[4][dp_rank] = num_reqs
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
+    num_reqs_across_dp = tensor[4]
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -93,6 +98,7 @@ def sync_cudagraph_and_dp_padding(
                 num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
+                num_reqs=int(num_reqs_across_dp.max().item()),
             ),
         )
 
@@ -126,6 +132,12 @@ def sync_cudagraph_and_dp_padding(
         num_tokens_across_dp=num_tokens_across_dp,
         uniform_token_count=synced_uniform_token_count,
         eager=False,
+        num_reqs=(
+            synced_desc.num_reqs
+            if synced_desc.cg_mode == CUDAGraphMode.FULL
+            and synced_desc.num_reqs is not None
+            else int(num_reqs_across_dp.max().item())
+        ),
     )
 
 
