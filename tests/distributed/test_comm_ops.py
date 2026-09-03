@@ -245,6 +245,47 @@ def _make_group_for_unit_test(
     return g
 
 
+def test_async_single_tensor_uses_default_neighbors_and_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int, object]] = []
+    work = _DummyWork()
+
+    def fake_isend(tensor, dst, group):
+        calls.append(("send", dst, group))
+        return work
+
+    def fake_irecv(tensor, src, group):
+        calls.append(("recv", src, group))
+        return work
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+    monkeypatch.setattr(torch.distributed, "irecv", fake_irecv)
+
+    group = _make_group_for_unit_test(rank_in_group=1, world_size=3)
+    group.cpu_group = object()
+    group.device_group = object()
+
+    assert group.isend_tensor(torch.empty(1)) is work
+    assert group.irecv_tensor(torch.empty(1)) is work
+    assert calls == [
+        ("send", 2, group.cpu_group),
+        ("recv", 0, group.cpu_group),
+    ]
+
+
+def test_async_single_tensor_requires_initialized_multi_rank_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = _make_group_for_unit_test(world_size=2)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    with pytest.raises(RuntimeError, match="initialized multi-rank"):
+        group.isend_tensor(torch.empty(1))
+    with pytest.raises(RuntimeError, match="initialized multi-rank"):
+        group.irecv_tensor(torch.empty(1))
+
+
 def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -594,6 +635,31 @@ def send_recv_test_worker(
         torch.testing.assert_close(test_tensor, recv_tensor)
 
 
+@ray.remote(num_gpus=1, max_calls=1)
+def async_send_recv_tensor_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    expected = torch.arange(64, dtype=torch.float32, device="cuda")
+    if get_pp_group().is_first_rank:
+        work = get_pp_group().isend_tensor(expected)
+    else:
+        received = torch.empty_like(expected)
+        work = get_pp_group().irecv_tensor(received)
+    work.wait()
+
+    if not get_pp_group().is_first_rank:
+        torch.testing.assert_close(received, expected)
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
@@ -611,7 +677,12 @@ def test_multi_process_tensor_parallel(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("pp_size", [2])
 @pytest.mark.parametrize(
-    "test_target", [send_recv_test_worker, send_recv_tensor_dict_test_worker]
+    "test_target",
+    [
+        send_recv_test_worker,
+        send_recv_tensor_dict_test_worker,
+        async_send_recv_tensor_test_worker,
+    ],
 )
 def test_multi_process_pipeline_parallel(
     monkeypatch: pytest.MonkeyPatch,
