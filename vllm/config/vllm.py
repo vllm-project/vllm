@@ -1773,7 +1773,7 @@ class VllmConfig:
         if fpm_port:
             if self.device_config.device_type != "cuda":
                 raise ValueError("Forward-pass metrics currently require a CUDA device")
-            if self.model_config.runner_type != "generate":
+            if self.model_config is None or self.model_config.runner_type != "generate":
                 raise ValueError(
                     "Forward-pass metrics currently support generative models only"
                 )

@@ -10,6 +10,7 @@ import pytest
 import zmq
 
 import vllm.v1.metrics.forward_pass_metrics as fpm_module
+from vllm.config import DeviceConfig, ObservabilityConfig, VllmConfig
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -252,6 +253,15 @@ def test_timer_is_disabled_off_and_on_non_output_ranks():
 
     assert make_forward_pass_metrics_timer(disabled, is_output_rank=True) is None
     assert make_forward_pass_metrics_timer(enabled, is_output_rank=False) is None
+
+
+def test_fpm_requires_model_config():
+    with pytest.raises(ValueError, match="support generative models only"):
+        VllmConfig(
+            model_config=None,
+            device_config=DeviceConfig(device="cuda"),
+            observability_config=ObservabilityConfig(forward_pass_metrics_port=20380),
+        )
 
 
 def test_only_executor_output_rank_owns_timing_events():
