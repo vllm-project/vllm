@@ -1374,7 +1374,17 @@ def get_default_config(
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
-        if M <= 32:
+        if E >= 128:
+            # Fine-grained MoE (e.g. 128+ experts): tokens are distributed
+            # thinly across many experts, so smaller M tiles dramatically
+            # reduce padding overhead.
+            if M <= 64:
+                block_m = 16
+            elif M <= 256:
+                block_m = 32
+            else:
+                block_m = 64
+        elif M <= 32:
             block_m = 16
         elif M <= 96:
             block_m = 32
@@ -1393,7 +1403,7 @@ def get_default_config(
         # Grouping adjacent M-blocks lets them share weight tiles in L2.
         # Only helps when there are enough M-blocks per expert to group;
         # with many experts each one sees few tokens so grouping is useless.
-        tokens_per_expert = M // max(E, 1)
+        tokens_per_expert = (M * topk) // max(E, 1)
         group_m = 16 if tokens_per_expert > 128 else 1
 
         # Large batches have enough blocks to saturate the GPU, so we
@@ -1560,22 +1570,23 @@ def _prepare_expert_assignment(
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
     # path of the fused_moe_kernel kernel
     naive_block_assignment = (
-        expert_map is None
+        (expert_map is None or not ignore_invalid_experts)
         and num_tokens * top_k_num * 4 <= global_num_experts
-        and not (
-            (use_int8_w8a16 or use_int4_w4a16)
-            and block_shape is not None
-            and block_shape[1] > 0
-        )
+        and not (use_int8_w8a16 or use_int4_w4a16)
     )
 
     if naive_block_assignment:
+        block_m = min(config.get("BLOCK_SIZE_M", 16), 16)
+        config["BLOCK_SIZE_M"] = block_m
+        expert_ids = (
+            topk_ids.view(-1) if expert_map is None else expert_map[topk_ids.view(-1)]
+        )
         return (
             None,
-            topk_ids.view(-1),
+            expert_ids,
             torch.full(
                 (1,),
-                topk_ids.numel() * config["BLOCK_SIZE_M"],
+                topk_ids.numel() * block_m,
                 dtype=torch.int32,
                 device=topk_ids.device,
             ),
