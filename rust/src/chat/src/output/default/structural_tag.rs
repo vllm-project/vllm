@@ -4,9 +4,7 @@
 //! Applies xgrammar structural-tag constraints for strict tool calling.
 
 use thiserror_ext::AsReport;
-use vllm_engine_core_client::protocol::structured_outputs::{
-    StructuredOutputBackend, StructuredOutputsParams,
-};
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_parser::tool::StructuralTagBuilder;
 use xgrammar_structural_tag::builders::StructuralTagOptions;
 use xgrammar_structural_tag::{
@@ -55,10 +53,8 @@ pub(super) fn apply_structural_tag_constraint(
     })?;
 
     // Overwrite any existing structured output settings with the structural tag constraint.
-    request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-        backend: StructuredOutputBackend::Xgrammar,
-        ..StructuredOutputsParams::structural_tag(structural_tag)
-    });
+    request.sampling_params.structured_outputs =
+        Some(StructuredOutputsParams::structural_tag(structural_tag));
 
     Ok(())
 }
@@ -86,9 +82,7 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use vllm_engine_core_client::protocol::structured_outputs::{
-        StructuredOutputBackend, StructuredOutputsParams,
-    };
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_parser::tool::{Qwen3CoderToolParser, Tool, ToolParser};
 
     use super::*;
@@ -127,7 +121,6 @@ mod tests {
             .structured_outputs
             .as_ref()
             .expect("structured outputs should be set");
-        assert_eq!(params.backend, StructuredOutputBackend::Xgrammar);
         let structural_tag = params
             .constraint
             .as_structural_tag()
@@ -219,12 +212,10 @@ mod tests {
     }
 
     #[test]
-    fn auto_strict_tool_choice_overwrites_existing_json_guidance() {
+    fn auto_strict_tool_choice_overwrites_existing_json_constraint() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", Some(true))]);
-        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-            backend: StructuredOutputBackend::Xgrammar,
-            ..StructuredOutputsParams::json(json!({"type": "object"}))
-        });
+        request.sampling_params.structured_outputs =
+            Some(StructuredOutputsParams::json(json!({"type": "object"})));
         let parser = qwen3_coder_parser(request.tools());
 
         apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
@@ -251,12 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn required_tool_choice_overwrites_existing_json_object_guidance() {
+    fn required_tool_choice_overwrites_existing_json_object_constraint() {
         let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
-        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-            backend: StructuredOutputBackend::Xgrammar,
-            ..StructuredOutputsParams::json_object()
-        });
+        request.sampling_params.structured_outputs = Some(StructuredOutputsParams::json_object());
         let parser = qwen3_coder_parser(request.tools());
 
         apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
@@ -299,12 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn none_tool_choice_preserves_existing_json_object_guidance() {
+    fn none_tool_choice_preserves_existing_json_object_constraint() {
         let mut request = request(ChatToolChoice::None, vec![chat_tool("search", Some(true))]);
-        request.sampling_params.structured_outputs = Some(StructuredOutputsParams {
-            backend: StructuredOutputBackend::Xgrammar,
-            ..StructuredOutputsParams::json_object()
-        });
+        request.sampling_params.structured_outputs = Some(StructuredOutputsParams::json_object());
         let parser = qwen3_coder_parser(request.tools());
 
         apply_structural_tag_constraint(&mut request, parser.structural_tag_builder())
