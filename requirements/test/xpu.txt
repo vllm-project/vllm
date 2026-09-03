@@ -375,9 +375,11 @@ mbstrdecoder==1.1.5
     #   dataproperty
     #   pytablewriter
     #   typepy
-mcp==2.0.0
-    # via -r requirements/test/../common.txt
-mcp-types==2.0.0
+mcp==2.1.1
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
+mcp-types==2.1.1
     # via mcp
 mdurl==0.1.2
     # via markdown-it-py

@@ -64,6 +64,11 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("HY V4 is only supported on CUDA")
 
+    if model_arch == "DeepseekV4ForConditionalGeneration" and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Deepseek V4 is only supported on CUDA")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None

@@ -10,10 +10,13 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing.context import (
     InputProcessingContext,
     overlay_modality_mm_kwargs,
 )
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     PlaceholderFeaturesInfo,
@@ -1262,3 +1265,69 @@ def test_mm_processor_kwargs_merge_then_overlay_preserves_scoping():
     assert overlay_modality_mm_kwargs(merged, "video")["size"] == size
     assert "size" not in overlay_modality_mm_kwargs(merged, "image")
     assert "size" not in overlay_modality_mm_kwargs(merged, None)
+
+
+def test_processor_inputs_hashes_partial_uuids():
+    rng = np.random.RandomState(0)
+    images = [random_image(rng, min_wh=8, max_wh=9) for _ in range(2)]
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": images}),
+        mm_uuid_items={"image": ["image-uuid", None]},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {
+        "image": [
+            "image-uuid",
+            MultiModalHasher.hash_kwargs(
+                "blake3", model_id="test-model", image=images[1]
+            ),
+        ]
+    }
+
+
+def test_processor_inputs_hashes_scope_kwargs_by_modality():
+    """Changing one modality's options must not invalidate another item."""
+    rng = np.random.RandomState(0)
+    mm_data_items = MultiModalDataParser().parse_mm_data(
+        {
+            "image": [random_image(rng, min_wh=8, max_wh=9)],
+            "video": [np.zeros((2, 8, 8, 3), dtype=np.uint8)],
+        }
+    )
+    mm_uuid_items = {"image": ["image-uuid"], "video": ["video-uuid"]}
+
+    def get_hashes(video_frames: int, image_size: int, video_size: int):
+        return ProcessorInputs(
+            prompt=[],
+            mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
+            media_io_kwargs={"video": {"num_frames": video_frames}},
+            hf_processor_mm_kwargs={
+                "images_kwargs": {"size": {"longest_edge": image_size}},
+                "videos_kwargs": {"size": {"longest_edge": video_size}},
+            },
+        ).get_mm_hashes("test-model", "blake3")
+
+    base = get_hashes(video_frames=4, image_size=224, video_size=224)
+    changed_video = get_hashes(video_frames=16, image_size=224, video_size=448)
+    changed_image = get_hashes(video_frames=4, image_size=448, video_size=224)
+
+    assert changed_video["image"] == base["image"]
+    assert changed_video["video"] != base["video"]
+    assert changed_image["image"] != base["image"]
+    assert changed_image["video"] == base["video"]
+
+
+def test_processor_inputs_hashes_ignore_unrelated_kwargs():
+    """An image-only request ignores video-only processing configuration."""
+    image = random_image(np.random.RandomState(0), min_wh=8, max_wh=9)
+    inputs = ProcessorInputs(
+        prompt=[],
+        mm_data_items=MultiModalDataParser().parse_mm_data({"image": [image]}),
+        mm_uuid_items={"image": ["image-uuid"]},
+        media_io_kwargs={"video": {"num_frames": 16}},
+        hf_processor_mm_kwargs={"videos_kwargs": {"size": {"longest_edge": 448}}},
+    )
+
+    assert inputs.get_mm_hashes("test-model", "blake3") == {"image": ["image-uuid"]}

@@ -3296,6 +3296,7 @@ def _spec_decode_grouping_config(method="dspark", model_type=None):
         speculative_config=SimpleNamespace(
             method=method,
             use_eagle=lambda: True,
+            use_eagle_block_drop=lambda: True,
         ),
     )
 
