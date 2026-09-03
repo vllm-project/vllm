@@ -1091,11 +1091,34 @@ def zero_experts_compute_triton(
     return output
 
 
+def get_candidate_device_names(device_name: str) -> list[str]:
+    """Return prioritized candidate device names for MoE config lookup.
+
+    Allows variants within the same architecture family (e.g. H100 PCIe, H100 NVL,
+    H100 SXM5, H800) to fall back to shared tuned configurations.
+    """
+    candidates = [device_name]
+    tokens = device_name.split("_")
+    if "H200" in tokens:
+        if "NVIDIA_H200" not in candidates:
+            candidates.append("NVIDIA_H200")
+    elif "H100" in tokens or "H800" in tokens:
+        for fallback in ("NVIDIA_H100_80GB_HBM3", "NVIDIA_H100"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+    return candidates
+
+
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
 def get_config_file_name(
-    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+    E: int,
+    N: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+    device_name: str | None = None,
 ) -> str:
-    device_name = get_device_name_as_file_name()
+    if device_name is None:
+        device_name = get_device_name_as_file_name()
     # Set device_name to H200 if a device from the H200 family is detected
     if "H200" in device_name.split("_"):
         device_name = "NVIDIA_H200"
@@ -1129,24 +1152,26 @@ def get_moe_configs(
         return None
 
     # First look up if an optimized configuration is available in the configs
-    # directory
+    # directory across candidate device names in the family hierarchy
     block_shape = [block_n, block_k] if block_n and block_k else None
-    json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    base_device_name = get_device_name_as_file_name()
+    device_candidates = get_candidate_device_names(base_device_name)
+
+    candidate_file_names = []
+    for dev in device_candidates:
+        fn = get_config_file_name(E, N, dtype, block_shape, device_name=dev)
+        if fn not in candidate_file_names:
+            candidate_file_names.append(fn)
 
     config_file_paths = []
-
-    # note that we prioritize user defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
-    if user_defined_config_folder is not None:
-        user_defined_config_file_path = os.path.join(
-            user_defined_config_folder, json_file_name
-        )
-        config_file_paths.append(user_defined_config_file_path)
+    configs_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "configs")
 
-    default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
-    )
-    config_file_paths.append(default_config_file_path)
+    if user_defined_config_folder is not None:
+        for fn in candidate_file_names:
+            config_file_paths.append(os.path.join(user_defined_config_folder, fn))
+    for fn in candidate_file_names:
+        config_file_paths.append(os.path.join(configs_dir, fn))
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
@@ -1374,6 +1399,12 @@ def get_default_config(
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
+        is_hopper = False
+        if current_platform.is_cuda():
+            cc = current_platform.get_device_capability()
+            if cc and cc[0] >= 9:
+                is_hopper = True
+
         if M <= 32:
             block_m = 16
         elif M <= 96:
@@ -1402,6 +1433,10 @@ def get_default_config(
 
         if current_platform.is_rocm():
             num_stages = num_stages_rocm
+        elif is_hopper and M <= 16:
+            # Hopper SM90 async copy and 228KB SRAM/L1 per SM can pipeline
+            # deeper stages effectively even at small batch sizes
+            num_stages = 4
         elif M <= 32:
             num_stages = 4
         else:
