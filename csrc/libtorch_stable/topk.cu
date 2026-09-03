@@ -28,13 +28,12 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
   const int64_t stride = logits.stride(0);
   const cudaStream_t stream = get_current_cuda_stream();
 
-  static int num_sms = 0;
-  static int max_smem_per_block = 0;
-  if (num_sms == 0) {
-    const cudaDeviceProp* device_prop = get_device_prop();
-    num_sms = device_prop->multiProcessorCount;
-    max_smem_per_block = device_prop->sharedMemPerBlockOptin;
-  }
+  // Per call, for the device selected by the caller's guard: get_device_prop()
+  // caches the properties per device, and the dynamic-smem cap below must
+  // reflect the device this launch runs on.
+  const cudaDeviceProp* device_prop = get_device_prop();
+  const int num_sms = device_prop->multiProcessorCount;
+  const int max_smem_per_block = device_prop->sharedMemPerBlockOptin;
 
   if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
     cudaError_t status =

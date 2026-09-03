@@ -1665,7 +1665,7 @@ def _run_persistent_topk(
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("num_rows", [1, 8, 64])
 @pytest.mark.parametrize("seq_len", [1024, 4096, 8192, 20000, 40000])
-@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
 @pytest.mark.parametrize("kind", ["random", "ties"])
 def test_persistent_topk_deterministic(
     num_rows: int, seq_len: int, top_k: int, kind: str
