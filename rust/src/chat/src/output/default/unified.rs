@@ -218,7 +218,7 @@ fn text_event(kind: AssistantBlockKind, delta: String) -> Option<AssistantEvent>
     Some(AssistantEvent::TextDelta {
         kind,
         delta,
-        token_count: 0,
+        token_count: None,
     })
 }
 
@@ -241,7 +241,7 @@ fn push_piece_delta(
     events.push(AssistantEvent::TextDelta {
         kind,
         delta: piece.text,
-        token_count: piece.attributions.len(),
+        token_count: Some(piece.attributions.len()),
     });
 }
 
@@ -586,7 +586,7 @@ mod tests {
             vec![AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Reasoning,
                 delta: "thinking".to_string(),
-                token_count: 0,
+                token_count: Some(0),
             }]
         );
     }
@@ -633,7 +633,7 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "thinking".to_string(),
-                    token_count: 0,
+                    token_count: Some(0),
                 },
                 AssistantEvent::ToolCallStart {
                     id: "call_test".to_string(),
@@ -663,7 +663,7 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "visible ".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::ToolCallStart {
                     id: "call_test".to_string(),
@@ -703,7 +703,7 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: " done".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
             ]
         );
@@ -726,17 +726,17 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "committed".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "later".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
             ]
         );
@@ -757,7 +757,7 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),
@@ -786,18 +786,18 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "think".to_string(),
-                    token_count: 2,
+                    token_count: Some(2),
                 },
                 // Non-reasoning deltas carry no token count.
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "visible".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "more".to_string(),
-                    token_count: 3,
+                    token_count: Some(3),
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
@@ -824,12 +824,12 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "visible".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "tail".to_string(),
-                    token_count: 2,
+                    token_count: Some(2),
                 },
                 AssistantEvent::Done {
                     usage: done_usage(2),
@@ -865,23 +865,23 @@ mod tests {
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "think".to_string(),
-                    token_count: 2,
+                    token_count: Some(2),
                 },
                 // Committed reasoning still counts before the failure fallback.
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "more".to_string(),
-                    token_count: 3,
+                    token_count: Some(3),
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "buffered".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "later".to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::Done {
                     usage: done_usage(5),
@@ -926,7 +926,7 @@ mod tests {
                     kind: AssistantBlockKind::Text,
                     delta: "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
                         .to_string(),
-                    token_count: 0,
+                    token_count: None,
                 },
                 AssistantEvent::Done {
                     usage: done_usage(0),

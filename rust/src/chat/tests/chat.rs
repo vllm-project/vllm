@@ -393,7 +393,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -402,7 +402,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -502,7 +502,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -589,7 +589,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -777,7 +777,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -885,7 +885,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "reason ".to_string(),
-            token_count: 7,
+            token_count: Some(7),
         }
     );
     assert_eq!(
@@ -894,7 +894,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "more".to_string(),
-            token_count: 4,
+            token_count: Some(4),
         }
     );
     assert_eq!(
@@ -919,7 +919,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 1,
             kind: AssistantBlockKind::Text,
             delta: "answer".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(
@@ -1393,7 +1393,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
-            token_count: 0,
+            token_count: None,
         }
     );
     assert_eq!(

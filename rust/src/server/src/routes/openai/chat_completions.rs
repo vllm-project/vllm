@@ -333,7 +333,9 @@ async fn chat_completion_chunk_stream(
                 // The count is per-delta and follows the decoder clock; it is
                 // fed even when the reasoning delta itself is hidden from the
                 // client (`include_reasoning=false`).
-                if matches!(kind, AssistantBlockKind::Reasoning) {
+                if matches!(kind, AssistantBlockKind::Reasoning)
+                    && let Some(token_count) = token_count
+                {
                     continuous_usage.add_reasoning_tokens(token_count);
                 }
                 let include_delta =
@@ -942,7 +944,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "hi".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1021,7 +1023,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1082,13 +1084,13 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::BlockDelta {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -1136,7 +1138,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1155,7 +1157,7 @@ mod tests {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1245,7 +1247,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1287,7 +1289,7 @@ mod tests {
                 index: 1,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: Some(DecodedLogprobs {
@@ -1443,7 +1445,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 2,
+                token_count: Some(2),
             }),
             Ok(ChatEvent::LogprobsDelta {
                 logprobs: None,
@@ -1454,7 +1456,7 @@ mod tests {
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
                 // A stray text-side count must not pollute reasoning usage.
-                token_count: 7,
+                token_count: None,
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -1525,7 +1527,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 2,
+                token_count: Some(2),
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),
@@ -1586,7 +1588,7 @@ mod tests {
                 index: 0,
                 kind: AssistantBlockKind::Text,
                 delta: "answer".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(ChatEvent::Done {
                 message: Default::default(),

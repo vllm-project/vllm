@@ -203,9 +203,8 @@ pub enum ChatEvent {
         index: usize,
         kind: AssistantBlockKind,
         delta: String,
-        /// Number of generated tokens attributed to this delta alone.
-        // TODO: currently, only reasoning deltas have this value set
-        token_count: usize,
+        /// Number of generated tokens attributed to this delta, when available.
+        token_count: Option<usize>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {

@@ -81,7 +81,7 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
-        token_count: usize,
+        token_count: Option<usize>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_tool_call(&mut events);
@@ -172,7 +172,7 @@ impl StructuredEventState {
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
-        token_count: usize,
+        token_count: Option<usize>,
         events: &mut Vec<ChatEvent>,
     ) {
         if delta.is_empty() {
@@ -446,7 +446,7 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "before".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(AssistantEvent::ToolCallStart {
                 id: "call_1".to_string(),
@@ -506,7 +506,7 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Text,
                 delta: "done".to_string(),
-                token_count: 0,
+                token_count: None,
             }),
             Ok(AssistantEvent::Done {
                 usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
@@ -622,7 +622,7 @@ mod tests {
             Ok(AssistantEvent::TextDelta {
                 kind: AssistantBlockKind::Reasoning,
                 delta: "think".to_string(),
-                token_count: 3,
+                token_count: Some(3),
             }),
             Ok(AssistantEvent::Done {
                 usage: ChatTokenUsage {
@@ -651,7 +651,7 @@ mod tests {
             events[2],
             ChatEvent::BlockDelta {
                 kind: AssistantBlockKind::Reasoning,
-                token_count: 3,
+                token_count: Some(3),
                 ..
             }
         ));

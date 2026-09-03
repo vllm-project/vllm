@@ -261,7 +261,7 @@ impl HarmonyState {
                         delta: "\n".to_string(),
                         // TODO: measure reasoning tokens from native
                         // analysis-channel token counts.
-                        token_count: 0,
+                        token_count: None,
                     });
                 }
 
@@ -273,7 +273,7 @@ impl HarmonyState {
                 delta: group.text,
                 // TODO: measure reasoning tokens from native
                 // analysis-channel token counts.
-                token_count: 0,
+                token_count: None,
             });
             return;
         }
