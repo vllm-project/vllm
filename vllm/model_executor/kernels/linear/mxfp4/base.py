@@ -38,6 +38,15 @@ class MxFp4LinearKernel(ABC):
         assert self.is_supported()[0]
         self.config = config
 
+    def input_quant_key(self) -> QuantKey | None:
+        """Return the input quantization key this kernel can consume.
+
+        None (the default) means the kernel always quantizes its own
+        activation. Override on backends that skip that step when handed a
+        matching QuantizedActivation.
+        """
+        return None
+
     @classmethod
     @abstractmethod
     def is_supported(

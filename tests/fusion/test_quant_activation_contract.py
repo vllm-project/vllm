@@ -9,7 +9,13 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_INT8_KERNELS,
+    _POSSIBLE_MXFP4_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
+)
+from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+from vllm.model_executor.kernels.linear.mxfp4.base import (
+    MxFp4LinearKernel,
+    MxFp4LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
@@ -37,15 +43,19 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 
 # The only backends that consume a pre-quantized activation.
+# AiterMxfp4LinearKernel lives in the ROCm MXFP4 registry; the scan walks every
+# platform so CUDA CI still sees the class. Probe it with __new__ (no AITER).
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    AiterMxfp4LinearKernel,
 }
 
 
@@ -56,6 +66,7 @@ def _all_kernel_classes() -> list[type]:
         _POSSIBLE_FP8_BLOCK_KERNELS,
         _POSSIBLE_INT8_KERNELS,
         _POSSIBLE_NVFP4_KERNELS,
+        _POSSIBLE_MXFP4_KERNELS,
     ):
         for kernels in registry.values():
             for cls in kernels:
@@ -69,6 +80,11 @@ def _probe(cls: type):
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
+    elif issubclass(cls, MxFp4LinearKernel):
+        obj.config = MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
+        # AITER advertises kMxfp4Dynamic only on the Triton branch. The probe
+        # never runs __init__, so default to that branch.
+        obj.use_asm_gemm = False
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
             is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
@@ -112,6 +128,15 @@ def test_bridge_marks_supporting_and_skips_others():
     assert unsupported.input_quant_key() is None
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
+    assert not hasattr(layer, "input_quant_key")
+
+    aiter = _probe(AiterMxfp4LinearKernel)
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, aiter)
+    assert layer.input_quant_key == kMxfp4Dynamic
+    aiter.use_asm_gemm = True
+    layer = torch.nn.Module()
+    expose_input_quant_key(layer, aiter)
     assert not hasattr(layer, "input_quant_key")
 
 
