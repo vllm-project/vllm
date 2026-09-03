@@ -178,6 +178,16 @@ class TestKVCacheMetricsCollector:
             c.on_block_allocated(KVCacheBlock(block_id=10))
         assert 10 in c.block_metrics
 
+    def test_group_local_ids_do_not_collide_across_physical_pools(self):
+        c = KVCacheMetricsCollector(sample_rate=1.0)
+        legacy = KVCacheBlock(block_id=7, pool_id=0)
+        narrow = KVCacheBlock(block_id=7, pool_id=1)
+
+        c.on_block_allocated(legacy)
+        c.on_block_allocated(narrow)
+
+        assert set(c.block_metrics) == {7, (1, 7)}
+
     def test_huge_time_jump(self):
         c = KVCacheMetricsCollector(sample_rate=1.0)
 

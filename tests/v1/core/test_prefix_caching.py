@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolSpec,
     KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
@@ -1110,6 +1111,212 @@ def test_prefill_hybrid_model_mamba_align():
     assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
 
     manager.free(req0)
+
+
+def _make_qwen35_mtp_kv_cache_config(
+    block_size: int, num_blocks: int, annotate_draft: bool = False
+) -> KVCacheConfig:
+    """Qwen3.8-shaped hybrid layout: one target full-attention group, one
+    align-mode Mamba group, and one draft full-attention group whose spec is
+    identical to the target's except for the ``is_draft_kv_cache`` marker.
+
+    ``annotate_draft`` presets ``is_eagle_group`` on the draft group, which is
+    what ``_annotate_eagle_groups`` does when a spec-decode method is active.
+    """
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(["target_full"], full_spec),
+            KVCacheGroupSpec(
+                ["mtp_full"],
+                replace(full_spec, is_draft_kv_cache=True),
+                is_eagle_group=annotate_draft,
+            ),
+        ],
+    )
+
+
+def _run_two_identical_prefills(
+    manager: KVCacheManager,
+    block_size: int,
+    *,
+    use_eagle: bool = False,
+) -> int:
+    """Prime the cache with a chunked prefill, then look up an identical one.
+
+    Align-mode Mamba only materializes a cacheable state at each chunk end, so
+    the primer must chunk like the real scheduler (one block per step). With
+    spec decode the scheduler also passes a one-token prefill lookahead for
+    every chunk but the last.
+
+    Returns the second request's computed-token count.
+    """
+    hash_fn = sha256
+    num_chunks = 4
+    token_ids = [i for i in range(num_chunks) for _ in range(block_size)]
+    req0 = make_request("0", token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    for chunk in range(num_chunks):
+        if chunk == 0:
+            blocks = manager.allocate_slots(
+                req0,
+                block_size,
+                num_computed_tokens,
+                computed_blocks,
+                num_lookahead_tokens=1 if use_eagle else 0,
+            )
+        else:
+            blocks = manager.allocate_slots(
+                req0,
+                block_size,
+                0,
+                None,
+                num_lookahead_tokens=1 if use_eagle and chunk < num_chunks - 1 else 0,
+            )
+        assert blocks is not None
+        req0.num_computed_tokens = (chunk + 1) * block_size
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    manager.free(req1)
+    return num_computed_tokens
+
+
+def test_group_local_block_ids_are_scoped_by_physical_pool():
+    block_size = 16
+    config = _make_qwen35_mtp_kv_cache_config(block_size, 10, annotate_draft=True)
+    config.kv_cache_pools = [
+        KVCachePoolSpec((0, 1), 10, 64, 0),
+        KVCachePoolSpec((2,), 6, 4, 640),
+    ]
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    req = make_request("pool-scoped", list(range(32)), block_size, sha256)
+
+    blocks = manager.allocate_slots(req, num_new_tokens=block_size)
+
+    assert blocks is not None
+    assert blocks.get_block_ids() == ([1], [2], [1])
+    assert [group[0].pool_id for group in blocks.blocks] == [0, 0, 1]
+    manager.free(req)
+    assert manager.coordinator.get_num_free_blocks() == (9, 5)
+
+
+def test_qwen35_mtp_prefix_hit_across_fixed_physical_pools():
+    block_size = 16
+    config = _make_qwen35_mtp_kv_cache_config(block_size, 100, annotate_draft=True)
+    config.kv_cache_pools = [
+        KVCachePoolSpec((0, 1), 100, 64, 0),
+        KVCachePoolSpec((2,), 100, 4, 6400),
+    ]
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    hit = _run_two_identical_prefills(manager, block_size, use_eagle=True)
+
+    assert hit > 0
+    assert manager.coordinator.eagle_group_ids == {2}
+
+
+def test_group_local_pool_admission_failure_leaves_all_pools_unchanged():
+    block_size = 16
+    config = _make_qwen35_mtp_kv_cache_config(block_size, 10)
+    config.kv_cache_pools = [
+        KVCachePoolSpec((0, 1), 10, 64, 0),
+        KVCachePoolSpec((2,), 1, 4, 640),
+    ]
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=64,
+        enable_caching=False,
+        hash_block_size=block_size,
+    )
+    req = make_request("pool-full", list(range(32)), block_size, sha256)
+    free_before = manager.coordinator.get_num_free_blocks()
+
+    blocks = manager.allocate_slots(req, num_new_tokens=block_size)
+
+    assert blocks is None
+    assert manager.coordinator.get_num_free_blocks() == free_before
+    assert all(
+        req.request_id not in single.req_to_blocks
+        for single in manager.coordinator.single_type_managers
+    )
+
+
+def test_fixed_physical_subpools_reset_all_prefix_caches():
+    block_size = 16
+    config = _make_qwen35_mtp_kv_cache_config(block_size, 20, annotate_draft=True)
+    config.kv_cache_pools = [
+        KVCachePoolSpec((0, 1), 20, 64, 0),
+        KVCachePoolSpec((2,), 20, 4, 1_280),
+    ]
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+    req = make_request("reset-pools", list(range(32)), block_size, sha256)
+    assert manager.allocate_slots(req, num_new_tokens=block_size) is not None
+    manager.free(req)
+    assert any(
+        pool.cached_block_hash_to_block for pool in manager.coordinator.block_pools
+    )
+
+    assert manager.reset_prefix_cache()
+    assert all(
+        len(pool.cached_block_hash_to_block) == 0
+        for pool in manager.coordinator.block_pools
+    )
+    assert manager.coordinator.get_num_free_blocks() == (19, 19)
+
+
+def test_ungrouped_eviction_fails_explicitly_with_physical_subpools():
+    block_size = 16
+    config = _make_qwen35_mtp_kv_cache_config(block_size, 10)
+    config.kv_cache_pools = [
+        KVCachePoolSpec((0, 1), 10, 64, 0),
+        KVCachePoolSpec((2,), 10, 4, 640),
+    ]
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=64,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    with pytest.raises(RuntimeError, match="Ungrouped block-ID eviction"):
+        manager.evict_blocks({1})
 
 
 def test_hybrid_cache_mamba_align_shared_prefix_detection():

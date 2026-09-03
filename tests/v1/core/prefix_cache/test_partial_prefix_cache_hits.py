@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -92,6 +93,7 @@ def make_full_mamba_manager(
     num_blocks: int = 32,
     use_eagle: bool = False,
     num_prefill_checkpoint_blocks: int = 0,
+    heterogeneous_pools: bool = False,
 ):
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -118,6 +120,11 @@ def make_full_mamba_manager(
             ),
         ],
     )
+    if heterogeneous_pools:
+        kv_cache_config.kv_cache_pools = [
+            KVCachePoolSpec((0,), num_blocks, 32, 0),
+            KVCachePoolSpec((1,), num_blocks, 4, num_blocks * 32),
+        ]
     scheduler_block_size = lcm(
         full_block_size * dcp_world_size,
         mamba_block_size,
@@ -131,6 +138,35 @@ def make_full_mamba_manager(
         hash_block_size=hash_block_size,
         use_eagle=use_eagle,
     )
+
+
+def test_partial_hit_cow_is_qualified_by_group_local_pool():
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        heterogeneous_pools=True,
+    )
+    producer = make_request("producer", [0, 0, 1, 1, 2, 2], 2, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(producer)
+    assert manager.allocate_slots(producer, 6, num_computed, computed) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request("consumer", [0, 0, 1, 1, 2, 2, 3, 3], 2, sha256)
+    computed, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+    new_blocks = manager.allocate_slots(consumer, 2, num_computed, computed)
+    assert new_blocks is not None
+
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert {copy.group_id for copy in copies} == {0, 1}
+    assert all(
+        copy.src_block_id < manager.kv_cache_config.get_num_blocks(copy.group_id)
+        and copy.dst_block_id < manager.kv_cache_config.get_num_blocks(copy.group_id)
+        for copy in copies
+        if copy.group_id is not None
+    )
+    assert {block.pool_id for block in retained} == {0, 1}
+    manager.block_pool.free_blocks(retained)
 
 
 def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():

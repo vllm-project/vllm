@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCachePoolSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     compute_layout_strides,
@@ -183,6 +184,55 @@ def test_allocate_compressed_mla_cache(
     assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
 
 
+def test_allocate_heterogeneous_width_cache_uses_pool_local_block_counts():
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    page = spec.page_size_bytes
+    total_size = 3 * 2 * page + 5 * page
+    config = KVCacheConfig(
+        num_blocks=5,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=total_size,
+                layers=["wide.0", "wide.1"],
+                layer_stride=page,
+                block_stride=2 * page,
+                offset=0,
+            ),
+            KVCacheTensor(
+                size=total_size,
+                layers=["narrow.0"],
+                layer_stride=page,
+                block_stride=page,
+                offset=6 * page,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["wide.0", "wide.1"], spec),
+            KVCacheGroupSpec(["narrow.0"], spec),
+        ],
+        kv_cache_pools=[
+            KVCachePoolSpec((0,), 3, 2 * page, 0),
+            KVCachePoolSpec((1,), 5, page, 6 * page),
+        ],
+    )
+
+    caches = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.BLHNC, None)
+
+    assert caches["wide.0"].shape[0] == 3
+    assert caches["wide.1"].shape[0] == 3
+    assert caches["narrow.0"].shape[0] == 5
+    assert config.total_size == total_size
+    assert caches["wide.0"].untyped_storage().nbytes() >= total_size
+    assert caches["narrow.0"].storage_offset() * 4 == 6 * page
+    caches["narrow.0"].fill_(7)
+    assert torch.count_nonzero(caches["wide.0"]) == 0
+
+
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
 def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     num_blocks = 4
@@ -208,6 +258,25 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     for layer_idx, cache in enumerate(caches):
         torch.testing.assert_close(cache[2], expected[layer_idx][0])
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
+
+
+def test_copy_kv_cache_blocks_is_scoped_to_group_local_ids():
+    group0 = torch.zeros((4, 1, 2, 4), dtype=torch.float32)
+    group1 = torch.zeros((3, 1, 2, 4), dtype=torch.float32)
+    group0[0].fill_(10)
+    group0[2].fill_(12)
+    group1[0].fill_(20)
+    group1[2].fill_(22)
+
+    copy_kv_cache_blocks_inplace(
+        [group0, group1],
+        [4, 3],
+        [KVCacheBlockCopy(0, 2, group_id=1)],
+        cache_group_ids=[0, 1],
+    )
+
+    assert torch.all(group0[2] == 12)
+    assert torch.all(group1[2] == 20)
 
 
 def test_fixed_block_stride_propagates_outward_in_lhbnc():

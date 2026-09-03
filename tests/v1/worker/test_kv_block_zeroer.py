@@ -235,6 +235,52 @@ def test_large_dsv4_launch_geometry(monkeypatch):
     assert captured_grids == [(n_blocks, n_segs, max_chunks)]
 
 
+def test_group_local_block_ids_zero_only_their_physical_pool(monkeypatch):
+    device = torch.device("cpu")
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    group0 = torch.ones((4, 1, 2, 2), dtype=torch.float32)
+    group1 = torch.ones((3, 1, 2, 2), dtype=torch.float32)
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(None, ["group0"], spec, 0),
+            AttentionGroup(None, ["group1"], spec, 1),
+        ],
+        kernel_block_sizes=[2, 2],
+        static_forward_context={
+            "group0": SimpleNamespace(kv_cache=group0),
+            "group1": SimpleNamespace(kv_cache=group1),
+        },
+    )
+    calls: list[tuple[list[int], list[int]]] = []
+
+    class FakeKernel:
+        def __getitem__(self, _grid):
+            def invoke(seg_addrs, _strides, _sizes, block_ids, **_kwargs):
+                calls.append((seg_addrs.tolist(), block_ids.tolist()))
+
+            return invoke
+
+    monkeypatch.setattr(worker_utils, "_zero_kv_blocks_kernel", FakeKernel())
+    monkeypatch.setattr(
+        worker_utils,
+        "async_tensor_h2d",
+        lambda values, **kwargs: torch.tensor(values, dtype=torch.int64),
+    )
+
+    zeroer.zero_block_ids(([1], [2]))
+
+    assert calls == [
+        ([group0.data_ptr()], [1]),
+        ([group1.data_ptr()], [2]),
+    ]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_warmup_compiles_for_all_block_counts():
     """After warmup, no launch should trigger a first-request JIT compile.
