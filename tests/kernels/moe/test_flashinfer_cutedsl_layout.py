@@ -73,7 +73,8 @@ def _stub_experts(cls):
     obj.global_num_experts = 4
     obj.local_num_experts = 4
     obj.local_expert_offset = 0
-    obj._bias_up = obj._bias_gate = obj._down_bias = None
+    obj._w1_bias = obj._w2_bias = None
+    obj._weight_interleave = 16
     obj.gemm1_alpha = obj.gemm1_beta = obj.gemm1_clamp_limit = None
     return obj
 

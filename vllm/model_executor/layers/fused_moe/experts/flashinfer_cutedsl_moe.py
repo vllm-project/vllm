@@ -14,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    flashinfer_cutedsl_weight_interleave,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -67,8 +70,9 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta
+        self._weight_interleave = flashinfer_cutedsl_weight_interleave()
         half_layout = quant_config.quant_dtype in ("mxfp4", "mxfp8")
-        self._bias_gate, self._bias_up, self._down_bias = self._prepare_biases(
+        self._w1_bias, self._w2_bias = self._prepare_biases(
             quant_config.w1_bias,
             quant_config.w2_bias,
             half_layout=half_layout,
@@ -80,7 +84,7 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         half_layout = self.quant_dtype in ("mxfp4", "mxfp8")
-        self._bias_gate, self._bias_up, self._down_bias = self._prepare_biases(
+        self._w1_bias, self._w2_bias = self._prepare_biases(
             self.w1_bias,
             self.w2_bias,
             half_layout=half_layout,
@@ -113,6 +117,10 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
             (kNvfp4Static, kNvfp4Dynamic),
             (kMxfp4Static, kMxfp8Dynamic),
         ]
+        cap = current_platform.get_device_capability()
+        if cap is not None and cap.to_int() == 107:
+            # SM107 only has the W4A4 kernel.
+            SUPPORTED_W_A = SUPPORTED_W_A[:1]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
@@ -160,32 +168,23 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
         *,
         half_layout: bool,
         activation: MoEActivation,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """MXFP4 convert already emits [up | gate] halves; else normalize."""
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """The kernel splits w1_bias into [up | gate]; MXFP4 convert already
+        emits that layout, else reorder into it."""
         from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
             reorder_w13_to_w31_for_flashinfer_cutedsl,
         )
 
-        if w1_bias is None:
-            bias_gate, bias_up = None, None
-        else:
-            bias = (
-                w1_bias if w1_bias.dtype == torch.float32 else w1_bias.to(torch.float32)
-            )
+        if w1_bias is not None:
+            w1_bias = w1_bias.to(torch.float32)
             if not half_layout:
-                bias = reorder_w13_to_w31_for_flashinfer_cutedsl(
-                    activation, bias, bias
+                w1_bias = reorder_w13_to_w31_for_flashinfer_cutedsl(
+                    activation, w1_bias, w1_bias
                 )[0]
-            half = bias.shape[1] // 2
-            bias_up = bias[:, :half].contiguous()
-            bias_gate = bias[:, half:].contiguous()
-        if w2_bias is None:
-            down_bias = None
-        elif w2_bias.dtype == torch.float32 and w2_bias.is_contiguous():
-            down_bias = w2_bias
-        else:
-            down_bias = w2_bias.to(torch.float32).contiguous()
-        return bias_gate, bias_up, down_bias
+            w1_bias = w1_bias.contiguous()
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32).contiguous()
+        return w1_bias, w2_bias
 
     def _fused_moe(
         self,
@@ -267,11 +266,10 @@ class FlashInferCuteDSLExpertsBase(mk.FusedMoEExperts):
             activation_type=activation_to_flashinfer_int(
                 MoEActivation.SILU if activation == MoEActivation.SITU else activation
             ),
-            bias_up=self._bias_up,
-            bias_gate=self._bias_gate,
-            down_bias=self._down_bias,
+            w1_bias=self._w1_bias,
+            w2_bias=self._w2_bias,
             quant_mode="w4a4" if self.quant_dtype == "nvfp4" else "w4a8",
-            weight_interleave=16,
+            weight_interleave=self._weight_interleave,
             router_logits=router_logits,
             **swiglu_kwargs,
         )

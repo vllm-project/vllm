@@ -1096,6 +1096,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8:
         from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            flashinfer_cutedsl_weight_interleave,
             interleave_linear_and_gate,
             reorder_w13_to_w31_for_flashinfer_cutedsl,
         )
@@ -1148,9 +1149,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             if w2_bias is not None:
                 w2_bias = torch.nn.functional.pad(w2_bias, (0, h_pad))
 
-        w13_weight = interleave_linear_and_gate(w13_weight, group_size=16, dim=1)
+        interleave = flashinfer_cutedsl_weight_interleave()
+        w13_weight = interleave_linear_and_gate(
+            w13_weight, group_size=interleave, dim=1
+        )
         w13_weight_scale = interleave_linear_and_gate(
-            w13_weight_scale, group_size=16, dim=1
+            w13_weight_scale, group_size=interleave, dim=1
         )
 
         # Swizzle scales for CuteDSL kernel (swizzle_blockscale asserts e4m3, hence the
