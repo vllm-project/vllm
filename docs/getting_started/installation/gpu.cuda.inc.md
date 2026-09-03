@@ -496,11 +496,15 @@ kernel. Validate the exact driver version on the target system.
 
 NVIDIA also publishes a CUDA 13.4 developer-preview apt repo publicly
 (`packages.nvidia.com`), and `pytorch/manylinux2_28-builder` has a public
-`cuda13.4`-tagged image on Docker Hub. Set `CUDA_PREVIEW_APT_REPO` and
-`CUDA_PREVIEW_APT_SUITE` to register that apt repo for `FINAL_BASE_IMAGE`
-(no public `nvidia/cuda:13.4` image exists yet, so `FINAL_BASE_IMAGE` stays a
-plain `ubuntu:24.04`), and use the public `manylinux2_28-builder:cuda13.4`
-image for `BUILD_BASE_IMAGE` instead of an internal one:
+`cuda13.4`-tagged image on Docker Hub. For `FINAL_BASE_IMAGE`, use the public,
+multi-arch `nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04`
+image instead of plain `ubuntu:24.04` - it already bundles nvcc/nvrtc-dev,
+`PATH`/`CUDA_HOME`, NCCL 2.30.7, and GDRCopy 2.5.1, so none of the
+`ubuntu:24.04`-specific workarounds in this Dockerfile are needed.
+`CUDA_PREVIEW_APT_REPO`/`CUDA_PREVIEW_APT_SUITE` are still set below (harmless
+no-op against this image, since it already has everything they'd otherwise
+install) and use the public `manylinux2_28-builder:cuda13.4` image for
+`BUILD_BASE_IMAGE` instead of an internal one:
 
 ??? console "CUDA 13.4 public build command"
 
@@ -521,7 +525,7 @@ image for `BUILD_BASE_IMAGE` instead of an internal one:
       --build-arg CUDA_PREVIEW_APT_REPO=https://packages.nvidia.com/noble \
       --build-arg CUDA_PREVIEW_APT_SUITE=prerelease/cuda/13.4.0 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
-      --build-arg FINAL_BASE_IMAGE="ubuntu:24.04" \
+      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
       .
     ```
 

@@ -11,9 +11,12 @@ torchaudio==2.11.0.dev20260903+cu134
 
 # docker/Dockerfile strips these two from requirements/cuda.txt whenever
 # INSTALL_RUBIN_PRERELEASE=true, so they must be pinned here instead to
-# still get installed. Same versions as requirements/cuda.txt's own
-# defaults - nvidia-cutlass-dsl[cu13]==4.6.2's missing sm_107a arch-enum
-# entry is worked around via CUTE_DSL_ARCH=sm_100f (docker/Dockerfile ENV),
-# no version bump needed.
-nvidia-cutlass-dsl[cu13]==4.6.2
+# still get installed. nvidia-cutlass-dsl bumped past requirements/cuda.txt's
+# own 4.6.2 default to 4.8.0.dev0 (only public release with sm_107a in its
+# Arch enum at time of writing) - confirmed via live testing that this
+# alone (no CUTE_DSL_ARCH override needed) resolves the sm_107a KeyError.
+# docker/Dockerfile still sets CUTE_DSL_ARCH=sm_100f unconditionally as a
+# fallback for the internal INSTALL_RUBIN_PRERELEASE path, which may still
+# pin an older cutlass-dsl without sm_107a.
+nvidia-cutlass-dsl[cu13]==4.8.0.dev0
 flashinfer-python==0.6.18
