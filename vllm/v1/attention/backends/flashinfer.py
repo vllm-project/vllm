@@ -1123,7 +1123,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                if self.has_sinks and current_platform.is_device_capability_family(120):
+                if self.has_sinks and (
+                    current_platform.is_device_capability(90)
+                    or current_platform.is_device_capability_family(120)
+                ):
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
                             self._get_workspace_buffer(),
@@ -1154,7 +1157,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
-                if self.has_sinks and current_platform.is_device_capability_family(120):
+                if self.has_sinks and (
+                    current_platform.is_device_capability(90)
+                    or current_platform.is_device_capability_family(120)
+                ):
                     assert not self.is_kvcache_nvfp4
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
                         self._get_workspace_buffer(),
