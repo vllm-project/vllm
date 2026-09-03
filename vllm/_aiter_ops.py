@@ -1747,6 +1747,7 @@ class rocm_aiter_ops:
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+    _FUSED_QK_ROPE_CACHE_MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1778,6 +1779,9 @@ class rocm_aiter_ops:
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+        cls._FUSED_QK_ROPE_CACHE_MLA_ENABLED = (
+            envs.VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA
+        )
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1979,6 +1983,50 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_fused_qk_rope_cache_mla_enabled(cls) -> bool:
+        return (
+            cls._AITER_ENABLED
+            and cls._MLA_ENABLED
+            and cls._FUSED_QK_ROPE_CACHE_MLA_ENABLED
+        )
+
+    @staticmethod
+    def fused_qk_rope_concat_and_cache_mla(
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+    ) -> None:
+        from aiter import fused_qk_rope_concat_and_cache_mla
+
+        fused_qk_rope_concat_and_cache_mla(
+            q_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            kv_cache,
+            q_out,
+            slot_mapping,
+            k_scale,
+            q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox=is_neox,
+            is_nope_first=True,
+        )
 
     @classmethod
     @if_aiter_supported

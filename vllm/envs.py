@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA: bool = False
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1293,6 +1294,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Fuse q/k RoPE + MLA KV-cache write + fp8 query assembly for decode-only
+    # batches into AITER's fused_qk_rope_concat_and_cache_mla kernel (the
+    # kernel ATOM uses). ROCm AITER MLA backend, fp8 KV cache only.
+    "VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA", "False").lower()
+        in ("true", "1")
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through

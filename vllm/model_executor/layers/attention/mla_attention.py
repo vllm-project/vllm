@@ -679,6 +679,130 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+        # VLLM_ROCM_USE_AITER_FUSED_QK_ROPE_CACHE_MLA:
+        # when active this layer owns rope and the KV-cache write; decode-only
+        # batches use AITER's fused kernel, otherwise the eager fallback.
+        self.rotary_emb: torch.nn.Module | None = None
+        self.fused_qk_rope_cache_mla = False
+        self._fused_rope_cos: torch.Tensor | None = None
+        self._fused_rope_sin: torch.Tensor | None = None
+
+    def attach_rotary_emb(self, rotary_emb: torch.nn.Module | None) -> None:
+        """Enable the fused rope + KV-cache + fp8-query path when eligible."""
+        self.rotary_emb = rotary_emb
+        # Decided once at load; any failing condition keeps main's path.
+        self.fused_qk_rope_cache_mla = bool(
+            rotary_emb is not None
+            and hasattr(rotary_emb, "cos_sin_cache")
+            and rocm_aiter_ops.is_fused_qk_rope_cache_mla_enabled()
+            and self.attn_backend.get_name() == "ROCM_AITER_MLA"
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "fp8_ds_mla"
+            and getattr(self.impl, "supports_quant_query_input", False)
+            and not self.use_sparse
+            and not self.use_pcp
+            and self.impl.dcp_world_size <= 1
+            and not self.dcp_q_replicate
+        )
+        if self.fused_qk_rope_cache_mla:
+            logger.info_once(
+                "MLA: using AITER fused_qk_rope_concat_and_cache_mla for "
+                "decode-only batches (rope + KV-cache write + fp8 q assembly)."
+            )
+
+    def _fused_rope_cos_sin(
+        self, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """AITER takes separate contiguous cos/sin tables; vLLM stores one
+        fused cos_sin_cache, so split and cache per layer."""
+        if self._fused_rope_cos is None or self._fused_rope_cos.dtype != dtype:
+            assert self.rotary_emb is not None
+            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            self._fused_rope_cos = cos.to(dtype).contiguous()
+            self._fused_rope_sin = sin.to(dtype).contiguous()
+        assert self._fused_rope_sin is not None
+        return self._fused_rope_cos, self._fused_rope_sin
+
+    def _fused_rope_unfused_fallback(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Prefill/mixed (or no cache yet): eagerly run the same fused
+        rope+cache kernel the baseline compile pass produces. Rotates q_pe in
+        place; returns the rotated k_pe."""
+        assert self.rotary_emb is not None
+        _, _, raw_kv_cache, layer_slot_mapping = get_attention_context(
+            self.layer_name
+        )
+        q_pe = q[..., self.qk_nope_head_dim :]
+        if layer_slot_mapping is not None and raw_kv_cache.numel() > 0:
+            # slot_mapping may be padded past num_actual_tokens (graph-size
+            # padding); the kernel requires q rows >= slot rows, so trim.
+            if layer_slot_mapping.size(0) > q_pe.size(0):
+                layer_slot_mapping = layer_slot_mapping[: q_pe.size(0)]
+            # one launch: rope + fp8 cache write; the kernel takes strides,
+            # so the split view of k_pe needs no contiguous() copy
+            k_pe = k_pe.squeeze(1)
+            ops.concat_and_cache_mla_rope_fused(
+                positions,
+                q_pe,
+                k_pe,
+                k_c_normed,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                layer_slot_mapping,
+                raw_kv_cache.squeeze(1) if raw_kv_cache.dim() == 4 else raw_kv_cache,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
+            return k_pe.unsqueeze(1)
+        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(positions, q_pe, k_pe)
+        return k_pe
+
+    def _fused_qk_rope_concat_and_cache(
+        self,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        positions: torch.Tensor,
+        fp8_attention: bool,
+    ) -> torch.Tensor:
+        """Decode-only: one AITER launch for rope(q_pe, k_pe), the fp8 KV-cache
+        write of [kv_c | k_pe] and the assembled fp8 query [ql_nope | q_pe]."""
+        B, N, L = ql_nope.shape
+        P = q_pe.shape[-1]
+        q_out = torch.empty(
+            (B, N, L + P),
+            dtype=current_platform.fp8_dtype() if fp8_attention else ql_nope.dtype,
+            device=ql_nope.device,
+        )
+        _, _, _, layer_slot_mapping = get_attention_context(self.layer_name)
+        if layer_slot_mapping is not None and layer_slot_mapping.size(0) > B:
+            # same padded-slot_mapping trim as the prefill fallback
+            layer_slot_mapping = layer_slot_mapping[:B]
+        cos, sin = self._fused_rope_cos_sin(ql_nope.dtype)
+        rocm_aiter_ops.fused_qk_rope_concat_and_cache_mla(
+            ql_nope,
+            q_pe,
+            kv_c,
+            k_pe.squeeze(1),
+            kv_cache.view(-1, 1, L + P),
+            q_out,
+            layer_slot_mapping,
+            self._k_scale,
+            self._q_scale,
+            positions,
+            cos,
+            sin,
+            is_neox=self.rotary_emb.is_neox_style,  # type: ignore[union-attr]
+        )
+        return q_out
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
@@ -721,7 +845,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        fused_rope_cache = self.fused_qk_rope_cache_mla and positions is not None
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -752,14 +878,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.use_pcp,
                 )
             )
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_for_cache,
-                kpe_for_cache,
-                self_kv_cache,
-                layer_slot_mapping,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            if not fused_rope_cache:
+                # fused path: the cache is written inside forward_impl instead
+                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                    kv_for_cache,
+                    kpe_for_cache,
+                    self_kv_cache,
+                    layer_slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -769,17 +897,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata,
                 output=output,
                 q_dcp_replicated=q_dcp_replicated,
+                positions=positions,
             )
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                encoded,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            kv_cache_dummy_dep = None
+            if not fused_rope_cache:
+                # fused path: the cache is written inside forward_impl instead
+                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    encoded,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
@@ -789,6 +921,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
                 q_dcp_replicated=q_dcp_replicated,
+                positions=positions,
             )
             return output
 
@@ -807,6 +940,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -865,6 +999,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
+        fused_rope_cache = self.fused_qk_rope_cache_mla and positions is not None
+        if fused_rope_cache:
+            positions = positions[:num_actual_toks]  # type: ignore[index]
         if fp8_attention and self.kv_cache_dtype not in (
             # Opaque per-token byte formats stay as raw uint8
             "fp8_ds_mla",
@@ -901,6 +1038,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
         )
+
+        if fused_rope_cache and (num_mha_tokens > 0 or kv_cache.numel() == 0):
+            # Prefill or mixed batch: un-fused rope + cache write, then the
+            # regular paths below see rotated q/k_pe exactly as before.
+            k_pe = self._fused_rope_unfused_fallback(
+                q, k_c_normed, k_pe, kv_cache, positions  # type: ignore[arg-type]
+            )
+            fused_rope_cache = False
 
         if num_mha_tokens > 0:
             if mha_use_quant_output:
@@ -997,7 +1142,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if fused_rope_cache:
+                # decode-only: one AITER launch for rope + cache + fp8 q assembly
+                mqa_q = self._fused_qk_rope_concat_and_cache(
+                    mqa_ql_nope,
+                    mqa_q_pe,
+                    k_c_normed[:num_mqa_tokens],
+                    k_pe[:num_mqa_tokens],
+                    kv_cache,
+                    positions[:num_mqa_tokens],  # type: ignore[index]
+                    fp8_attention,
+                )
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -1390,6 +1546,7 @@ def unified_mla_attention_with_output(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1411,6 +1568,7 @@ def unified_mla_attention_with_output(
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
+        positions=positions,
     )
 
 
@@ -1428,6 +1586,7 @@ def unified_mla_attention_with_output_fake(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 
