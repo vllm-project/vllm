@@ -30,10 +30,6 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
-# Largest per-token gap, in nats, at which a divergence still counts as a tie.
-# Measured on tiny-mixtral: ties span 0.000009..0.004810, the failure is 0.018413.
-CROSS_LOGPROB_TOL = 0.025
-
 
 # @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
@@ -243,12 +239,11 @@ def test_models(
 
             # HF is unloaded, but the sequences share every token before the
             # divergence, so only the final term differs from HF's own rows.
-            vllm_seq_in_hf = (
-                sum(hf_rows[pos, hf_ids[pos]].item() for pos in range(hf_idx))
-                + hf_rows[hf_idx, vllm_token_id].item()
-            )
+            vllm_seq_in_hf = [
+                hf_rows[pos, hf_ids[pos]].item() for pos in range(hf_idx)
+            ] + [hf_rows[hf_idx, vllm_token_id].item()]
 
-            return sum(hf_seq_in_vllm), vllm_seq_in_hf
+            return sum(hf_seq_in_vllm), sum(vllm_seq_in_hf)
 
         # Called here rather than after the block so that vLLM is still alive
         # to score a divergence.
@@ -258,7 +253,9 @@ def test_models(
             name_0="hf",
             name_1="vllm",
             cross_scorer=cross_score,
-            cross_logprob_tol=CROSS_LOGPROB_TOL,
+            # Largest per-token gap, in nats, still counted as a tie. Measured
+            # on tiny-mixtral: ties span 0.000009..0.004810, failure 0.018413.
+            cross_logprob_tol=0.025,
         )
 
     if prompt_embeds is not None:
