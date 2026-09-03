@@ -421,13 +421,6 @@ def _splitk_config(base_programs: int, is_prefill: bool) -> tuple[int, int, int]
     """Return (BLOCK_N, target_splits, num_warps) for the split-K kernel.
 
     Tuned on GB300 for the Qwen3.8-Flash-Next TP1, TP2, and TP4 shapes.
-    Past the decode table (bp > 2048) the prefill profile uses narrow
-    no-split tiles: prefill/mixed batches have causally ragged per-row work
-    (each row's valid extent ramps with its position), while decode/verify
-    batches are uniform-extent (every row at full budget) and keep the wide
-    entry. Measured: no single config serves both distributions within ~3%.
-    is_prefill is capture-stable: at FULL-graph capture max_query_len is the
-    uniform decode/verify length by construction, identical at replay.
     """
     if base_programs > 2048:
         return (32, 1, 1) if is_prefill else (64, 1, 2)

@@ -214,9 +214,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.total_num_heads % tp_size:
             raise ValueError("QSA attention heads must be divisible by TP size")
         self.num_heads = self.total_num_heads // tp_size
-        # Decode/verify batches have at most 1 + num_spec query tokens per
-        # request; the sparse-attention config table splits its top region
-        # on this (is_prefill = max_query_len > _max_decode_query_len).
         self._max_decode_query_len = 1 + vllm_config.num_speculative_tokens
         self.total_num_kv_heads = int(config.num_key_value_heads)
         if self.total_num_kv_heads >= tp_size:
