@@ -761,20 +761,28 @@ def test_qsa_block_expansion_correctness() -> None:
 
 @requires_qsa_kernels
 @pytest.mark.parametrize(
-    ("num_rows", "num_query_heads", "num_kv_heads", "page_size", "is_prefill"),
+    (
+        "num_rows",
+        "num_query_heads",
+        "num_kv_heads",
+        "page_size",
+        "is_prefill",
+        "num_requests",
+    ),
     [
-        # Kernel-visible pages with --block-size 256 and hybrid-cache alignment.
-        # The shape sweep spans the wrapper's profile regions (base_programs =
-        # rows x kv_heads), including both top-region is_prefill variants.
-        pytest.param(1, 24, 2, 1792, True, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1792, True, id="tp2_r16"),
-        pytest.param(32, 6, 1, 1024, True, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1792, True, id="tp1_r128"),
-        pytest.param(257, 6, 1, 1024, True, id="tp4_r257"),
-        pytest.param(513, 6, 1, 1024, True, id="tp4_r513"),
-        pytest.param(1024, 24, 2, 1792, True, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1792, True, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1792, False, id="tp1_r2048_uniform"),
+        # Production page sizes from hybrid-cache block alignment: 784/800
+        # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
+        # splits are per-rank TP1/TP2/TP4; the largest batch runs both
+        # is_prefill variants.
+        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
+        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -783,10 +791,10 @@ def test_qsa_sparse_paged_attention_correctness(
     num_kv_heads: int,
     page_size: int,
     is_prefill: bool,
+    num_requests: int,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
-    num_requests = 2
     num_selected_pages = 64
     # Keep the newest page outside the synthetic top-k as causal headroom.
     num_pages_per_request = num_selected_pages + 1
@@ -814,20 +822,22 @@ def test_qsa_sparse_paged_attention_correctness(
     rows_per_request = math.ceil(num_rows / num_requests)
     row_indices = torch.arange(num_rows, device="cuda", dtype=torch.int32)
     token_to_req = row_indices // rows_per_request
-    request_row_counts = torch.tensor(
-        [rows_per_request, num_rows - rows_per_request],
-        device="cuda",
-        dtype=torch.int32,
+    # Uniform row split; the last request takes the remainder (possibly 0).
+    request_row_counts = torch.full(
+        (num_requests,), rows_per_request, device="cuda", dtype=torch.int32
     )
+    request_row_counts[-1] = num_rows - rows_per_request * (num_requests - 1)
 
-    # Request 1 is short-context: its positions sit within the first few
-    # selection tiles, so the clip bound lands on a small tile boundary and
-    # an off-by-one there moves those rows far outside the tolerance.
-    context_lengths = torch.tensor(
-        [num_pages_per_request * page_size - 1, rows_per_request + 8],
+    # Mix context lengths: every third request is short-context, attending
+    # to only its first few pages; the rest fill their cache.
+    context_lengths = torch.full(
+        (num_requests,),
+        num_pages_per_request * page_size - 1,
         device="cuda",
         dtype=torch.int32,
     )
+    short_requests = torch.arange(num_requests, device="cuda") % 3 == 1
+    context_lengths[short_requests] = request_row_counts[short_requests] + 8
     block_topk = indexer_budget // indexer_compress_ratio
     compressed_blocks_per_page = page_size // indexer_compress_ratio
     selection = torch.arange(block_topk, device="cuda")
