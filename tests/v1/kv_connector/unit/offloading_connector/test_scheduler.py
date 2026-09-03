@@ -587,13 +587,13 @@ def test_external_cache_hit_sources_preserve_partial_tail_origin():
 
     def get_load_source(key, req_context):
         block_hash = get_offload_block_hash(key)
-        return "p2p" if block_hash == b"h3" else "cpu"
+        return "p2p" if block_hash == b"h3" else "host"
 
     scheduler.manager.get_load_source.side_effect = get_load_source
 
     assert scheduler.get_external_cache_hit_sources(request, 28) == [
         ("p2p", 16),
-        ("cpu", 12),
+        ("host", 12),
     ]
 
 
@@ -634,7 +634,7 @@ def test_external_cache_hit_sources_fall_back_for_conflicting_groups(
         ]
     scheduler._req_status[request.request_id] = req_status
     runner.manager.get_load_source.side_effect = lambda key, req_context: (
-        "cpu" if get_offload_group_idx(key) == 0 else "p2p"
+        "host" if get_offload_group_idx(key) == 0 else "p2p"
     )
 
     assert scheduler.get_external_cache_hit_sources(request, 2 * block_size) == [

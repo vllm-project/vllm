@@ -211,8 +211,8 @@ class SchedulerFixture:
     num_groups: int = 1
 
 
-@pytest.mark.parametrize("backend", ["cpu", "disk"])
-def test_connector_reports_configured_cache_source(tmp_path, backend: str):
+@pytest.mark.parametrize(("backend", "source"), [("cpu", "host"), ("disk", "disk")])
+def test_connector_reports_configured_cache_source(tmp_path, backend: str, source: str):
     kv_cache_config = _make_kv_cache_config(num_blocks=4)
     vllm_config = _make_vllm_config()
     extra_config = {
@@ -232,7 +232,7 @@ def test_connector_reports_configured_cache_source(tmp_path, backend: str):
         kv_cache_config,
     )
 
-    assert connector.get_external_cache_hit_sources(None, 32) == [(backend, 32)]  # type: ignore[arg-type]
+    assert connector.get_external_cache_hit_sources(None, 32) == [(source, 32)]  # type: ignore[arg-type]
     assert connector.get_external_cache_hit_sources(None, 0) == []  # type: ignore[arg-type]
 
 

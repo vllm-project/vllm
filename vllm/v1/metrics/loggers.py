@@ -720,7 +720,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name="vllm:prompt_tokens_cached_by_source",
             documentation=(
                 "Number of cached prompt tokens by the cache tier that "
-                "supplied their KV. Sources are device, cpu, disk, p2p, and "
+                "supplied their KV. Sources are device, host, disk, p2p, and "
                 "external."
             ),
             labelnames=labelnames + ["source"],

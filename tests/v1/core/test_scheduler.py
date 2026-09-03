@@ -2517,7 +2517,7 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
         block_size=block_size,
     )[0]
     assert scheduler.connector is not None
-    get_sources = Mock(return_value=[("p2p", block_size), ("cpu", block_size)])
+    get_sources = Mock(return_value=[("p2p", block_size), ("host", block_size)])
     monkeypatch.setattr(
         scheduler.connector,
         "get_external_cache_hit_sources",
@@ -2531,7 +2531,7 @@ def test_kv_connector_records_external_cache_hit_sources(monkeypatch):
     assert request.prefill_stats is not None
     assert request.prefill_stats.external_cached_token_sources == [
         ("p2p", block_size),
-        ("cpu", block_size),
+        ("host", block_size),
     ]
 
 
