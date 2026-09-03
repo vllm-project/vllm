@@ -7,7 +7,6 @@ from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
@@ -30,6 +29,13 @@ AITER_MODEL_LIST = [
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
 ]
+
+# How wide a slice of HF's distribution to keep so vLLM's pick can be looked up
+# after HF is unloaded. A near-tie sits near the top by definition.
+CROSS_SCORE_WIDE_K = 256
+# Largest per-token gap, in nats, at which a divergence still counts as a tie.
+# Measured on tiny-mixtral: ties span 0.000009..0.004810, the failure is 0.018413.
+CROSS_LOGPROB_TOL = 0.025
 
 
 # @maybe_test_rocm_aiter
@@ -157,8 +163,13 @@ def test_models(
         trust_remote_code=model_info.trust_remote_code,
     ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs
+            example_prompts,
+            max_tokens,
+            num_logprobs,
+            wide_logprobs_k=CROSS_SCORE_WIDE_K,
         )
+        # Plain Python data, so it outlives the runner.
+        hf_wide_logprobs = hf_model.wide_logprobs
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
@@ -219,18 +230,43 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
-    # On MI355 with The Rock 7.14, overlaps stop at token 27.
-    # Issue arises due to hipblaslt kernel selections differences between ROCm
-    # versions.
-    skip_last_tokens_0 = 0 if not on_gfx950() else 5
+        def cross_score(prompt_idx, hf_idx, vllm_idx, hf_token_id, vllm_token_id):
+            hf_rows = hf_wide_logprobs[prompt_idx]
+            if vllm_token_id not in hf_rows[hf_idx]:
+                # The two models disagree by more than a tie could explain.
+                return None
 
-    check_logprobs_close(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-        skip_last_tokens_0=skip_last_tokens_0,
-    )
+            hf_ids = list(hf_outputs[prompt_idx][0])
+
+            # vLLM is still resident, so score HF's sequence directly.
+            prompt_ids = list(
+                vllm_model.llm.get_tokenizer()(example_prompts[prompt_idx])[
+                    "input_ids"
+                ]
+            )
+            (hf_seq_in_vllm,) = vllm_model.score_forced_continuations(
+                prompt_ids, [hf_ids[: hf_idx + 1]]
+            )
+
+            # HF is unloaded, but the sequences share every token before the
+            # divergence, so only the final term differs from HF's own rows.
+            vllm_seq_in_hf = sum(
+                hf_rows[pos][hf_ids[pos]] for pos in range(hf_idx)
+            ) + hf_rows[hf_idx][vllm_token_id]
+
+            return sum(hf_seq_in_vllm), vllm_seq_in_hf
+
+        # Called here rather than after the block so that vLLM is still alive
+        # to score a divergence.
+        check_logprobs_close(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+            cross_scorer=cross_score,
+            cross_logprob_tol=CROSS_LOGPROB_TOL,
+        )
+
     if prompt_embeds is not None:
         check_logprobs_close(
             outputs_0_lst=vllm_outputs,

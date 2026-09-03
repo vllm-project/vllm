@@ -454,6 +454,8 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         self.device = self.get_default_device()
+        # Populated by generate_greedy_logprobs_limit(wide_logprobs_k=...).
+        self.wide_logprobs: list[list[dict[int, float]]] | None = None
         self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
@@ -801,12 +803,16 @@ class HfRunner:
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
         num_logprobs: int | None,
-    ) -> tuple[list[dict[int, float]], int]:
+        wide_logprobs_k: int | None = None,
+    ) -> tuple[list[dict[int, float]], int, list[dict[int, float]] | None]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
 
         # convert to dict
         seq_logprobs_lst: list[dict[int, float]] = []
+        wide_logprobs_lst: list[dict[int, float]] | None = (
+            [] if wide_logprobs_k else None
+        )
         for tok_idx, tok_logprobs in enumerate(seq_logprobs):
             # drop prompt logprobs
             if tok_idx == 0:
@@ -819,9 +825,25 @@ class HfRunner:
 
             seq_logprobs_lst.append(tok_logprobs_dct)
 
+            if wide_logprobs_lst is not None:
+                # The full log_softmax row is already materialized, so a second
+                # wider topk over the same tensor is nearly free.
+                wide_topk = tok_logprobs.topk(
+                    min(wide_logprobs_k, tok_logprobs.shape[-1])
+                )
+                wide_logprobs_lst.append(
+                    {
+                        token_id.item(): logprob.item()
+                        for token_id, logprob in zip(
+                            wide_topk.indices[0], wide_topk.values[0]
+                        )
+                    }
+                )
+
         return (
             seq_logprobs_lst,
             output_len,
+            wide_logprobs_lst,
         )
 
     def generate_greedy_logprobs_limit(
@@ -834,8 +856,15 @@ class HfRunner:
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
         tokenization_kwargs: dict[str, Any] | None = None,
+        wide_logprobs_k: int | None = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
+        """
+        If `wide_logprobs_k` is given, a wider top-k of the same distributions
+        is additionally recorded on `self.wide_logprobs`, indexed as
+        `[prompt][position] -> {token_id: logprob}`. It is plain Python data,
+        so it stays usable after this runner has released the model.
+        """
         all_inputs = self.get_inputs(
             prompts,
             images=images,
@@ -845,6 +874,7 @@ class HfRunner:
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
+        all_wide_logprobs: list[list[dict[int, float]]] = []
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
 
@@ -870,14 +900,21 @@ class HfRunner:
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
+                wide_logprobs_lst,
+            ) = self._hidden_states_to_logprobs(
+                hidden_states, num_logprobs, wide_logprobs_k
+            )
 
             all_logprobs.append(seq_logprobs_lst)
+            if wide_logprobs_lst is not None:
+                all_wide_logprobs.append(wide_logprobs_lst)
             seq_ids = output.sequences[0]
             output_len = len(seq_logprobs_lst)
             output_ids = seq_ids[-output_len:]
             all_output_ids.append(output_ids.tolist())
             all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        self.wide_logprobs = all_wide_logprobs if wide_logprobs_k else None
 
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
         return [
@@ -1233,6 +1270,42 @@ class VllmRunner:
             videos=videos,
             **kwargs,
         )
+
+    def score_forced_continuations(
+        self,
+        prompt_token_ids: list[int],
+        continuations: list[list[int]],
+    ) -> list[list[float]]:
+        """
+        Teacher-forced per-token logprobs of each continuation, conditioned on
+        `prompt_token_ids`.
+
+        Returns one list per continuation, of the same length, holding the
+        logprob of each continuation token given everything before it. Summing
+        a list gives the joint logprob of that continuation; its last element
+        is the conditional logprob of the final token.
+
+        Every continuation is scored as its own sequence, so a token is
+        reachable no matter how low it ranks. All are submitted as one batch.
+        """
+        seqs = [list(prompt_token_ids) + list(c) for c in continuations]
+        outputs = self.generate_greedy_logprobs(
+            seqs, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
+        )
+
+        results: list[list[float]] = []
+        for continuation, output in zip(continuations, outputs):
+            output = cast(TokensTextLogprobsPromptLogprobs, output)
+            token_datas = cast(list[dict[int, Logprob] | None], output[3])
+            # The trailing prompt positions are the forced continuation.
+            tail = token_datas[len(token_datas) - len(continuation) :]
+            logprobs: list[float] = []
+            for token_id, token_data in zip(continuation, tail):
+                assert token_data is not None
+                logprobs.append(token_data[token_id].logprob)
+            results.append(logprobs)
+
+        return results
 
     def generate_prompt_perplexity(
         self, prompts: list[str], mask: Optional[list[str]] = None
