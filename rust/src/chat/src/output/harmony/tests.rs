@@ -13,7 +13,7 @@ use vllm_text::output::{
 use super::*;
 use crate::output::ChatOutputProcessor;
 use crate::request::{ChatRequest, ChatTool, ChatToolChoice, ResolvedToolContext};
-use crate::{AssistantMessageExt, ChatEvent, FinishReason};
+use crate::{AssistantMessageExt, ChatEvent, ChatTokenUsage, FinishReason};
 
 fn assistant_prefix() -> Vec<u32> {
     harmony_encoding()
@@ -125,11 +125,11 @@ fn interrupted_final_message_is_preserved() {
                     text: "hello".to_string(),
                 }],
             },
-            usage: vllm_llm::TokenUsage {
+            usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
                 cached_token_count: 0,
-            },
+            }),
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,
@@ -176,11 +176,11 @@ fn interrupted_analysis_message_is_preserved() {
                     text: "think".to_string(),
                 }],
             },
-            usage: vllm_llm::TokenUsage {
+            usage: ChatTokenUsage::from(vllm_llm::TokenUsage {
                 prompt_token_count: 0,
                 output_token_count: 0,
                 cached_token_count: 0,
-            },
+            }),
             finish_reason: FinishReason::stop_eos(),
             kv_transfer_params: None,
             ec_transfer_params: None,

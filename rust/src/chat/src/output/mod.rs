@@ -7,12 +7,11 @@ use std::sync::Arc;
 use futures::Stream;
 use trait_set::trait_set;
 use uuid::Uuid;
-use vllm_llm::TokenUsage;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use crate::FinishReason;
 use crate::error::Result;
-use crate::event::{AssistantBlockKind, ChatEvent};
+use crate::event::{AssistantBlockKind, ChatEvent, ChatTokenUsage};
 
 mod default;
 mod harmony;
@@ -35,6 +34,8 @@ pub(crate) enum AssistantEvent {
     TextDelta {
         kind: AssistantBlockKind,
         delta: String,
+        /// Number of generated tokens attributed to this delta, when available.
+        token_count: Option<usize>,
     },
     /// Per-decoded-update sample metadata: logprobs and/or output token IDs.
     LogprobsDelta {
@@ -47,7 +48,7 @@ pub(crate) enum AssistantEvent {
     /// `ToolCallStart`.
     ToolCallArgumentsDelta { delta: String },
     Done {
-        usage: TokenUsage,
+        usage: ChatTokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,
