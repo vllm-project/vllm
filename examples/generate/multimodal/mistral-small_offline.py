@@ -49,8 +49,8 @@ from vllm.multimodal.utils import encode_image_url
 # ```
 #
 # Usage:
-#     python demo.py simple
-#     python demo.py advanced
+#     python examples/generate/multimodal/mistral-small_offline.py simple
+#     python examples/generate/multimodal/mistral-small_offline.py advanced
 
 # Lower max_model_len and/or max_num_seqs on low-VRAM GPUs.
 # These scripts have been tested on 2x L40 GPUs
