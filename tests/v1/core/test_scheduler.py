@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolSpec,
     MambaSpec,
 )
 from vllm.v1.outputs import (
@@ -1131,6 +1132,106 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_heterogeneous_pool_preemption_frees_and_resumes_all_groups():
+    """Pool-local IDs survive scheduler preemption and full recomputation."""
+    block_size = 16
+    num_blocks = 11  # One null + ten usable blocks in each physical pool.
+    base = create_scheduler(
+        max_num_batched_tokens=100,
+        block_size=block_size,
+        num_blocks=num_blocks,
+        enable_prefix_caching=False,
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["wide"], spec),
+            KVCacheGroupSpec(["narrow"], spec),
+        ],
+        kv_cache_pools=[
+            KVCachePoolSpec((0,), num_blocks, 64, 0),
+            KVCachePoolSpec((1,), num_blocks, 4, num_blocks * 64),
+        ],
+    )
+    scheduler = Scheduler(
+        vllm_config=base.vllm_config,
+        kv_cache_config=kv_cache_config,
+        structured_output_manager=StructuredOutputManager(base.vllm_config),
+        block_size=block_size,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    requests = create_requests(num_requests=2, num_tokens=80, block_size=block_size)
+
+    scheduler.add_request(requests[0])
+    output0 = scheduler.schedule()
+    assert output0.scheduled_new_reqs[0].block_ids is not None
+    assert [len(ids) for ids in output0.scheduled_new_reqs[0].block_ids] == [5, 5]
+
+    # Admit the second in-flight request. Together they exhaust all ten usable
+    # IDs in each pool.
+    scheduler.add_request(requests[1])
+    output1 = scheduler.schedule()
+    assert output1.scheduled_new_reqs[0].block_ids is not None
+    assert [len(ids) for ids in output1.scheduled_new_reqs[0].block_ids] == [5, 5]
+    assert scheduler.kv_cache_manager.coordinator.get_num_free_blocks() == (0, 0)
+
+    scheduler.update_from_output(
+        output0,
+        ModelRunnerOutput(
+            req_ids=[requests[0].request_id],
+            req_id_to_index={requests[0].request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Request 0 now crosses a block boundary in both groups. The scheduler must
+    # preempt request 1, return its IDs to both owning pools, and allocate the
+    # new pair atomically to request 0.
+    scheduler.schedule()
+    assert requests[1].status == RequestStatus.PREEMPTED
+    assert scheduler.running == [requests[0]]
+    assert scheduler.kv_cache_manager.coordinator.get_num_free_blocks() == (4, 4)
+
+    # Its in-flight output is still committed even though it was preempted.
+    scheduler.update_from_output(
+        output1,
+        ModelRunnerOutput(
+            req_ids=[requests[1].request_id],
+            req_id_to_index={requests[1].request_id: 0},
+            sampled_token_ids=[[42]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert len(requests[1].output_token_ids) == 1
+    assert requests[1].output_token_ids[0] == 42
+
+    # Once request 0 releases both pools, request 1 is recomputed and resumes
+    # with six pool-local blocks in each group (80 prompt + one output token).
+    scheduler.finish_requests(requests[0].request_id, RequestStatus.FINISHED_ABORTED)
+    resumed = scheduler.schedule()
+    assert requests[1].status == RequestStatus.RUNNING
+    assert resumed.scheduled_new_reqs[0].block_ids is not None
+    assert [len(ids) for ids in resumed.scheduled_new_reqs[0].block_ids] == [6, 6]
+    assert all(
+        0 < block_id < num_blocks
+        for group_ids in resumed.scheduled_new_reqs[0].block_ids
+        for block_id in group_ids
+    )
 
 
 def test_prefix_cache_query_not_inflated_by_connector_defer():
