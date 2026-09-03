@@ -106,14 +106,18 @@ def _get_c_ptrs(
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
+# The one-shot kernel keeps the rank-dimension intermediate in registers.
+# Larger ranks require rank tiling, so route them through the two-kernel path.
+_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK = 128
+
 
 # ---------------------------------------------------------------------------
 # Fully-fused MoE-LoRA kernel (one-shot): shrink + expand combined into a single
 # launch with the rank-dim intermediate kept in registers. Used by the fast
-# path of `_fused_moe_lora` for `fully_sharded=False`. The legacy two-kernel
-# path (`_fused_moe_lora_kernel` above) is retained for `fully_sharded=True`
-# because that path needs to materialise the intermediate cache for an
-# all_reduce / all_gather between shrink and expand.
+# path of `_fused_moe_lora` for supported ranks with `fully_sharded=False`.
+# The legacy two-kernel path (`_fused_moe_lora_kernel` above) is retained for
+# larger ranks and for `fully_sharded=True`, where the intermediate cache must
+# be materialised for an all_reduce / all_gather between shrink and expand.
 # ---------------------------------------------------------------------------
 
 
@@ -349,8 +353,9 @@ def _run_fused_moe_lora_one_shot(
     # regressed across all M (+8 to +40%): the (64,32) fp32 accumulator +
     # widened B tile pushed register count past spill threshold, lowering
     # occupancy by more than the MMA gain saved.
-    assert rank <= 128, (
-        f"fused_moe_lora_one_shot supports max_lora_rank<=128; got rank={rank}"
+    assert rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK, (
+        "fused_moe_lora_one_shot supports "
+        f"max_lora_rank<={_FUSED_MOE_LORA_ONE_SHOT_MAX_RANK}; got rank={rank}"
     )
     BLOCK_R = max(triton.next_power_of_2(rank), 16)
 
@@ -1317,6 +1322,7 @@ def _fused_moe_lora_expand(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    add_inputs: bool = True,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
@@ -1407,7 +1413,7 @@ def _fused_moe_lora_expand(
         token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        ADD_INPUTS=True,
+        ADD_INPUTS=add_inputs,
         USE_B_L2_CACHE=True,
         sort_c=False,
         IS_PRIMARY=False,
@@ -1477,7 +1483,7 @@ def _fused_moe_lora(
     assert top_k_num == topk_weights.shape[1]
 
     # Fast path: single fused kernel
-    if not fully_sharded:
+    if not fully_sharded and max_lora_rank <= _FUSED_MOE_LORA_ONE_SHOT_MAX_RANK:
         M_pairs = topk_weights.numel()
         if (
             sorted_token_ids is None
@@ -1523,9 +1529,8 @@ def _fused_moe_lora(
         )
         return
 
-    assert add_inputs, (
-        "fused_moe_lora(add_inputs=False) is only supported on the "
-        "fully_sharded=False fast path"
+    assert add_inputs or not fully_sharded, (
+        "fused_moe_lora(add_inputs=False) is not supported with fully_sharded=True"
     )
 
     device = qcurr_hidden_states.device
@@ -1659,6 +1664,7 @@ def _fused_moe_lora(
         offset,
         use_gdc=use_gdc,
         use_tma=use_tma,
+        add_inputs=add_inputs,
     )
 
 
@@ -1768,6 +1774,7 @@ def _fused_moe_lora_expand_fake(
     offset: int = 0,
     use_gdc: bool = False,
     use_tma: bool = False,
+    add_inputs: bool = True,
 ) -> None:
     return
 
