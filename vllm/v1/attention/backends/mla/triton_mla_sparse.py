@@ -171,4 +171,4 @@ class TritonMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return True
+        return capability.major >= 8
