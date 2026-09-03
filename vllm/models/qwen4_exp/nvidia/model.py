@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -888,6 +889,7 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
+            self.input_norm = FusedInputNorm.identity()
             self._tower_model_names = []
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
@@ -901,6 +903,7 @@ class Qwen4ExpForConditionalGeneration(
                     quant_config=quant_config,
                     prefix=maybe_prefix(prefix, "visual"),
                 )
+                self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         self.use_deepstack = (
             not self.language_model_only
