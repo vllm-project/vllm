@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -806,6 +807,36 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         )
 
 
+def _reject_incomplete_nvfp4_scales(
+    layer: torch.nn.Module,
+    scale_names: list[str],
+    *,
+    unit: str = "output partitions",
+) -> None:
+    """Fail fast when a consumed NVFP4 global scale was never loaded.
+
+    These per-tensor scales are created full of NaN, so a scale the checkpoint
+    did not populate (or populated with a zero or non finite value) is still
+    invalid here. It would otherwise fold silently into the dequant math and
+    quietly corrupt the layer instead of raising. Each scale is treated as one
+    row per output partition (linear) or expert (MoE); ``unit`` only labels
+    those rows in the error message.
+    """
+    for name in scale_names:
+        scale = getattr(layer, name, None)
+        if scale is None:
+            continue
+        per_row = scale.detach().float().reshape(scale.shape[0], -1)
+        bad = ((per_row == 0) | ~per_row.isfinite()).any(dim=-1)
+        if bad.any():
+            bad_ids = bad.nonzero(as_tuple=True)[0].tolist()
+            raise ValueError(
+                f"NVFP4 checkpoint is missing or carries invalid values for "
+                f"'{name}' at {unit} {bad_ids}. This scale was not loaded and "
+                f"would corrupt the dequantized weights."
+            )
+
+
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
     MoE Method for FP4 Quantization.
@@ -925,13 +956,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            data=torch.full(
+                (num_experts, w13_num_shards), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, dtype=torch.float32),
+            data=torch.full((num_experts,), float("nan"), dtype=torch.float32),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -944,9 +977,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             global_num_experts if self.use_global_sf else num_experts
         )
         w13_input_scale = PerTensorScaleParameter(
-            data=torch.empty(
-                global_sf_num_experts,
-                w13_num_shards,
+            data=torch.full(
+                (global_sf_num_experts, w13_num_shards),
+                float("nan"),
                 dtype=torch.float32,
             ),
             weight_loader=weight_loader,
@@ -954,15 +987,34 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
-            data=torch.empty(global_sf_num_experts, dtype=torch.float32),
+            data=torch.full(
+                (global_sf_num_experts,), float("nan"), dtype=torch.float32
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
+
+    def _validate_loaded_expert_scales(self, layer: RoutedExperts) -> None:
+        """Reject missing per-expert scales, checking only the ones the selected
+        backend consumes. HUMMING and MARLIN drop the activation (input) global
+        scales in convert_to_nvfp4_moe_kernel_format (both set a13/a2 to None),
+        and MARLIN also serves the W4A16 MoE path whose checkpoints legitimately
+        omit input scales -- so only the weight global scales are required for
+        them. Every other backend is W4A4 and folds both input scales in."""
+        names = ["w13_weight_scale_2", "w2_weight_scale_2"]
+        if self.nvfp4_backend not in (
+            NvFp4MoeBackend.HUMMING,
+            NvFp4MoeBackend.MARLIN,
+        ):
+            names += ["w13_input_scale", "w2_input_scale"]
+
+        _reject_incomplete_nvfp4_scales(layer, names, unit="expert ids")
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        self._validate_loaded_expert_scales(layer)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
@@ -1878,7 +1930,8 @@ class KNvfp4Static(QuantKeyScheme):
             input_dim=1,
             output_dim=0,
         )
-        # Per-tensor global weight scale.
+        # Per-tensor global weight scale. NaN-init so an unloaded scale stays
+        # detectable in process(); a real checkpoint overwrites every row.
         self.register_params(
             layer,
             "weight_scale_2",
@@ -1886,6 +1939,7 @@ class KNvfp4Static(QuantKeyScheme):
             torch.float32,
             PerTensorScaleParameter,
             wl,
+            init=float("nan"),
         )
         # Per-block (group_size) weight scale.
         self.register_params(
@@ -1905,6 +1959,8 @@ class KNvfp4Static(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
+        # Both W4A4 and W4A16 consume this global weight scale below.
+        _reject_incomplete_nvfp4_scales(layer, ["weight_scale_2"])
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
@@ -1927,6 +1983,7 @@ class KNvfp4Dynamic(QuantKeyScheme):
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not ACT:
             self.reject(role)
+        # NaN-init so an unloaded input scale stays detectable in process().
         self.register_params(
             layer,
             "input_scale",
@@ -1934,11 +1991,15 @@ class KNvfp4Dynamic(QuantKeyScheme):
             torch.float32,
             PerTensorScaleParameter,
             wl,
+            init=float("nan"),
         )
 
     def process(self, layer, role) -> None:
         if role is not ACT:
             self.reject(role)
+        # W4A4 folds this global input scale into alpha below; W4A16 never
+        # reaches here (activation key is None, so this scheme is not built).
+        _reject_incomplete_nvfp4_scales(layer, ["input_scale"])
         if torch.unique(layer.input_scale).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global input scale differs across "
