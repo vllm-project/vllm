@@ -96,6 +96,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "kimi_k3_reasoning_parser",
         "KimiK3ReasoningParser",
     ),
+    "k2_horizon": (
+        "k2_horizon_reasoning_parser",
+        "K2HorizonReasoningParser",
+    ),
     "mimo": (
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
