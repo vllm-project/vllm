@@ -7,15 +7,18 @@ import random
 
 import pytest
 import torch
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LBHNCStoreLayout,
     LBNHCStoreLayout,
+    PoolKey,
     RankLocalStoreLayout,
+    endpoint_neutral_region_metadata,
 )
-from vllm.utils.math_utils import cdiv
 
 BLOCK_SIZE = 128
 
@@ -77,6 +80,90 @@ def test_rank_local_descriptors_handle_empty_and_invalid_chunks():
     assert layout.prepare_values([], [1, 2, 3], []) == ([], [], [])
     with pytest.raises(AssertionError):
         layout.prepare_values([(0, BLOCK_SIZE + 1)], [0, 1], [0])
+
+
+def test_semantic_region_key_is_endpoint_neutral():
+    prefill = KeyMetadata(
+        "test-model",
+        tp_rank=2,
+        pcp_rank=0,
+        dcp_rank=2,
+        pp_rank=0,
+        group_id=1,
+        cache_prefix="experiment",
+        store_namespace="@schema:v1",
+    )
+    decode = KeyMetadata(
+        "test-model",
+        tp_rank=2,
+        pcp_rank=0,
+        dcp_rank=2,
+        pp_rank=1,
+        group_id=5,
+        cache_prefix="experiment",
+        store_namespace="@schema:v1",
+    )
+
+    prefill_region = endpoint_neutral_region_metadata(prefill, "layer.4:target_conv")
+    decode_region = endpoint_neutral_region_metadata(decode, "layer.4:target_conv")
+
+    assert (
+        PoolKey(prefill_region, "abc").to_string()
+        == PoolKey(decode_region, "abc").to_string()
+    )
+    assert (
+        "@pp_rank:-1@group:-1@region:layer.4:target_conv@abc"
+        in PoolKey(prefill_region, "abc").to_string()
+    )
+
+
+def test_legacy_key_format_is_unchanged_without_region_id():
+    metadata = KeyMetadata("test-model", 1, 2, 3, 4, group_id=5)
+    assert (
+        PoolKey(metadata, "abc").to_string()
+        == "test-model@tp_rank:1@pcp2@dcp3@pp_rank:4@group:5@abc"
+    )
+
+
+def test_semantic_region_database_separates_content_length_from_stride():
+    database = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 1, 0, 1, 1, group_id=7),
+        block_size=16,
+    )
+    region = ChunkedTokenDatabase.from_semantic_region(
+        database,
+        region_id="layer.9:base_recurrent",
+        base_addr=0x1000,
+        block_stride=4096,
+        content_len=768,
+    )
+
+    assert region.key_for(BlockHash(b"hash")).startswith(
+        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:-1@group:-1"
+        "@region:layer.9:base_recurrent@"
+    )
+    assert region.prepare_value_for_block(3) == ([0x1000 + 3 * 4096], [768])
+
+    region.store_layout.set_block_stride([0])
+    assert region.prepare_value_for_block(3) == ([0x1000], [768])
+
+
+@pytest.mark.parametrize(
+    ("block_stride", "content_len"),
+    [(63, 64), (0, 0), (-1, 1)],
+)
+def test_semantic_region_database_rejects_invalid_geometry(
+    block_stride: int, content_len: int
+):
+    database = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), 16)
+    with pytest.raises(ValueError, match="stride"):
+        ChunkedTokenDatabase.from_semantic_region(
+            database,
+            region_id="layer.0:page",
+            base_addr=0x1000,
+            block_stride=block_stride,
+            content_len=content_len,
+        )
 
 
 @pytest.mark.parametrize(
