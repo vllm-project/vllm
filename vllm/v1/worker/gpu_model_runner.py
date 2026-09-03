@@ -173,6 +173,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.notifications import has_pending_worker_notifications
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -3551,6 +3552,7 @@ class GPUModelRunner(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
             kv_connector_output=kv_connector_output,
+            worker_notifications_pending=has_pending_worker_notifications(),
         )
 
         if raw_pooler_output is None or not any(finished_mask):
@@ -4876,6 +4878,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                worker_notifications_pending=has_pending_worker_notifications(),
             )
 
         if not self.use_async_scheduling:
