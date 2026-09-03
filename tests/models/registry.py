@@ -294,6 +294,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
+    "Glm5NextForCausalLM": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -363,6 +364,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "ai21labs/Jamba-tiny-dev",
             "random": "ai21labs/Jamba-tiny-random",
         },
+    ),
+    "K2HorizonForCausalLM": _HfExamplesInfo(
+        "IFM/K2-Horizon-36B",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
@@ -928,6 +934,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "zai-org/GLM-OCR",
         min_transformers_version="5.1.0",
     ),
+    "Glm5NextForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
         trust_remote_code=True,
@@ -1697,6 +1704,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
         min_transformers_version="5.1.0",
+    ),
+    "Glm5NextMTPModel": _HfExamplesInfo(
+        "zai-org/GLM-5.3-Flash",
+        speculative_model="zai-org/GLM-5.3-Flash",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",
