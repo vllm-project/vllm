@@ -290,20 +290,18 @@ def _hc_combine_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
+    HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
+    NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
+    NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
+
+    row = tl.program_id(0)
+    stream = tl.program_id(1)
+    offs_hc = tl.arange(0, HC_PAD)
+    mask_hc = offs_hc < HC
     if inj_ptr is not None:
-        row = tl.program_id(0)
-        stream = tl.program_id(1)
-        HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
-        NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
-        NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
-        offs_hc = tl.arange(0, HC_PAD)
-        mask_hc = offs_hc < HC
         tile_ids = tl.arange(0, NUM_TILES_PAD)
         offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
     else:
-        pid = tl.program_id(0)
-        row = pid // HC
-        stream = pid % HC
         UNIT_BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(HC_DIM)
         offs_inner = tl.arange(0, UNIT_BLOCK_SIZE)
     mask_inner = offs_inner < HC_DIM
@@ -335,19 +333,18 @@ def _hc_combine_norm_kernel(
     out = (res.to(tl.float32) + block.to(tl.float32) * scale).to(
         out_ptr.dtype.element_ty
     )
+    if inj_ptr is None:
+        w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
+    tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
+
+    out = out.to(tl.float32)
     if inj_ptr is not None:
-        tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
-        out = out.to(tl.float32)
         # Keep the two-axis reduction: flattening the padded tile is ~40%
         # slower at decode sizes.
         sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
-        rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
     else:
-        w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
-        out_fp32 = out.to(tl.float32)
-        rrms = tl.rsqrt(tl.sum(out_fp32 * out_fp32) / HC_DIM + EPS)
-        y = out_fp32 * rrms
-        y += y * w.to(tl.float32)
+        sum_sq = tl.sum(out * out)
+    rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
 
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
@@ -356,12 +353,9 @@ def _hc_combine_norm_kernel(
         # Loading the weight earlier helps decode but keeps the tile live across
         # the reduction and regresses larger batches, so defer it to the norm.
         w = tl.load(w_ptr + w_offs, mask_inner, other=0.0)
-        y = out * rrms
-        y += y * w.to(tl.float32)
-        tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
-    else:
-        tl.store(out_ptr + row * stride_out + offs, out, mask_inner)
-        tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
+    y = out * rrms
+    y += y * w.to(tl.float32)
+    tl.store(y_ptr + row * stride_y + offs, y, mask_inner)
 
 
 def _hc_combine_norm(
@@ -389,8 +383,7 @@ def _hc_combine_norm(
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
-    grid = (N, hc_count) if injection_logits is not None else (N * hc_count,)
-    _hc_combine_norm_kernel[grid](
+    _hc_combine_norm_kernel[(N, hc_count)](
         block_output,
         residual,
         injection_logits,
