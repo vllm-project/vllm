@@ -895,29 +895,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     assert aiter_ar is not None, "aiter allreduce must be initialized"
     ca = aiter_ar.aiter_ca
-
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.numel() // hidden_dim
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = ca.world_size
-    full_nvlink = ca.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
 
     result = ca.custom_fused_ar_rms(
         input_,

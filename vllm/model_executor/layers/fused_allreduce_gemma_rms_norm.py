@@ -128,7 +128,9 @@ def _can_use_aiter_fused_ar_rms(hidden_states: torch.Tensor) -> bool:
     total_bytes = hidden_states.numel() * hidden_states.element_size()
     if total_bytes > aiter_ar.effective_max_size():
         return False
-    return aiter_ar.should_custom_ar(hidden_states)
+    if not aiter_ar.should_custom_ar(hidden_states):
+        return False
+    return aiter_ar.use_1stage_fused_ar_rms(hidden_states)
 
 
 def fused_allreduce_gemma_rms_norm(
