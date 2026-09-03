@@ -40,11 +40,13 @@ if not current_platform.is_cuda():
         allow_module_level=True,
     )
 
+import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as flashinfer_sparse_mod
 from vllm.model_executor.layers.attention.mla_attention import (
     _canonicalize_sparse_mla_kv_cache_dtype,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseImpl,
     FlashInferMLASparseTRTLLMBackend,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -80,6 +82,60 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
+    """Weight absorption must not change the model's attention temperature."""
+    model_scale = 256**-0.5
+    kv_lora_rank = 512
+    topk = torch.zeros((1, 1), dtype=torch.int32)
+    metadata = SimpleNamespace(
+        req_id_per_token=torch.zeros(1, dtype=torch.int32),
+        block_table=torch.zeros((1, 1), dtype=torch.int32),
+        block_size=1,
+    )
+    recorded_scale = None
+
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.scale = model_scale
+    impl.qk_nope_head_dim = 256
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = 0
+    impl.kv_cache_dtype = "auto"
+    impl.topk_indices_buffer = topk
+    impl.dcp_world_size = 1
+    impl._workspace_buffer = torch.empty(1)
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.is_nope_mla = True
+    impl.need_to_return_lse_for_decode = False
+    monkeypatch.setattr(
+        flashinfer_sparse_mod,
+        "triton_convert_req_index_to_global_index",
+        lambda *args, **kwargs: (topk, torch.ones(1, dtype=torch.int32)),
+    )
+
+    import flashinfer.decode
+
+    def fake_flashinfer(**kwargs):
+        nonlocal recorded_scale
+        recorded_scale = kwargs["bmm1_scale"]
+        return torch.zeros((1, 1, 1, kv_lora_rank))
+
+    monkeypatch.setattr(
+        flashinfer.decode,
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fake_flashinfer,
+    )
+    impl.forward_mqa(
+        torch.zeros(1, 1, kv_lora_rank),
+        torch.zeros(1, 1, kv_lora_rank),
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert recorded_scale == model_scale
+    assert recorded_scale != kv_lora_rank**-0.5
 
 
 def _float_to_e8m0_truncate(f: float) -> float:
@@ -1451,14 +1507,14 @@ def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
         return_valid_counts=False,
     )
     assert isinstance(result_only, torch.Tensor)
-    torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+    for row, num_valid in enumerate(expected_valid):
+        compact_valid = result[row, :num_valid].sort().values
+        original_valid = result_only[row][result_only[row] >= 0].sort().values
+        torch.testing.assert_close(compact_valid, original_valid, rtol=0, atol=0)
+        assert torch.all(result[row, num_valid:] == -1)
 
 
 def test_flashmla_cache_dtype_aliases_use_ds_layout():
-    from vllm.model_executor.layers.attention.mla_attention import (
-        _canonicalize_sparse_mla_kv_cache_dtype,
-    )
-
     # kv-cache dtype aliases are canonicalized to fp8_ds_mla before the layer
     # stores kv_cache_dtype, so they cannot bypass the gate.
     for alias in ("fp8", "fp8_e4m3"):
