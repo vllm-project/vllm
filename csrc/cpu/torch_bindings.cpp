@@ -58,9 +58,9 @@ std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
 
 // SGL CPU kernels
 
-at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
-                                const std::optional<at::Tensor>& bias,
-                                bool is_vnni);
+void weight_packed_linear(at::Tensor& out, const at::Tensor& mat1,
+                          const at::Tensor& mat2,
+                          const std::optional<at::Tensor>& bias, bool is_vnni);
 
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
@@ -507,8 +507,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
   ops.def(
-      "weight_packed_linear(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!)? "
-      "bias, bool is_vnni) -> Tensor");
+      "weight_packed_linear(Tensor(a0!) out, Tensor(a1) mat1, Tensor(a2) mat2, "
+      "Tensor(a3)? "
+      "bias, bool is_vnni) -> ()");
   ops.impl("weight_packed_linear", torch::kCPU, &weight_packed_linear);
   ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
   ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);

@@ -37,10 +37,10 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.transformers.fuser import get_fuser
 from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import extract_layer_index, maybe_prefix
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, direct_register_custom_op
 
-from .utils import log_replacement
+from .utils import log_replacement, maybe_per_layer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -183,7 +183,7 @@ class MoEMixin(MixtureOfExperts):
         )
 
         # Common kwargs
-        renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
+        norm_topk_prob = getattr(text_config, "norm_topk_prob", None)
 
         # Routed scaling factor kwargs
         routed_scaling_factor = getattr(text_config, "routed_scaling_factor", 1.0)
@@ -266,12 +266,25 @@ class MoEMixin(MixtureOfExperts):
                                 self.num_shared_experts = 1
                                 break
 
+                    # Only pay for the layer index if something is per-layer;
+                    # `extract_layer_index` raises for unnumbered module paths.
+                    per_layer = (top_k, intermediate_size, norm_topk_prob)
+                    layer_idx = (
+                        extract_layer_index(qual_name)
+                        if any(isinstance(v, list) for v in per_layer)
+                        else 0
+                    )
+                    layer_top_k = maybe_per_layer(top_k, layer_idx)
+                    layer_renormalize = maybe_per_layer(norm_topk_prob, layer_idx)
+                    if layer_renormalize is None:
+                        layer_renormalize = layer_top_k > 1
+
                     kwargs: dict[str, Any] = dict(
                         num_experts=num_experts,
-                        top_k=top_k,
+                        top_k=layer_top_k,
                         hidden_size=hidden_size,
-                        intermediate_size=intermediate_size,
-                        renormalize=renormalize,
+                        intermediate_size=maybe_per_layer(intermediate_size, layer_idx),
+                        renormalize=layer_renormalize,
                         quant_config=self.quant_config,
                         prefix=qual_name,
                         activation=activation,
