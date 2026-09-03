@@ -194,6 +194,10 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.helion import (
+    HelionFP8ScaledMMLinearKernel,
+    HelionINT8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
     HummingFP8ScaledMMLinearKernel,
     HummingInt8ScaledMMLinearKernel,
@@ -296,6 +300,10 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         TritonFp8BlockScaledMMKernel,
         TritonW4A16LinearKernel,
     },
+    "helion": {
+        HelionFP8ScaledMMLinearKernel,
+        HelionINT8ScaledMMLinearKernel,
+    },
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
     },
@@ -393,6 +401,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
     PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
+        HelionINT8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
         HummingInt8ScaledMMLinearKernel,
     ],
@@ -405,6 +414,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CUDA: [
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
+        HelionFP8ScaledMMLinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
@@ -749,11 +759,13 @@ def init_int8_linear_kernel(
     is_static_input_scheme: bool,
     input_symmetric: bool,
     module_name: str,
+    weight_shape: tuple[int, int],
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
         is_channelwise=is_channelwise,
         is_static_input_scheme=is_static_input_scheme,
         input_symmetric=input_symmetric,
+        weight_shape=weight_shape,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
@@ -1198,6 +1210,8 @@ __all__ = [
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
+    "HelionFP8ScaledMMLinearKernel",
+    "HelionINT8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
     "ChannelWiseTorchFP8ScaledMMLinearKernel",
