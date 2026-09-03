@@ -79,6 +79,26 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Small Models Distributed"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
@@ -109,9 +129,11 @@ steps:
   num_devices: 4
   optional: true
   source_file_dependencies:
-  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TEP4.yaml
+  - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-TP4.yaml
   - tests/evals/gsm8k/configs/models-spec-decode.txt
   - vllm/models/deepseek_v4/
+  - vllm/models/kimi_k3/
   - vllm/model_executor/models/qwen3_dspark.py
   - vllm/v1/spec_decode/metrics.py
   - vllm/v1/worker/gpu/spec_decode/adaptive_verification.py
@@ -121,6 +143,45 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/speculator.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Spec Decode"
+      dind: false
+      device: mi355_4
+      timeout_in_minutes: 120
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-AITER-TP4.yaml
+      - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-AITER-TEP4.yaml
+      - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
+      - tests/evals/gsm8k/test_gsm8k_correctness.py
+      - tests/evals/gsm8k/gsm8k_eval.py
+      - tests/evals/gsm8k/conftest.py
+      - vllm/config/
+      - vllm/envs.py
+      - vllm/models/kimi_k3/
+      - vllm/models/deepseek_v4/
+      - vllm/model_executor/kernels/mhc/
+      - vllm/model_executor/layers/mhc.py
+      - vllm/model_executor/layers/quantization/
+      - vllm/model_executor/layers/sparse_attn_indexer.py
+      - vllm/model_executor/models/config.py
+      - vllm/model_executor/models/registry.py
+      - vllm/model_executor/models/qwen3_dspark.py
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/warmup/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/tokenizers/
+      - vllm/v1/attention/
+      - vllm/v1/core/kv_cache_utils.py
+      - vllm/v1/spec_decode/metrics.py
+      - vllm/v1/worker/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
 
 - label: ":nvidia: (B200) LM Eval Large Models EP"
   key: lm-eval-large-models-ep-2xb200
@@ -177,8 +238,12 @@ steps:
   device: h100
   optional: true
   num_devices: 2
+  parallelism: 4
   commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+    # Timing-balanced static split of the former config-h100.txt (measured on
+    # build 83851): shards ~12.4/13.6/12.4/14.5m of eval time. New configs must
+    # be added to exactly one config-h100-shard-*.txt.
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
   
 - label: ":nvidia: (B200) MoE Refactor Integration TEMPORARY Shard %N"
   key: moe-refactor-integration-test-b200-temporary
@@ -330,6 +395,28 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) GPQA Eval (GPT-OSS)"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/model_executor/layers/fused_moe/
+      - tests/evals/gpt_oss/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - uv pip install --system 'gpt-oss[eval]==0.0.5'
+      - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: ":nvidia: (B200) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
   key: accuracy-eval-qwen3-8-flash-next-fp8-b200

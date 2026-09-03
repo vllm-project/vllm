@@ -1811,6 +1811,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             inputs.mm_data_items,
             inputs.mm_uuid_items,
             hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+            media_io_kwargs=inputs.media_io_kwargs,
         )
 
         encoder_inputs = super().apply(encoder_processor_inputs, timing_ctx)
