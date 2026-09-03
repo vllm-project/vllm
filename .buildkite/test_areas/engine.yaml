@@ -103,10 +103,15 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
+    - vllm/config/cache.py
+    - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
+    - vllm/model_executor/models/nemotron_h.py
     - vllm/v1/attention/backends/mamba_attn.py
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/
+    - vllm/v1/worker/gpu_model_runner.py
+    - vllm/v1/worker/gpu_worker.py
   commands:
     - pytest -v -s v1/e2e/test_replayssm_decode.py
 
