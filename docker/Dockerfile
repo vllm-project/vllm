@@ -886,19 +886,6 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         && ldconfig; \
     fi
 
-# nvidia-cutlass-dsl has no sm_107 entry in its Arch enum, so on Rubin every
-# CuTe DSL kernel (FA4, etc.) dies with `KeyError: 'sm_107a'` at JIT compile -
-# and that JIT compile happens at vllm serve runtime, not at image build time,
-# so this must be set in the final runtime stage, not an earlier build stage.
-# sm_100f is the family target covering all sm_10x (sm_100a would be
-# arch-specific and still miss sm_107). Both DSL singletons need setting --
-# CUTE_DSL_ARCH for CuTeDSL and CUTE_EXPERIMENTAL_DSL_ARCH for
-# CuteExperimentalDSL (the default bf16 GEMM) -- since either alone leaves the
-# other half failing. TODO(rubin-bringup): drop once nvidia-cutlass-dsl adds a
-# real sm_107 arch entry.
-ENV CUTE_DSL_ARCH=sm_100f
-ENV CUTE_EXPERIMENTAL_DSL_ARCH=sm_100f
-
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
