@@ -854,11 +854,13 @@ ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
 # stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
 # under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory - but that symlink only applies to the internal Rubin CUDA
-# image, which bundles NCCL directly; our own public-preview-apt-repo build
-# (CUDA_PREVIEW_APT_REPO set) has no NCCL yet at this point in the build (it
-# arrives later via the standard nvidia-nccl-cu* pip package, UV_OVERRIDE
-# below), so there's nothing to symlink from and that step is skipped.
+# subdirectory - but that symlink is only possible when the FINAL_BASE_IMAGE
+# already bundles NCCL (internal Rubin CUDA images, nvcr.io/nvidia/cuda-dl-base);
+# our own plain-ubuntu + CUDA_PREVIEW_APT_REPO build has no NCCL yet at this
+# point (it arrives later via the standard nvidia-nccl-cu* pip package,
+# UV_OVERRIDE below). Check reality (whether libnccl.so.2 is actually found)
+# rather than inferring from CUDA_PREVIEW_APT_REPO, and tolerate not finding
+# it instead of failing the build.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
         && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
@@ -876,10 +878,9 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
             echo "Unsupported Rubin CUDA version: ${CUDA_MAJOR_MINOR}" >&2; \
             exit 1; \
         fi \
-        && if [ -z "${CUDA_PREVIEW_APT_REPO}" ]; then \
-            NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
-            && test -n "${NCCL_LIBRARY}" \
-            && ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
+        && if NCCL_LIBRARY=$(find /usr/lib -name libnccl.so.2 -print -quit) \
+            && [ -n "${NCCL_LIBRARY}" ]; then \
+            ln -sf "${NCCL_LIBRARY}" /usr/lib/libnccl.so.2 \
             && ln -sf libnccl.so.2 /usr/lib/libnccl.so; \
         fi \
         && ldconfig; \
@@ -1025,12 +1026,14 @@ ARG GDRCOPY_CUDA_VERSION=12.8
 ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
+# Some Rubin FINAL_BASE_IMAGE choices (internal Rubin CUDA images,
+# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; our own plain-ubuntu +
+# CUDA_PREVIEW_APT_REPO build doesn't, so it falls through to the normal
+# install below. Check reality (ldconfig) rather than inferring from which
+# FINAL_BASE_IMAGE flag is set.
 RUN set -eux; \
-    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && [ -z "${CUDA_PREVIEW_APT_REPO}" ]; then \
-        # The internal Rubin CUDA image already provides GDRCopy. Our own
-        # public-preview-apt-repo build (CUDA_PREVIEW_APT_REPO set) has no
-        # such guarantee, so it falls through to the normal install below.
-        ldconfig -p | grep -q 'libgdrapi\.so'; \
+    if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && ldconfig -p | grep -q 'libgdrapi\.so'; then \
+        true; \
     else \
         case "${TARGETPLATFORM}" in \
           linux/arm64) UUARCH="aarch64" ;; \
