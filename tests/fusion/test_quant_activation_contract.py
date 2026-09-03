@@ -25,6 +25,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.helion import (
+    HelionFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
@@ -46,6 +49,7 @@ SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    HelionFP8ScaledMMLinearKernel,
 }
 
 
@@ -71,7 +75,10 @@ def _probe(cls: type):
         obj.config = NvFp4LinearLayerConfig()
     elif issubclass(cls, Int8ScaledMMLinearKernel):
         obj.config = Int8ScaledMMLinearLayerConfig(
-            is_static_input_scheme=True, is_channelwise=False, input_symmetric=True
+            is_static_input_scheme=True,
+            is_channelwise=False,
+            input_symmetric=True,
+            weight_shape=(16, 16),
         )
     else:
         obj.config = FP8ScaledMMLinearLayerConfig(
