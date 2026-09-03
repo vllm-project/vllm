@@ -18,6 +18,8 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.paged_shm.client import PagedShmClient
 from vllm.multimodal.paged_shm.serial_utils import (
     MAGIC,
+    PagedShmDecoder,
+    PagedShmEncoder,
     encode_item,
     read_decoded_from_blocks,
     write_encoded_to_blocks,
@@ -33,7 +35,6 @@ from vllm.multimodal.processing.processor import (
     UpdateMode,
 )
 from vllm.utils import random_uuid
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -140,7 +141,7 @@ class TestEncode:
     """Tests for encode_item function."""
 
     def test_encode_item_basic(self):
-        encoder = MsgpackEncoder(size_threshold=4096)
+        encoder = PagedShmEncoder(size_threshold=4096)
         item = _make_test_item()
         result = encode_item((item.kwargs_item, item.prompt_updates), encoder)
         assert result is not None, "Expected multi-chunk encoding"
@@ -184,7 +185,7 @@ class TestEncode:
             assert actual_size == lengths[i]
 
     def test_encode_item_empty(self):
-        encoder = MsgpackEncoder(size_threshold=4096)
+        encoder = PagedShmEncoder(size_threshold=4096)
         result = encode_item((MultiModalKwargsItem({}), []), encoder)
         # Empty item may result in one chunk or None; either is acceptable.
         if result is not None:
@@ -195,7 +196,7 @@ class TestEncode:
         small_tensor = torch.randn(10, 10)
         e = MultiModalFieldElem(small_tensor, MultiModalBatchedField())
         kwargs = MultiModalKwargsItem({"x": e})
-        encoder = MsgpackEncoder(size_threshold=4096)
+        encoder = PagedShmEncoder(size_threshold=4096)
         result = encode_item((kwargs, []), encoder)
         # Single chunk (no large tensor) should return None.
         assert result is None, "Should return None for single chunk"
@@ -232,8 +233,8 @@ class TestIntegration:
         return alloc.read_token
 
     def test_write_read_roundtrip(self, client):
-        encoder = MsgpackEncoder(size_threshold=client._block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=client._block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
         original_item = _make_test_item()
 
         token = self._write_and_get_token(client, original_item, encoder)
@@ -250,8 +251,8 @@ class TestIntegration:
 
     def test_write_read_large_data(self, client):
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
 
         large_tensor = torch.randn(4096 + 100, dtype=torch.float32)  # ~16KB
         e1 = MultiModalFieldElem(large_tensor, MultiModalBatchedField())
@@ -272,8 +273,8 @@ class TestIntegration:
 
     def test_write_read_with_prompt_updates(self, client):
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
 
         update = ResolvedPromptUpdate(
             modality="audio",
@@ -311,8 +312,8 @@ class TestIntegration:
 
     def test_concurrent_readers(self, client):
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
         original_item = _make_test_item()
 
         token = self._write_and_get_token(client, original_item, encoder)
@@ -345,8 +346,8 @@ class TestIntegration:
 
     def test_read_token_reusable(self, client):
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
         original_item = _make_test_item()
 
         token = self._write_and_get_token(client, original_item, encoder)
@@ -364,7 +365,7 @@ class TestIntegration:
         client.close_read(token)
 
     def test_read_nonexistent_blocks_fails(self, client):
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
         with pytest.raises(ValueError, match="Blocks list cannot be empty"):
             read_decoded_from_blocks(client._storage, [], client._block_size, decoder)
 
@@ -377,8 +378,8 @@ class TestIntegration:
     def test_type_flag_restoration(self, client):
         """Test that type flags correctly restore bytes vs tensor."""
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
 
         large_tensor = torch.randn(1024, dtype=torch.float32)
         small_tensor = torch.randn(10, 10, dtype=torch.float32)
@@ -429,8 +430,8 @@ class TestIntegration:
         """
         block_size = client._block_size
         threshold = 1024
-        encoder = MsgpackEncoder(size_threshold=threshold)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=threshold)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
 
         # Create many data chunks, enough to make metadata chunk > block_size
         num_tensors = 1000
@@ -493,6 +494,81 @@ class TestIntegration:
             "Data mismatch for large metadata chunk"
         )
 
+    def test_read_skip_tensor_payload(self, client):
+        """
+        Test that skip_tensor_payload=True skips reading tensor data chunks,
+        returning None for those fields, while inline tensors and prompt_updates
+        remain intact.
+        """
+        block_size = client._block_size
+        threshold = block_size // 2  # Ensure large tensors become separate chunks
+        encoder = PagedShmEncoder(size_threshold=threshold)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
+
+        # Create multiple large tensors, each will be a separate data chunk
+        large_tensors = {
+            "t1": torch.randn(1024, 1024, dtype=torch.float32),  # ~4MB
+            "t2": torch.randn(512, 512, dtype=torch.float32),  # ~1MB
+        }
+        # A small tensor that will be inlined in the msgpack body (not a separate chunk)
+        small_tensor = torch.randn(10, 10, dtype=torch.float32)
+
+        fields = {}
+        for k, v in large_tensors.items():
+            fields[k] = MultiModalFieldElem(v, MultiModalBatchedField())
+        fields["small"] = MultiModalFieldElem(
+            small_tensor, MultiModalFlatField(slices=[slice(None)], dim=0)
+        )
+        kwargs_item = MultiModalKwargsItem(fields)
+
+        # Add a prompt update to verify it is unaffected by skipping tensors
+        update = ResolvedPromptUpdate(
+            modality="image",
+            item_idx=0,
+            mode=UpdateMode.INSERT,
+            target=[1, 2],
+            content=PromptUpdateDetails.from_seq([3, 4]),
+        )
+        original_item = PagedShmCacheOutItem(
+            kwargs_item=kwargs_item, prompt_updates=[update]
+        )
+
+        token = self._write_and_get_token(client, original_item, encoder)
+
+        # Read with skip_tensor_payload=True
+        read_alloc = client.open_read(token, timeout=5.0)
+        decoded_kwargs, decoded_updates = read_decoded_from_blocks(
+            client._storage,
+            read_alloc.blocks,
+            block_size,
+            decoder,
+            skip_tensor_payload=True,
+        )
+        client.close_read(token)
+
+        # Verify large tensor fields are None
+        for key in large_tensors:
+            skip_field = decoded_kwargs.data.get(key)
+            assert skip_field is not None
+            assert skip_field.data is None, (
+                f"Tensor {key} should be None when skip_tensor_payload=True"
+            )
+
+        # Verify the small inlined tensor is still present and correct
+        small_skip = decoded_kwargs.data.get("small")
+        assert small_skip is not None
+        assert small_skip.data is not None
+        assert torch.equal(small_skip.data, small_tensor)
+
+        # Verify prompt_updates are unchanged
+        assert len(decoded_updates) == 1
+        du = decoded_updates[0]
+        assert du.modality == update.modality
+        assert du.item_idx == update.item_idx
+        assert du.mode == update.mode
+        assert du.target == update.target
+        assert du.content == update.content
+
 
 class TestErrorHandling:
     """Tests for error conditions."""
@@ -500,7 +576,7 @@ class TestErrorHandling:
     def test_insufficient_blocks_raises(self, client):
         storage = client._storage
         block_size = storage.block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
+        encoder = PagedShmEncoder(size_threshold=block_size)
         item = _make_test_item()
         result = encode_item((item.kwargs_item, item.prompt_updates), encoder)
         assert result is not None
@@ -527,9 +603,9 @@ class TestErrorHandling:
 
         # Attempt to read with only block 0 available.
         # The metadata chunk can be read, but the data chunk requires more blocks.
-        with pytest.raises(ValueError, match="Insufficient blocks for data chunk"):
+        with pytest.raises(ValueError, match="Insufficient blocks for"):
             read_decoded_from_blocks(
-                storage, [0], block_size, MsgpackDecoder(PagedShmCacheOutItem)
+                storage, [0], block_size, PagedShmDecoder(PagedShmCacheOutItem)
             )
 
     def test_invalid_magic_raises(self, client):
@@ -543,18 +619,17 @@ class TestErrorHandling:
 
         with pytest.raises(ValueError, match="Invalid magic number"):
             read_decoded_from_blocks(
-                storage, [0], block_size, MsgpackDecoder(PagedShmCacheOutItem)
+                storage, [0], block_size, PagedShmDecoder(PagedShmCacheOutItem)
             )
 
 
-@pytest.mark.slow
 class TestStress:
     """Stress tests."""
 
     def test_stress_many_writes_reads(self, client):
         block_size = client._block_size
-        encoder = MsgpackEncoder(size_threshold=block_size)
-        decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        encoder = PagedShmEncoder(size_threshold=block_size)
+        decoder = PagedShmDecoder(PagedShmCacheOutItem)
         num_items = 20
 
         tokens = []

@@ -36,6 +36,8 @@ from vllm.multimodal.cache import (
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.paged_shm.client import PagedShmClient
 from vllm.multimodal.paged_shm.serial_utils import (
+    PagedShmDecoder,
+    PagedShmEncoder,
     encode_item,
     read_decoded_from_blocks,
     write_encoded_to_blocks,
@@ -43,7 +45,6 @@ from vllm.multimodal.paged_shm.serial_utils import (
 from vllm.multimodal.paged_shm.types import PagedShmCacheOutItem, ShmWriteRequest
 from vllm.utils.cache import CacheInfo
 from vllm.utils.torch_utils import DeviceLikeType
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 logger = init_logger(__name__)
 
@@ -118,10 +119,8 @@ class PagedShmCache:
         self.open_write_timeout = open_write_timeout
         self.device = device
 
-        self._encoder = MsgpackEncoder(
-            size_threshold=self.block_size, save_raw_tensor=True
-        )
-        self._decoder = MsgpackDecoder(PagedShmCacheOutItem)
+        self._encoder = PagedShmEncoder(size_threshold=self.block_size)
+        self._decoder = PagedShmDecoder(PagedShmCacheOutItem)
         self.stream: torch.Stream = nullcontext() if not pin else torch.cuda.Stream()
 
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -207,7 +206,9 @@ class PagedShmCache:
                 )
             raise  # re-raise original exception
 
-    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem:
+    def get_item(
+        self, mm_hash: str, skip_tensor_payload: bool = True
+    ) -> MultiModalProcessorCacheOutItem:
         """
         Read and decode an item from shared memory.
 
@@ -226,7 +227,8 @@ class PagedShmCache:
                         alloc.blocks,
                         self.block_size,
                         self._decoder,
-                        self.device,
+                        skip_tensor_payload=skip_tensor_payload,
+                        device=self.device,
                     )
                 if isinstance(self.stream, torch.cuda.Stream):
                     self.stream.synchronize()
@@ -278,7 +280,7 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
             return self.create_item(mm_item, mm_hash)
         else:
             self._stats.record_access(is_hit=True)
-            return self.get_item(mm_hash)
+            return self.get_item(mm_hash, skip_tensor_payload=True)
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """No‑op for sender; items are already in SHM when created."""
@@ -321,7 +323,7 @@ class PagedShmReceiverCache(PagedShmCache, BaseMultiModalReceiverCache):
         """
         if mm_item is not None:
             return mm_item
-        kwargs_item, _ = self.get_item(mm_hash)
+        kwargs_item, _ = self.get_item(mm_hash, skip_tensor_payload=False)
         assert kwargs_item is not None
         return kwargs_item
 
