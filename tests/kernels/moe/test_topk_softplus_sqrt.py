@@ -609,7 +609,7 @@ def test_dsv4_fast_topk_bias_vl():
         bias_vl=bias_vl,
         image_sentinel_lo=image_sentinel_lo,
     )
-    topk_weights, topk_ids = dsv4_topk(
+    topk_weights, topk_ids = _DSV4_TOPK_KERNEL(
         gating_output,
         correction_bias,
         torch.int64,
