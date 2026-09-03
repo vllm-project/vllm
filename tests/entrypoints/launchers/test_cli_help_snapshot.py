@@ -14,7 +14,11 @@ import pytest
 import regex as re
 
 ROOT = Path(__file__).parents[3]
-LAUNCHER = ROOT / "tools/vllm"
+SOURCE = ROOT / "tools/vllm"
+GENERATOR = ROOT / "tools/generate_cli_help.py"
+INSTALLED = Path(sysconfig.get_path("scripts")) / "vllm"
+# The ROCm CI image ships tests without tools/, so use the installed command.
+LAUNCHER = SOURCE if SOURCE.is_file() else INSTALLED
 _SPEC = util.find_spec("vllm")
 assert _SPEC is not None and _SPEC.origin is not None
 # Resolved the way tools/vllm resolves it: beside the importable package.
@@ -99,8 +103,7 @@ def test_fast_paths_match_canonical_without_runtime_imports(args, page):
 
 
 def test_installed_command_is_the_launcher():
-    script = Path(sysconfig.get_path("scripts")) / "vllm"
-    if not script.is_file():
+    if not INSTALLED.is_file():
         pytest.skip("no installed vllm command")
     # Wheels and PEP 660 editable installs record a RECORD; the egg-info an
     # editable build leaves in the source tree does not, and would otherwise
@@ -127,12 +130,14 @@ def test_installed_command_is_the_launcher():
     if not (wheel or editable):
         pytest.skip("installed vllm is not the importable checkout")
 
-    source = LAUNCHER.read_text(encoding="utf-8").splitlines()[:4]
+    if not SOURCE.is_file():
+        pytest.skip("launcher source is not in this tree")
+    source = SOURCE.read_text(encoding="utf-8").splitlines()[:4]
     spdx = [line for line in source if line.startswith("# SPDX")]
     assert len(spdx) == 2
     # pip can replace the shebang with a multi-line sh trampoline, so match the
     # header anywhere in the installed script rather than at a fixed offset.
-    installed = script.read_text(encoding="utf-8").splitlines()
+    installed = INSTALLED.read_text(encoding="utf-8").splitlines()
     assert all(line in installed for line in spdx)
 
     assert not [
@@ -142,7 +147,7 @@ def test_installed_command_is_the_launcher():
     ]
 
     result = subprocess.run(
-        [sys.executable, "-X", "importtime", str(script), "--help"],
+        [sys.executable, "-X", "importtime", str(INSTALLED), "--help"],
         capture_output=True,
         cwd=ROOT,
         env=_env(),
@@ -158,8 +163,10 @@ def test_installed_command_is_the_launcher():
 
 
 def test_generator_check_pins_its_environment():
+    if not GENERATOR.is_file():
+        pytest.skip("generator is not in this tree")
     result = subprocess.run(
-        [sys.executable, str(ROOT / "tools/generate_cli_help.py"), "--check"],
+        [sys.executable, str(GENERATOR), "--check"],
         capture_output=True,
         cwd=ROOT,
         env=os.environ
@@ -178,15 +185,15 @@ def test_generator_check_pins_its_environment():
 
 
 def test_generator_check_fails_on_stale_page(tmp_path):
+    if not GENERATOR.is_file():
+        pytest.skip("generator is not in this tree")
     if util.find_spec("torch") is None:
         pytest.skip("the generator needs Torch to render")
     for name in PAGES.values():
         (tmp_path / name).write_bytes((HELP_DIR / name).read_bytes())
     stale = tmp_path / PAGES["top"]
     stale.write_bytes(stale.read_bytes() + b"x")
-    generator = runpy.run_path(
-        str(ROOT / "tools/generate_cli_help.py"), run_name="generate_cli_help"
-    )
+    generator = runpy.run_path(str(GENERATOR), run_name="generate_cli_help")
     with pytest.raises(SystemExit, match=PAGES["top"]):
         generator["_check"](tmp_path)
 
