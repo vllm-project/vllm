@@ -263,7 +263,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if scratch is None:
             max_expanded_rows = (
                 self.moe_config.max_num_tokens
-                * self.moe_config.dp_size
+                * self.moe_config.ep_size
                 * self.moe_config.experts_per_token
             )
             scratch = MoEPermuteScratch(
