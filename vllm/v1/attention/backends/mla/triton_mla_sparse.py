@@ -174,7 +174,7 @@ class TritonMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # This implementation still hard-codes BF16 output. Supporting FP16
-        # inputs alone is not enough to claim SM75 support; make the output
-        # dtype-aware before relaxing this guard.
+        # This particular Triton sparse-MLA implementation still hard-codes
+        # BF16 output, so its advertised FP16 path is not yet enough to claim
+        # SM75 support. Make the output dtype-aware before relaxing this guard.
         return capability.major >= 8
