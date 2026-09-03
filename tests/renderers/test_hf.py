@@ -844,6 +844,89 @@ SYSTEM_FIRST_TEMPLATE = (
 )
 
 
+EFFORT_VALIDATING_TEMPLATE = (
+    "{% if reasoning_effort is defined and "
+    "reasoning_effort not in ['xhigh', 'medium', 'low'] %}"
+    "{{ raise_exception('Unexpected reasoning effort ' + reasoning_effort + "
+    "'. Supported types are xhigh (default), medium, and low.') }}"
+    "{% endif %}"
+    "{% for message in messages %}"
+    "{{ message['role'] }}: {{ message['content'] }}\n"
+    "{% endfor %}"
+)
+
+EFFORT_BREAKING_TEMPLATE = (
+    "{% if reasoning_effort is defined %}"
+    "{{ raise_exception('Template broke for an unrelated reason') }}"
+    "{% endif %}"
+    "{% for message in messages %}"
+    "{{ message['role'] }}: {{ message['content'] }}\n"
+    "{% endfor %}"
+)
+
+
+class TestApplyChatTemplateEffortTolerant:
+    """Chat templates that reject unsupported reasoning_effort values should
+    surface a 400-style client error instead of crashing the request."""
+
+    @pytest.fixture
+    def model_config(self):
+        return ModelConfig(
+            "facebook/opt-125m",
+            tokenizer="facebook/opt-125m",
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="float16",
+        )
+
+    @pytest.fixture
+    def tokenizer(self):
+        return get_tokenizer("facebook/opt-125m")
+
+    def test_unsupported_effort_raises_bad_request(self, model_config, tokenizer):
+        conversation = [{"role": "user", "content": "Hello"}]
+        with pytest.raises(
+            VLLMValidationError,
+            match="Unexpected reasoning effort high",
+        ) as excinfo:
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                chat_template=EFFORT_VALIDATING_TEMPLATE,
+                tokenize=False,
+                reasoning_effort="high",
+            )
+        # The template's own message tells the client which values are supported.
+        assert "Supported types are xhigh (default), medium, and low" in str(
+            excinfo.value
+        )
+
+    def test_supported_effort_accepted(self, model_config, tokenizer):
+        conversation = [{"role": "user", "content": "Hello"}]
+        result = safe_apply_chat_template(
+            model_config,
+            tokenizer,
+            conversation,
+            chat_template=EFFORT_VALIDATING_TEMPLATE,
+            tokenize=False,
+            reasoning_effort="medium",
+        )
+        assert result == "user: Hello\n"
+
+    def test_non_effort_template_error_is_bad_request(self, model_config, tokenizer):
+        conversation = [{"role": "user", "content": "Hello"}]
+        with pytest.raises(VLLMValidationError, match="unrelated reason"):
+            safe_apply_chat_template(
+                model_config,
+                tokenizer,
+                conversation,
+                chat_template=EFFORT_BREAKING_TEMPLATE,
+                tokenize=False,
+                reasoning_effort="high",
+            )
+
+
 class TestConsolidateSystemMessages:
     def test_no_system_messages_unchanged(self):
         conversation = [
