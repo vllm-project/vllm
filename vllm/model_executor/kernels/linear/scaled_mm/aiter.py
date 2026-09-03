@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8DynamicTokenSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -149,6 +151,14 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires aiter library to be installed."
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        # Advertise per-token FP8 so KDA gated-RMSNorm fusion can skip
+        # in-kernel quant. Do not return kMxfp4Dynamic: that is a different
+        # GEMM family. Do not call get_output_padding() - torch fallbacks
+        # resolve padding from compilation_config, which is unset in
+        # profile_run. This kernel does not pad activations.
+        return kFp8DynamicTokenSym
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         is_ptpc = (
@@ -241,6 +251,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
+    def input_quant_key(self) -> QuantKey | None:
+        # Same PTPC consume ABI as the bpreshuffle kernel. HIPBMM stays off
+        # in this harness unless a bench enables it.
+        return kFp8DynamicTokenSym
+
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         is_ptpc = (
@@ -317,6 +332,9 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return AiterPreshuffledPerTokenFp8ScaledMMLinearKernel.is_supported(
             compute_capability
         )
+
+    def input_quant_key(self) -> QuantKey | None:
+        return kFp8DynamicTokenSym
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
