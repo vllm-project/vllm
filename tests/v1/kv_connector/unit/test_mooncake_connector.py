@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +15,9 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+    mooncake_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -31,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
+    RegisterWorkerPayload,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
@@ -504,9 +509,23 @@ async def test_bootstrap_server(bootstrap_server: MooncakeBootstrapServer):
         assert data["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
         assert data["0"]["worker_addr"]["0"]["1"] == "tcp://2.2.2.2:2222"
 
-    # Test failure: re-registering the same worker
+    # Re-registering the same rank at the same address is idempotent, so a
+    # client that timed out waiting for a response it never saw can safely
+    # retry a request that was already committed server-side.
     async with httpx.AsyncClient() as client:
         response = await client.post(f"{base_url}/register", json=payload1)
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{base_url}/query")
+        assert response.json()["0"]["worker_addr"]["0"]["0"] == "tcp://1.1.1.1:1111"
+
+    # Test failure: re-registering the same rank at a *different* address
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{base_url}/register", json={**payload1, "addr": "tcp://9.9.9.9:9999"}
+        )
         assert response.status_code == 400
         assert "is already registered" in response.text
 
@@ -1402,3 +1421,113 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+class _SlowFirstRegisterServer(MooncakeBootstrapServer):
+    """Bootstrap server that commits the first registration but answers it
+    too late for the client to see the response."""
+
+    def __init__(self, host: str, port: int, delay: float):
+        self._delay = delay
+        self._calls = 0
+        super().__init__(host, port)
+
+    async def register_worker(self, payload: RegisterWorkerPayload):
+        result = await super().register_worker(payload)
+        self._calls += 1
+        if self._calls == 1:
+            await asyncio.sleep(self._delay)
+        return result
+
+
+def _register_stub() -> SimpleNamespace:
+    return SimpleNamespace(
+        vllm_config=None,
+        hostname="127.0.0.1",
+        side_channel_port=5555,
+        engine_id="eng-timeout",
+        dp_rank=0,
+        tp_rank=0,
+        pp_rank=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_with_bootstrap_retries_timeout_idempotently(monkeypatch):
+    """A registration that is committed server-side but times out client-side
+    must be retried and must succeed, rather than failing startup."""
+
+    port = get_open_port()
+    server = _SlowFirstRegisterServer("127.0.0.1", port, delay=2.0)
+    server.start()
+
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_HTTP_TIMEOUT", 0.5)
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_RETRY_INTERVAL", 0.1)
+    monkeypatch.setattr(
+        mooncake_connector, "get_mooncake_bootstrap_addr", lambda _: ("127.0.0.1", port)
+    )
+
+    try:
+        await MooncakeConnectorWorker.register_worker_with_bootstrap(_register_stub())
+
+        assert server._calls >= 2, "client should have retried after the timeout"
+
+        import httpx
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://127.0.0.1:{port}/query")
+            assert (
+                response.json()["0"]["worker_addr"]["0"]["0"] == "tcp://127.0.0.1:5555"
+            )
+    finally:
+        server.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_register_with_bootstrap_gives_up_at_deadline(monkeypatch):
+    """An unreachable bootstrap server must fail the coroutine at the
+    deadline instead of retrying forever."""
+
+    import httpx
+
+    port = get_open_port()
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_RETRY_INTERVAL", 0.05)
+    monkeypatch.setattr(mooncake_connector, "_BOOTSTRAP_REGISTER_DEADLINE", 0.3)
+    monkeypatch.setattr(
+        mooncake_connector, "get_mooncake_bootstrap_addr", lambda _: ("127.0.0.1", port)
+    )
+
+    with pytest.raises((httpx.ConnectError, httpx.TimeoutException)):
+        await asyncio.wait_for(
+            MooncakeConnectorWorker.register_worker_with_bootstrap(_register_stub()),
+            timeout=30,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sender_listener_reports_registration_failure():
+    """A registration failure must unblock register_kv_caches() and hand it
+    the exception, instead of leaving it waiting on the ready event."""
+
+    err = RuntimeError("bootstrap unreachable")
+
+    async def _failing_register():
+        raise err
+
+    stub = SimpleNamespace(
+        async_zmq_ctx=zmq.asyncio.Context(),
+        hostname="127.0.0.1",
+        num_sender_tasks=1,
+        side_channel_port=0,
+        register_worker_with_bootstrap=_failing_register,
+        _sender_listener_startup_exc=None,
+    )
+
+    ready_event = threading.Event()
+    try:
+        await MooncakeConnectorWorker._mooncake_sender_listener(stub, ready_event)
+
+        assert ready_event.is_set(), "waiter must not be left blocked"
+        assert stub._sender_listener_startup_exc is err
+    finally:
+        stub.async_zmq_ctx.destroy(linger=0)

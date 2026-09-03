@@ -98,14 +98,15 @@ class MooncakeBootstrapServer:
             dp_entry.worker_addr[payload.tp_rank] = {}
 
         tp_entry = dp_entry.worker_addr[payload.tp_rank]
-        if payload.pp_rank in tp_entry:
+        registered_addr = tp_entry.get(payload.pp_rank)
+        if registered_addr is not None and registered_addr != payload.addr:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"Worker with dp_rank={payload.dp_rank}, "
                     f"tp_rank={payload.tp_rank}, pp_rank={payload.pp_rank} "
                     f"is already registered at "
-                    f"{tp_entry[payload.pp_rank]}, "
+                    f"{registered_addr}, "
                     f"but still want to register at {payload.addr}"
                 ),
             )
