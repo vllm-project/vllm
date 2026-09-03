@@ -31,6 +31,58 @@ SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 FLA_CHUNK_SIZE = 64
 
 
+class GdnWorkspaceTracker:
+    """Record FLA chunk-scan temporaries during memory profiling.
+
+    Peak is the max live-set of one ``chunk_gated_delta_rule`` call, not
+    the sum across layers. Disabled by default so inference is a no-op.
+    """
+
+    def __init__(self) -> None:
+        self._enabled = False
+        self._current_bytes = 0
+        self.peak_bytes = 0
+
+    @contextlib.contextmanager
+    def collecting(self) -> Any:
+        was_enabled = self._enabled
+        self._enabled = True
+        self._current_bytes = 0
+        self.peak_bytes = 0
+        try:
+            yield self
+        finally:
+            self._enabled = was_enabled
+
+    @contextlib.contextmanager
+    def track_call(self) -> Any:
+        if not self._enabled:
+            yield
+            return
+        prev = self._current_bytes
+        self._current_bytes = 0
+        try:
+            yield
+        finally:
+            if self._current_bytes > self.peak_bytes:
+                self.peak_bytes = self._current_bytes
+            self._current_bytes = prev
+
+    def record(self, nbytes: int) -> None:
+        if self._enabled and nbytes > 0:
+            self._current_bytes += nbytes
+
+
+gdn_workspace_tracker = GdnWorkspaceTracker()
+
+
+def record_gdn_workspace_tensor(tensor: torch.Tensor | None) -> None:
+    """Charge one FLA workspace tensor to the profile tracker."""
+    if tensor is None or not gdn_workspace_tracker._enabled:
+        return
+    gdn_workspace_tracker.record(tensor.numel() * tensor.element_size())
+
+
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent results of a function with tensor inputs.

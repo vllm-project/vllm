@@ -531,10 +531,25 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
+        from vllm.model_executor.layers.mamba.gdn.chunk_workspace import (
+            apply_gdn_chunk_workspace_reservation,
+        )
+        from vllm.third_party.flash_linear_attention.ops.utils import (
+            gdn_workspace_tracker,
+        )
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            with gdn_workspace_tracker.collecting():
+                self.model_runner.profile_run()
+            apply_gdn_chunk_workspace_reservation(
+                kv_cache_memory_bytes,
+                self.vllm_config,
+                getattr(self.model_runner, "model", None),
+                gdn_workspace_tracker.peak_bytes,
+                apply_reservation=False,
+            )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -556,25 +571,28 @@ class Worker(WorkerBase):
             )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        # of the model. Tracker stays on through CUDA-graph profiling so a
+        # first-capture GDN transient is treated as already covered (#50780).
+        with gdn_workspace_tracker.collecting():
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                self.model_runner.profile_run()
 
-        # Profile CUDA graph memory if graphs will be captured.
-        # ROCm is included: #44825 moved the profiler to
-        # torch.accelerator.get_memory_info (reliable on ROCm, as used by
-        # the AMD-CI mem tests), and graph_pool_handle resolves to the same
-        # torch.cuda handle the live capture path already uses on ROCm.
-        # XPU stays excluded (see #39977).
-        cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike()
-            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            # Profile CUDA graph memory if graphs will be captured.
+            # ROCm is included: #44825 moved the profiler to
+            # torch.accelerator.get_memory_info (reliable on ROCm, as used by
+            # the AMD-CI mem tests), and graph_pool_handle resolves to the same
+            # torch.cuda handle the live capture path already uses on ROCm.
+            # XPU stays excluded (see #39977).
+            cudagraph_memory_estimate = 0
+            if (
+                current_platform.is_cuda_alike()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
+                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -610,10 +628,13 @@ class Worker(WorkerBase):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        self.available_kv_cache_memory_bytes = (
+        self.available_kv_cache_memory_bytes = apply_gdn_chunk_workspace_reservation(
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate_applied,
+            self.vllm_config,
+            getattr(self.model_runner, "model", None),
+            gdn_workspace_tracker.peak_bytes,
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
