@@ -28,6 +28,10 @@ USER_SP_TOKEN = "<｜User｜>"
 ASSISTANT_SP_TOKEN = "<｜Assistant｜>"
 LATEST_REMINDER_SP_TOKEN = "<｜latest_reminder｜>"
 
+# Placeholder text inlined at each image's position; the multimodal processor
+# later expands it into the sentinel token block.
+IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
 # Task special tokens for internal classification tasks
 DS_TASK_SP_TOKENS = {
     "action": "<｜action｜>",
@@ -199,6 +203,30 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 # Message Rendering
 # ============================================================
 
+def flatten_content_blocks(content: Any) -> Any:
+    """Flatten OpenAI-style content blocks to plain text.
+
+    Image blocks are inlined as IMAGE_PLACEHOLDER at their position. The image
+    data itself travels out of band (multi_modal_data) and is matched to
+    placeholders by order. Plain-string content passes through unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+        elif block.get("type") in ("image", "image_url"):
+            parts.append(IMAGE_PLACEHOLDER)
+        elif block.get("type") == "text":
+            parts.append(block.get("text", ""))
+        else:
+            raise ValueError(
+                f"Unsupported content block type: {block.get('type')!r}"
+            )
+    return "".join(parts)
+
+
 def render_message(
     index: int,
     messages: List[Dict[str, Any]],
@@ -292,6 +320,8 @@ def render_message(
                 block_type = block.get("type")
                 if block_type == "text":
                     parts.append(block.get("text", ""))
+                elif block_type in ("image", "image_url"):
+                    parts.append(IMAGE_PLACEHOLDER)
                 elif block_type == "tool_result":
                     tool_content = block.get("content", "")
                     if isinstance(tool_content, list):
@@ -307,7 +337,7 @@ def render_message(
                     parts.append(f"[Unsupported {block_type}]")
             prompt += "\n\n".join(parts)
         else:
-            prompt += content or ""
+            prompt += flatten_content_blocks(content) or ""
 
     elif role == "latest_reminder":
         prompt += LATEST_REMINDER_SP_TOKEN + latest_reminder_msg_template.format(content=content)
@@ -447,13 +477,15 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "content_blocks": [tool_block],
                 })
         elif role == "user":
-            text_block = {"type": "text", "text": msg.get("content", "")}
+            # Flatten OpenAI-style content blocks (images become placeholders)
+            text_content = flatten_content_blocks(msg.get("content", ""))
+            text_block = {"type": "text", "text": text_content}
             if merged and merged[-1].get("role") == "user" and "content_blocks" in merged[-1] and merged[-1].get("task") is None:
                 merged[-1]["content_blocks"].append(text_block)
             else:
                 new_msg = {
                     "role": "user",
-                    "content": msg.get("content", ""),
+                    "content": text_content,
                     "content_blocks": [text_block],
                 }
                 # Preserve extra fields (task, wo_eos, mask, etc.)

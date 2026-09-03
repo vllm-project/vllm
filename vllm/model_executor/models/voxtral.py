@@ -765,7 +765,11 @@ class VoxtralEncoderModel(nn.Module):
             max_frequency=8000.0,
             sampling_rate=self.config.sampling_rate,
         )
-        self.mel_filters = torch.tensor(mel_filters, dtype=torch.float32)
+        self.register_buffer(
+            "mel_filters",
+            torch.tensor(mel_filters, dtype=torch.float32),
+            persistent=False,
+        )
 
     def compute_whisper_melspec(
         self,
