@@ -30,8 +30,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
-    create_ubatch_slices,
     _slice_input_batch,
+    create_ubatch_slices,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
