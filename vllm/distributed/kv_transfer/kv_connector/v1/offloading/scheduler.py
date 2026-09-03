@@ -385,7 +385,7 @@ class RequestOffloadState:
         group_state: RequestGroupState,
         num_offloadable_tokens: int,
     ) -> int:
-        """Number of allocated leading offloaded chunks eligible for store.
+        """Number of allocated and keyed leading chunks eligible for store.
 
         For eagle/MTP groups the volatile trailing chunk of the offloadable
         range is excluded while decoding: the draft-layer KV of the last
@@ -405,7 +405,8 @@ class RequestOffloadState:
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
         )
-        return min(num_chunks, num_allocated_chunks)
+        num_keyed_chunks = len(group_state.offload_keys)
+        return min(num_chunks, num_allocated_chunks, num_keyed_chunks)
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         # max(): at the prefill->decode transition of a chunk-aligned prompt,
