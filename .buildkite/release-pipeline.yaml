@@ -479,6 +479,32 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build nightly image - x86_64 - CPU"
+        depends_on: ~
+        id: build-nightly-cpu-image-x86
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_CPU_X86=true --tag public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:$BUILDKITE_COMMIT-x86_64"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build nightly image - arm64 - CPU"
+        depends_on: ~
+        id: build-nightly-cpu-image-arm64
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64 --progress plain --target vllm-openai -f docker/Dockerfile.cpu ."
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:$BUILDKITE_COMMIT-aarch64"
+        env:
+          DOCKER_BUILDKIT: "1"
+
   - group: "Publish release images"
     key: "publish-release-images"
     steps:
@@ -572,6 +598,25 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - label: "Publish nightly CPU multi-arch image to DockerHub"
+        depends_on:
+          - build-nightly-cpu-image-x86
+          - build-nightly-cpu-image-arm64
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds-cpu.sh"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-cpu"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
