@@ -72,7 +72,11 @@ ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
     {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
-DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
+# At least one platform implementation of each architecture below has no
+# active torch.compile boundary and uses breakable graphs for PIECEWISE
+# capture. Platform-specific compiled implementations are carved out by
+# _uses_noncompiled_cudagraph_path(), including compatibility-policy exceptions.
+NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
@@ -91,6 +95,22 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
+
+# These implementations also define the current default policy. Keep the
+# capability set separately named because policy can change independently.
+DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = (
+    NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES
+)
+
+# DeepSeek V3.2 and its MTP model use their noncompiled implementations on
+# CUDA, but the shared implementations selected elsewhere are compiled.
+NON_CUDA_COMPILED_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV32MTPModel",
+        "DeepseekV32ForCausalLM",
+        "GlmMoeDsaForCausalLM",
     }
 )
 
@@ -712,6 +732,33 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
+    def _uses_noncompiled_cudagraph_path(self) -> bool:
+        """Whether the selected path needs the noncompiled graph fallback."""
+        model_config = self.model_config
+        if model_config is None:
+            return False
+
+        architecture = model_config.architecture
+        if architecture not in NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES:
+            return False
+
+        from vllm.platforms import current_platform
+
+        if (
+            not current_platform.is_cuda()
+            and architecture in NON_CUDA_COMPILED_CUDAGRAPH_ARCHITECTURES
+        ):
+            return False
+
+        # Compatibility policy: keep DeepSeek V4's existing ROCm MRV1 graph
+        # defaults unchanged. MRV2 adds a runtime provider guard and therefore
+        # needs the fallback when explicitly selected.
+        return not (
+            current_platform.is_rocm()
+            and architecture == "DeepseekV4ForCausalLM"
+            and not self.use_v2_model_runner
+        )
+
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
             "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -730,6 +777,53 @@ class VllmConfig:
         enabled = is_breakable_cudagraph_enabled()
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
+        elif self._uses_noncompiled_cudagraph_path():
+            # These architectures do not have an active torch.compile wrapper,
+            # so PIECEWISE capture is unavailable without breakable graphs. Keep
+            # full graphs for uniform decode at O2/O3 and run other batches
+            # eagerly. This also handles platforms such as ROCm that deliberately
+            # leave breakable graphs disabled by default for performance.
+            compilation_config = self.compilation_config
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+                raise ValueError(
+                    f"{self.model_config.architecture} does not expose an active "
+                    "torch.compile boundary, so compilation mode VLLM_COMPILE "
+                    "cannot be honored and later CUDA graph resolution can require "
+                    "unavailable piecewise capture. Use compilation mode NONE with "
+                    "cudagraph mode NONE/FULL_DECODE_ONLY, or enable breakable CUDA "
+                    "graphs."
+                )
+            if compilation_config.cudagraph_mode is None:
+                from vllm.platforms import current_platform
+
+                architecture = self.model_config.architecture
+                unsafe_full_graph = (
+                    current_platform.is_rocm()
+                    and current_platform.is_device_capability(95)
+                    and self.use_v2_model_runner
+                    and architecture
+                    in {
+                        "DeepseekV4ForCausalLM",
+                        "DeepseekV4ForConditionalGeneration",
+                    }
+                )
+                compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_DECODE_ONLY
+                    if self.optimization_level >= OptimizationLevel.O2
+                    and not unsafe_full_graph
+                    else CUDAGraphMode.NONE
+                )
+                logger.info_once(
+                    "Breakable CUDA graphs are disabled for a model without "
+                    "torch.compile support; defaulting cudagraph mode to %s.",
+                    compilation_config.cudagraph_mode.name,
+                )
+
+            # None is the unset value, not an explicit compile request. These
+            # wrappers cannot provide piecewise compilation, so resolve it now
+            # and let the compatibility pass below remove impossible modes.
+            if compilation_config.mode is None:
+                compilation_config.mode = CompilationMode.NONE
         return enabled
 
     @property
@@ -965,6 +1059,51 @@ class VllmConfig:
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
+
+    def _normalize_unavailable_piecewise_cudagraphs(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> None:
+        """Remove piecewise graphs when no capture implementation is active."""
+        compilation_config = self.compilation_config
+        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            compilation_config.max_cudagraph_capture_size = 0
+            compilation_config.cudagraph_capture_sizes = []
+            return
+
+        piecewise_capture_available = (
+            VllmConfig._piecewise_cudagraph_provider_available(
+                self,
+                breakable_cudagraph_enabled=breakable_cudagraph_enabled,
+            )
+        )
+        if (
+            compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            and not piecewise_capture_available
+        ):
+            fallback_mode = (
+                CUDAGraphMode.FULL_DECODE_ONLY
+                if compilation_config.cudagraph_mode.has_full_cudagraphs()
+                else CUDAGraphMode.NONE
+            )
+            logger.info_once(
+                "Cudagraph mode %s is not compatible with compilation mode %s. "
+                "Overriding to %s.",
+                compilation_config.cudagraph_mode,
+                compilation_config.mode,
+                fallback_mode,
+            )
+            compilation_config.cudagraph_mode = fallback_mode
+            if fallback_mode == CUDAGraphMode.NONE:
+                compilation_config.max_cudagraph_capture_size = 0
+                compilation_config.cudagraph_capture_sizes = []
+
+    def _piecewise_cudagraph_provider_available(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> bool:
+        return breakable_cudagraph_enabled or (
+            self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not self._uses_noncompiled_cudagraph_path()
+        )
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
@@ -1409,7 +1548,7 @@ class VllmConfig:
             )
         ):
             logger.warning_once(
-                "Inductor compilation was disabled by user settings, "
+                "Inductor compilation is disabled by configuration, "
                 "optimizations settings that are only active during "
                 "inductor compilation will be ignored."
             )
@@ -1470,19 +1609,6 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
-
-        if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-        ):
-            logger.info_once(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1595,6 +1721,9 @@ class VllmConfig:
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
+            self._normalize_unavailable_piecewise_cudagraphs(
+                breakable_cudagraph_enabled=breakable_cudagraph_enabled
+            )
             self._set_cudagraph_sizes()
 
         else:
@@ -1651,6 +1780,13 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        # Platform and connector compatibility checks above can replace a full
+        # graph mode with PIECEWISE. Re-normalize after those late updates and
+        # before validating consumers of the resolved mode.
+        self._normalize_unavailable_piecewise_cudagraphs(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
+
         self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
@@ -1661,7 +1797,9 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_batch_sharded_sampling()
-        self._validate_adaptive_verification()
+        self._validate_adaptive_verification(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -2648,7 +2786,9 @@ class VllmConfig:
 
         return unsupported
 
-    def _validate_adaptive_verification(self) -> None:
+    def _validate_adaptive_verification(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> None:
         spec_config = self.speculative_config
         if not spec_config or not spec_config.enable_adaptive_verification:
             return
@@ -2658,6 +2798,16 @@ class VllmConfig:
             # while the trimmed batch's true boundaries are decided on the GPU.
             raise ValueError(
                 "Adaptive verification is not currently compatible with LoRA"
+            )
+
+        if not VllmConfig._piecewise_cudagraph_provider_available(
+            self,
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled,
+        ):
+            raise ValueError(
+                "Adaptive verification requires piecewise CUDA graphs, but no "
+                "torch.compile or breakable CUDA graph provider is active. Enable "
+                "breakable CUDA graphs or disable adaptive verification."
             )
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
