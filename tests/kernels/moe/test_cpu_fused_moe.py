@@ -502,8 +502,8 @@ def test_cpu_fused_moe_int8_power(
 ):
     """Test cpu_fused_moe_int8 on POWER VSX against pure-torch reference."""
     set_random_seed(0)
-    if hidden_size % 16 != 0 or intermediate_size % 16 != 0:
-        pytest.skip("VSX kernel requires dims divisible by 16")
+    if hidden_size % 32 != 0 or intermediate_size % 32 != 0:
+        pytest.skip("VSX kernel requires dims divisible by 32")
 
     topk_num = max(expert_num // 2, 1)
     up_dim = 2 * intermediate_size
@@ -534,17 +534,31 @@ def test_cpu_fused_moe_int8_power(
     topk_ids = topk_ids.to(torch.int32)
 
     ref_output = ref_fused_moe_int8(
-        input, w13, w2, w13_scale, w2_scale,
-        w13_bias, w2_bias, topk_weights, topk_ids, act,
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act,
     )
     packed_w13 = cpu_prepack_moe_weight_int8(w13, isa)
-    packed_w2  = cpu_prepack_moe_weight_int8(w2, isa)
+    packed_w2 = cpu_prepack_moe_weight_int8(w2, isa)
     output = cpu_fused_moe_int8(
-        input, packed_w13, packed_w2,
-        w13_scale, w2_scale,
-        w13_bias, w2_bias,
-        topk_weights, topk_ids,
-        act.value, isa,
+        input,
+        packed_w13,
+        packed_w2,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act.value,
+        isa,
     )
 
     torch.testing.assert_close(output, ref_output, atol=1e-1, rtol=1e-1)

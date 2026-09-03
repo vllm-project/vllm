@@ -919,10 +919,10 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             torch.bfloat16,
         ):
             return False, "kernel requires float32, float16, or bfloat16 activations"
-        if moe_config.hidden_dim % 16 != 0:
-            return False, "kernel requires hidden dim divisible by 16"
-        if moe_config.intermediate_size_per_partition % 16 != 0:
-            return False, "kernel requires intermediate dim divisible by 16"
+        if moe_config.hidden_dim % 32 != 0:
+            return False, "kernel requires hidden dim divisible by 32"
+        if moe_config.intermediate_size_per_partition % 32 != 0:
+            return False, "kernel requires intermediate dim divisible by 32"
         return True, None
 
     @staticmethod
@@ -985,7 +985,7 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         from vllm.model_executor.utils import replace_parameter
 
         w13 = cpu_prepack_moe_weight_int8(layer.w13_weight, "vsx")
-        w2  = cpu_prepack_moe_weight_int8(layer.w2_weight, "vsx")
+        w2 = cpu_prepack_moe_weight_int8(layer.w2_weight, "vsx")
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 

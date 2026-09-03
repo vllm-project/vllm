@@ -13,8 +13,8 @@ namespace vec_op {
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
+#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
 // Note: FP16 (Half) is not supported on POWER VSX — no FP16Vec16 type.
 
@@ -635,8 +635,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_ctf(v.reg.val[3], 0);
   }
 
-  explicit FP32Vec16(const float* __restrict__ base,
-                     const INT32Vec16& index) {
+  explicit FP32Vec16(const float* __restrict__ base, const INT32Vec16& index) {
     INT32Vec16::AliasReg idx;
     idx.reg = index.reg;
     AliasReg ar;
@@ -662,10 +661,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16 operator-() const {
     const __vector float zero = vec_splats(0.0f);
-    return FP32Vec16(f32x4x4_t({vec_sub(zero, reg.val[0]),
-                                vec_sub(zero, reg.val[1]),
-                                vec_sub(zero, reg.val[2]),
-                                vec_sub(zero, reg.val[3])}));
+    return FP32Vec16(
+        f32x4x4_t({vec_sub(zero, reg.val[0]), vec_sub(zero, reg.val[1]),
+                   vec_sub(zero, reg.val[2]), vec_sub(zero, reg.val[3])}));
   }
 
   FP32Vec16 operator-(const FP32Vec16& b) const {

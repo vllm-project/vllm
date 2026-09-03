@@ -28,11 +28,11 @@
 
 #if defined(__powerpc64__)
   #include "cpu/micro_gemm/cpu_micro_gemm_int8_vsx.hpp"
-  #define VSX_DISPATCH(SCALAR_TYPE, ...)                                    \
-    case cpu_utils::ISA::VSX: {                                             \
-      using gemm_t =                                                        \
+  #define VSX_DISPATCH(SCALAR_TYPE, ...)                                   \
+    case cpu_utils::ISA::VSX: {                                            \
+      using gemm_t =                                                       \
           cpu_micro_gemm::MicroGemmINT8<cpu_utils::ISA::VSX, SCALAR_TYPE>; \
-      return __VA_ARGS__();                                                 \
+      return __VA_ARGS__();                                                \
     }
 #else
   #define VSX_DISPATCH(SCALAR_TYPE, ...) case cpu_utils::ISA::VSX:
@@ -94,9 +94,9 @@ void fused_moe_int8_impl(
 
   const int32_t thread_num = cpu_utils::get_max_threads();
   const int32_t w13_input_buffer_size = cpu_utils::round_up<64>(
-      gemm_m_tile_size * input_size_13 * sizeof(int8_t));
-  const int32_t w2_input_buffer_size =
-      cpu_utils::round_up<64>(gemm_m_tile_size * input_size_2 * sizeof(int8_t));
+      (gemm_m_tile_size * input_size_13 + 64) * sizeof(int8_t));
+  const int32_t w2_input_buffer_size = cpu_utils::round_up<64>(
+      (gemm_m_tile_size * input_size_2 + 64) * sizeof(int8_t));
 
   const int32_t w13_n_tile_size = [&]() {
     const int64_t cache_size = cpu_utils::get_available_l2_size();

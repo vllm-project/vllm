@@ -625,7 +625,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
         // !defined(__APPLE__))
 #if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
-     !defined(__APPLE__)) || \
+     !defined(__APPLE__)) ||                                   \
     defined(__powerpc64__)
   ops.def(
       "prepack_moe_weight_int8(Tensor weight, Tensor(a1!) packed_weight, "
