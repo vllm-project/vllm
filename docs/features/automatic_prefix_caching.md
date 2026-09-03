@@ -13,6 +13,26 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Hybrid Mamba models
+
+Under `--mamba-cache-mode align`, Mamba state is stored only on the Mamba block grid, so a prefix-cache hit can resume only at a block boundary. `--enable-mamba-fine-grained-prefix-cache` also stores a checkpoint at the shared-prefix junction, the point where an earlier request with the same prefix stopped. Requests whose shared prefix ends inside a block can then reuse it.
+
+This helps when many requests share a long system prompt and then diverge. It is off by default, and takes effect only when all of the following hold:
+
+- `--mamba-cache-mode align`
+- EAGLE/MTP speculative decoding on the Mamba group
+- `--prefix-match-unit` smaller than the Mamba block size
+- the model does not use multi-module MTP
+
+```bash
+vllm serve <hybrid-model> \
+    --mamba-cache-mode align \
+    --prefix-match-unit 64 \
+    --enable-mamba-fine-grained-prefix-cache
+```
+
+`--prefix-match-unit` is required. Under `align` the attention block size is raised to the Mamba page size, so cache keys are already computed at the block size and no finer boundary exists to match against. Without it the flag has no effect.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
