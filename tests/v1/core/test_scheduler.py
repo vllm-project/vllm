@@ -53,6 +53,78 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_spec_decode_preemption_rebuilds_proposal(async_scheduling):
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        max_model_len=32,
+        enable_prefix_caching=True,
+        block_size=1,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+    )
+    scheduler.enable_spec_recovery = True
+    [request] = create_requests(num_requests=1, num_tokens=4, block_size=1)
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    _model_output(scheduler, output, [[7]])
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(
+        request, 0.0, drop_stale_output=scheduler.requires_kv_delivery
+    )
+    assert request.spec_recovery_size == 3
+
+    replay = scheduler.schedule()
+    assert replay.num_scheduled_tokens[request.request_id] == 1
+    assert request.num_computed_tokens == request.num_tokens - 1
+    _model_output(scheduler, replay, [[]])
+    scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[1, 2, 3]]))
+
+    verify = scheduler.schedule()
+    assert verify.num_scheduled_tokens[request.request_id] == 4
+    assert verify.scheduled_spec_decode_tokens[request.request_id] == [1, 2, 3]
+    assert request.spec_recovery_size == 0
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_batch_invariant_spec_decode_defers_partial_proposals(
+    async_scheduling,
+):
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_seqs=2,
+        max_num_batched_tokens=11,
+        max_model_len=32,
+        block_size=1,
+        parallel_drafting=True,
+        async_scheduling=async_scheduling,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+    )
+    scheduler.enable_spec_recovery = True
+    scheduler.max_num_scheduled_tokens = 6
+    requests = create_requests(num_requests=2, num_tokens=1, block_size=1)
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill = scheduler.schedule()
+    _model_output(scheduler, prefill, [[10], [20]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(
+            [request.request_id for request in requests],
+            [[1, 2], [4, 5, 6]],
+        )
+    )
+
+    first_verify = scheduler.schedule()
+    assert first_verify.num_scheduled_tokens == {requests[0].request_id: 3}
+    assert requests[1].spec_token_ids == [4, 5, 6]
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

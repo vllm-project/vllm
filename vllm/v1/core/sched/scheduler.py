@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -315,6 +316,12 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.enable_spec_recovery = (
+            envs.VLLM_BATCH_INVARIANT
+            and self.use_v2_model_runner
+            and speculative_config is not None
+            and speculative_config.supports_batch_invariance()
+        )
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
@@ -477,7 +484,11 @@ class Scheduler(SchedulerInterface):
         self, request: Request
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         connector = self.connector
-        if connector is not None and connector.supports_divergent_local_hybrid_hits:
+        if (
+            connector is not None
+            and connector.supports_divergent_local_hybrid_hits
+            and not request.spec_recovery_size
+        ):
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
 
         blocks, num_local, shared_prefix_boundary = (
@@ -505,6 +516,19 @@ class Scheduler(SchedulerInterface):
         if 0 < remaining < self.num_prefill_lookahead:
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
+
+    def _limit_spec_recovery_replay(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> int:
+        """Leave the last committed token for rebuilding the proposal."""
+        if not request.spec_recovery_size or request.spec_token_ids:
+            return num_new_tokens
+
+        tokens_to_replay = request.num_tokens - num_computed_tokens - 1
+        return min(num_new_tokens, max(tokens_to_replay, 0))
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -597,9 +621,16 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+            requested_num_new_tokens = num_new_tokens
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
+            if self.enable_spec_recovery and request.spec_token_ids:
+                num_new_tokens = min(
+                    requested_num_new_tokens,
+                    self.max_num_scheduled_tokens,
+                    self.scheduler_config.max_num_batched_tokens - draft_slots,
+                )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -639,6 +670,16 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._reserve_prefill_lookahead(
                 request, request.num_computed_tokens, num_new_tokens
             )
+            num_new_tokens = self._limit_spec_recovery_replay(
+                request, request.num_computed_tokens, num_new_tokens
+            )
+
+            if (
+                num_new_tokens > token_budget
+                or num_new_tokens + draft_slots > input_budget
+            ):
+                req_index += 1
+                continue
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -697,7 +738,9 @@ class Scheduler(SchedulerInterface):
                             token_budget += restored
                             input_budget += restored + draft_slots
                             req_to_new_blocks.pop(preempted_req_id)
-                            scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                            preempted_req.spec_token_ids = (
+                                scheduled_spec_decode_tokens.pop(preempted_req_id, [])
+                            )
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
                             )
@@ -749,6 +792,7 @@ class Scheduler(SchedulerInterface):
                     if len(spec_token_ids) > num_scheduled_spec_tokens:
                         spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+                    request.spec_recovery_size = 0
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
@@ -853,7 +897,7 @@ class Scheduler(SchedulerInterface):
                     ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if self.connector is not None and not request.spec_recovery_size:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -1047,6 +1091,9 @@ class Scheduler(SchedulerInterface):
                     # Multi-module MTP: avoid ending a prefill chunk within
                     # num_prefill_lookahead of the prefill end.
                     num_new_tokens = self._reserve_prefill_lookahead(
+                        request, num_computed_tokens, num_new_tokens
+                    )
+                    num_new_tokens = self._limit_spec_recovery_replay(
                         request, num_computed_tokens, num_new_tokens
                     )
 
@@ -1432,6 +1479,9 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
+            if self.enable_spec_recovery:
+                # Rebuild the same number of draft tokens after recomputation.
+                request.spec_recovery_size = len(request.spec_token_ids)
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
         # still delivered on return (dropping them would perturb spec-decode
@@ -1443,6 +1493,8 @@ class Scheduler(SchedulerInterface):
         request.drop_stale_output = drop_stale_output or (
             request.drop_stale_output and request.num_stale_output_tokens > 0
         )
+        if request.drop_stale_output and request.num_in_flight_tokens:
+            request.spec_recovery_size = 0
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
@@ -2337,17 +2389,27 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
+            is_recovery_draft = False
             if request.is_prefill_chunk:
-                # Ignore draft tokens for prefill chunks.
-                if request.spec_token_ids:
-                    request.spec_token_ids = []
-                continue
+                is_recovery_draft = (
+                    request.spec_recovery_size > 0
+                    and request.num_computed_tokens == request.num_tokens - 1
+                )
+                if not is_recovery_draft:
+                    # Ignore draft tokens for prefill chunks.
+                    if request.spec_token_ids:
+                        request.spec_token_ids = []
+                    continue
+
+                spec_token_ids = spec_token_ids[: request.spec_recovery_size]
 
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
+            if is_recovery_draft:
+                request.spec_recovery_size = len(spec_token_ids)
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput

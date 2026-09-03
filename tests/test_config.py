@@ -2355,6 +2355,21 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_speculative_config_batch_invariance_support():
+    config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    assert config.supports_batch_invariance()
+
+    config.num_speculative_tokens_per_batch_size = [(1, 1, 1)]
+    assert not config.supports_batch_invariance()
+
+    config.num_speculative_tokens_per_batch_size = None
+    config.enable_adaptive_verification = True
+    assert not config.supports_batch_invariance()
+
+
 @patch("vllm.config.speculative.ModelConfig")
 def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
     """Regression test: MTP + runai_streamer should use model_weights (original

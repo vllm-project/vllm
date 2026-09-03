@@ -1094,6 +1094,21 @@ class VllmConfig:
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
 
+        speculative_config = self.speculative_config
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and speculative_config is not None
+            and not (
+                self.use_v2_model_runner
+                and speculative_config.supports_batch_invariance()
+            )
+        ):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT with speculative decoding is supported for "
+                "Model Runner V2 with fixed speculative lengths and adaptive "
+                "verification disabled."
+            )
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
