@@ -352,16 +352,11 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if current_platform.is_cpu():
-        if HAS_TRITON:
-            return apply_top_k_top_p_triton(logits, k, p)
-        return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
-
-    if HAS_TRITON and logits.shape[0] >= 8:
+    if HAS_TRITON:
         return apply_top_k_top_p_triton(logits, k, p)
 
-    # Use pytorch sort implementation for small batch sizes.
-    return apply_top_k_top_p_pytorch(logits, k, p)
+    is_cpu = current_platform.is_cpu()
+    return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
 
 
 def apply_top_k_top_p_pytorch(
@@ -513,7 +508,4 @@ def flashinfer_sample(
 
 
 def _to_tensor_scalar_tuple(x):
-    if isinstance(x, torch.Tensor):
-        return (x, 0)
-    else:
-        return (None, x)
+    return (x, 0) if isinstance(x, torch.Tensor) else (None, x)
