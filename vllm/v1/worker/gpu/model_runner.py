@@ -724,17 +724,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-        if (
-            isinstance(self.speculator, DraftModelSpeculator)
-            and self.vllm_config.attention_config.hisparse_config is not None
-            and self.scheduler_config.async_scheduling
-        ):
-            self.speculator.slot_mapping_observer = (
-                self.kv_connector.stage_host_mirror_mapping
-            )
-            self.speculator.host_mirror_forward_observer = (
-                self.kv_connector.finish_host_mirror_forward
-            )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""

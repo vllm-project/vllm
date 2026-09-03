@@ -139,9 +139,6 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             name: slot_mappings[name][:num_tokens]
             for name in self.draft_attn_layer_names
         }
-        mirror_staged = self.stage_draft_host_mirror(
-            draft_slot_mappings, num_tokens, dummy_run
-        )
         with set_forward_context(
             draft_attn_metadata,
             self.vllm_config,
@@ -154,6 +151,5 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             is_padding=input_batch.is_padding[:num_tokens],
         ):
             self.model(hidden_states=self.hidden_states[:num_tokens])
-        self.finish_draft_host_mirror(mirror_staged)
 
         return draft_tokens

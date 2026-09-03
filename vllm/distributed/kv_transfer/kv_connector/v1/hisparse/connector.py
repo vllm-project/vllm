@@ -47,7 +47,6 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
     source_block_ids: tuple[int, ...]
     row_mirrors: dict[str, tuple[SparseKVRowMirror, ...]]
     all_context_pages_resident: bool
-    row_mirrors_from_resident: bool = False
 
 
 @dataclass
@@ -128,10 +127,6 @@ class HiSparseConnectorScheduler:
                 scheduler_output.num_scheduled_tokens.items()
             )
         )
-        row_mirrors_from_resident = self.async_speculative and any(
-            scheduler_output.num_output_placeholders.get(request_id, 0)
-            for request_id in scheduler_output.num_scheduled_tokens
-        )
         row_mirrors = {}
         for (
             request_id,
@@ -163,7 +158,6 @@ class HiSparseConnectorScheduler:
             tuple(source_block_ids),
             row_mirrors,
             self.coordinator.all_context_pages_resident(scheduled_requests),
-            row_mirrors_from_resident=row_mirrors_from_resident,
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -206,17 +200,10 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config.scheduler_config.async_scheduling
                 and speculative_config is not None
             )
-            refines_row_mirrors = bool(
-                async_speculative
-                and speculative_config is not None
-                and speculative_config.uses_draft_kv_cache()
-            )
             self.connector_scheduler = HiSparseConnectorScheduler(
                 coordinator,
                 async_speculative=async_speculative,
-                draft_kv_lookahead=(
-                    vllm_config.num_speculative_tokens + 1 if refines_row_mirrors else 0
-                ),
+                draft_kv_lookahead=vllm_config.num_lookahead_tokens,
             )
         elif role == KVConnectorRole.WORKER:
             if coordinator is not None:
@@ -240,10 +227,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         assert self.connector_worker is not None
         self.connector_worker.stage_row_mirror_mapping(slot_mappings, num_tokens)
-
-    def finish_host_mirror_forward(self) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.finish_staged_mirror_forward()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None

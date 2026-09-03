@@ -307,10 +307,6 @@ class KVConnectorBase_V1(ABC):
         """Stage GPU slot mappings for host mirroring."""
         return
 
-    def finish_host_mirror_forward(self) -> None:
-        """Finish host mirroring for a model forward."""
-        return
-
     def reset_capture_state(self) -> None:
         """Reset worker state mutated while capturing CUDA graphs."""
         return

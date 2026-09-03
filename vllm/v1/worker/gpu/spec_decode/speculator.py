@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -166,33 +166,6 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.supports_mm_inputs = False
-        self.slot_mapping_observer: (
-            Callable[[dict[str, torch.Tensor], int], None] | None
-        ) = None
-        self.host_mirror_forward_observer: Callable[[], None] | None = None
-
-    def stage_draft_host_mirror(
-        self,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens: int,
-        dummy_run: bool,
-    ) -> bool:
-        if dummy_run or self.slot_mapping_observer is None or slot_mappings is None:
-            return False
-        draft_slot_mappings = {
-            layer_name: slot_mappings[layer_name]
-            for layer_name in self.draft_attn_layer_names
-            if layer_name in slot_mappings
-        }
-        if not draft_slot_mappings:
-            return False
-        self.slot_mapping_observer(draft_slot_mappings, num_tokens)
-        return True
-
-    def finish_draft_host_mirror(self, staged: bool) -> None:
-        if staged:
-            assert self.host_mirror_forward_observer is not None
-            self.host_mirror_forward_observer()
 
     @abstractmethod
     def load_draft_model(
