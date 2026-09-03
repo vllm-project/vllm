@@ -120,6 +120,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
+            extra_args=(
+                {"skip_writing_prefix_cache": True}
+                if params.skip_writing_prefix_cache
+                else None
+            ),
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
@@ -450,6 +455,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     if len(allowed_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
                     else None
                 ),
+                extra_args=base_params.extra_args,
                 skip_clone=True,
             )
             result.append((beam_params, allowed_ids))
