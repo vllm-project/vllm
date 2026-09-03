@@ -30,9 +30,6 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen3-8B",
 ]
 
-# How wide a slice of HF's distribution to keep so vLLM's pick can be looked up
-# after HF is unloaded. A near-tie sits near the top by definition.
-CROSS_SCORE_WIDE_K = 256
 # Largest per-token gap, in nats, at which a divergence still counts as a tie.
 # Measured on tiny-mixtral: ties span 0.000009..0.004810, the failure is 0.018413.
 CROSS_LOGPROB_TOL = 0.025
@@ -166,10 +163,10 @@ def test_models(
             example_prompts,
             max_tokens,
             num_logprobs,
-            wide_logprobs_k=CROSS_SCORE_WIDE_K,
+            return_full_logprobs=True,
         )
-        # Plain Python data, so it outlives the runner.
-        hf_wide_logprobs = hf_model.wide_logprobs
+        # Held on CPU, so it outlives the runner.
+        hf_full_logprobs = hf_model.full_logprobs
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
@@ -231,11 +228,7 @@ def test_models(
             )
 
         def cross_score(prompt_idx, hf_idx, vllm_idx, hf_token_id, vllm_token_id):
-            hf_rows = hf_wide_logprobs[prompt_idx]
-            if vllm_token_id not in hf_rows[hf_idx]:
-                # The two models disagree by more than a tie could explain.
-                return None
-
+            hf_rows = hf_full_logprobs[prompt_idx]
             hf_ids = list(hf_outputs[prompt_idx][0])
 
             # vLLM is still resident, so score HF's sequence directly.
@@ -250,9 +243,10 @@ def test_models(
 
             # HF is unloaded, but the sequences share every token before the
             # divergence, so only the final term differs from HF's own rows.
-            vllm_seq_in_hf = sum(
-                hf_rows[pos][hf_ids[pos]] for pos in range(hf_idx)
-            ) + hf_rows[hf_idx][vllm_token_id]
+            vllm_seq_in_hf = (
+                sum(hf_rows[pos, hf_ids[pos]].item() for pos in range(hf_idx))
+                + hf_rows[hf_idx, vllm_token_id].item()
+            )
 
             return sum(hf_seq_in_vllm), vllm_seq_in_hf
 
