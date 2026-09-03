@@ -384,6 +384,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Doorbell: this worker's notification buffer is non-empty, so the engine
+    # core should gather from every rank after this step.
+    worker_notifications_pending: bool = False
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

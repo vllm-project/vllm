@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypeVar
 
 import torch
@@ -55,6 +56,20 @@ class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
 
 
 class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
+
+
+@dataclass
+class LoRALoadedState:
+    """Adapter int ids resident in each tier of a LoRA manager's caches."""
+
+    active_ids: set[int]
+    """Adapters activated into GPU slots."""
+
+    registered_ids: set[int]
+    """Adapters resident in the CPU cache (superset of `active_ids`)."""
+
+    pinned_ids: set[int]
+    """Adapters pinned in the caches."""
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -1198,6 +1213,13 @@ class LoRAModelManager:
 
     def list_adapters(self) -> dict[int, LoRAModel]:
         return dict(self._registered_adapters.cache)
+
+    def get_loaded_state(self) -> LoRALoadedState:
+        return LoRALoadedState(
+            active_ids=set(self._active_adapters),
+            registered_ids=set(self._registered_adapters),
+            pinned_ids=set(self._registered_adapters.pinned_items),
+        )
 
     def get_adapter(self, adapter_id: int) -> LoRAModel | None:
         return self._registered_adapters.get(adapter_id)

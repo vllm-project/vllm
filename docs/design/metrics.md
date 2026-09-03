@@ -394,6 +394,17 @@ Encoding a running/waiting counts for multiple adapters in a
 comma-separated string seems quite misguided - we could use labels to
 distinguish between per-adapter counts. This should be revisited.
 
+That metric is now deprecated in favour of three gauges fed by the
+engine notification channel (`vllm/v1/notifications.py`), which the
+worker updates whenever its adapter caches change, including on an
+idle engine with statically configured adapters:
+
+- `vllm:lora_adapter_loaded{adapter_name, level="gpu"|"cpu", pinned}`:
+  one series per resident adapter, present while it is loaded and
+  removed when it is evicted.
+- `vllm:num_gpu_loaded_lora_adapters` and
+  `vllm:num_cpu_loaded_lora_adapters`: counts per tier.
+
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.
 
