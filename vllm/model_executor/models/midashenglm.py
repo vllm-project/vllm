@@ -36,7 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -570,6 +570,7 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -593,6 +594,7 @@ class MiDashengLMMultiModalProcessor(
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
+        assert isinstance(audios, list)
 
         min_audio_len = self.info.get_min_audio_len()
         processed_audios = [
@@ -637,6 +639,7 @@ class MiDashengLMMultiModalProcessor(
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
+        audio_output_lengths: list[int]
         if audio_length is None:
             audio_output_lengths = []
         else:
@@ -645,10 +648,13 @@ class MiDashengLMMultiModalProcessor(
                 if isinstance(audio_length, torch.Tensor)
                 else audio_length
             )
-            audio_output_lengths = [
-                max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
-                for length in audio_length_np
-            ]
+            assert isinstance(audio_length_np, (list, tuple, np.ndarray))
+            audio_output_lengths = []
+            for length in audio_length_np:
+                assert isinstance(length, (int, np.integer))
+                audio_output_lengths.append(
+                    max(1, calculate_mel_frames_dasheng(int(length)))
+                )
 
         def get_replacement_midashenglm(item_idx: int):
             num_features = audio_output_lengths[item_idx]
