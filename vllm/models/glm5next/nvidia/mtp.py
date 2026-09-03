@@ -22,6 +22,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.nvidia.model import (
+    make_deepseek_v4_expert_params_mapping,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -297,13 +300,26 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+        uses_mega_moe = any(
+            isinstance(layer.mtp_block.mlp, Glm5NextMoE)
+            and layer.mtp_block.mlp.use_mega_moe
+            for layer in self.model.layers.values()
         )
+        if uses_mega_moe:
+            expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+                self.config.n_routed_experts,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+            )
+        else:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts,
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -426,4 +442,11 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
                 )
+        self.process_weights_after_loading()
         return loaded_params
+
+    def process_weights_after_loading(self) -> None:
+        for layer in self.model.layers.values():
+            mlp = layer.mtp_block.mlp
+            if isinstance(mlp, Glm5NextMoE):
+                mlp.finalize_mega_moe_weights()

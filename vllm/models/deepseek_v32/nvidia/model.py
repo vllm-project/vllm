@@ -44,6 +44,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.models.deepseek_v4.nvidia.model import (
+    make_deepseek_v4_expert_params_mapping,
+)
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 
@@ -96,6 +99,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.mlp",
                 apply_routed_scale_to_output=False,
+                vllm_config=vllm_config,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -322,14 +326,28 @@ class DeepseekV32Model(torch.nn.Module):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=self.num_redundant_experts,
+        uses_mega_moe = any(
+            isinstance(layer, DeepseekV32DecoderLayer)
+            and isinstance(layer.mlp, DeepseekV2MoE)
+            and layer.mlp.use_mega_moe
+            for layer in self.layers
         )
+        if uses_mega_moe:
+            expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+                self.config.n_routed_experts,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+            )
+        else:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts,
+                num_redundant_experts=self.num_redundant_experts,
+            )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -440,3 +458,15 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded = super().load_weights(weights)
+        self.process_weights_after_loading()
+        return loaded
+
+    def process_weights_after_loading(self) -> None:
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                layer.mlp.finalize_mega_moe_weights()
