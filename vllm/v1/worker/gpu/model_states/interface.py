@@ -211,6 +211,25 @@ class ModelState(ABC):
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         raise NotImplementedError
 
+    def prepare_runtime_dummy_inputs(
+        self, input_batch: InputBatch, req_states: RequestState
+    ) -> dict[str, Any]:
+        """Input preparation for a runtime (profile/DP-empty) dummy batch.
+
+        Distinct from ``prepare_dummy_inputs``, which is capture-only and
+        derives every field's shape from a raw integer token count.
+        ``GPUModelRunner.execute_model`` calls this — never
+        ``prepare_dummy_inputs`` — on its dummy-run branch, since that
+        branch already has a real (``InputBatch.make_dummy``-built)
+        ``InputBatch``/``RequestState`` pair at the same shapes
+        ``prepare_inputs`` already consumes. The default body delegates to
+        ``prepare_inputs`` unchanged, which is correct for every model
+        state that has no field needing separate dummy-batch handling.
+        Override when a field must never read real request state on a
+        dummy/profile run (e.g. Qwen4Exp's mmap-staged PLE rows).
+        """
+        return self.prepare_inputs(input_batch, req_states)
+
     @abstractmethod
     def prepare_attn(
         self,
