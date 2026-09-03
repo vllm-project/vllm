@@ -1085,10 +1085,10 @@ steps:
         agents:
           queue: small_cpu_queue_release
         commands:
-          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh vllm/vllm-openai-rock rock"
+          - "bash .buildkite/scripts/push-nightly-builds-rocm.sh rock rocm714"
           # Clean up old nightly builds (keep only last 14)
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-rock"
-          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly- vllm/vllm-openai-rock"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly-rocm714- vllm/vllm-openai-rocm"
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh base-nightly-rocm714- vllm/vllm-openai-rocm"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot

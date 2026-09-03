@@ -3,13 +3,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Push a ROCm-family nightly base image and nightly image from ECR to Docker Hub
-# as <repo>:base-nightly, <repo>:base-nightly-<commit>, <repo>:nightly and
-# <repo>:nightly-<commit>.
+# under vllm/vllm-openai-rocm, as base-nightly[-<variant>], nightly[-<variant>]
+# and their -<commit> forms.
 # Run when NIGHTLY=1 after the matching build-*-release-image step has pushed to ECR.
 #
-# Usage: push-nightly-builds-rocm.sh [DOCKERHUB_REPO ECR_TAG_SUFFIX]
-#   Pass both arguments or neither. The default target is ROCm; the ROCk images
-#   pass "vllm/vllm-openai-rock" and "rock".
+# Usage: push-nightly-builds-rocm.sh [ECR_TAG_SUFFIX TAG_VARIANT]
+#   Pass both arguments or neither. With none, the default ROCm apt build is
+#   published as :nightly. The TheRock build passes "rock" (the source ECR tag
+#   suffix) and "rocm714" (the Docker Hub tag flavor), giving :nightly-rocm714.
 #
 # Local testing (no push to Docker Hub):
 #   BASE_ECR_IMAGE=<full-base-image-reference> \
@@ -20,21 +21,23 @@
 set -euxo pipefail
 
 usage() {
-  echo "Usage: $0 [DOCKERHUB_REPO ECR_TAG_SUFFIX]" >&2
+  echo "Usage: $0 [ECR_TAG_SUFFIX TAG_VARIANT]" >&2
 }
+
+DOCKERHUB_REPO="vllm/vllm-openai-rocm"
 
 case "$#" in
   0)
-    DOCKERHUB_REPO="vllm/vllm-openai-rocm"
     ECR_TAG_SUFFIX="rocm"
+    TAG_VARIANT=""
     ;;
   2)
     if [[ -z "$1" || -z "$2" ]]; then
       usage
       exit 2
     fi
-    DOCKERHUB_REPO="$1"
-    ECR_TAG_SUFFIX="$2"
+    ECR_TAG_SUFFIX="$1"
+    TAG_VARIANT="$2"
     ;;
   *)
     usage
@@ -67,10 +70,12 @@ if [[ -z "$BASE_ORIG_TAG" ]]; then
 fi
 
 ORIG_TAG="${BUILDKITE_COMMIT}-${ECR_TAG_SUFFIX}"
-BASE_TAG_NAME="base-nightly"
-TAG_NAME="nightly"
-BASE_TAG_NAME_COMMIT="base-nightly-${BUILDKITE_COMMIT}"
-TAG_NAME_COMMIT="nightly-${BUILDKITE_COMMIT}"
+VARIANT_SUFFIX=""
+[[ -n "$TAG_VARIANT" ]] && VARIANT_SUFFIX="-$TAG_VARIANT"
+BASE_TAG_NAME="base-nightly${VARIANT_SUFFIX}"
+TAG_NAME="nightly${VARIANT_SUFFIX}"
+BASE_TAG_NAME_COMMIT="base-nightly${VARIANT_SUFFIX}-${BUILDKITE_COMMIT}"
+TAG_NAME_COMMIT="nightly${VARIANT_SUFFIX}-${BUILDKITE_COMMIT}"
 
 echo "Pushing base image from ECR: $BASE_ORIG_TAG"
 echo "Pushing release image from ECR tag: $ORIG_TAG to Docker Hub as $DOCKERHUB_REPO:$TAG_NAME and $DOCKERHUB_REPO:$TAG_NAME_COMMIT"
