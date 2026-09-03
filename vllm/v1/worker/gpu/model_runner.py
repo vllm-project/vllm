@@ -133,7 +133,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
-from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.pp_utils import PPHandler, prepare_pp_intermediate_tensors
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_logits,
@@ -491,6 +491,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
+
+        if envs.VLLM_ROCM_USE_STREAMED_PP_TRANSPORT:
+            assert self.pp_handler is not None
+            schema = self.intermediate_tensors
+            if schema is None:
+                schema = self.model.make_empty_intermediate_tensors(
+                    batch_size=self.max_num_tokens,
+                    dtype=self.model_config.dtype,
+                    device=torch.device("meta"),
+                )
+            enabled = self.pp_handler.init_activation_transport(
+                schema=schema,
+                chunk_tokens=self.max_num_tokens,
+            )
+            if enabled:
+                logger.info(
+                    "Enabled streamed BF16 PP transport with %d-token chunks",
+                    self.max_num_tokens,
+                )
 
         get_offloader().post_init()
 
@@ -1735,13 +1754,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
-            new_tensors = {
-                k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                for k, v in self.intermediate_tensors.tensors.items()
-            }
-            model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
+            model_inputs["intermediate_tensors"] = prepare_pp_intermediate_tensors(
+                self.intermediate_tensors,
+                intermediate_tensors,
+                num_tokens=n,
+                dummy_run=dummy_run,
+            )
             del intermediate_tensors
 
         # Update the EPLB meta.
@@ -2050,6 +2068,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pp_handler is not None:
+            self.pp_handler.drain_activation_transport()
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):

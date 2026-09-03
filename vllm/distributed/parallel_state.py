@@ -1146,6 +1146,16 @@ class GroupCoordinator:
             handles[0].wait()
             pending.popleft()
 
+    def drain_pending_isends(self) -> None:
+        """Wait for and release all self-retained tensor-dict sends."""
+        pending = getattr(self, "_pending_isends", None)
+        if pending is None:
+            return
+        while pending:
+            handles, _ = pending.popleft()
+            for handle in handles:
+                handle.wait()
+
     def isend_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
