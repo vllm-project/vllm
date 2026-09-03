@@ -28,8 +28,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
     TrtLlmBf16ExpertsModular,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    convert_moe_weights_to_flashinfer_trtllm_block_layout,
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    UnquantizedMoeBackend,
+    convert_to_unquantized_kernel_format,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -38,7 +39,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 if pytest and (
     not has_flashinfer_trtllm_fused_moe()
-    or not current_platform.has_device_capability(100)
+    or not current_platform.is_device_capability_family(100)
 ):
     pytest.skip(
         "Requires flashinfer TRTLLM fused MoE BF16 backend (SM100)",
@@ -46,9 +47,8 @@ if pytest and (
     )
 
 # (m, n, k) = (tokens, intermediate_size_per_partition, hidden_dim).
-# Covers larger NvFP4-like shapes while keeping BF16's FlashInfer TRTLLM
-# intermediate-size multiple-of-128 requirement.
 MNK_FACTORS = [
+    (2, 160, 2560),
     (2, 1024, 1024),
     (64, 2048, 1536),
     (64, 1024, 4096),
@@ -97,11 +97,15 @@ def test_trtllm_bf16_moe_modular_no_graph(
             max_num_tokens=next_power_of_2(m),
         )
 
-        trtllm_w1, trtllm_w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
-            {},
+        trtllm_w1, trtllm_w2 = convert_to_unquantized_kernel_format(
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            moe_config,
             w1,
             w2,
         )
+        expected_n = (n + 127) // 128 * 128
+        assert moe_config.intermediate_size_per_partition == expected_n
+        assert trtllm_w2.numel() == e * k * expected_n
 
         trtllm_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
