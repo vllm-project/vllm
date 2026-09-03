@@ -202,10 +202,17 @@ __launch_bounds__(256) void paged_attention_ll4mi_reduce_free_kernel(
     }
   }
 
+  // The block is launched at least one warp wide so the partition reduction
+  // above always has a full warp, which for head_size < WARP_SIZE is more
+  // threads than there are head elements. The surplus lanes must still reach
+  // the __syncthreads below, so they redundantly accumulate element 0 and drop
+  // the result at the store rather than reading past this head's slice.
+  const bool helem_active = threadIdx.x < static_cast<unsigned>(head_size);
+  const unsigned helem = helem_active ? threadIdx.x : 0u;
   const scalar_t* tmp_out_ptr =
       tmp_out + seq_idx * num_heads * max_num_partitions * head_size +
       head_idx * max_num_partitions * head_size +
-      static_cast<int64_t>(partition_offset) * head_size + threadIdx.x;
+      static_cast<int64_t>(partition_offset) * head_size + helem;
   constexpr int MAX_NPAR = 64;
   scalar_t tmps[MAX_NPAR];
   const float dzero = 0.0f;
@@ -288,6 +295,10 @@ __launch_bounds__(256) void paged_attention_ll4mi_reduce_free_kernel(
       query_start_loc_ptr ? query_start_loc_ptr[seq_idx] : seq_idx);
   OUTT* out_ptr = out + query_start_off * num_heads * head_size +
                   static_cast<int64_t>(head_idx) * head_size;
+
+  if (!helem_active) {
+    return;
+  }
 
   if constexpr (std::is_same<OUTT, float4>::value) {
     float4* temp_dst = reinterpret_cast<float4*>(
@@ -2216,7 +2227,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
   constexpr int VTLOOP = NWARPS;
   constexpr int VTLANELOOP = DIVIDE_ROUND_UP(
       VTOKENS_PER_LANE, CONTIGUOUS_KV_ELEMS_16B_LOAD);
-  const int vheloop = head_size / 16 / NWARPS;
+  // Round up: a head_size that is not a multiple of NWARPS*16 still has a
+  // partial last iteration, whose out-of-range lanes are masked in fetchV.
+  const int vheloop = DIVIDE_ROUND_UP(head_size / 16, NWARPS);
   constexpr int MAX_VHELOOP = 4;  // supports head_size up to 256
 
 
@@ -2231,7 +2244,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kphysical_block_offset = klocal_token_idx % block_size;
+    // Slot within the block must come from the global token index:
+    // partition_start_token_idx is congruent to 0 mod block_size only when
+    // block_size divides T_PAR_SIZE.
+    const int kphysical_block_offset =
+        (partition_start_token_idx + klocal_token_idx) % block_size;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
     for (int qkhe_depth = 0; qkhe_depth < qkheloop; qkhe_depth++) {
@@ -2271,22 +2288,43 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
     }
   }
 
-
-  const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
-                         ((rowid * VTOKENS_PER_LANE) % block_size);
+  // The intra-block slot offset depends on vtoken_depth and the partition base,
+  // so it cannot be hoisted here; it is computed in the fetch loop below.
+  const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride;
 
   auto fetchV = [&]() {
     // fetch V values (runtime head_size for vheloop, runtime block_size for addressing)
     for (int vhe_depth = 0; vhe_depth < vheloop; vhe_depth++) {
       const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
+      if (vhead_elem >= head_size) {
+        // Partial last iteration: reading V here would run past this head's
+        // slice. Zero so the SV MFMA below consumes defined values; the
+        // resulting outelems are never read back by the tmp_out writeback,
+        // which is itself guarded on head_elem_idx < head_size.
+        for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+          for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP;
+               vfetch_depth++) {
+            Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = _B16x8{};
+          }
+        }
+        continue;
+      }
       const cache_t* v_ptr2 = v_ptr + vhead_elem * block_size;
 
       for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        // block_size is a multiple of VTOKENS_PER_LANE (16), so a lane's 16
+        // consecutive tokens never straddle a block boundary.
+        const int vlocal_token_idx =
+            vtoken_depth * VTOKENS_PER_LANE * ROWS_PER_WARP +
+            rowid * VTOKENS_PER_LANE;
+        const int vphysical_block_offset =
+            (partition_start_token_idx + vlocal_token_idx) % block_size;
         for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
           const int vblock_depth = 0;
           const int64_t vblock_number = static_cast<int64_t>(
               vphysical_block_number[vtoken_depth][vblock_depth]);
-          const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
+          const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride) +
+                                  vphysical_block_offset;
           const cache_t* v_fetch_ptr =
               v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
           const _B16x8* v_fetch_ptr_16B =
@@ -3858,7 +3896,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_free_kernel
     const int64_t kblock_number = static_cast<int64_t>(kphysical_block_number[token_depth]);
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx = TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kphysical_block_offset = klocal_token_idx % block_size;
+    // Same as the GFX9 free kernel: derive the slot from the global token
+    // index. The V path below already does. No-op where block_size divides
+    // T_PAR_SIZE, i.e. everywhere this kernel is correct today.
+    const int kphysical_block_offset =
+        (partition_start_token_idx + klocal_token_idx) % block_size;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
     for (int qkhe_depth = 0; qkhe_depth < qkheloop; qkhe_depth++) {
       const int head_elem = row_head_elem + qkhe_depth * QKHE_PER_FETCH;
@@ -4487,7 +4529,9 @@ void paged_attention_fully_custom_launcher(
   LAUNCH_CUSTOM_ATTENTION_MFMA16_FREE();
 
   dim3 reduce_grid(num_heads, num_seqs);
-  dim3 reduce_block(head_size);
+  // At least one full warp: the reduction's partition sweep is warp-wide, so a
+  // head_size below WARP_SIZE would silently drop partitions past head_size.
+  dim3 reduce_block(std::max(head_size, WARP_SIZE));
   const int npar_loops = DIVIDE_ROUND_UP(max_num_partitions, WARP_SIZE);
   int seq_len_offset = 0;
   // reduction kernel supports upto 8 NPAR_loops * 64 (warp_size) * 256
