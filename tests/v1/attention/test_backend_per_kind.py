@@ -4,11 +4,13 @@
 
 import pytest
 
+from tests.v1.attention.utils import create_vllm_config
 from vllm.config.attention import AttentionConfig
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.attention.selector import get_attn_spec_kind
-from vllm.v1.kv_cache_interface import KVCacheSpecKind
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpecKind
 
 
 @pytest.mark.parametrize(
@@ -65,3 +67,29 @@ def test_backend_per_kind_rejects_unknown_kind():
 
 def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
+
+
+def test_resolve_kv_cache_layout_intersects_worker_preferences(monkeypatch):
+    config = create_vllm_config()
+    config.cache_config.kv_cache_layout = None
+    monkeypatch.setattr("vllm.envs.VLLM_KV_CACHE_LAYOUT", None)
+
+    layout = resolve_kv_cache_layout(
+        config,
+        [
+            ["LBNHC", "LBHNC", "BLNHC", "BLHNC"],
+            ["BLNHC", "BLHNC"],
+        ],
+    )
+
+    assert layout is KVCacheLayout.BLNHC
+    assert config.cache_config.kv_cache_layout == "BLNHC"
+
+
+def test_resolve_kv_cache_layout_rejects_disjoint_worker_preferences(monkeypatch):
+    config = create_vllm_config()
+    config.cache_config.kv_cache_layout = None
+    monkeypatch.setattr("vllm.envs.VLLM_KV_CACHE_LAYOUT", None)
+
+    with pytest.raises(ValueError, match="share no supported KV cache layout"):
+        resolve_kv_cache_layout(config, [["LBNHC"], ["BLHNC"]])
