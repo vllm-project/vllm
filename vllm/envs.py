@@ -1900,12 +1900,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
     ),
     # Opt-in custom all-reduce size ceiling in MiB (integer 1..256).
-    # Unset keeps the 8 MiB constructor default. Applied only for same-node
-    # TP=2; other topologies ignore the env. This *sets* the ceiling (it can
-    # lower as well as raise). CUSTOM is used when inp_size < max_size
-    # (strictly less). Raising max_size grows *two* same-node buffers
-    # (sync metadata scratch + eager IPC copy buffer), so 128 MiB is about
-    # +232 MiB/GPU and 256 MiB about +488 MiB/GPU vs the 8 MiB default.
+    # Unset keeps the 8 MiB constructor default. Applied for same-node
+    # all-reduce groups of 2/4/6/8 ranks (custom all-reduce's
+    # kernel-supported sizes); other topologies ignore the env. At world
+    # sizes above two, custom all-reduce stays enabled only with full
+    # NVLink connectivity — on PCIe-only TP>2 groups it is disabled
+    # entirely and this override has no effect. This *sets* the ceiling
+    # (it can lower as well as raise). CUSTOM is used when
+    # inp_size < max_size (strictly less). Raising max_size grows *two*
+    # same-node buffers (sync metadata scratch + eager IPC copy buffer),
+    # so 128 MiB is about +232 MiB/GPU and 256 MiB about +488 MiB/GPU vs
+    # the 8 MiB default (per-GPU cost is approximately world-size
+    # independent). The CUSTOM-vs-NCCL crossover was only measured on
+    # same-node TP=2 PCIe; operators at other world sizes should measure
+    # their own topology.
     "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB": lambda: (
         int(v) if (v := os.getenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB")) else None
     ),

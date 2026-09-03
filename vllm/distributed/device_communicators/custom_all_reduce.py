@@ -226,15 +226,14 @@ class CustomAllreduce:
         if override_mb is not None and not applied_override:
             logger.warning_once(
                 "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB=%s is ignored "
-                "(only same-node TP=2 is supported).",
+                "(applies only to same-node all-reduce groups of 2/4/6/8 "
+                "ranks).",
                 override_mb,
             )
-        elif applied_override:
-            logger.info_once(
-                "Custom allreduce max size overridden to %d MiB via "
-                "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB (same-node TP=2).",
-                max_size // (1024 * 1024),
-            )
+        # The "overridden" info line is deferred until every disable path
+        # (unsupported world size, multi-node, TP>2 PCIe-only, P2P failure)
+        # has passed: reporting an override on a group whose custom
+        # allreduce is then disabled would be misleading.
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:
@@ -274,6 +273,13 @@ class CustomAllreduce:
             return
 
         self.disabled = False
+        if applied_override:
+            logger.info_once(
+                "Custom allreduce max size overridden to %d MiB via "
+                "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB (same-node, world_size=%d).",
+                max_size // (1024 * 1024),
+                world_size,
+            )
         # Buffers memory are owned by this Python class and passed to C++.
         # Metadata composes of two parts: metadata for synchronization and a
         # temporary buffer for storing intermediate allreduce results.
