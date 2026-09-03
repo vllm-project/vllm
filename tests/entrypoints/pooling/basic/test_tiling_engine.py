@@ -16,7 +16,7 @@ def llm(vllm_runner):
     with vllm_runner(
         MODEL_NAME,
         max_model_len=None,
-        max_num_seqs=2,  # small to trigger tiling
+        max_num_seqs=4,  # small to trigger tiling
         tensor_parallel_size=1,
         gpu_memory_utilization=0.75,
         enforce_eager=True,
@@ -31,18 +31,35 @@ def llm(vllm_runner):
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_basic(llm):
     """
-    Basic test with a small number of prompts (less than max_num_seqs).
+    Basic test with a small number of prompts (up to max_num_seqs).
     No tiling should be triggered, but the engine still processes correctly.
     """
-    prompts = ["Hello", "World"]
-    with mock.patch.object(
-        llm.llm_engine,
-        "add_requests",
-        wraps=llm.llm_engine.add_requests,
-    ) as mock_add_requests:
+    prompts = [f"Prompt {i}" for i in range(4)]
+    execution_batch_sizes: list[int] = []
+    get_output = llm.llm_engine.engine_core.get_output
+
+    def record_execution_batch_size():
+        output = get_output()
+        if output.outputs:
+            execution_batch_sizes.append(len(output.outputs))
+        return output
+
+    with (
+        mock.patch.object(
+            llm.llm_engine,
+            "add_requests",
+            wraps=llm.llm_engine.add_requests,
+        ) as mock_add_requests,
+        mock.patch.object(
+            llm.llm_engine.engine_core,
+            "get_output",
+            side_effect=record_execution_batch_size,
+        ),
+    ):
         outputs = llm.encode(prompts, pooling_task="embed")
     assert len(outputs) == len(prompts)
     mock_add_requests.assert_called_once()
+    assert execution_batch_sizes == [len(prompts)]
 
 
 @pytest.mark.skip_global_cleanup

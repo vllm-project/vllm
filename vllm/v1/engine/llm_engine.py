@@ -223,7 +223,7 @@ class LLMEngine:
         request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
-    def add_request(
+    def _prepare_engine_core_request(
         self,
         request_id: str,
         prompt: EngineCoreRequest | PromptType | EngineInput,
@@ -235,12 +235,10 @@ class LLMEngine:
         priority: int = 0,
         session_id: str | None = None,
         prompt_text: str | None = None,
-    ) -> str:
-        # Validate the request_id type.
+    ) -> tuple[EngineCoreRequest, str | None]:
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
 
-        # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
@@ -272,6 +270,44 @@ class LLMEngine:
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
         self.input_processor.assign_request_id(request)
+        return request, prompt_text
+
+    def _register_request(
+        self,
+        request: EngineCoreRequest,
+        prompt_text: str | None,
+        parent_req: ParentRequest | None = None,
+        request_index: int = 0,
+    ) -> None:
+        self.output_processor.add_request(
+            request, prompt_text, parent_req, request_index
+        )
+
+    def add_request(
+        self,
+        request_id: str,
+        prompt: EngineCoreRequest | PromptType | EngineInput,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        session_id: str | None = None,
+        prompt_text: str | None = None,
+    ) -> str:
+        request, prompt_text = self._prepare_engine_core_request(
+            request_id,
+            prompt,
+            params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+            session_id=session_id,
+            prompt_text=prompt_text,
+        )
 
         req_id = request.request_id
 
@@ -282,7 +318,7 @@ class LLMEngine:
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, prompt_text, None, 0)
+            self._register_request(request, prompt_text)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return req_id
@@ -296,39 +332,36 @@ class LLMEngine:
             child_request.sampling_params = child_params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(
-                child_request, prompt_text, parent_req, idx
-            )
+            self._register_request(child_request, prompt_text, parent_req, idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
         return req_id
 
     def add_requests(self, requests: Sequence[LLMEngineRequest]) -> list[str]:
+        prepared_requests = [
+            self._prepare_engine_core_request(
+                request_id,
+                prompt,
+                params,
+                lora_request=lora_request,
+                priority=priority,
+            )
+            for request_id, prompt, params, lora_request, priority in requests
+        ]
+
         request_ids: list[str] = []
         engine_core_requests: list[EngineCoreRequest] = []
         try:
-            for request_id, prompt, params, lora_request, priority in requests:
-                if not isinstance(request_id, str):
-                    raise TypeError(
-                        f"request_id must be a string, got {type(request_id)}"
-                    )
-
-                request = self.input_processor.process_inputs(
-                    request_id,
-                    prompt,
-                    params,
-                    supported_tasks=self.get_supported_tasks(),
-                    lora_request=lora_request,
-                    priority=priority,
-                )
-                prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
-
-                self.input_processor.assign_request_id(request)
+            for request, prompt_text in prepared_requests:
                 request_ids.append(request.request_id)
-                self.output_processor.add_request(request, prompt_text, None, 0)
+                self._register_request(request, prompt_text)
                 engine_core_requests.append(request)
+        except Exception:
+            self.output_processor.abort_requests(request_ids, internal=True)
+            raise
 
+        try:
             self.engine_core.add_requests(engine_core_requests)
         except Exception:
             internal_ids = self.output_processor.abort_requests(

@@ -1553,13 +1553,7 @@ class EngineCoreProc(EngineCore):
             for req, request_wave in request:
                 if self._reject_add_in_shutdown(req):
                     continue
-                try:
-                    self.add_request(req, request_wave)
-                except Exception:
-                    logger.exception("Failed to add request %s", req.request_id)
-                    self._send_error_outputs_to_client(
-                        [req.request_id], req.client_index
-                    )
+                self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

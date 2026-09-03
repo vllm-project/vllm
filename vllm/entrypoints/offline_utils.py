@@ -534,23 +534,28 @@ class OfflineInferenceMixin:
 
         try:
             if batch_engine_requests:
-                requests_to_add: list[LLMEngineRequest] = []
-                for i, prompt in enumerate(prompts):
-                    if not isinstance(params[i], PoolingParams):
-                        raise TypeError("Bulk request ingress only supports pooling")
-                    requests_to_add.append(
-                        (
-                            str(next(self.request_counter)),
-                            prompt,
-                            params[i],
-                            self._resolve_mm_lora(
+                rendered_prompts = list(prompts)
+                if all(prompt["type"] == "token" for prompt in rendered_prompts):
+                    requests_to_add: list[LLMEngineRequest] = []
+                    for i, prompt in enumerate(rendered_prompts):
+                        if not isinstance(params[i], PoolingParams):
+                            raise TypeError(
+                                "Bulk request ingress only supports pooling"
+                            )
+                        requests_to_add.append(
+                            (
+                                str(next(self.request_counter)),
                                 prompt,
-                                None if lora_requests is None else lora_requests[i],
-                            ),
-                            0 if priorities is None else priorities[i],
+                                params[i],
+                                self._resolve_mm_lora(
+                                    prompt,
+                                    None if lora_requests is None else lora_requests[i],
+                                ),
+                                0 if priorities is None else priorities[i],
+                            )
                         )
-                    )
-                return self.llm_engine.add_requests(requests_to_add)
+                    return self.llm_engine.add_requests(requests_to_add)
+                prompts = rendered_prompts
 
             for i, prompt in enumerate(prompts):
                 request_id = self._add_request(
