@@ -20,9 +20,18 @@ from packaging import version
 
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.forward_context import set_forward_context
+from vllm.model_executor import parameter
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
@@ -109,6 +118,12 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse(QUARK_MXFP4_MIN_VERSION)
 
 AITER_AVAILABLE = is_aiter_found_and_supported()
+
+AITER_PTPC_KERNELS = (
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+)
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -909,6 +924,54 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
         method = config.get_quant_method(layer, "experts")
 
         assert isinstance(method, case.dispatch_cls)
+
+
+def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
+    """QuarkW8A8Fp8 must advertise the key its kernel consumes pre-quantized.
+
+    Only kernel selection runs, no GEMM. The shape matters: AITER PTPC
+    kernels decline untuned shapes, leaving a torch kernel that has no key.
+    """
+    # Llama-3.1-70B qkv_proj at TP1 (aiter-tuned N, K on gfx950).
+    N, K = 10240, 8192
+    dtype = torch.bfloat16
+    kernel_config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8StaticChannelSym,
+        activation_quant_key=kFp8DynamicTokenSym,
+        weight_shape=(N, K),
+        input_dtype=dtype,
+        out_dtype=dtype,
+    )
+    if not any(
+        cls.is_supported()[0] and cls.can_implement(kernel_config)[0]
+        for cls in AITER_PTPC_KERNELS
+    ):
+        pytest.skip("no AITER PTPC kernel is usable for this shape and environment")
+
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    scheme = QuarkW8A8Fp8.__new__(QuarkW8A8Fp8)
+    scheme.weight_qscheme = "per_channel"
+    scheme.is_static_input_scheme = False
+    scheme.input_qscheme = "per_channel"
+    scheme.activation_quant_key = kFp8DynamicTokenSym
+    scheme.weight_quant_key = kFp8StaticChannelSym
+    scheme.out_dtype = dtype
+    scheme.input_dtype = dtype
+
+    layer = torch.nn.Module()
+    with set_current_vllm_config(VllmConfig()):
+        scheme.create_weights(
+            layer,
+            output_partition_sizes=[N],
+            input_size_per_partition=K,
+            params_dtype=dtype,
+            weight_loader=lambda *args, **kwargs: None,
+        )
+
+    assert isinstance(scheme.fp8_linear, AITER_PTPC_KERNELS)
+    assert layer.input_quant_key == kFp8DynamicTokenSym
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
