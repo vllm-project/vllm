@@ -37,21 +37,13 @@ def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module
 def maybe_share_target_embed(
     draft_model: nn.Module, draft_inner: nn.Module, target_inner: nn.Module
 ) -> None:
-    """Alias the target's input embedding into the drafter when it needs one.
-
-    Under PP the drafter runs on the last stage, where the target's embedding
-    exists only because spec_decode_needs_target_embed() asked for it.
-    """
+    """Share the target input embedding with the drafter when needed."""
     target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
         target_inner, "embedding", None
     )
     if isinstance(target_embed, PPMissingLayer):
         target_embed = None
-    # If the target's embedding is LoRA-wrapped, share the underlying base
-    # layer. The draft is not part of the LoRA adapter; sharing the wrapper
-    # would make the draft run the LoRA embedding kernel with the target's
-    # punica metadata (sized for the target's token count), causing an
-    # out-of-bounds GPU access during multi-step draft decode.
+    # The drafter does not use the target's LoRA adapter.
     if isinstance(target_embed, BaseLayerWithLoRA):
         target_embed = target_embed.base_layer
     draft_embed = getattr(draft_inner, "embed_tokens", None)
@@ -59,24 +51,15 @@ def maybe_share_target_embed(
     if get_pp_group().world_size > 1 and not hasattr(
         draft_model, "has_own_embed_tokens"
     ):
-        # MTP-style drafts load an embedding from the target checkpoint, and the
-        # flag that would tell a loaded one from a missing one is EAGLE-only.
         return
 
     if target_embed is None:
-        # hasattr, not draft_embed is not None: DSpark drafts declare
-        # embed_tokens as None and wait for the alias, and they are the ones
-        # that cannot run without it.
         if hasattr(draft_inner, "embed_tokens") and not getattr(
             draft_model, "has_own_embed_tokens", False
         ):
             raise RuntimeError(
-                f"{type(draft_model).__name__} ships no input embedding of its "
-                "own and the target's is absent on this pipeline stage, "
-                "leaving the drafter nothing to embed its proposals with. "
-                "spec_decode_needs_target_embed() must be true for "
-                f"{type(target_inner).__name__} so the last stage instantiates "
-                "the target's embed_tokens."
+                f"{type(draft_model).__name__} needs the target input embedding, "
+                "but it is unavailable on this PP stage"
             )
         return
 

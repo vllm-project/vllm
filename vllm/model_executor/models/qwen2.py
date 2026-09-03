@@ -416,9 +416,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        remote_aux: list[torch.Tensor] = []
-        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
-            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
 
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
@@ -435,14 +433,13 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            # Merged by unpacking rather than dict.update: the compile wrapper
-            # rejects a forward whose bytecode names `update`.
-            tensors = {
-                "hidden_states": hidden_states,
-                "residual": residual,
-                **self.pack_local_aux_hidden_states(aux_hidden_states),
-            }
-            return IntermediateTensors(tensors)
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
 

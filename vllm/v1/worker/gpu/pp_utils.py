@@ -31,7 +31,6 @@ class PendingRecv:
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
-    # Draft proposals for the step this slot feeds, when spec decoding is on.
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
 
 
@@ -46,8 +45,7 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    # Discount drafts from the prior step: scheduler advances num_computed by
-    # full width before PP peers consume that step's sample broadcast.
+    # The scheduler has already counted the prior step's draft tokens.
     finish_computed = old_computed
     if input_batch.prev_num_draft_tokens_per_req is not None:
         finish_computed = old_computed - input_batch.prev_num_draft_tokens_per_req
@@ -153,7 +151,6 @@ class PPHandler:
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
-            # A freed index may already belong to a new request.
             if exclude_mask.any():
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=self.device)
@@ -262,15 +259,10 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            # Pad to max_sample_len so send width matches receive().
-            send_tokens = sampled_token_ids
-            width = send_tokens.shape[-1]
-            if width < self.max_sample_len:
-                padded = send_tokens.new_zeros(
-                    send_tokens.shape[0], self.max_sample_len
-                )
-                padded[:, :width] = send_tokens
-                send_tokens = padded
+            send_tokens = torch.nn.functional.pad(
+                sampled_token_ids,
+                (0, self.max_sample_len - sampled_token_ids.shape[-1]),
+            )
             torch.distributed.broadcast(
                 send_tokens.contiguous(),
                 src=self.last_rank,

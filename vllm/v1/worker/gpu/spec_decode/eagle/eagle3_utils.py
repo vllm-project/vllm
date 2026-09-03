@@ -18,8 +18,6 @@ def set_eagle3_aux_hidden_state_layers(
 ) -> None:
     if not supports_eagle3(model):
         raise RuntimeError("Model does not support EAGLE3 interface")
-    # mypy may infer the class-level overload for supports_eagle3.
-    # Narrow explicitly to the runtime protocol instance.
     if isinstance(model, type):
         raise RuntimeError("Expected model instance for EAGLE3 configuration")
     eagle3_model = cast(SupportsEagle3, model)
@@ -47,34 +45,25 @@ def verify_supports_aux_hidden_states_over_pp(model: nn.Module, method: str) -> 
     inner = _inner_decoder(model)
     if not getattr(inner, "supports_aux_hidden_states_over_pp", False):
         raise ValueError(
-            f"{method} with pipeline parallel is not supported by "
-            f"{type(model).__name__}: it does not forward auxiliary hidden states "
-            "across pipeline stages."
+            f"{type(model).__name__} does not support {method} with "
+            "pipeline parallelism"
         )
 
 
 def aux_hidden_state_relay_keys(model: nn.Module) -> tuple[str, ...]:
-    """Auxiliary hidden-state keys this stage forwards."""
     from vllm.distributed.parallel_state import get_pp_group
 
     pp = get_pp_group()
     if pp.world_size < 2 or pp.is_first_rank or pp.is_last_rank:
         return ()
     inner = _inner_decoder(model)
-    if inner is None or not getattr(inner, "supports_aux_hidden_states_over_pp", False):
-        return ()
-    num_upstream = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
-    key = inner.AUX_HIDDEN_STATE_KEY
-    return tuple(f"{key}{i}" for i in range(num_upstream))
+    assert inner is not None
+    return tuple(
+        f"{inner.AUX_HIDDEN_STATE_KEY}{i}" for i in range(inner._aux_slot_base_cached)
+    )
 
 
 def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
-    """Declare the aux slots this stage receives from upstream.
-
-    The runner copies received tensors into a persistent buffer built once from
-    `make_empty_intermediate_tensors`, silently dropping keys that buffer lacks.
-    An undeclared slot therefore costs acceptance without failing.
-    """
     from vllm.distributed.parallel_state import get_pp_group
 
     pp = get_pp_group()
@@ -84,7 +73,7 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
     if inner is None or not getattr(inner, "supports_aux_hidden_states_over_pp", False):
         return
 
-    num_aux_states = inner._aux_slot_base(pp.rank_in_group, pp.world_size)
+    num_aux_states = inner._aux_slot_base_cached
     if num_aux_states == 0:
         return
 
@@ -101,11 +90,6 @@ def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
         return tensors
 
     model.make_empty_intermediate_tensors = make_empty_with_aux
-    logger.info(
-        "Reserved %d auxiliary hidden-state slot(s) from PP stages 0..%d.",
-        num_aux_states,
-        pp.rank_in_group - 1,
-    )
 
 
 def get_eagle3_aux_layers_from_config(

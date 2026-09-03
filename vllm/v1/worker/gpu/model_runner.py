@@ -1966,8 +1966,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
-            # The other PP ranks have no drafter, so hand them the proposals
-            # they must feed the target on the next step.
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
                     self.req_states.draft_tokens, input_batch

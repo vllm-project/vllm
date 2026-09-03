@@ -111,7 +111,6 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
-    # [num_reqs] draft width from each request's prior scheduled step under PP.
     prev_num_draft_tokens_per_req: np.ndarray | None = None
 
     @classmethod

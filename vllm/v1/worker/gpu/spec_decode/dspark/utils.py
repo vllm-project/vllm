@@ -85,7 +85,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    maybe_share_target_embed(draft_model, draft_inner, target_inner)
+    if draft_model_config.get_vocab_size() <= target_vocab_size:
+        maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)

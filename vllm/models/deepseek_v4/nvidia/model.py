@@ -1390,9 +1390,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             input_ids = sp_shard(input_ids)
 
         residual, post_mix, res_mix = None, None, None
-        remote_aux: list[torch.Tensor] = []
-        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
-            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
         aux_hidden_states: list[torch.Tensor] = []
         final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
         for idx, layer in enumerate(
@@ -1427,13 +1425,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
 
         if not get_pp_group().is_last_rank:
-            # Merged by unpacking rather than dict.update: the compile wrapper
-            # rejects a forward whose bytecode names `update`.
-            tensors = {
-                "hidden_states": hidden_states,
-                **self.pack_local_aux_hidden_states(aux_hidden_states),
-            }
-            return IntermediateTensors(tensors)
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+            )
 
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
