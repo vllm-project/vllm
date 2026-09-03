@@ -5,9 +5,9 @@
 --pre
 --extra-index-url https://download.pytorch.org/whl/nightly/cu134
 
-torch==2.15.0.dev20260812+cu134
-torchvision==0.29.0.dev20260813+cu134
-torchaudio==2.11.0.dev20260813+cu134
+torch==2.15.0.dev20260903+cu134
+torchvision==0.30.0.dev20260903+cu134
+torchaudio==2.11.0.dev20260903+cu134
 
 # docker/Dockerfile strips these two from requirements/cuda.txt whenever
 # INSTALL_RUBIN_PRERELEASE=true, so they must be pinned here instead to
