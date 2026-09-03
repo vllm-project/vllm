@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -48,8 +49,7 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
-    # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
-    # requires the head shard to cover the model's KV heads exactly
+    # Matches _full_attention_spec's heads at tp=1.
     config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
@@ -275,9 +275,11 @@ def _parallelism_agnostic(
     *,
     canonical: bool = False,
     v2: bool = False,
+    tensor_parallel_size: int = 1,
 ) -> bool:
     config = _make_vllm_config(
-        extra_config={"canonical_layout": True} if canonical else None
+        extra_config={"canonical_layout": True} if canonical else None,
+        tensor_parallel_size=tensor_parallel_size,
     )
     config.use_v2_model_runner = v2
     kv_cache_config = KVCacheConfig(
@@ -723,8 +725,20 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
 
 
-def test_parallelism_agnostic_for_single_full_attention_group():
-    assert _parallelism_agnostic([KVCacheGroupSpec(["l0"], _full_attention_spec())])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("canonical", [False, True])
+def test_head_sharded_attention_requires_canonical_layout_for_portability(
+    tensor_parallel_size: int, canonical: bool
+):
+    spec = replace(_full_attention_spec(), num_kv_heads=4 // tensor_parallel_size)
+    assert (
+        _parallelism_agnostic(
+            [KVCacheGroupSpec(["l0", "l1"], spec)],
+            canonical=canonical,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+        is canonical
+    )
 
 
 _SWA_SPEC = SlidingWindowSpec(
