@@ -40,9 +40,9 @@ def test_custom_allreduce_filters_dtype(
 ) -> None:
     communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
     communicator.disabled = False
+    communicator._ptr = 0
     communicator.world_size = 2
     communicator.max_size = 1024
-    communicator._ptr = 0
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
 
@@ -106,6 +106,81 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
     monkeypatch.setattr(car.current_platform, "is_cuda", lambda: False)
 
     assert not car._has_local_multicast_support(torch.device("cuda:0"))
+
+
+@pytest.mark.parametrize(
+    ("same_node", "world_size", "device_capability", "expected"),
+    [
+        (True, 8, (10, 3), True),
+        (False, 8, (10, 3), False),
+        (True, 4, (10, 3), False),
+        (True, 8, (10, 0), False),
+    ],
+)
+def test_mnnvl_multimem_reduce_scatter_platform_gate(
+    monkeypatch,
+    same_node,
+    world_size,
+    device_capability,
+    expected,
+):
+    def is_device_capability(capability, device_id):
+        assert capability == (10, 3)
+        assert device_id == 3
+        return device_capability == capability
+
+    monkeypatch.setattr(
+        car.current_platform,
+        "is_device_capability",
+        is_device_capability,
+    )
+
+    supported = car._supports_mnnvl_multimem_reduce_scatter(
+        torch.device("cuda:3"), world_size, same_node
+    )
+    assert supported is expected
+
+
+@pytest.mark.parametrize(
+    ("message_bytes", "multimem_ptr", "batch_invariant", "expected"),
+    [
+        (16 * 1024 * 1024, 1, False, "mnnvl_lamport"),
+        (16 * 1024 * 1024 + 128, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024, 1, False, "mnnvl_multimem"),
+        (64 * 1024 * 1024 + 128, 1, False, None),
+        (32 * 1024 * 1024, 0, False, None),
+        (8 * 1024 * 1024, 1, True, "mnnvl_lamport"),
+        (32 * 1024 * 1024, 1, True, None),
+    ],
+)
+def test_mnnvl_reduce_scatter_backend_gate(
+    monkeypatch,
+    message_bytes,
+    multimem_ptr,
+    batch_invariant,
+    expected,
+):
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(car.envs, "VLLM_BATCH_INVARIANT", batch_invariant)
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator._ptr = 0
+    communicator.world_size = 8
+    communicator.mnnvl_only = False
+    communicator.fully_connected = True
+    communicator.mnnvl_multicast_ptr = 1
+    communicator.mnnvl_multimem_rs_multicast_ptr = multimem_ptr
+    communicator.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
+    communicator.max_mnnvl_multimem_reduce_scatter_size = 64 * 1024 * 1024
+    communicator.max_reduce_scatter_size = 16 * 1024 * 1024
+    inp = torch.empty((8, message_bytes // 16), dtype=torch.bfloat16)
+
+    assert inp.nbytes == message_bytes
+    assert communicator._select_reduce_scatter_backend(inp) == expected
+    assert communicator.should_custom_reduce_scatter(inp) is (expected is not None)
+    assert communicator.should_mnnvl_multimem_reduce_scatter(inp) is (
+        expected == "mnnvl_multimem"
+    )
 
 
 @ray.remote(num_gpus=1, max_calls=1)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import cast
+from typing import Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -31,6 +31,8 @@ except ImportError:
     torch_symm_mem = None
 
 logger = init_logger(__name__)
+
+_ReduceScatterBackend = Literal["legacy", "mnnvl_lamport", "mnnvl_multimem"]
 
 
 def _has_local_multicast_support(device: torch.device) -> bool:
@@ -101,6 +103,17 @@ def _can_p2p(rank: int, world_size: int) -> bool:
     return True
 
 
+def _supports_mnnvl_multimem_reduce_scatter(
+    device: torch.device, world_size: int, same_node: bool
+) -> bool:
+    return (
+        same_node
+        and world_size == 8
+        and device.index is not None
+        and current_platform.is_device_capability((10, 3), device.index)
+    )
+
+
 from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 
 
@@ -116,6 +129,8 @@ class CustomAllreduce:
     }
     _DEFAULT_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
     _DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE = 16 * 1024 * 1024
+    _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE = 64 * 1024 * 1024
+    _MNNVL_MULTIMEM_REDUCE_SCATTER_BLOCKS = 8
 
     # max_size: max supported allreduce size
     def __init__(
@@ -127,6 +142,9 @@ class CustomAllreduce:
         max_mnnvl_all_gather_size=None,
         max_reduce_scatter_size=_DEFAULT_REDUCE_SCATTER_MAX_SIZE,
         max_mnnvl_reduce_scatter_size=_DEFAULT_MNNVL_REDUCE_SCATTER_MAX_SIZE,
+        max_mnnvl_multimem_reduce_scatter_size=(
+            _DEFAULT_MNNVL_MULTIMEM_REDUCE_SCATTER_MAX_SIZE
+        ),
         symm_mem_enabled=False,
     ) -> None:
         """
@@ -153,6 +171,12 @@ class CustomAllreduce:
         self.mnnvl_lamport_epochs = None
         self.mnnvl_lamport_ag_epoch_ptr = 0
         self.mnnvl_lamport_rs_epoch_ptr = 0
+        self.mnnvl_multimem_rs_supported = False
+        self.mnnvl_multimem_rs_buffer = None
+        self.mnnvl_multimem_rs_handle = None
+        self.mnnvl_multimem_rs_buffer_size = 0
+        self.mnnvl_multimem_rs_local_ptr = 0
+        self.mnnvl_multimem_rs_multicast_ptr = 0
         self.mnnvl_only = False
 
         if not custom_ar:
@@ -197,6 +221,9 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
+        self.mnnvl_multimem_rs_supported = _supports_mnnvl_multimem_reduce_scatter(
+            device, world_size, same_node
+        )
         if not same_node and not _group_can_attempt_mnnvl(group, device):
             logger.warning(
                 "Custom collectives are disabled because this multi-node "
@@ -294,6 +321,9 @@ class CustomAllreduce:
         self.max_mnnvl_all_gather_size = max_mnnvl_all_gather_size
         self.max_reduce_scatter_size = max_reduce_scatter_size
         self.max_mnnvl_reduce_scatter_size = max_mnnvl_reduce_scatter_size
+        self.max_mnnvl_multimem_reduce_scatter_size = (
+            max_mnnvl_multimem_reduce_scatter_size
+        )
         self.rank = rank
         self.world_size = world_size
         self.fully_connected = fully_connected
@@ -307,6 +337,10 @@ class CustomAllreduce:
                 max_mnnvl_reduce_scatter_size,
             )
         )
+        if self.mnnvl_multimem_rs_supported and self.mnnvl_multicast_ptr:
+            self._init_mnnvl_multimem_reduce_scatter_buffer(
+                max_mnnvl_multimem_reduce_scatter_size
+            )
         if not same_node and not self.mnnvl_multicast_ptr:
             logger.warning(
                 "Custom collectives are disabled because this multi-node "
@@ -367,6 +401,23 @@ class CustomAllreduce:
             self.mnnvl_lamport_rs_epoch_ptr = epochs[1].data_ptr()
         except RuntimeError as error:
             logger.debug("MNNVL AG/RS initialization failed: %s", error)
+
+    def _init_mnnvl_multimem_reduce_scatter_buffer(self, buffer_size: int) -> None:
+        assert torch_symm_mem is not None
+        try:
+            buffer = torch_symm_mem.empty(
+                buffer_size, dtype=torch.uint8, device=self.device
+            )
+            handle = torch_symm_mem.rendezvous(buffer, self.group.group_name)
+            if handle.multicast_ptr == 0:
+                return
+            self.mnnvl_multimem_rs_buffer = buffer
+            self.mnnvl_multimem_rs_handle = handle
+            self.mnnvl_multimem_rs_buffer_size = buffer_size
+            self.mnnvl_multimem_rs_local_ptr = buffer.data_ptr()
+            self.mnnvl_multimem_rs_multicast_ptr = handle.multicast_ptr
+        except RuntimeError as error:
+            logger.debug("MNNVL multimem RS initialization failed: %s", error)
 
     @contextmanager
     def capture(self):
@@ -510,35 +561,64 @@ class CustomAllreduce:
             )
         return out
 
-    def should_custom_reduce_scatter(self, inp: torch.Tensor) -> bool:
+    def _select_reduce_scatter_backend(
+        self, inp: torch.Tensor
+    ) -> _ReduceScatterBackend | None:
         if self.disabled or not current_platform.is_cuda():
-            return False
+            return None
         if self.world_size == 16 and not self.mnnvl_only:
-            return False
+            return None
         inp_size = inp.nbytes
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            return False
+            return None
         if inp.shape[0] % self.world_size != 0:
-            return False
+            return None
         output_size = inp_size // self.world_size
-        max_size = (
-            self.max_mnnvl_reduce_scatter_size
-            if self.mnnvl_multicast_ptr
-            else self.max_reduce_scatter_size
-        )
-        return (
-            0 < inp_size <= max_size
-            and output_size % 16 == 0
-            and is_weak_contiguous(inp)
-            and (self.fully_connected or bool(self.mnnvl_multicast_ptr))
-        )
+        if inp_size <= 0 or output_size % 16 != 0 or not is_weak_contiguous(inp):
+            return None
+
+        if self.mnnvl_multicast_ptr:
+            if inp_size <= self.max_mnnvl_reduce_scatter_size:
+                return "mnnvl_lamport"
+            if (
+                self.mnnvl_multimem_rs_multicast_ptr
+                and not envs.VLLM_BATCH_INVARIANT
+                and inp_size <= self.max_mnnvl_multimem_reduce_scatter_size
+            ):
+                return "mnnvl_multimem"
+            return None
+
+        if self.fully_connected and inp_size <= self.max_reduce_scatter_size:
+            return "legacy"
+        return None
+
+    def should_custom_reduce_scatter(self, inp: torch.Tensor) -> bool:
+        return self._select_reduce_scatter_backend(inp) is not None
+
+    def should_mnnvl_multimem_reduce_scatter(self, inp: torch.Tensor) -> bool:
+        return self._select_reduce_scatter_backend(inp) == "mnnvl_multimem"
 
     def custom_reduce_scatter(self, inp: torch.Tensor) -> torch.Tensor | None:
-        if not self.should_custom_reduce_scatter(inp):
+        backend = self._select_reduce_scatter_backend(inp)
+        if backend is None:
             return None
         out_shape = (inp.shape[0] // self.world_size,) + inp.shape[1:]
         out = torch.empty(out_shape, dtype=inp.dtype, device=inp.device)
-        if self.mnnvl_multicast_ptr:
+        if backend == "mnnvl_multimem":
+            logger.info_once(
+                "Using the low-SM MNNVL multimem reduce-scatter kernel.",
+                scope="global",
+            )
+            ops.mnnvl_multimem_reduce_scatter(
+                self._ptr,
+                inp,
+                out,
+                self.mnnvl_multimem_rs_local_ptr,
+                self.mnnvl_multimem_rs_multicast_ptr,
+                self.mnnvl_multimem_rs_buffer_size,
+                self._MNNVL_MULTIMEM_REDUCE_SCATTER_BLOCKS,
+            )
+        elif backend == "mnnvl_lamport":
             logger.info_once(
                 "Using the MNNVL Lamport reduce-scatter kernel.",
                 scope="global",
@@ -572,6 +652,8 @@ class CustomAllreduce:
             self.mnnvl_handle = None
             self.mnnvl_buffer = None
             self.mnnvl_lamport_epochs = None
+            self.mnnvl_multimem_rs_handle = None
+            self.mnnvl_multimem_rs_buffer = None
 
     def __del__(self):
         self.close()

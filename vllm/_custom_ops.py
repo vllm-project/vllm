@@ -3280,6 +3280,26 @@ def mnnvl_lamport_reduce_scatter(
     )
 
 
+def mnnvl_multimem_reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    local_buffer: int,
+    multicast_buffer: int,
+    stage_sz_bytes: int,
+    block_limit: int,
+) -> None:
+    torch.ops._C_custom_ar.mnnvl_multimem_reduce_scatter(
+        fa,
+        inp,
+        out,
+        local_buffer,
+        multicast_buffer,
+        stage_sz_bytes,
+        block_limit,
+    )
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 

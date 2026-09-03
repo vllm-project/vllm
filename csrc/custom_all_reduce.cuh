@@ -339,6 +339,10 @@ class CustomAllreduce {
   void mnnvl_lamport_reduce_scatter(cudaStream_t stream, T* input, T* output,
                                     void* local_buffer, uint32_t* epochs,
                                     int size, int stage_size_bytes);
+  template <typename T>
+  void mnnvl_multimem_reduce_scatter(cudaStream_t stream,
+                                     const T* multicast_input, T* output,
+                                     int size, int block_limit);
 
   ~CustomAllreduce() {
     for (auto [_, ptr] : ipc_handles_) {
