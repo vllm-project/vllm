@@ -1565,10 +1565,27 @@ def _prepare_expert_assignment(
     ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
-    # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
-    # activates only a small fraction of total experts
-    # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # Naive block assignment: skip moe_align_block_size when tokens are so
+    # sparsely distributed across experts that the sorting kernel's fixed
+    # ~20 µs cost exceeds any packing benefit.
+    #
+    # Birthday paradox threshold (factor of 4, i.e. 25% load):
+    #   When load factor M*topk/E <= 0.25, expert collisions are rare.
+    #   At E=128, topk=8:
+    #     M=4 → 32 tokens in 128 bins → ~3.7 collisions → saves ~12 µs
+    #     M=5 → 40 tokens in 128 bins → ~5.6 collisions → saves ~19 µs
+    #   The moe_align_block_size sorting kernel costs ~20 µs, so the
+    #   crossover where sorting pays for itself is right at 25% load.
+    #
+    # Expert map safety (EP): when expert_map is provided, the naive path
+    # remaps IDs via expert_map[topk_ids]. This is safe when
+    # ignore_invalid_experts is False (all experts in topk_ids are valid
+    # for this rank). When ignore_invalid_experts is True (active EP with
+    # potentially unmapped -1 sentinel experts), we must use the aligned
+    # path which handles invalid expert filtering.
+    #
+    # WNA16 quantized kernels (int8_w8a16, int4_w4a16) require the aligned
+    # path as their Triton kernels do not support sorted_token_ids=None.
     naive_block_assignment = (
         (expert_map is None or not ignore_invalid_experts)
         and num_tokens * top_k_num * 4 <= global_num_experts

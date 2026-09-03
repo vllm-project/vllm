@@ -2315,10 +2315,7 @@ def moe_sum(
     if topk_ids is None and expert_map is None:
         torch.ops._moe_C.moe_sum(input, output)
     else:
-        try:
-            torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
-        except RuntimeError:
-            torch.ops._moe_C.moe_sum(input, output)
+        torch.ops._moe_C.moe_sum(input, output, topk_ids, expert_map)
 
 
 def moe_align_block_size(

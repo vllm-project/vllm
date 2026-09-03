@@ -14,6 +14,7 @@ Validates that:
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_mod
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -127,12 +128,21 @@ def test_fused_experts_fine_grained_parity(M: int):
             # with forced aligned mode
             orig_fn = fused_moe_mod._prepare_expert_assignment
 
-            def forced_aligned(*args, **kwargs):
+            def forced_aligned(
+                topk_ids,
+                config,
+                num_tokens,
+                top_k_num,
+                global_num_experts,
+                expert_map=None,
+                **kwargs,
+            ):
+                """Force the aligned (sorting) path for parity comparison."""
                 return moe_align_block_size(
-                    args[0],
-                    args[1]["BLOCK_SIZE_M"],
-                    args[4],
-                    args[5],
+                    topk_ids,
+                    config["BLOCK_SIZE_M"],
+                    global_num_experts,
+                    expert_map,
                     ignore_invalid_experts=kwargs.get("ignore_invalid_experts", False),
                 )
 
@@ -200,3 +210,28 @@ def test_fused_experts_expert_map():
             expert_map=None,
         )
         torch.testing.assert_close(out_with_map, out_no_map, atol=0.0, rtol=0.0)
+
+
+def test_moe_sum_dispatch():
+    """Verify moe_sum dispatches correctly for 2-arg and 4-arg paths."""
+    device = torch.device("cuda:0")
+    M, top_k, hidden = 2, 4, 64
+    dtype = torch.float32
+
+    input_tensor = torch.randn(M, top_k, hidden, dtype=dtype, device=device)
+
+    # 2-arg path: topk_ids=None, expert_map=None
+    output_2arg = torch.zeros(M, 1, hidden, dtype=dtype, device=device)
+    ops.moe_sum(input_tensor, output_2arg, topk_ids=None, expert_map=None)
+    expected = input_tensor.sum(dim=1, keepdim=True)
+    torch.testing.assert_close(output_2arg, expected, atol=1e-5, rtol=1e-5)
+
+    # 4-arg path: with topk_ids and identity expert_map
+    E = 16
+    topk_ids = torch.randint(0, E, (M, top_k), dtype=torch.int32, device=device)
+    expert_map = torch.arange(E, dtype=torch.int32, device=device)
+    output_4arg = torch.zeros(M, 1, hidden, dtype=dtype, device=device)
+    ops.moe_sum(input_tensor, output_4arg, topk_ids=topk_ids, expert_map=expert_map)
+
+    # Both paths should produce the same reduction result with identity map
+    torch.testing.assert_close(output_4arg, expected, atol=1e-5, rtol=1e-5)
