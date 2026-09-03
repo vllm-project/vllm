@@ -11,7 +11,6 @@ from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -54,7 +53,8 @@ from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    get_engine_zmq_addresses,
+    EngineZmqAddresses,
+    get_engine_zmq_bind_addresses,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -551,60 +551,47 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
                 tensor_queue = client_addresses.get("tensor_queue")
+                input_listener = client_addresses.get("input_listener")
+                output_listener = client_addresses.get("output_listener")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
+                    listener=input_listener,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, output_address, zmq.PULL
+                    self.ctx,
+                    output_address,
+                    zmq.PULL,
+                    listener=output_listener,
                 )
 
-                # Report bound endpoints back so the parent can forward
-                # them to engines (mirrors the DPCoordinator pattern).
-                actual_address_pipe: Connection | None = client_addresses.get(
-                    "actual_address_pipe"
-                )
-                if actual_address_pipe is not None:
-                    try:
-                        actual_input = self.input_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_output = self.resources.output_socket.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode()
-                        actual_address_pipe.send(
-                            {
-                                "input_address": actual_input,
-                                "output_address": actual_output,
-                            }
-                        )
-                    finally:
-                        actual_address_pipe.close()
             else:
                 # Engines are managed by this client.
-                addresses = get_engine_zmq_addresses(vllm_config)
+                bind_addresses = get_engine_zmq_bind_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
-                    addresses.inputs[0],
+                    bind_addresses.inputs[0],
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
-                    self.ctx, addresses.outputs[0], zmq.PULL
+                    self.ctx, bind_addresses.outputs[0], zmq.PULL
                 )
 
-                # Resolve ``tcp://host:0`` placeholders to bound endpoints
-                # before engines DEALER-connect. No-op for IPC.
-                addresses.inputs[0] = self.input_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
-                addresses.outputs[0] = self.resources.output_socket.getsockopt(
-                    zmq.LAST_ENDPOINT
-                ).decode()
+                # EngineZmqAddresses contains only endpoints resolved by the
+                # sockets that own the bind operation.
+                addresses = EngineZmqAddresses(
+                    inputs=[self.input_socket.getsockopt(zmq.LAST_ENDPOINT).decode()],
+                    outputs=[
+                        self.resources.output_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                    ],
+                )
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses

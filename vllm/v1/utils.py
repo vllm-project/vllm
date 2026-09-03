@@ -29,7 +29,7 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -176,19 +176,13 @@ class APIServerProcessManager:
         sock: Any,
         args: argparse.Namespace,
         num_servers: int,
-        input_addresses: list[str],
-        output_addresses: list[str],
+        input_listeners: list[ZmqListener],
+        output_listeners: list[ZmqListener],
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
-
-        ``input_addresses``/``output_addresses`` may contain
-        ``tcp://host:0`` placeholders; each child must report the actual
-        bound endpoint over its ``actual_address_pipe`` in ``client_config``
-        and the parent collects them via
-        :py:meth:`gather_actual_addresses`.
 
         Args:
             target_server_fn: Override function to call for each API server process
@@ -196,8 +190,8 @@ class APIServerProcessManager:
             sock: Socket for client connections
             args: Command line arguments
             num_servers: Number of API server processes to start
-            input_addresses: Input addresses for each API server
-            output_addresses: Output addresses for each API server
+            input_listeners: Input listeners for each API server
+            output_listeners: Output listeners for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
         """
@@ -207,126 +201,64 @@ class APIServerProcessManager:
 
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
-        self._address_pipes: list[connection.Connection] = []
 
-        for i, in_addr, out_addr in zip(
-            range(num_servers), input_addresses, output_addresses
-        ):
-            client_config: dict[str, Any] = {
-                "input_address": in_addr,
-                "output_address": out_addr,
-                "client_count": num_servers,
-                "client_index": i,
-            }
-            if stats_update_address is not None:
-                client_config["stats_update_address"] = stats_update_address
-            if tensor_queue is not None:
-                client_config["tensor_queue"] = tensor_queue
-
-            parent_recv, child_send = spawn_context.Pipe(duplex=False)
-            self._address_pipes.append(parent_recv)
-            client_config["actual_address_pipe"] = child_send
-
-            proc = spawn_context.Process(
-                target=target_server_fn or run_api_server_worker_proc,
-                name=f"ApiServer_{i}",
-                args=(listen_address, sock, args, client_config),
+        listeners = [*input_listeners, *output_listeners]
+        self._listeners = listeners
+        try:
+            listener_pairs = zip(
+                range(num_servers), input_listeners, output_listeners, strict=True
             )
-            self.processes.append(proc)
-            proc.start()
+            for i, input_listener, output_listener in listener_pairs:
+                client_config: dict[str, Any] = {
+                    "input_address": input_listener.address,
+                    "output_address": output_listener.address,
+                    "input_listener": input_listener.socket,
+                    "output_listener": output_listener.socket,
+                    "client_count": num_servers,
+                    "client_index": i,
+                }
+                if stats_update_address is not None:
+                    client_config["stats_update_address"] = stats_update_address
+                if tensor_queue is not None:
+                    client_config["tensor_queue"] = tensor_queue
 
-            # Drop parent's write end so reader sees EOF on child death.
-            child_send.close()
+                proc = spawn_context.Process(
+                    target=target_server_fn or run_api_server_worker_proc,
+                    name=f"ApiServer_{i}",
+                    args=(listen_address, sock, args, client_config),
+                )
+                self.processes.append(proc)
+                proc.start()
+                input_listener.close()
+                output_listener.close()
+        except BaseException:
+            _shutdown_processes_and_cleanup_listeners(self.processes, listeners)
+            raise
 
         logger.info("Started %d API server processes", len(self.processes))
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
-
-    def gather_actual_addresses(
-        self,
-        timeout: float = envs.VLLM_ENGINE_READY_TIMEOUT_S,
-    ) -> tuple[list[str], list[str]]:
-        """Return (inputs, outputs) reported by each child, indexed by
-        ``client_index``. Raises ``RuntimeError`` on timeout or premature
-        child exit."""
-        n = len(self._address_pipes)
-        inputs: list[str | None] = [None] * n
-        outputs: list[str | None] = [None] * n
-        pending: dict[connection.Connection, int] = {
-            pipe: i for i, pipe in enumerate(self._address_pipes)
-        }
-        sentinel_to_idx: dict[Any, int] = {
-            proc.sentinel: i for i, proc in enumerate(self.processes)
-        }
-
-        deadline = time.monotonic() + timeout
-        try:
-            while pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    missing = [self.processes[i].name for i in pending.values()]
-                    raise RuntimeError(
-                        f"Timed out after {timeout:.1f}s waiting for "
-                        f"API server(s) to report bound ZMQ addresses: "
-                        f"{missing}"
-                    )
-                waitables: list[Any] = list(pending.keys()) + list(
-                    sentinel_to_idx.keys()
-                )
-                ready = connection.wait(waitables, timeout=remaining)
-                # Drain pipes before checking sentinels: a child that sent
-                # its message and then exited can surface both events in
-                # the same poll, and we must record the success first.
-                for item in ready:
-                    if isinstance(item, connection.Connection) and item in pending:
-                        idx = pending.pop(item)
-                        try:
-                            msg: dict[str, str] = item.recv()
-                        except EOFError as e:
-                            raise RuntimeError(
-                                f"API server {self.processes[idx].name} "
-                                f"closed its address pipe without "
-                                f"reporting its bound ZMQ addresses"
-                            ) from e
-                        inputs[idx] = msg["input_address"]
-                        outputs[idx] = msg["output_address"]
-                        item.close()
-                for item in ready:
-                    if item in sentinel_to_idx:
-                        idx = sentinel_to_idx.pop(item)
-                        pipe = self._address_pipes[idx]
-                        if pipe in pending:
-                            proc = self.processes[idx]
-                            raise RuntimeError(
-                                f"API server process {proc.name} exited "
-                                f"(code={proc.exitcode}) before reporting "
-                                f"its bound ZMQ addresses"
-                            )
-        finally:
-            for pipe in pending:
-                with contextlib.suppress(Exception):
-                    pipe.close()
-
-        return inputs, outputs  # type: ignore[return-value]
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_processes_and_cleanup_listeners,
+            self.processes,
+            listeners,
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
-        for pipe in self._address_pipes:
-            with contextlib.suppress(Exception):
-                pipe.close()
-        self._address_pipes = []
-
         if self._finalizer.detach() is not None:
-            shutdown(self.processes, timeout=timeout)
+            _shutdown_processes_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
 
 
 class RustFrontendProcessManager:
     """Manages a single Rust frontend subprocess.
 
     Launches the Rust vllm-rs binary in 'frontend' mode, passing the
-    listening socket fd and ZMQ transport addresses. Provides the same
+    HTTP and ZMQ listener file descriptors. Provides the same
     interface as APIServerProcessManager for process monitoring.
     """
 
@@ -335,8 +267,8 @@ class RustFrontendProcessManager:
         binary_path: str,
         sock: Any,
         args: argparse.Namespace,
-        input_address: str,
-        output_address: str,
+        input_listener: ZmqListener,
+        output_listener: ZmqListener,
         engine_start_index: int,
         engine_count: int,
         data_parallel_size: int,
@@ -345,18 +277,22 @@ class RustFrontendProcessManager:
         import os
         import subprocess
 
-        fd = sock.fileno()
-        os.set_inheritable(fd, True)
+        listen_fd = sock.fileno()
+        input_fd = input_listener.socket.fileno()
+        output_fd = output_listener.socket.fileno()
+        inherited_fds = (listen_fd, input_fd, output_fd)
+        for fd in inherited_fds:
+            os.set_inheritable(fd, True)
 
         cmd = [
             binary_path,
             "frontend",
             "--listen-fd",
-            str(fd),
-            "--input-address",
-            input_address,
-            "--output-address",
-            output_address,
+            str(listen_fd),
+            "--input-listener-fd",
+            str(input_fd),
+            "--output-listener-fd",
+            str(output_fd),
             "--engine-start-index",
             str(engine_start_index),
             "--engine-count",
@@ -395,18 +331,34 @@ class RustFrontendProcessManager:
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        self._listeners = [input_listener, output_listener]
+        try:
+            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
+        except BaseException:
+            for listener in self._listeners:
+                listener.cleanup()
+            raise
+        else:
+            input_listener.close()
+            output_listener.close()
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
             _SubprocessWrapper(self._proc, "RustFrontend")
         ]
 
-        self._finalizer = weakref.finalize(self, _shutdown_subprocesses, self.processes)
+        self._finalizer = weakref.finalize(
+            self,
+            _shutdown_subprocesses_and_cleanup_listeners,
+            self.processes,
+            self._listeners,
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         if self._finalizer.detach() is not None:
-            _shutdown_subprocesses(self.processes, timeout=timeout)
+            _shutdown_subprocesses_and_cleanup_listeners(
+                self.processes, self._listeners, timeout=timeout
+            )
 
 
 class _SubprocessWrapper:
@@ -501,6 +453,18 @@ def _shutdown_subprocesses(
         kill_process_tree(pid)
 
     logger.debug_once("[shutdown] Subprocess manager: complete")
+
+
+def _shutdown_subprocesses_and_cleanup_listeners(
+    procs: list[_SubprocessWrapper],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        _shutdown_subprocesses(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
 
 
 def run_api_server_worker_proc(
@@ -650,6 +614,18 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         kill_process_tree(pid)
 
     logger.debug_once("[shutdown] Process manager: complete")
+
+
+def _shutdown_processes_and_cleanup_listeners(
+    procs: list[BaseProcess],
+    listeners: list[ZmqListener],
+    timeout: float | None = None,
+) -> None:
+    try:
+        shutdown(procs, timeout=timeout)
+    finally:
+        for listener in listeners:
+            listener.cleanup()
 
 
 def copy_slice(

@@ -20,7 +20,7 @@ from vllm.v1.engine.core_client import BackgroundResources
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     EngineZmqAddresses,
-    get_engine_zmq_addresses,
+    bind_engine_zmq_listeners,
     launch_core_engines,
 )
 from vllm.v1.utils import APIServerProcessManager
@@ -64,35 +64,27 @@ class _StubEngineCoreActor(EngineCoreActorMixin):
 
 
 # Module-level stub worker for the Ray-DP regression test. Must be importable
-# by ``multiprocessing.spawn`` (no closures, no nesting). Mirrors the worker
-# in ``tests/entrypoints/test_api_server_process_manager.py``.
-def _bind_and_report_worker(listen_address, sock, args, client_config):
-    """Bind ROUTER/PULL with a kernel-assigned port, report the actual
-    endpoints back via ``actual_address_pipe``, then exit."""
+# by ``multiprocessing.spawn`` (no closures, no nesting).
+def _adopt_listener_worker(listen_address, sock, args, client_config):
+    """Adopt the supervisor-bound ROUTER/PULL listeners, then exit."""
     ctx = zmq.Context()
     try:
         in_sock = make_zmq_socket(
-            ctx, client_config["input_address"], zmq.ROUTER, bind=True
+            ctx,
+            client_config["input_address"],
+            zmq.ROUTER,
+            bind=True,
+            listener=client_config["input_listener"],
         )
         out_sock = make_zmq_socket(
-            ctx, client_config["output_address"], zmq.PULL, bind=True
+            ctx,
+            client_config["output_address"],
+            zmq.PULL,
+            bind=True,
+            listener=client_config["output_listener"],
         )
-        try:
-            pipe = client_config["actual_address_pipe"]
-            try:
-                pipe.send(
-                    {
-                        "input_address": in_sock.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        "output_address": out_sock.getsockopt(
-                            zmq.LAST_ENDPOINT
-                        ).decode(),
-                    }
-                )
-            finally:
-                pipe.close()
-        finally:
-            in_sock.close(linger=0)
-            out_sock.close(linger=0)
+        in_sock.close(linger=0)
+        out_sock.close(linger=0)
     finally:
         ctx.term()
 
@@ -258,17 +250,9 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
     ``launch_core_engines`` Ray branch pickles ``addresses`` into each engine
     actor at ``.remote()`` time, and ``EngineCoreActorMixin._perform_handshakes``
     is a no-op, so the actor uses that pickled snapshot for the rest of its
-    life. If ``run_multi_api_server`` allocates ``addresses`` as
-    ``tcp://host:0`` placeholders (its default), the actors hold placeholders
-    forever and DEALER-connect to port 0 — ZMQ ``connect`` is async and does
-    not raise, so the failure mode is a deterministic hang.
-
-    The Ray-DP carve-out in ``run_multi_api_server`` forces
-    ``defer_api_server_ports=False`` when ``data_parallel_backend == "ray"``
-    so addresses are pre-allocated in the driver and Ray pickles real ports
-    into each actor. This test mirrors that call-site logic and asserts the
-    actors hold real (non-placeholder) endpoints. If the carve-out is
-    removed without an alternative fix, the test fails.
+    life. The supervisor therefore binds the frontend listeners before actor
+    construction and Ray pickles their resolved endpoints. This test asserts
+    that each actor holds real (non-placeholder) endpoints.
     """
     created_placement_groups: list[Any] = []
 
@@ -287,15 +271,10 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
 
     vllm_config = _make_vllm_config_ray_dp_multinode()
 
-    # Mirror run_multi_api_server's address-allocation logic. The Ray DP
-    # carve-out forces pre-allocation so the addresses pickled into engine
-    # actors at .remote() time are real, not ``tcp://host:0``.
-    is_ray_dp = vllm_config.parallel_config.data_parallel_backend == "ray"
-    addresses = get_engine_zmq_addresses(
-        vllm_config,
-        num_api_servers=2,
-        defer_api_server_ports=not is_ray_dp,
-    )
+    # Mirror run_multi_api_server: bind listeners in the supervisor so the
+    # addresses pickled into Ray actors contain kernel-assigned ports.
+    listeners = bind_engine_zmq_listeners(vllm_config, num_api_servers=2)
+    addresses = listeners.addresses
 
     sock = socket.socket()
     engine_manager: CoreEngineActorManager | None = None
@@ -312,25 +291,16 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             engine_manager = engine_launch.engine_manager
             assert isinstance(engine_manager, CoreEngineActorManager)
 
-            # API-server children bind to the pre-allocated ports.
+            # API-server children adopt the already-bound listener FDs.
             api_server_manager = APIServerProcessManager(
                 listen_address="tcp://127.0.0.1:0",
                 sock=sock,
                 args="test_args",
                 num_servers=2,
-                input_addresses=addresses.inputs,
-                output_addresses=addresses.outputs,
-                target_server_fn=_bind_and_report_worker,
+                input_listeners=listeners.inputs,
+                output_listeners=listeners.outputs,
+                target_server_fn=_adopt_listener_worker,
             )
-
-            # run_multi_api_server skips ``gather_actual_addresses`` for
-            # Ray DP (addresses are already real). Mirror that.
-            if not is_ray_dp:
-                actual_inputs, actual_outputs = (
-                    api_server_manager.gather_actual_addresses(timeout=15.0)
-                )
-                addresses.inputs = actual_inputs
-                addresses.outputs = actual_outputs
 
             # Snapshot what each Ray actor actually holds.
             actors = (
@@ -358,8 +328,8 @@ def test_ray_dp_addresses_resolved_before_actor_creation(
             assert scheme == "tcp", url
             assert port and int(port) > 0, (
                 f"Ray actor was pickled with placeholder address {url!r}; "
-                "``run_multi_api_server`` must pre-allocate ports for the "
-                "Ray DP backend so the actors hold real endpoints by the "
-                "time they DEALER-connect. See PR #42585 / Ray-DP "
+                "``run_multi_api_server`` must bind frontend listeners before "
+                "constructing Ray DP actors so they hold real endpoints when "
+                "they DEALER-connect. See PR #42585 / Ray-DP "
                 "multi-API-server regression."
             )

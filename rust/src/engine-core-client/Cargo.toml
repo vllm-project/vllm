@@ -18,6 +18,7 @@ futures.workspace = true
 half.workspace = true
 hex.workspace = true
 itertools.workspace = true
+libc.workspace = true
 parking_lot.workspace = true
 rmp-serde.workspace = true
 rmpv.workspace = true
@@ -27,6 +28,7 @@ serde_json.workspace = true
 serde_repr.workspace = true
 serde_tuple.workspace = true
 serde_with.workspace = true
+socket2.workspace = true
 task-local.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
