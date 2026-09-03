@@ -442,6 +442,9 @@ def _dcp_a2a_pack_send_kernel(
     out_ptr,
     lse_ptr,
     send_ptr,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    num_seqs,
     out_stride_B,
     out_stride_H,
     out_stride_D,
@@ -455,10 +458,29 @@ def _dcp_a2a_pack_send_kernel(
     HEAD_DIM: tl.constexpr,
     H_PER_RANK: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    HAS_EMPTY_MASK: tl.constexpr,
+    BLOCK_SEQ: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     local_head_idx = tl.program_id(1).to(tl.int64)
     d_offsets = tl.arange(0, HEAD_DIM)
+
+    # Rows whose local KV shard is empty carry undefined out/lse, so they must
+    # not contribute to the cross-rank merge. Folding the test in here avoids a
+    # separate masking pass (and its `.contiguous()` on the LSE) per layer.
+    empty_kv = batch_idx < 0  # tl.int1 zero, kept a tensor for the `~` below
+    if HAS_EMPTY_MASK:
+        # Trailing rows past the last sequence are padding.
+        empty_kv = batch_idx >= tl.load(query_start_loc_ptr + num_seqs)
+        seq_offs = tl.arange(0, BLOCK_SEQ)
+        for seq_base in tl.range(0, num_seqs, BLOCK_SEQ):
+            idx = seq_base + seq_offs
+            in_range = idx < num_seqs
+            seq_start = tl.load(query_start_loc_ptr + idx, mask=in_range, other=0)
+            seq_end = tl.load(query_start_loc_ptr + idx + 1, mask=in_range, other=0)
+            seq_len = tl.load(seq_lens_ptr + idx, mask=in_range, other=1)
+            hit = in_range & (batch_idx >= seq_start) & (batch_idx < seq_end)
+            empty_kv |= tl.sum((hit & (seq_len == 0)).to(tl.int32)) > 0
 
     for rank_idx in tl.static_range(N):
         src_head_idx = rank_idx * H_PER_RANK + local_head_idx
@@ -476,11 +498,13 @@ def _dcp_a2a_pack_send_kernel(
         tl.store(
             send_ptr + send_base + d_offsets * send_stride_D,
             tl.load(out_ptr + out_offsets),
+            mask=~empty_kv,
         )
 
         lse_val = tl.load(
             lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H
         ).to(tl.float32)
+        lse_val = tl.where(empty_kv, -float("inf"), lse_val)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + HEAD_DIM * send_stride_D,
@@ -636,12 +660,30 @@ def _dcp_a2a_pack_send(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> None:
-    mask_dcp_empty_shards_(cp_attn_lse, seq_lens, query_start_loc)
+    # Empty-shard masking is folded into the pack kernel below rather than run
+    # as a separate pass, so the a2a combine costs one launch per layer instead
+    # of one plus the masking chain. The decision is made from device pointers,
+    # which keeps it correct under CUDA graph replay and identical on both model
+    # runners (Model Runner V2 has no CPU mirror of the DCP local seq lens).
+    if seq_lens is None or query_start_loc is None:
+        if seq_lens is not None or query_start_loc is not None:
+            raise ValueError("seq_lens and query_start_loc must be provided together")
+        has_empty_mask = False
+    else:
+        if seq_lens.ndim != 1 or query_start_loc.ndim != 1:
+            raise ValueError("seq_lens and query_start_loc must be 1-D")
+        if query_start_loc.shape[0] != seq_lens.shape[0] + 1:
+            raise ValueError("query_start_loc must contain one boundary per sequence")
+        has_empty_mask = True
+
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
     _dcp_a2a_pack_send_kernel[grid](
         cp_attn_out,
         cp_attn_lse,
         send_buffer,
+        seq_lens if has_empty_mask else cp_attn_lse,
+        query_start_loc if has_empty_mask else cp_attn_lse,
+        seq_lens.shape[0] if has_empty_mask else 0,
         cp_attn_out.stride(0),
         cp_attn_out.stride(1),
         cp_attn_out.stride(2),
@@ -655,6 +697,8 @@ def _dcp_a2a_pack_send(
         HEAD_DIM=head_dim,
         H_PER_RANK=h_per_rank,
         LSE_PACK_DIM=lse_pack_dim,
+        HAS_EMPTY_MASK=has_empty_mask,
+        BLOCK_SEQ=128,
     )
 
 

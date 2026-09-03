@@ -469,6 +469,157 @@ class TestPackedA2AKernels:
         assert torch.isneginf(actual_lse[:1]).all()
         assert torch.isfinite(actual_output[1:]).all()
 
+    @pytest.mark.skipif(
+        torch.accelerator.device_count() < 1, reason="CUDA is required."
+    )
+    @pytest.mark.parametrize("num_seqs", [1, 5, 17, 200])
+    def test_pack_send_empty_mask_matches_reference(self, num_seqs: int):
+        """In-kernel empty-shard masking must match the standalone pass.
+
+        Sizes straddle the block-scan width so the multi-iteration path is
+        covered, and every case mixes empty shards, non-empty shards and
+        trailing padding rows.
+        """
+        from vllm.v1.attention.ops.dcp import (
+            _dcp_a2a_lse_pack_dim,
+            _dcp_a2a_pack_send,
+            _dcp_a2a_unpack_combine,
+            mask_dcp_empty_shards_,
+        )
+
+        device = torch.device("cuda")
+        world_size, h_per_rank, head_dim = 2, 2, 32
+        num_heads = world_size * h_per_rank
+        torch.manual_seed(num_seqs)
+
+        # Varying query lengths, every third shard empty, plus padded rows.
+        query_lens = [1 + (i % 3) for i in range(num_seqs)]
+        query_start_loc_list = [0]
+        for q in query_lens:
+            query_start_loc_list.append(query_start_loc_list[-1] + q)
+        num_tokens = query_start_loc_list[-1] + 3  # trailing padding rows
+        seq_lens = torch.tensor(
+            [0 if i % 3 == 0 else 8 for i in range(num_seqs)],
+            device=device,
+            dtype=torch.int32,
+        )
+        query_start_loc = torch.tensor(
+            query_start_loc_list, device=device, dtype=torch.int32
+        )
+
+        output = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=torch.bfloat16
+        )
+        lse = torch.randn(num_tokens, num_heads, device=device, dtype=output.dtype)
+        lse_pack_dim = _dcp_a2a_lse_pack_dim(output.dtype)
+
+        def run(masked_ahead: bool):
+            out = output.clone()
+            this_lse = lse.clone()
+            send_buffer = torch.empty(
+                (world_size, num_tokens, h_per_rank, head_dim + lse_pack_dim),
+                device=device,
+                dtype=output.dtype,
+            )
+            if masked_ahead:
+                # Reference: pre-mask, then pack with masking disabled.
+                mask_dcp_empty_shards_(this_lse, seq_lens, query_start_loc)
+                args = (None, None)
+            else:
+                args = (seq_lens, query_start_loc)
+            _dcp_a2a_pack_send(
+                out,
+                this_lse,
+                send_buffer,
+                world_size,
+                h_per_rank,
+                head_dim,
+                lse_pack_dim,
+                seq_lens=args[0],
+                query_start_loc=args[1],
+            )
+            return _dcp_a2a_unpack_combine(
+                send_buffer,
+                head_dim,
+                lse_pack_dim,
+                return_lse=True,
+                is_lse_base_on_e=True,
+            )
+
+        ref_out, ref_lse = run(masked_ahead=True)
+        got_out, got_lse = run(masked_ahead=False)
+
+        empty_rows = torch.isneginf(ref_lse).all(dim=-1)
+        # Padding rows are always empty; a mix of both needs >1 sequence.
+        assert empty_rows.any()
+        if num_seqs > 1:
+            assert not empty_rows.all()
+        torch.testing.assert_close(got_lse, ref_lse)
+        torch.testing.assert_close(got_out, ref_out)
+
+    @pytest.mark.skipif(
+        torch.accelerator.device_count() < 1, reason="CUDA is required."
+    )
+    def test_pack_send_empty_rows_neutralize_stale_buffer(self):
+        """Skipping the store on an empty row must not leak the send buffer.
+
+        The packed output store is masked off for rows whose shard is empty, so
+        whatever the (uninitialized, possibly recycled) send buffer already held
+        stays there. Correctness then rests on the ``-inf`` LSE neutralizing it
+        in the combine. Poison the buffer to prove that holds rather than
+        relying on it happening to contain benign values.
+        """
+        from vllm.v1.attention.ops.dcp import (
+            _dcp_a2a_lse_pack_dim,
+            _dcp_a2a_pack_send,
+            _dcp_a2a_unpack_combine,
+        )
+
+        device = torch.device("cuda")
+        world_size, num_tokens, h_per_rank, head_dim = 2, 4, 2, 32
+        num_heads = world_size * h_per_rank
+        output = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=torch.bfloat16
+        )
+        lse = torch.randn(num_tokens, num_heads, device=device, dtype=output.dtype)
+        # Row 0 empty via seq_len, row 3 empty as trailing padding.
+        seq_lens = torch.tensor([0, 4, 4], device=device, dtype=torch.int32)
+        query_start_loc = torch.tensor([0, 1, 2, 3], device=device, dtype=torch.int32)
+        lse_pack_dim = _dcp_a2a_lse_pack_dim(output.dtype)
+        send_buffer = torch.full(
+            (world_size, num_tokens, h_per_rank, head_dim + lse_pack_dim),
+            float("nan"),
+            device=device,
+            dtype=output.dtype,
+        )
+
+        _dcp_a2a_pack_send(
+            output,
+            lse,
+            send_buffer,
+            world_size,
+            h_per_rank,
+            head_dim,
+            lse_pack_dim,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+        )
+        actual_output, actual_lse = _dcp_a2a_unpack_combine(
+            send_buffer,
+            head_dim,
+            lse_pack_dim,
+            return_lse=True,
+            is_lse_base_on_e=True,
+        )
+
+        empty = [0, 3]
+        assert torch.isneginf(actual_lse[empty]).all()
+        assert not torch.isnan(actual_output).any()
+        torch.testing.assert_close(
+            actual_output[empty], torch.zeros_like(actual_output[empty])
+        )
+        assert torch.isfinite(actual_output[[1, 2]]).all()
+
 
 def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
