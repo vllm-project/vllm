@@ -258,32 +258,37 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         attn_metadata: Any,
         *,
         return_valid_counts: bool,
+        num_decodes: int | None = None,
+        decode_query_len: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = attn_metadata.num_decode_tokens
-        num_decodes = attn_metadata.num_decodes
+        num_tokens = logical_topk_indices.shape[0]
+        if num_decodes is None:
+            num_decodes = attn_metadata.num_decodes
+        if decode_query_len is None:
+            decode_query_len = attn_metadata.decode_max_query_len
         assert logical_topk_indices.shape[0] == num_tokens
-        max_query_len = attn_metadata.decode_max_query_len
-        if max_query_len == 1:
+        if decode_query_len == 1:
             return self.convert_logical_to_physical_topk(
                 layer_index,
                 logical_topk_indices,
                 attn_metadata,
                 block_stride_rows=None,
                 return_valid_counts=return_valid_counts,
+                req_id_per_token=self.request_ids[:num_decodes],
             )
 
-        assert num_tokens == num_decodes * max_query_len
+        assert num_tokens == num_decodes * decode_query_len
         logical_topk_by_request = logical_topk_indices.view(
-            num_decodes, max_query_len, -1
+            num_decodes, decode_query_len, -1
         )
         physical_topk_by_request = self.physical_topk_indices[:num_tokens].view(
-            num_decodes, max_query_len, -1
+            num_decodes, decode_query_len, -1
         )
         valid_topk_by_request = self.valid_topk_counts[:num_tokens].view(
-            num_decodes, max_query_len
+            num_decodes, decode_query_len
         )
         request_ids = self.request_ids[:num_decodes]
-        for step in range(max_query_len):
+        for step in range(decode_query_len):
             cache = self.cache(layer_index)
             source_block_table = cache.source_block_table
             assert source_block_table is not None

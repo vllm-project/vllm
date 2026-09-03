@@ -298,9 +298,9 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
             source_block_table[static_cast<int64_t>(request_id) *
                                    source_bt_stride +
                                source_block];
-        g = physical_block >= 0 ? physical_block * source_block_size +
-                                      token_index % source_block_size
-                                : -1;
+        g = physical_block > 0 ? physical_block * source_block_size +
+                                     token_index % source_block_size
+                               : -1;
       } else {
         g = -1;
       }

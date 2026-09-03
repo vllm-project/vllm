@@ -613,8 +613,11 @@ class HiSparseRuntime:
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         group = self.index_group
+        compute_stream = current_stream()
+        compute_stream.wait_stream(group.copy_stream)
         group.device_global_indices.fill_(-1)
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
+        group.copy_stream.wait_stream(compute_stream)
 
     def invalidate_slots(
         self,
