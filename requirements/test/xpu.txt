@@ -488,10 +488,6 @@ openai==3.2.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-oss-harmony==0.0.11
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 opencv-python-headless==5.0.0.93
     # via
     #   -c requirements/common.txt
@@ -537,6 +533,10 @@ opentelemetry-semantic-conventions==0.65b0
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions-ai
 opentelemetry-semantic-conventions-ai==0.5.1
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
+oss-harmony==0.0.11
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
