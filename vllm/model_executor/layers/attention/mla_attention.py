@@ -1157,14 +1157,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "DCP query replication is unsupported on head-padding MLA "
                 "backends (q_pad_num_heads)."
             )
-            if (
-                self.is_aiter_triton_fp4_bmm_enabled
-                or self.is_aiter_triton_fp8_bmm_enabled
-            ):
-                raise NotImplementedError(
-                    "DCP query replication is not implemented for the aiter "
-                    "FP4/FP8 MLA BMM paths."
-                )
 
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
@@ -1200,6 +1192,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.W_V, self.W_V_scale = quark_quantize_weight_to_mxfp4(
                 W_UV.permute(1, 2, 0)
             )
+
+            if self.dcp_q_replicate:
+                self.W_K = get_dcp_group().all_gather(
+                    self.W_K.contiguous(), dim=0
+                )
+                self.W_K_scale = get_dcp_group().all_gather(
+                    self.W_K_scale.contiguous(), dim=0
+                )
         elif self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
@@ -1209,6 +1209,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype()
             )
+
+            if self.dcp_q_replicate:
+                self.W_K = get_dcp_group().all_gather(
+                    self.W_K.contiguous(), dim=0
+                )
+                self.W_K_scale = get_dcp_group().all_gather(
+                    self.W_K_scale.contiguous(), dim=0
+                )
 
             # The kernel operates on non-padded inputs. Hence, pre-compiling
             # triton kernel to avoid runtime compilation for unseen batch sizes
