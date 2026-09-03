@@ -34,6 +34,18 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+_FP8_E4M3_DTYPES = {
+    dtype
+    for dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    if dtype is not None
+}
+
+
+def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
+    return t is not None and t.dtype in _FP8_E4M3_DTYPES
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -1764,6 +1776,11 @@ class rocm_aiter_ops:
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    # Lazily probed to avoid importing (and potentially compiling) AITER while
+    # this module is imported.
+    _FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED: bool | None = None
+    _FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE: bool | None = None
+    _FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q: bool | None = None
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
@@ -1973,6 +1990,150 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
+
+    @classmethod
+    def fused_qknorm_idxrqknorm_is_available(cls) -> bool:
+        """Whether AITER has the consolidated MiniMax-M3 fused op."""
+        if cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED is None:
+            try:
+                import inspect
+
+                from aiter import fused_qknorm_idxrqknorm
+
+                parameters = tuple(
+                    inspect.signature(fused_qknorm_idxrqknorm).parameters
+                )
+                cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED = (
+                    bool(parameters) and parameters[-1] == "skip_index_branch"
+                )
+            except (ImportError, AttributeError, TypeError, ValueError):
+                cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED = False
+        return cls._FUSED_QKNORM_IDXRQKNORM_CONSOLIDATED
+
+    @classmethod
+    def fused_qknorm_idxrqknorm_supports_packed_shuffle(cls) -> bool:
+        """Whether AITER accepts offset packed-SHUFFLE K/V page spans."""
+        if cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE is None:
+            try:
+                from aiter import (
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE,
+                )
+
+                cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE = bool(
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_PACKED_SHUFFLE
+                )
+            except (ImportError, AttributeError):
+                cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE = False
+        return cls._FUSED_QKNORM_IDXRQKNORM_PACKED_SHUFFLE
+
+    @classmethod
+    def fused_qknorm_idxrqknorm_supports_fp8_index_q(cls) -> bool:
+        """Whether AITER can emit unit-scale e4m3 index_q (4787 q_idx)."""
+        if cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q is None:
+            try:
+                from aiter import (
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q,
+                )
+
+                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = bool(
+                    FUSED_QKNORM_IDXRQKNORM_SUPPORTS_FP8_INDEX_Q
+                )
+            except (ImportError, AttributeError):
+                cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q = False
+        return cls._FUSED_QKNORM_IDXRQKNORM_FP8_INDEX_Q
+
+    @classmethod
+    def fused_qknorm_idxrqknorm(
+        cls,
+        qkv: torch.Tensor,
+        q_norm_weight: torch.Tensor,
+        k_norm_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        eps: float,
+        slot_mapping: torch.Tensor,
+        kv_cache_k: torch.Tensor,
+        kv_cache_v: torch.Tensor,
+        q_out: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+        index_q_norm_weight: torch.Tensor | None = None,
+        index_k_norm_weight: torch.Tensor | None = None,
+        num_index_heads: int = 0,
+        index_cache: torch.Tensor | None = None,
+        index_q_out: torch.Tensor | None = None,
+        index_slot_mapping: torch.Tensor | None = None,
+        skip_index_branch: bool = False,
+    ) -> bool:
+        """Run consolidated MiniMax-M3 fusion, or report it unsupported.
+
+        Capability and cache dtype are checked before invocation. Runtime
+        failures from a supported AITER op are deliberately propagated.
+        """
+        if not cls.fused_qknorm_idxrqknorm_is_available():
+            return False
+        if (
+            kv_cache_k.shape[0] != kv_cache_v.shape[0]
+            and not cls.fused_qknorm_idxrqknorm_supports_packed_shuffle()
+        ):
+            return False
+
+        if kv_cache_dtype == "auto":
+            aiter_kv_cache_dtype = "auto"
+            aiter_k_scale = None
+            aiter_v_scale = None
+        elif kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            if k_scale is None or v_scale is None:
+                return False
+            aiter_kv_cache_dtype = "fp8_e4m3_static"
+            aiter_k_scale = k_scale
+            aiter_v_scale = v_scale
+        else:
+            return False
+
+        if _is_fp8_e4m3_tensor(
+            index_q_out
+        ) and not cls.fused_qknorm_idxrqknorm_supports_fp8_index_q():
+            return False
+        aiter_index_cache_dtype = (
+            "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
+        )
+
+        from aiter import fused_qknorm_idxrqknorm
+
+        fused_qknorm_idxrqknorm(
+            qkv,
+            q_norm_weight,
+            k_norm_weight,
+            cos_sin_cache,
+            positions,
+            num_heads,
+            num_kv_heads,
+            rotary_dim,
+            eps,
+            index_q_norm_weight=index_q_norm_weight,
+            index_k_norm_weight=index_k_norm_weight,
+            num_index_heads=num_index_heads,
+            slot_mapping=slot_mapping,
+            kv_cache_k=kv_cache_k,
+            kv_cache_v=kv_cache_v,
+            index_cache=index_cache,
+            block_size=16,
+            q_out=q_out,
+            index_q_out=index_q_out,
+            index_slot_mapping=index_slot_mapping,
+            kv_cache_dtype=aiter_kv_cache_dtype,
+            index_cache_dtype=aiter_index_cache_dtype,
+            k_scale=aiter_k_scale,
+            v_scale=aiter_v_scale,
+            asm_layout=True,
+            skip_index_branch=skip_index_branch,
+        )
+        return True
 
     @classmethod
     @if_aiter_supported
