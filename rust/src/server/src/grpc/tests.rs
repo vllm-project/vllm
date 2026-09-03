@@ -49,6 +49,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
+use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -144,88 +145,26 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
 }
 
 fn ec_proto_struct(mm_hashes: &[&str]) -> prost_types::Struct {
-    use prost_types::value::Kind;
-
-    prost_types::Struct {
-        fields: std::collections::BTreeMap::from([(
-            "ec_items".to_string(),
-            prost_types::Value {
-                kind: Some(Kind::ListValue(prost_types::ListValue {
-                    values: mm_hashes
-                        .iter()
-                        .map(|mm_hash| prost_types::Value {
-                            kind: Some(Kind::StructValue(prost_types::Struct {
-                                fields: std::collections::BTreeMap::from([
-                                    (
-                                        "image_grid_thw".to_string(),
-                                        prost_types::Value {
-                                            kind: Some(Kind::ListValue(prost_types::ListValue {
-                                                values: vec![prost_types::Value {
-                                                    kind: Some(Kind::ListValue(
-                                                        prost_types::ListValue {
-                                                            values: vec![1.0, 16.0, 16.0]
-                                                                .into_iter()
-                                                                .map(|value| prost_types::Value {
-                                                                    kind: Some(Kind::NumberValue(
-                                                                        value,
-                                                                    )),
-                                                                })
-                                                                .collect(),
-                                                        },
-                                                    )),
-                                                }],
-                                            })),
-                                        },
-                                    ),
-                                    (
-                                        "mm_hash".to_string(),
-                                        prost_types::Value {
-                                            kind: Some(Kind::StringValue((*mm_hash).to_string())),
-                                        },
-                                    ),
-                                ]),
-                            })),
-                        })
-                        .collect(),
-                })),
-            },
-        )]),
-    }
+    let ec_items: Vec<_> = mm_hashes
+        .iter()
+        .map(|mm_hash| {
+            serde_json::json!({
+                "image_grid_thw": [[1, 16, 16]],
+                "mm_hash": mm_hash,
+            })
+        })
+        .collect();
+    json_to_proto_struct(&serde_json::json!({ "ec_items": ec_items }))
+        .expect("valid EC proto struct")
 }
 
 fn decode_kv_proto_struct() -> prost_types::Struct {
-    use prost_types::value::Kind;
-
-    prost_types::Struct {
-        fields: std::collections::BTreeMap::from([
-            (
-                "do_remote_prefill".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::BoolValue(true)),
-                },
-            ),
-            (
-                "pp_size".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::NumberValue(1.0)),
-                },
-            ),
-            (
-                "remote_block_ids".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::ListValue(prost_types::ListValue {
-                        values: vec![prost_types::Value {
-                            kind: Some(Kind::ListValue(prost_types::ListValue {
-                                values: vec![prost_types::Value {
-                                    kind: Some(Kind::NumberValue(7.0)),
-                                }],
-                            })),
-                        }],
-                    })),
-                },
-            ),
-        ]),
-    }
+    json_to_proto_struct(&serde_json::json!({
+        "do_remote_prefill": true,
+        "pp_size": 1,
+        "remote_block_ids": [[7]],
+    }))
+    .expect("valid KV proto struct")
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
