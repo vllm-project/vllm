@@ -487,25 +487,28 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
         query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)
-        single_token_prefill_rows = is_prefilling & (query_lens_cpu == 1)
+
+        # First prompt chunks have no prior Mamba state and must stay prefills.
+        has_prior_state = seq_lens_cpu > query_lens_cpu
+        stateful_prefill_rows = is_prefilling & has_prior_state
+
+        # One-token prefills with prior state can use the decode/update path.
+        prefill_to_decode = stateful_prefill_rows & (query_lens_cpu == 1)
+
         # The scheduler may pad a one-token remote prompt tail with placeholder
         # drafts to retain the uniform K+1 decode graph. This is a speculative
         # decode transaction even though the real token is still in the prompt:
         # the decode kernels keep h(N) in the running slot and h(N+i) in scratch
         # slots, so normal acceptance rollback remains valid. The prefill kernels
         # only return h(N+K) and cannot roll the placeholders back.
-        padded_prompt_tail_rows = torch.zeros_like(is_prefilling)
         if num_decode_draft_tokens_cpu is not None:
             padded_prompt_tail_rows = (
-                is_prefilling
+                stateful_prefill_rows
                 & (num_decode_draft_tokens_cpu >= 0)
                 & (query_lens_cpu == num_decode_draft_tokens_cpu + 1)
             )
-        # First prompt chunks have no prior Mamba state and must stay prefills.
-        has_prior_state = seq_lens_cpu > query_lens_cpu
-        prefill_to_decode = (
-            single_token_prefill_rows | padded_prompt_tail_rows
-        ) & has_prior_state
+            prefill_to_decode |= padded_prompt_tail_rows
+
         if torch.any(prefill_to_decode).item():
             # ReplaySSM handles these rows as single-token flushes (see the
             # write-position derivation below), same as the baseline decode path.
