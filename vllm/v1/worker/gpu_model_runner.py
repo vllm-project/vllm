@@ -222,6 +222,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
+    group_block_stride_bytes,
     is_residual_scattered_for_sp,
     raise_if_nan_logits,
 )
@@ -7075,6 +7076,9 @@ class GPUModelRunner(
                     num_metadata_builders=1
                     if not self.parallel_config.use_ubatching
                     else self.parallel_config.num_ubatches,
+                    block_stride_bytes=group_block_stride_bytes(
+                        kv_cache_config, kv_cache_group_id
+                    ),
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,

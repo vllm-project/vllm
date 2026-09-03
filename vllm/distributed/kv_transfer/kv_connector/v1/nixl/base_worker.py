@@ -1441,7 +1441,6 @@ class NixlBaseConnectorWorker:
             self._supports_pp_hma and self._is_hma_required and not self._has_mamba
         )
         region_layers: list[list[str]] = []
-
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
@@ -1600,15 +1599,7 @@ class NixlBaseConnectorWorker:
                     ]
                 else:
                     segment_bytes = num_blocks * block_stride
-                    if cache.nbytes % segment_bytes != 0:
-                        raise AssertionError(
-                            "KV cache view cannot be partitioned into NIXL regions: "
-                            f"layer={layer_name}, cache_nbytes={cache.nbytes}, "
-                            f"num_blocks={num_blocks}, block_stride={block_stride}, "
-                            f"physical_page_size={physical_page_size}, "
-                            f"cache_shape={tuple(cache.shape)}, "
-                            f"cache_stride={tuple(cache.stride())}"
-                        )
+                    assert cache.nbytes % segment_bytes == 0
                     num_segments = cache.nbytes // segment_bytes
                     region_block_len = (
                         block_stride if num_segments > 1 else physical_page_size

@@ -20,6 +20,7 @@ from vllm.models.glm5next.common.sparse_indexer import (
     _fill_causal_indices,
     _fill_short_decode_causal_indices,
     _gather_workspace_shapes,
+    _kpool_flat_page_view,
     _scatter_decode_tokens_by_request,
     kv_cache_as_quant_view,
 )
@@ -122,6 +123,7 @@ def sparse_attn_indexer_kpool(
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
+    kv_cache = _kpool_flat_page_view(kv_cache)
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):

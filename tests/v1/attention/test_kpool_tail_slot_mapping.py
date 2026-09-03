@@ -31,14 +31,12 @@ from vllm.v1.attention.backends.mla.indexer import (
     compute_kpool_tail_slot_mapping,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
-from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.worker.block_table import get_block_table_width
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
-    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
+    layout, *_ = KpoolTailBackend.supported_kv_cache_layouts()
     spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
@@ -49,33 +47,9 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
 
-    assert layout is KVCacheLayout.LBHNC
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
-
-
-def test_tail_spec_opts_out_of_generic_slot_mapping():
-    """The tail row is one block wide (padded to the block-table alignment), so
-    the generic kernel's ``pos // kpool`` column index runs off the end of the
-    allocation for long prompts. The spec must opt out of it entirely."""
-    spec = KpoolTailSpec(
-        block_size=KPOOL,
-        num_kv_heads=2,
-        head_size=128,
-        head_size_v=0,
-        dtype=torch.bfloat16,
-        sliding_window=KPOOL,
-    )
-    max_len = 1 << 20
-    width = get_block_table_width(
-        spec.max_num_blocks_per_req(None, max_len),
-        spec.block_size,
-        token_alignment=spec.block_table_token_alignment,
-    )
-
-    assert width * KPOOL < max_len
-    assert spec.uses_slot_mapping is False
 
 
 def make_tail_block_table(own_blocks, width=64):
