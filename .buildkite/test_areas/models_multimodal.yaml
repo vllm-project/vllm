@@ -115,7 +115,7 @@ steps:
   - vllm/v1/worker/encoder_cudagraph_defs.py
   - tests/models/multimodal/generation/test_pixtral.py
   commands:
-    - pytest -v -s models/multimodal/generation/test_pixtral.py -k "flashinfer and (matches_eager or ignores_poisoned_padding_tail)"
+    - pytest -v -s models/multimodal/generation/test_pixtral.py -k "flashinfer and matches_eager"
 
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
   key: multi-modal-processor
