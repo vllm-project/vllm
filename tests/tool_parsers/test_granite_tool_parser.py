@@ -78,6 +78,10 @@ I'll get that information.""",
             parallel_tool_calls_names=["get_weather", "get_time"],
             # xfail markers
             xfail_streaming={
+                "test_streaming_split_invariance": (
+                    "Streamed result depends on delta boundaries; the tool call is "
+                    "lost when a delta carries it whole (#47907)"
+                ),
                 "test_malformed_input": (
                     "Streaming mode incorrectly creates tool call from malformed JSON"
                 ),

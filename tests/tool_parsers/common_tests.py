@@ -8,9 +8,18 @@ from typing import Any
 
 import pytest
 
-from tests.tool_parsers.utils import run_tool_extraction
+from tests.tool_parsers.utils import (
+    random_groupings,
+    run_tool_extraction,
+    run_tool_extraction_streaming_batched,
+    split_string_into_token_stream,
+    two_chunk_groupings,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
+
+RANDOM_GROUPING_COUNT = 100
+RANDOM_GROUPING_SEED = 20260902
 
 
 @dataclass
@@ -366,6 +375,99 @@ class ToolParserTests:
         if len(tools_non) > 0:
             assert tools_non[0].function.name == tools_stream[0].function.name
             assert tools_non[0].function.arguments == tools_stream[0].function.arguments
+
+    def test_streaming_split_invariance(
+        self,
+        request: pytest.FixtureRequest,
+        tool_parser: Any,
+        test_config: ToolParserTestConfig,
+    ):
+        """Verify the streamed result does not depend on token batching.
+
+        ``test_streaming_reconstruction`` streams one token at a time,
+        which is a single partition of the token stream.  A server
+        batches a variable number of tokens per delta, so a tool-call
+        tag that is only mishandled when it straddles one particular
+        delta boundary never shows up.
+
+        The baseline here is the one-token-per-delta stream rather than
+        the non-streaming parse, so the check stays meaningful for
+        parsers whose non-streaming path is separately known to be
+        broken (see ``xfail_nonstreaming``).
+        """
+        test_name = "test_streaming_split_invariance"
+        self.apply_xfail_mark(request, test_config, test_name, True)
+
+        for label, output in (
+            ("single", test_config.single_tool_call_output),
+            ("parallel", test_config.parallel_tool_calls_output),
+        ):
+            token_texts, token_ids = split_string_into_token_stream(
+                tool_parser.model_tokenizer, output
+            )
+            baseline = self.stream_with_batching(
+                test_config,
+                tool_parser.model_tokenizer,
+                token_texts,
+                token_ids,
+                [1] * len(token_texts),
+            )
+            batchings = two_chunk_groupings(len(token_texts)) + random_groupings(
+                len(token_texts),
+                count=RANDOM_GROUPING_COUNT,
+                seed=RANDOM_GROUPING_SEED,
+            )
+            failures: list[tuple[list[int], str]] = []
+            for lengths in batchings:
+                try:
+                    actual = self.stream_with_batching(
+                        test_config,
+                        tool_parser.model_tokenizer,
+                        token_texts,
+                        token_ids,
+                        lengths,
+                    )
+                    assert actual == baseline, f"expected {baseline}, got {actual}"
+                except AssertionError as exc:
+                    failures.append((lengths, str(exc)))
+
+            if failures:
+                lengths, err = min(failures, key=lambda item: len(item[0]))
+                raise AssertionError(
+                    f"{len(failures)}/{len(batchings)} token batchings changed "
+                    f"the {label} tool-call parse for "
+                    f"{test_config.parser_name!r}. Minimal failing batching "
+                    f"(tokens per delta) {lengths}:\n{err}"
+                )
+
+    @staticmethod
+    def stream_with_batching(
+        test_config: ToolParserTestConfig,
+        tokenizer: TokenizerLike,
+        token_texts: list[str],
+        token_ids: list[int],
+        lengths: list[int],
+    ) -> tuple[str | None, tuple[tuple[str, str], ...]]:
+        """Stream the token sequence batched by *lengths* into a result.
+
+        A fresh parser is built per batching because parsers carry
+        streaming state across deltas.
+        """
+        parser = ToolParserManager.get_tool_parser(test_config.parser_name)(tokenizer)
+        reconstructor = run_tool_extraction_streaming_batched(
+            parser,
+            token_texts,
+            token_ids,
+            lengths,
+            assert_one_tool_per_delta=False,
+        )
+        return (
+            reconstructor.other_content or None,
+            tuple(
+                (tc.function.name, tc.function.arguments or "")
+                for tc in reconstructor.tool_calls
+            ),
+        )
 
     def apply_xfail_mark(self, request, test_config, test_name, streaming):
         reason = None
