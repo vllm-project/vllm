@@ -10,6 +10,7 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -61,8 +62,11 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
             return
         device = self.topk_indices_buffer.device
         topk = self.topk_indices_buffer.shape[-1]
-        q = torch.empty(1, self.num_heads, _DIM_QK, dtype=torch.bfloat16, device=device)
-        kv = torch.empty(64, 1, _DIM_QK, dtype=torch.bfloat16, device=device)
+        cfg = get_current_vllm_config_or_none()
+        model_dtype = cfg.model_config.dtype if cfg is not None else torch.bfloat16
+        kv_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype, model_dtype)
+        q = torch.empty(1, self.num_heads, _DIM_QK, dtype=model_dtype, device=device)
+        kv = torch.empty(64, 1, _DIM_QK, dtype=kv_dtype, device=device)
         indices = torch.zeros(1, 1, topk, dtype=torch.int32, device=device)
         for splits in KV_SPLITS_CANDIDATES:
             triton_mla_sparse_attention(
@@ -78,7 +82,6 @@ class TritonMLASparseImpl(XPUMLASparseImpl):
         warmup_fp8_mqa_logits_triton(
             num_heads=indexer_num_heads, head_dim=indexer_head_dim, device=device
         )
-        cfg = get_current_vllm_config_or_none()
         if cfg is not None:
             warmup_fp8_paged_mqa_logits_triton(
                 num_heads=indexer_num_heads,
