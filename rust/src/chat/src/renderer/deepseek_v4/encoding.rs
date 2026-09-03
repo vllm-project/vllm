@@ -57,6 +57,8 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
+    let drop_historical_developers = thinking_mode == ThinkingMode::Thinking && drop_thinking;
+    let last_user_like_message_index = request.messages.iter().rposition(is_user_like_entry);
     let last_user_render_index =
         find_last_user_render_index(request.messages.as_slice(), synthetic_tool_system);
     let mut out = String::from(BOS_TOKEN);
@@ -80,6 +82,12 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
 
         let current_render_index = render_index;
         render_index += 1;
+
+        if drop_historical_developers
+            && is_historical_developer(message, message_index, last_user_like_message_index)
+        {
+            continue;
+        }
 
         match message {
             ChatMessage::System { content } => {
@@ -126,7 +134,12 @@ pub(super) fn render_request(request: &ChatRequest) -> Result<String> {
         }
 
         if (is_user_like_entry(message) || matches!(message, ChatMessage::System { .. }))
-            && next_rendered_entry_is_assistant_or_end(request.messages.as_slice(), message_index)
+            && next_rendered_entry_is_assistant_or_end(
+                request.messages.as_slice(),
+                message_index,
+                drop_historical_developers,
+                last_user_like_message_index,
+            )
         {
             write_assistant_transition(
                 &mut out,
@@ -243,14 +256,35 @@ fn is_user_like_entry(message: &ChatMessage) -> bool {
     )
 }
 
+/// Return whether a developer entry precedes another user-like turn.
+fn is_historical_developer(
+    message: &ChatMessage,
+    message_index: usize,
+    last_user_like_message_index: Option<usize>,
+) -> bool {
+    matches!(message, ChatMessage::Developer { .. })
+        && last_user_like_message_index.is_some_and(|last_index| message_index < last_index)
+}
+
 /// Return whether the next rendered entry is assistant, or there is no next
 /// entry.
-fn next_rendered_entry_is_assistant_or_end(messages: &[ChatMessage], message_index: usize) -> bool {
+fn next_rendered_entry_is_assistant_or_end(
+    messages: &[ChatMessage],
+    message_index: usize,
+    drop_historical_developers: bool,
+    last_user_like_message_index: Option<usize>,
+) -> bool {
     let mut next_index = message_index + 1;
-    if is_user_content_entry(&messages[message_index]) {
-        while next_index < messages.len() && is_user_content_entry(&messages[next_index]) {
-            next_index += 1;
-        }
+    while next_index < messages.len()
+        && (is_following_user_content(messages, next_index)
+            || (drop_historical_developers
+                && is_historical_developer(
+                    &messages[next_index],
+                    next_index,
+                    last_user_like_message_index,
+                )))
+    {
+        next_index += 1;
     }
 
     messages
