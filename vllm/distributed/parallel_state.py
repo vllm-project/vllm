@@ -1230,6 +1230,45 @@ class GroupCoordinator:
 
         return handles
 
+    def isend_tensor(self, tensor: torch.Tensor, dst: int | None = None) -> Handle:
+        """Asynchronously send a tensor without exchanging metadata."""
+        if not torch.distributed.is_initialized() or self.world_size <= 1:
+            raise RuntimeError("isend_tensor requires an initialized multi-rank group")
+        if self.use_cpu_custom_send_recv:
+            raise RuntimeError("isend_tensor does not support custom CPU transport")
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        if not 0 <= dst < self.world_size:
+            raise ValueError(f"Invalid destination rank {dst}")
+
+        comm_group = self.cpu_group if tensor.is_cpu else self.device_group
+        handle = torch.distributed.isend(
+            tensor,
+            dst=self.ranks[dst],
+            group=comm_group,
+        )
+        if tensor.is_cuda:
+            tensor.record_stream(torch.cuda.current_stream(tensor.device))
+        return handle
+
+    def irecv_tensor(self, tensor: torch.Tensor, src: int | None = None) -> Handle:
+        """Asynchronously receive a tensor with an already-known schema."""
+        if not torch.distributed.is_initialized() or self.world_size <= 1:
+            raise RuntimeError("irecv_tensor requires an initialized multi-rank group")
+        if self.use_cpu_custom_send_recv:
+            raise RuntimeError("irecv_tensor does not support custom CPU transport")
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        if not 0 <= src < self.world_size:
+            raise ValueError(f"Invalid source rank {src}")
+
+        comm_group = self.cpu_group if tensor.is_cpu else self.device_group
+        return torch.distributed.irecv(
+            tensor,
+            src=self.ranks[src],
+            group=comm_group,
+        )
+
     def recv_tensor_dict(
         self,
         src: int | None = None,
