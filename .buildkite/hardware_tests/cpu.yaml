@@ -79,6 +79,28 @@ steps:
       pytest -x -v -s tests/models/language/generation tests/models/language/pooling tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 3
 
+- label: CPU-Cgroup Memory Clamp Test
+  key: cpu-cgroup-memory-clamp-test
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/utils/cpu_resource_utils.py
+  - vllm/v1/worker/cpu_worker.py
+  - vllm/platforms/cpu.py
+  - .buildkite/scripts/hardware_ci/run-cpu-test.sh
+  - tests/v1/e2e/test_cpu_cgroup_memory_limit.py
+  commands:
+    # Runs under a real container --memory cgroup, with the legacy
+    # VLLM_CPU_KVCACHE_SPACE knob explicitly unset, so the fraction-of-
+    # available-memory auto-sizing path in CPUWorker.determine_available_memory
+    # actually runs and must clamp to this container's limit rather than the
+    # CI host's much larger RAM (see vllm/utils/cpu_resource_utils.py).
+    - |
+      CONTAINER_MEMORY_LIMIT=4294967296 VLLM_CPU_KVCACHE_SPACE= \
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 15m "
+      pytest -x -v -s tests/v1/e2e/test_cpu_cgroup_memory_limit.py"
+
 - label: CPU-Quantization Model Tests
   key: cpu-quantization-model-tests
   depends_on: []
