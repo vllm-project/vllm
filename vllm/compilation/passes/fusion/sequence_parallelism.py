@@ -23,7 +23,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
@@ -71,6 +70,8 @@ def get_sequence_parallelism_threshold(
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
     """
+    from vllm.platforms import current_platform
+
     if current_platform.is_xpu():
         min_hidden_size = 4096
         min_per_gpu_size_mb = 8.0
@@ -694,6 +695,8 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 MiddleAllReduceRMSNormStaticNVFP4Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)
+
+            from vllm.platforms import current_platform
 
             if current_platform.is_xpu():
                 FirstAllReduceRMSNormXPUMxFP8Pattern(
