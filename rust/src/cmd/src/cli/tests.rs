@@ -107,6 +107,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        root_path: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -694,6 +695,99 @@ fn frontend_args_json_accepts_api_key_list() {
 }
 
 #[test]
+fn serve_passes_root_path_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--root-path",
+        "/api/v1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.root_path.as_deref(), Some("/api/v1"));
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.root_path.as_deref(), Some("/api/v1"));
+}
+
+#[test]
+fn frontend_args_json_passes_root_path_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.root_path.as_deref(), Some("/prefix"));
+}
+
+#[test]
+fn serve_root_path_defaults_to_none() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.root_path, None);
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.root_path, None);
+}
+
+#[test]
+fn serve_args_accept_root_path_without_rejection() {
+    // --root-path used to be an `Unsupported` arg that would cause a
+    // hard error. Verify it is now accepted without error.
+    let result = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--root-path",
+        "/my-proxy",
+    ]);
+    assert!(result.is_ok(), "expected --root-path to be accepted");
+}
+
+#[test]
+fn serve_config_rejects_root_path_route_pattern() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--root-path",
+        "/{*prefix}",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let error = args
+        .to_frontend_config("tcp://127.0.0.1:62100".to_string())
+        .validate()
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "--root-path must be a static URL path without route parameters, got \"/{*prefix}\""
+    );
+}
+
+#[test]
 fn serve_args_reject_unknown_renderer_value() {
     let error = Cli::try_parse_from([
         "vllm-rs",
@@ -718,13 +812,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--root-path",
-        "/prefix",
+        "--response-role",
+        "assistant",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
+        error: invalid value 'assistant' for '--response-role <RESPONSE_ROLE>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -826,6 +920,7 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        root_path: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1115,19 +1210,20 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant"}"#,
     ])
     .unwrap_err();
 
+    let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
-        - root_path
+        - response_role
 
         Remove these arguments to continue.
 
         For more information, try '--help'.
-    "#]].assert_eq(&error.to_string());
+    "#]].assert_eq(&actual);
 }
 
 #[test]
@@ -1142,16 +1238,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - root_path
+        - uvicorn_log_level
 
         Remove these arguments to continue.
 
@@ -1420,6 +1516,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        root_path: None,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1582,6 +1679,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tls: None,
             api_keys: [],
+            root_path: None,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -1668,6 +1766,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tls: None,
             api_keys: [],
+            root_path: None,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -1775,6 +1874,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tls: None,
             api_keys: [],
+            root_path: None,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,

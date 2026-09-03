@@ -57,6 +57,7 @@ use super::{
     build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
     render::build_router as build_render_router,
 };
+use crate::apply_root_path_nesting;
 use crate::config::{ApiServerOptions, CorsConfig};
 use crate::render::RenderState;
 use crate::state::AppState;
@@ -2088,6 +2089,7 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
         )
         .await
         .expect("call app");
+
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     drop(app);
@@ -2259,15 +2261,28 @@ async fn load_lora_adapter_rejects_base_model_name_collision() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn http_metrics_record_list_models_requests() {
-    let mut app = test_app().await;
+async fn root_path_nesting_preserves_http_metrics_classification() {
+    let mut app = apply_root_path_nesting(test_app().await, Some("/proxy")).unwrap();
     let before = METRICS.render().unwrap();
 
     let response = app
         .call(
             Request::builder()
                 .method("GET")
-                .uri("/v1/models")
+                .uri("/proxy/v1/models")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/proxy/health")
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -2939,8 +2954,9 @@ async fn http_metrics_group_error_statuses() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn load_endpoint_tracks_chat_stream_lifecycle() {
+async fn root_path_nesting_preserves_load_tracking() {
     let (app, engine_task) = test_app_with_engine_handle().await;
+    let app = apply_root_path_nesting(app, Some("/proxy")).unwrap();
 
     assert_eq!(server_load(&app).await, 0);
 
@@ -2949,7 +2965,7 @@ async fn load_endpoint_tracks_chat_stream_lifecycle() {
         .call(
             Request::builder()
                 .method("POST")
-                .uri("/v1/chat/completions")
+                .uri("/proxy/v1/chat/completions")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -6244,6 +6260,7 @@ async fn post_json(
         )
         .await
         .expect("call app");
+
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&bytes)
@@ -6699,7 +6716,6 @@ async fn world_size_endpoint_is_dev_mode_only() {
         )
         .await
         .expect("call app");
-
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
@@ -6810,7 +6826,6 @@ async fn stop_profile_route_sends_expected_utility_call() {
         )
         .await
         .expect("call app");
-
     let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
@@ -6844,4 +6859,97 @@ async fn profile_routes_are_hidden_when_profiling_is_disabled() {
     }
 
     engine_task.abort_and_join().await;
+}
+
+async fn get_route_status(mut app: axum::Router, uri: &str) -> StatusCode {
+    app.call(
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .expect("build request"),
+    )
+    .await
+    .expect("call app")
+    .status()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_nesting_serves_bare_and_prefixed_routes() {
+    let app = apply_root_path_nesting(test_app().await, Some("/api")).unwrap();
+
+    assert_eq!(
+        get_route_status(app.clone(), "/health").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_route_status(app.clone(), "/api/health").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_route_status(app, "/wrong/health").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_nesting_serves_models_endpoint() {
+    let app = apply_root_path_nesting(test_app().await, Some("/proxy")).unwrap();
+
+    assert_eq!(
+        get_route_status(app.clone(), "/v1/models").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_route_status(app, "/proxy/v1/models").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_empty_string_is_noop() {
+    let app = apply_root_path_nesting(test_app().await, Some("")).unwrap();
+
+    assert_eq!(
+        get_route_status(app.clone(), "/health").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_route_status(app, "/api/health").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_trailing_slash_is_trimmed() {
+    let app = apply_root_path_nesting(test_app().await, Some("/api/")).unwrap();
+
+    assert_eq!(get_route_status(app, "/api/health").await, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_none_does_not_add_prefix_routes() {
+    let app = apply_root_path_nesting(test_app().await, None).unwrap();
+
+    assert_eq!(
+        get_route_status(app.clone(), "/health").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_route_status(app, "/api/health").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn root_path_without_leading_slash_is_normalized() {
+    let app = apply_root_path_nesting(test_app().await, Some("myapp")).unwrap();
+
+    assert_eq!(get_route_status(app, "/myapp/health").await, StatusCode::OK);
 }
