@@ -519,6 +519,8 @@ def make_nixl_scheduler(
     Only sets the flags needed by the tests.  When *heartbeat=True* the
     scheduler-side heartbeat bookkeeping fields are also initialised.
     """
+    from types import SimpleNamespace
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
@@ -530,6 +532,7 @@ def make_nixl_scheduler(
         block_size=16,
         mamba_enabled=has_mamba,
     )
+    sched.vllm_config = SimpleNamespace(num_prefill_lookahead_tokens=0)
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -593,9 +596,11 @@ def make_nixl_push_scheduler(
         mamba_enabled=has_mamba,
     )
 
-    # vllm_config is consulted for parallel_config.tensor_parallel_size.
+    # vllm_config is consulted for parallel_config.tensor_parallel_size, and by
+    # `_prefill_backoff` on both the P and D prefill paths.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.num_prefill_lookahead_tokens = 0
     sched.vllm_config = vllm_config
 
     # Push-specific state.

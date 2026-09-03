@@ -196,8 +196,8 @@ class NixlBaseConnectorScheduler:
     def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
+        if params is not None and params.get("do_remote_decode"):
+            self._truncate_request_for_prefill(request)
 
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
         # effectively disabled for Bidirectional KV transfer.
@@ -379,36 +379,56 @@ class NixlBaseConnectorScheduler:
                     (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
                 )
 
+    def _prefill_backoff(self) -> int:
+        """Trailing prompt tokens the prefiller must not compute; the decoder
+        recomputes them locally.
+
+        Mamba needs h(N-1) so the decoder can derive h(N) itself. Multi-module
+        MTP needs to keep its whole lookahead window off of the prefiller, which
+        would otherwise embed the unverified drafts in the MTP layer's KV cache. The
+        decoder would never rebuild them, because the update is sized by the rejection
+        count, which is zero for the first decode.
+        """
+        return max(
+            1 if self._has_mamba else 0,
+            self.vllm_config.num_prefill_lookahead_tokens - 1,
+        )
+
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
-        """D-side only. Returns N-1 for Mamba models since the decoder
-        always recomputes the last token and must start from h(N-1)."""
-        if self._has_mamba and num_prompt_tokens > 1:
-            return num_prompt_tokens - 1
+        """D-side only. The number of prompt tokens to load from the prefiller.
+        Stops short of the trailing ``_prefill_backoff()`` tokens that the decoder
+        will recompute locally."""
+        backoff = self._prefill_backoff()
+        if backoff and num_prompt_tokens > backoff:
+            return num_prompt_tokens - backoff
         return num_prompt_tokens
 
-    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
-        """P-side only: drop the last prompt token so the prefiller computes
-        h(N-1) instead of h(N). The decoder recomputes the last token to
-        derive h(N) correctly.
+    def _truncate_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the trailing ``_prefill_backoff()`` prompt tokens
+        so the prefiller stops short of what the decoder recomputes locally.
+        For Mamba that is the single token needed to yield h(N-1); for
+        multi-module MTP it is the drafter's whole lookahead window.
 
         Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
+        backoff = self._prefill_backoff()
         params = request.kv_transfer_params
         if (
-            params is not None
+            backoff
+            and params is not None
             # Guard against repeated truncation after preemption/reschedule.
             and not params.get("_p_side_truncated")
-            and request.num_prompt_tokens > 1
+            and request.num_prompt_tokens > backoff
         ):
             if request.prompt_token_ids is not None:
-                request.prompt_token_ids.pop()
+                del request.prompt_token_ids[-backoff:]
             elif request.prompt_embeds is not None:
-                request.prompt_embeds = request.prompt_embeds[:-1]
+                request.prompt_embeds = request.prompt_embeds[:-backoff]
             else:
                 return
 
-            request._all_token_ids.pop()
-            request.num_prompt_tokens -= 1
+            del request._all_token_ids[-backoff:]
+            request.num_prompt_tokens -= backoff
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 

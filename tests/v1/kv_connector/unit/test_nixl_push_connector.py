@@ -130,7 +130,7 @@ class TestPushScheduler:
 
         with patch.object(
             sched,
-            "_truncate_mamba_request_for_prefill",
+            "_truncate_request_for_prefill",
             side_effect=AssertionError("must not truncate after cache lookup"),
         ):
             assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
