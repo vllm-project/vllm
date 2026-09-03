@@ -1,7 +1,7 @@
 -r ../common.txt
 
 # --- Test Infrastructure ---
-tblib
+tblib==3.1.0
 pytest
 pytest_asyncio
 pytest-timeout
@@ -17,9 +17,12 @@ accelerate
 arctic-inference
 lm_eval[api]>=0.4.12
 modelscope<1.38
+runai-model-streamer[s3,gcs,azure]>=0.15.7
+tensorizer==2.10.1
 transformers==5.16.1
 
 # --- Audio Processing ---
+av
 librosa
 audioread
 soxr
@@ -29,7 +32,7 @@ soundfile
 # --- Tool Parsing & Evaluation ---
 blobfile
 rapidfuzz
-gpt-oss
+gpt-oss[eval]==0.0.5
 schemathesis
 jiwer
 bm25s
@@ -41,4 +44,17 @@ pqdm
 # --- Vision & Multimodal ---
 timm
 albumentations
+ftfy
+matplotlib
 mistral-common[image,audio]
+
+open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
+
+# --- Observability ---
+opentelemetry-api>=1.26.0
+opentelemetry-exporter-otlp>=1.26.0
+opentelemetry-sdk>=1.26.0
+opentelemetry-semantic-conventions-ai>=0.4.1
+
+cohere_melody>=0.11.1 # required for cohere command reasoning/tool parser tests
+cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import cohere.types)
