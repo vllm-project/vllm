@@ -757,3 +757,102 @@ def test_cutlass_fp8_group_gemm(
         baseline = baseline_tensors[g]
         c = out_tensors_stacked[expert_offsets[g] : expert_offsets[g + 1]]
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
+
+
+# Weight sizes chosen so the SM 12.x chunk path (weight > device L2) is
+# exercised on every part: 5120x5120 FP8 = 25 MiB and 16384x2560 = 42 MB exceed
+# GB10's 24 MiB L2, 57344x2560 = 147 MB exceeds full GB202's 128 MiB L2;
+# 2048x2560 = 5 MB is the no-chunk control. The assertions hold on either path.
+# The 147 MB weight runs once (baseline cost: 20 x 448 block matmuls per eval).
+LARGE_M_BLOCKWISE_CASES = [
+    (m, n, k)
+    for m in (4096, 4097, 8193, 12288)
+    for (n, k) in ((2048, 2560), (5120, 5120), (16384, 2560))
+] + [
+    # The 147 MB weight once (multiple chunks + remainder): its fp32 baseline
+    # is ~1.2e12 ops, so only where the chunked path can actually run.
+    pytest.param(
+        8193,
+        57344,
+        2560,
+        marks=pytest.mark.skipif(
+            not current_platform.is_device_capability_family(120),
+            reason="147 MB weight case is for the SM 12.x chunk path",
+        ),
+    )
+]
+
+
+def _blockwise_fp8_inputs(m: int, n: int, k: int):
+    """Random FP8 A [M,K], B [N,K] and blockwise scales (A's column-major)."""
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    b = to_fp8(torch.randn((n, k), device="cuda"))  # [N, K]
+    scale_a = torch.rand((m, k // 128), device="cuda", dtype=torch.float32) + 0.5
+    scale_a = scale_a.t().contiguous().t()  # column-major, as QuantFP8 emits it
+    scale_b = torch.rand((n // 128, k // 128), device="cuda", dtype=torch.float32) + 0.5
+    return a, b, scale_a, scale_b
+
+
+def _chunked_reference(a, b, scale_a, scale_b) -> torch.Tensor:
+    """Balanced row-chunked launches with per-chunk re-laid-out scales: the
+    same rule as the SM 12.x C++ path (see
+    csrc/.../scaled_mm_blockwise_sm120_fp8.cu): ~12 MiB of activation per
+    launch, at most 4096 rows, chunks balanced and 4-aligned."""
+    m, k = a.shape
+    max_rows = max(512, min(4096, (12 << 20) // k)) // 4 * 4
+    num_chunks = -(-m // max_rows)
+    rows = (-(-m // num_chunks) + 3) // 4 * 4
+    out = torch.empty((m, b.shape[0]), dtype=torch.bfloat16, device="cuda")
+    for i in range(0, m, rows):
+        sa = scale_a[i : i + rows].t().contiguous().t()
+        out[i : i + rows] = ops.cutlass_scaled_mm(
+            a[i : i + rows].contiguous(), b.t(), sa, scale_b.t(), torch.bfloat16, None
+        )
+    return out
+
+
+@pytest.mark.parametrize("m,n,k", LARGE_M_BLOCKWISE_CASES)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="FP8 blockwise is not supported on this GPU type.",
+)
+def test_cutlass_fp8_blockwise_large_m(m: int, n: int, k: int):
+    """Large-M blockwise GEMM against the dequantized fp32 baseline, and — on
+    SM 12.x, where the op chunks M internally once the weight exceeds the L2 —
+    bit-identical to a Python reference doing the same balanced chunking
+    (splitting M never changes an output element's K-reduction). Other
+    architectures may pick different kernel configurations per launch (e.g.
+    the SM90 swap-AB dispatch on M % 4), so exact equality is asserted only
+    where the C++ path is the one under test."""
+    a, b, scale_a, scale_b = _blockwise_fp8_inputs(m, n, k)
+    out = ops.cutlass_scaled_mm(a, b.t(), scale_a, scale_b.t(), torch.bfloat16, None)
+    baseline = baseline_scaled_mm(a, b.t(), scale_a, scale_b.t(), torch.bfloat16, None)
+    torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
+    ref = _chunked_reference(a, b, scale_a, scale_b)
+    if current_platform.is_device_capability_family(120):
+        assert torch.equal(out, ref)
+    else:
+        torch.testing.assert_close(out, ref, rtol=5e-1, atol=1.5e-1)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="FP8 blockwise is not supported on this GPU type.",
+)
+def test_cutlass_fp8_blockwise_compiled_dynamic_m():
+    """The M dispatch lives inside the op: ONE compiled graph with symbolic M
+    serves token counts on both sides of the chunk threshold (frame_count
+    stays 1 across the calls) and matches eager."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    def fn(a, b_t, sa, sb_t):
+        return ops.cutlass_scaled_mm(a, b_t, sa, sb_t, torch.bfloat16, None)
+
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(fn, backend=counter, dynamic=True, fullgraph=True)
+    n, k = 16384, 2560  # 42 MB weight: chunked on SM 12.x parts with a small L2
+    for m in (4096, 4097, 8193, 12288):
+        a, b, scale_a, scale_b = _blockwise_fp8_inputs(m, n, k)
+        eager = fn(a, b.t(), scale_a, scale_b.t())
+        assert torch.equal(compiled(a, b.t(), scale_a, scale_b.t()), eager)
+    assert counter.frame_count == 1, f"recompiled: frame_count={counter.frame_count}"
