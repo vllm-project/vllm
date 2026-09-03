@@ -74,6 +74,7 @@ def create_scheduler(
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
     per_request_spec_decode_metrics: str = "none",
+    max_concurrent_prefills: int = 0,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -111,6 +112,7 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        max_concurrent_prefills=max_concurrent_prefills,
         # Ensure admission/preemption mechanics are deterministic
         watermark=0.0,
     )

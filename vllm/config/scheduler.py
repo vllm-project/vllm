@@ -176,6 +176,22 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
+    max_concurrent_prefills: int = Field(default=0, ge=0)
+    """Maximum number of requests allowed to be in prefill at the same time,
+    counting requests whose prefill is still partially computed together with
+    those admitted in the current step. 0 (the default) does not bound it.
+
+    A request in prefill holds every block it has computed so far, and those
+    blocks come from the same pool that retains reusable prefixes. Admitting
+    many prefills at once therefore evicts prefixes that later requests would
+    have hit, and interleaves prefill into more of the steps that decode shares.
+    Bounding the count keeps that footprint flat, at the cost of holding
+    requests in the queue longer.
+
+    This bounds requests, not work: `long_prefill_token_threshold` and the
+    per-step token budget limit how much prefill a step computes, not how many
+    requests hold partial prefill state at once."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
