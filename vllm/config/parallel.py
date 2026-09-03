@@ -38,6 +38,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DCPA2ABackend = Literal["auto", "nccl", "flashinfer"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
@@ -359,6 +360,18 @@ class ParallelConfig:
       per layer for MLA models.
     """
 
+    dcp_a2a_backend: DCPA2ABackend = "auto"
+    """Kernel for the DCP All-to-All exchange (only used when
+    `dcp_comm_backend="a2a"`).
+    - "auto": pick automatically — FlashInfer's fused LL128 A2A on Blackwell
+      (sm_100+) under full-cudagraph decode, where it beats NCCL packed; NCCL
+      packed everywhere else. Falls back to NCCL if the FlashInfer MNNVL
+      workspace cannot initialize.
+    - "nccl": always use the NCCL packed all_to_all path.
+    - "flashinfer": always use FlashInfer's fused LL128 A2A (still falls back to
+      NCCL if the MNNVL workspace cannot initialize).
+    """
+
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP.
     Store interleave_size tokens on dcp_rank i, then store next
@@ -541,6 +554,12 @@ class ParallelConfig:
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
             raise ValueError(
                 "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
+            )
+
+        if self.dcp_a2a_backend != "auto" and self.dcp_comm_backend != "a2a":
+            logger.warning(
+                "dcp_a2a_backend=%r is ignored unless dcp_comm_backend='a2a'.",
+                self.dcp_a2a_backend,
             )
 
         return self

@@ -54,11 +54,11 @@ def set_dcp_a2a_backend(backend: str) -> None:
 def _get_dcp_a2a_backend() -> str:
     """Return the resolved DCP A2A kernel (``"nccl"`` or ``"flashinfer"``).
 
-    There is no user-facing flag: the choice is made automatically the first
-    time an attention backend selects the A2A combine path
-    (``ensure_dcp_a2a_backend``) — FlashInfer on Blackwell (sm_100+, where its
-    fused LL128 kernel is CUDA-graph captured and wins), NCCL packed everywhere
-    else — and cached here.
+    The choice is resolved the first time an attention backend selects the A2A
+    combine path (``ensure_dcp_a2a_backend``) and cached here. It follows the
+    ``--dcp-a2a-backend`` option: ``"nccl"`` / ``"flashinfer"`` force the kernel;
+    ``"auto"`` (default) picks FlashInfer on Blackwell (sm_100+) under
+    full-cudagraph decode, NCCL packed everywhere else.
     """
     if _DCP_A2A_BACKEND is not None:
         return _DCP_A2A_BACKEND
@@ -72,37 +72,50 @@ def ensure_dcp_a2a_backend(vllm_config: VllmConfig) -> None:
     DCP-combine path, so this hardware/feature-specific setup lives with the
     feature rather than in the generic worker. Idempotent per process.
 
-    FlashInfer's fused LL128 A2A only wins when the decode a2a-reduce is
-    captured under a full CUDA graph on Blackwell (sm_100+); in eager /
-    piecewise-only cudagraph or on non-Blackwell its per-call launch overhead
-    makes it slower than NCCL packed, so those use NCCL.
+    The kernel follows the ``--dcp-a2a-backend`` option:
+    - ``"nccl"``: always the NCCL packed all_to_all path.
+    - ``"flashinfer"``: always FlashInfer's fused LL128 A2A (with graceful NCCL
+      fallback if the MNNVL workspace cannot initialize).
+    - ``"auto"`` (default): FlashInfer only when the decode a2a-reduce is
+      captured under a full CUDA graph on Blackwell (sm_100+), where its fused
+      kernel beats NCCL packed; in eager / piecewise-only cudagraph or on
+      non-Blackwell its per-call launch overhead makes it slower, so those use
+      NCCL.
 
     The FlashInfer workspace must be allocated before CUDA-graph capture, which
     holds because attention backends are constructed at model-runner /
     attention-layer init, ahead of capture.
 
     Args:
-        vllm_config: The active vLLM config, used to read the cudagraph mode
-            and the DCP group.
+        vllm_config: The active vLLM config, used to read the backend option,
+            the cudagraph mode, and the DCP group.
     """
     global _DCP_A2A_INITIALIZED
     if _DCP_A2A_INITIALIZED:
         return
     _DCP_A2A_INITIALIZED = True
 
-    from vllm.config import CUDAGraphMode
-    from vllm.platforms import current_platform
-
-    cap = current_platform.get_device_capability()
-    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-    decode_full_cudagraph = (
-        cudagraph_mode is not None
-        and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-    )
-    use_fi = cap is not None and cap.major >= 10 and decode_full_cudagraph
-    if not use_fi:
+    choice = vllm_config.parallel_config.dcp_a2a_backend
+    if choice == "nccl":
         set_dcp_a2a_backend("nccl")
         return
+
+    if choice == "auto":
+        from vllm.config import CUDAGraphMode
+        from vllm.platforms import current_platform
+
+        cap = current_platform.get_device_capability()
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        decode_full_cudagraph = (
+            cudagraph_mode is not None
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+        )
+        use_fi = cap is not None and cap.major >= 10 and decode_full_cudagraph
+        if not use_fi:
+            set_dcp_a2a_backend("nccl")
+            return
+
+    # choice == "flashinfer" (forced), or "auto" resolved to FlashInfer.
     set_dcp_a2a_backend("flashinfer")
 
     from vllm.distributed.dcp_alltoall_flashinfer import DCPAllToAllFlashInfer
