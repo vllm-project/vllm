@@ -522,11 +522,7 @@ def sparse_attn_indexer_kpool(
                 cu_seqlen_ke = chunk.cu_seqlen_ke
 
             q_slice = q_quant[row_start:row_end]
-            q_scale_slice = (
-                q_scale[row_start:row_end]
-                if q_scale is not None
-                else None
-            )
+            q_scale_slice = q_scale[row_start:row_end] if q_scale is not None else None
             # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
             # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
             if use_fp4_cache:
@@ -604,10 +600,7 @@ def sparse_attn_indexer_kpool(
                     # Fused expand-pools + append-tail into one Triton kernel
                     # (replaces ~25 elementwise ops). seq_len is token-granular
                     # (pos+1); the kernel derives pool_len internally.
-                    q_seq = (
-                        positions[row_start:row_end].to(torch.int32)
-                        + 1
-                    )
+                    q_seq = positions[row_start:row_end].to(torch.int32) + 1
                     expanded = kpool_ops.expand_pools_and_append_tail(
                         pool_ids, q_seq, index_kpool
                     )
@@ -620,14 +613,25 @@ def sparse_attn_indexer_kpool(
 
         if shard_sizes is not None:
             prefill_end = num_decode_tokens + num_prefill_tokens
-            topk_indices_buffer[num_decode_tokens:prefill_end, :topk_tokens] = (
-                get_tp_group().all_gatherv(
-                    topk_indices_buffer[
-                        shard_start:shard_stop, :topk_tokens
-                    ].contiguous(),
-                    dim=0,
-                    sizes=shard_sizes,
-                )
+            # K-pool expansion appends the request's incomplete tail after the
+            # logical top-k history.  Those ``index_kpool - 1`` entries are
+            # part of the attention index and must be exchanged as well.
+            exchange_width = topk_tokens + (index_kpool - 1 if index_kpool > 1 else 0)
+            # Keep the contiguous local input alive until the NCCL operation's
+            # dependent copy has been enqueued.  In particular, PyNCCL's
+            # variable-size gather is asynchronous and the temporary created
+            # inline here could otherwise be released immediately after the
+            # collective call.
+            local_topk = topk_indices_buffer[
+                shard_start:shard_stop, :exchange_width
+            ].contiguous()
+            gathered_topk = get_tp_group().all_gatherv(
+                local_topk,
+                dim=0,
+                sizes=shard_sizes,
+            )
+            topk_indices_buffer[num_decode_tokens:prefill_end, :exchange_width] = (
+                gathered_topk
             )
 
     if has_decode:

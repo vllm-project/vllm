@@ -557,14 +557,16 @@ def sparse_attn_indexer(
             # a layout-preserving concatenation, not a top-k merge. all_gatherv
             # allocates its output, so the source may alias the destination.
             prefill_end = num_decode_tokens + num_prefill_tokens
+            local_topk = topk_indices_buffer[
+                shard_start:shard_stop, :topk_tokens
+            ].contiguous()
+            gathered_topk = get_tp_group().all_gatherv(
+                local_topk,
+                dim=0,
+                sizes=shard_sizes,
+            )
             topk_indices_buffer[num_decode_tokens:prefill_end, :topk_tokens] = (
-                get_tp_group().all_gatherv(
-                    topk_indices_buffer[
-                        shard_start:shard_stop, :topk_tokens
-                    ].contiguous(),
-                    dim=0,
-                    sizes=shard_sizes,
-                )
+                gathered_topk
             )
 
     if has_decode:
