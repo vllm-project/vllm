@@ -201,6 +201,19 @@ def test_stop_token_ids_size_limit(llm):
             SamplingParams(stop_token_ids=list(range(200))),
         )
 
+    # Boundary: 128 user-supplied stop IDs that exclude the model EOS (id=2
+    # for hmellor/tiny-random-LlamaForCausalLM). After EOS merge the set
+    # becomes 129 > MAX_NUM_STOP_TOKEN_IDS. min_tokens=1 activates the
+    # engine path that indexes by stop IDs.
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(
+                stop_token_ids=list(range(3, 131)),
+                min_tokens=1,
+            ),
+        )
+
 
 def test_seed(llm):
     """Check that seed impacts randomness."""
