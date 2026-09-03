@@ -160,14 +160,14 @@ class AsyncLookupManager(ABC):
         self._need_to_drain = True
         batch = self._lookup_batch
         self._lookup_batch = []
-        active_batch = [
-            entry
-            for entry in batch
-            if (state := self._lookup_state.get(entry[0])) is not None
-            and state.generation == entry[2]
+        batch = [
+            (key, req_context, generation)
+            for key, req_context, generation in batch
+            if (state := self._lookup_state.get(key)) is not None
+            and state.generation == generation
         ]
-        if active_batch:
-            self._lookup_queue.put(active_batch)
+        if batch:
+            self._lookup_queue.put(batch)
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
