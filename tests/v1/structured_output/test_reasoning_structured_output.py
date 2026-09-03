@@ -392,6 +392,31 @@ class TestReasoningStructuredOutput:
         assert list(called_delta) == [4, 5]
         assert result is False
 
+    def test_should_advance_whole_delta_fallback_pins_last_sequence_index(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When only the whole-delta predicate fires, the boundary is the
+        last index of the sequence, even if the placeholder window
+        overshoots it and the delta is empty.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        # Base-default shape: rescans the whole sequence, ignores the delta.
+        reasoner.is_reasoning_end_streaming.return_value = True
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
+        # placeholder window: start = 9 - 1 = 8, past the end -> delta = []
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 1
+
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+        assert structured_req.reasoning_ended is True
+        assert structured_req.reasoning_end_token_index == 4
+
     def test_should_advance_trims_reasoning_prefix_for_json(
         self,
         manager_with_reasoner,

@@ -498,7 +498,7 @@ class StructuredOutputManager:
             if reasoner.is_reasoning_end_streaming(prefix, [token]):
                 return start + offset
         if delta_appended:
-            return start + len(delta_ids) - 1
+            return len(all_token_ids) - 1
         return None
 
     def trim_reasoning_for_advance(
