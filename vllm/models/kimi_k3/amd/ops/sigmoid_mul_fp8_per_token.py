@@ -127,8 +127,7 @@ def sigmoid_mul_fp8_per_token(
 
 
 def o_proj_is_ptpc_fp8(o_proj: torch.nn.Module) -> bool:
-    """True when o_proj advertised the per-token FP8 consumer ABI.
-    """
+    """True when o_proj advertised the per-token FP8 consumer ABI."""
     return getattr(o_proj, "input_quant_key", None) == kFp8DynamicTokenSym
 
 
@@ -152,8 +151,7 @@ def maybe_fused_mla_oproj_ptpc(
     gate: torch.Tensor,
     o_proj: torch.nn.Module,
 ) -> QuantizedActivation | None:
-    """MLA sigmoid gate + PTPC FP8, or None to keep the BF16 expression.
-    """
+    """MLA sigmoid gate + PTPC FP8, or None to keep the BF16 expression."""
     if not o_proj_is_ptpc_fp8(o_proj):
         return None
     if not HAS_TRITON:
