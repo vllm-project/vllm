@@ -15,8 +15,8 @@
 #     comment saying why the test cannot be wired into a job.
 #   * To remove an entry: add the test to a job's `commands` (and matching
 #     `source_file_dependencies`) in .buildkite/test_areas/, then delete the line.
-#   * The nightly `check_test_tethering.py --all` run reports entries here that
-#     have since become tethered, and entries whose file no longer exists.
+#   * `check_test_tethering.py --all` reports entries here that have since
+#     become tethered, and entries whose file no longer exists.
 #
 # Tracking: https://github.com/vllm-project/vllm/issues/53944
 
