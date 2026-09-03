@@ -337,7 +337,6 @@ def test_pre_processed_mode_allows_declared_method():
     assert model.linear.saw_pre_processed_flag is True
 
 
-
 def _ipc_producer(conn, done) -> None:
     tensor = torch.arange(16, dtype=torch.float32, device="cuda").reshape(4, 4)
     conn.send(TensorEntry.from_tensor(tensor, "param"))
