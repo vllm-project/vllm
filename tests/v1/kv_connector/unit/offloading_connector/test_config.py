@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
@@ -264,6 +265,32 @@ def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
                     shapes=((1, 1),),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
+def _make_non_cacheable_tail_kv_cache_config() -> KVCacheConfig:
+    """Full attention plus a non-prefix-cacheable circular-buffer tail group.
+
+    Shapes a hybrid model that carries a small ring scratch group: the
+    attention group sets the hash granularity (1152 tokens) while the ring
+    group's block holds 4 tokens and opts out of prefix caching, so the ring
+    resolves to hashes_per_chunk == 0 and owns no hash-addressable chunk.
+    """
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec(block_size=1152)),
+            KVCacheGroupSpec(
+                ["ring_layer"],
+                CircularBufferSpec(
+                    block_size=4,
+                    num_kv_heads=4,
+                    head_size=128,
+                    dtype=torch.float32,
                 ),
             ),
         ],

@@ -32,6 +32,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -120,6 +121,11 @@ def get_sliding_window_size_in_chunks(
 
     if isinstance(kv_cache_spec, MambaSpec):
         # Mamba depends on a single state
+        return 1
+
+    if isinstance(kv_cache_spec, CircularBufferSpec):
+        # A one-block-per-request ring holding the group still being
+        # compressed; it never reaches back beyond its own block.
         return 1
 
     assert isinstance(kv_cache_spec, FullAttentionSpec)
@@ -354,9 +360,16 @@ class RequestOffloadState:
             )
 
     def update_offload_keys(self) -> None:
+        # Groups whose tokens_per_chunk < tokens_per_hash resolve to
+        # hashes_per_chunk == 0 (e.g. CircularBufferSpec: 4 tokens/block vs
+        # a 1152-token hash granularity). islice(step=0) raises ValueError;
+        # such groups carry no hash-addressable offload blocks by
+        # construction, so skip them entirely.
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
+            if group_config.hashes_per_chunk <= 0:
+                continue
             for req_block_hash in islice(
                 self.req.block_hashes,
                 group_config.hashes_per_chunk * len(group_state.offload_keys)
@@ -1357,6 +1370,12 @@ class OffloadingConnectorScheduler:
                 )
 
                 if group_config.requires_cow_source:
+                    continue
+
+                # Zero-hash groups (hashes_per_chunk == 0) accumulate no
+                # offload keys; skip them to keep offload_keys and
+                # offload_block_ids length-consistent.
+                if group_config.hashes_per_chunk <= 0:
                     continue
 
                 start_chunk_idx = group_state.next_stored_chunk_idx

@@ -8,6 +8,7 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
     _make_mamba_hybrid_kv_cache_config,
+    _make_non_cacheable_tail_kv_cache_config,
     _make_vllm_config,
 )
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
@@ -3680,3 +3681,89 @@ def test_chunked_local_attention_reports_its_chunk_window():
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=1024) == 8
     # Partial chunks round up, so the reachable tail is never understated.
     assert get_sliding_window_size_in_chunks(spec, tokens_per_chunk=3000) == 3
+
+
+def _make_non_cacheable_tail_scheduler() -> OffloadingConnectorScheduler:
+    """Scheduler over an MLA + CircularBufferSpec ring group set.
+
+    The ring group's chunk (4 tokens) is smaller than the hash granularity
+    derived from the prefix-cacheable MLA group (1152), so its
+    hashes_per_chunk resolves to 0.
+    """
+    vllm_config = _make_vllm_config()
+    vllm_config.speculative_config = None
+    kv_cache_config = _make_non_cacheable_tail_kv_cache_config()
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+def _make_non_cacheable_tail_request(num_block_hashes: int = 4) -> MagicMock:
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_prompt_tokens = 1152 * num_block_hashes
+    request.num_tokens = request.num_prompt_tokens
+    request.block_hashes = [
+        BlockHash(f"h{i}".encode()) for i in range(num_block_hashes)
+    ]
+    request.lora_request = None
+    request.is_finished.return_value = False
+    return request
+
+
+def test_non_cacheable_tail_group_has_zero_hashes_per_chunk():
+    """The ring group owns no hash-addressable chunk.
+
+    Pins the quantity the guards key on: tokens_per_chunk stays positive
+    (4), so a guard written against it would never fire; hashes_per_chunk is
+    what collapses to 0.
+    """
+    scheduler = _make_non_cacheable_tail_scheduler()
+    mla_config, ring_config = scheduler.config.kv_group_configs
+
+    assert mla_config.hashes_per_chunk == 1
+    assert ring_config.tokens_per_chunk == 4
+    assert ring_config.hashes_per_chunk == 0
+
+
+def test_update_offload_keys_skips_zero_hash_group():
+    """islice() rejects a zero step, so the ring group must be skipped.
+
+    Without the guard this raises, on the first scheduled request:
+        ValueError: Indices for islice() must be None or an integer:
+        0 <= x <= sys.maxsize.
+    """
+    scheduler = _make_non_cacheable_tail_scheduler()
+    state = RequestOffloadState(
+        config=scheduler.config,
+        req=_make_non_cacheable_tail_request(),
+        req_context=ReqContext(req_id="req"),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.BLOCK_LEVEL),
+    )
+
+    state.update_offload_keys()
+
+    mla_state, ring_state = state.group_states
+    # The prefix-cacheable group still accumulates keys at its granularity.
+    assert len(mla_state.offload_keys) == 4
+    # The ring group accumulates none, by construction.
+    assert not ring_state.offload_keys
+
+
+def test_update_offload_keys_is_idempotent_for_zero_hash_group():
+    """Repeated scheduling steps must keep the skipped group empty rather
+    than drift the other group's key list."""
+    scheduler = _make_non_cacheable_tail_scheduler()
+    state = RequestOffloadState(
+        config=scheduler.config,
+        req=_make_non_cacheable_tail_request(),
+        req_context=ReqContext(req_id="req"),
+        offloading_context=RequestOffloadingContext(policy=OffloadPolicy.BLOCK_LEVEL),
+    )
+
+    state.update_offload_keys()
+    state.update_offload_keys()
+
+    mla_state, ring_state = state.group_states
+    assert len(mla_state.offload_keys) == 4
+    assert not ring_state.offload_keys
