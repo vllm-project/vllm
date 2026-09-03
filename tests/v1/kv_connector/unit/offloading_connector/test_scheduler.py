@@ -378,6 +378,45 @@ def test_abort_queued_request_does_not_build_store_job(
     assert queued_req_id not in runner.connector_scheduler._req_status
 
 
+def test_store_jobs_wait_for_missing_offload_key(request_runner):
+    """Allocated chunks must wait until their block hash becomes available."""
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=8,
+        async_scheduling=False,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+    runner.new_request(token_ids=[0] * (block_size * 2))
+    runner.run(decoded_tokens=[1])
+
+    req_id = str(runner.req_id)
+    req_status = runner.connector_scheduler._req_status[req_id]
+    req = req_status.req
+    group_state = req_status.group_states[0]
+    assert len(group_state.block_ids) >= 2
+    assert len(group_state.offload_keys) == 2
+
+    missing_hash = req.block_hashes.pop()
+    group_state.offload_keys.pop()
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={req_id: 0}, finished_req_ids=set()
+    )
+
+    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    assert len(jobs) == 1
+    assert group_state.next_stored_chunk_idx == 1
+
+    req.block_hashes.append(missing_hash)
+    req_status.update_offload_keys()
+    jobs = runner.connector_scheduler._build_store_jobs(scheduler_output)
+    assert len(jobs) == 1
+    assert group_state.next_stored_chunk_idx == 2
+
+
 def test_scheduler_reports_lookup_sync_delay(request_runner):
     runner = request_runner(
         block_size=4,
