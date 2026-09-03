@@ -34,12 +34,16 @@ def test_tp4_same_node_override():
     assert applied is True
 
 
-@pytest.mark.parametrize("world_size", [8, 9])
-def test_world_size_boundary(world_size: int):
-    # 8 is custom all-reduce's own supported envelope; 9 never dispatches
-    # CUSTOM, so the override must not grow buffers there.
+@pytest.mark.parametrize(
+    "world_size, applied_wanted",
+    [(2, True), (4, True), (6, True), (8, True), (1, False), (3, False), (5, False), (7, False), (9, False), (16, False)],
+)
+def test_world_size_boundary(world_size: int, applied_wanted: bool):
+    # 2/4/6/8 are custom all-reduce's kernel-supported group sizes; odd
+    # counts and >8 (16 is class-supported but never dispatches) must not
+    # receive an applied override.
     size, applied = resolve_custom_allreduce_max_size(DEFAULT, world_size, True, 128)
-    if world_size <= 8:
+    if applied_wanted:
         assert size == 128 * MiB
         assert applied is True
     else:
