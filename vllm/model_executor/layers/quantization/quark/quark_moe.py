@@ -51,12 +51,16 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.quark.utils import QuarkQTensorHint
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    reconcile_nvfp4_moe_w13_scales,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
     _WEIGHT_QUANT_KEY_MAP,
@@ -1687,16 +1691,14 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        # Match existing NVFP4 MoE paths: fused w13 uses the w1 global scale.
-        if self.moe.is_act_and_mul and not torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ):
-            logger.warning_once(
-                "w1_weight_scale_2 must match w3_weight_scale_2. "
-                "Accuracy may be affected."
+        w13_weight_scale = layer.w13_weight_scale
+        if self.moe.is_act_and_mul and self.nvfp4_backend != NvFp4MoeBackend.HUMMING:
+            w13_weight_scale, w13_weight_scale_2 = reconcile_nvfp4_moe_w13_scales(
+                w13_weight_scale,
+                layer.w13_weight_scale_2,
             )
-
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
+        else:
+            w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2
 
@@ -1713,7 +1715,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             nvfp4_backend=self.nvfp4_backend,
             layer=layer,
             w13=layer.w13_weight,
-            w13_scale=layer.w13_weight_scale,
+            w13_scale=w13_weight_scale,
             w13_scale_2=w13_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             w2=layer.w2_weight,
