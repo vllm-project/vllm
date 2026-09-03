@@ -14,7 +14,10 @@ from PIL import Image
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.serial_utils import tensor2base64
-from vllm.utils.sparse_utils import check_sparse_tensor_invariants_threadsafe
+from vllm.utils.sparse_utils import (
+    check_sparse_tensor_invariants_threadsafe,
+    safe_to_dense,
+)
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO, MediaWithBytes
@@ -215,7 +218,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
         buffer = BytesIO(data)
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(buffer, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="video_embeds")
 
     def _load_numpy(self, data: bytes) -> torch.Tensor:
         with BytesIO(data) as buffer:
@@ -236,7 +239,7 @@ class VideoEmbeddingMediaIO(MediaIO[torch.Tensor]):
 
         with check_sparse_tensor_invariants_threadsafe():
             tensor = torch.load(filepath, weights_only=True)
-            return tensor.to_dense()
+            return safe_to_dense(tensor, parameter="video_embeds")
 
     def encode_base64(self, media: torch.Tensor) -> str:
         return tensor2base64(media)

@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 import pytest
 from packaging.version import Version
-from transformers import PretrainedConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.config.model import ModelDType, TokenizerMode
@@ -365,6 +364,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "random": "ai21labs/Jamba-tiny-random",
         },
     ),
+    "K2HorizonForCausalLM": _HfExamplesInfo(
+        "IFM/K2-Horizon-36B",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
@@ -508,6 +512,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         extras={"native-prefix": "imdatta0/small_qwen3_5_20b"},
         max_model_len=4096,
     ),
+    "Qwen4ExpForCausalLM": _HfExamplesInfo("", is_available_online=False),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -831,6 +836,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
+    ),
+    "DeepseekV4ForConditionalGeneration": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
         "dots-studio/dots3-note-prev",
@@ -1191,35 +1199,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
-    "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
-        max_model_len=4096,
-        # NemotronH layers are constructed via `hybrid_override_pattern`
-        use_original_num_layers=True,
-        hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                video_temporal_patch_size=2,
-                # TODO(nhaber): This is `true` in the official `config.json`,
-                # but this causes a processor exception in the tests due to a known bug
-                # with mixed-resolution video when `true`. To be resolved.
-                video_maintain_aspect_ratio=False,
-            ),
-            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
-        },
-        trust_remote_code=True,
-    ),
-    "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
-    ),
-    # TODO: Change repo id once pertinent archs are public.
-    "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
-    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
@@ -1347,6 +1326,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B",
         max_model_len=4096,
+    ),
+    "Qwen4ExpForConditionalGeneration": _HfExamplesInfo(
+        "",
+        is_available_online=False,
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -1718,7 +1701,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
@@ -1797,6 +1779,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3.5-35B-A3B",
         speculative_model="Qwen/Qwen3.5-35B-A3B",
     ),
+    "Qwen4ExpMTP": _HfExamplesInfo("", is_available_online=False),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
         speculative_model="stepfun-ai/Step-3.5-Flash",

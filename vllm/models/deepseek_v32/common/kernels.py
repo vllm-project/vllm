@@ -181,22 +181,29 @@ def _fused_norm_rope_kernel(
             )
         return
 
-    if slot_mapping_ptr is None:
-        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
-            return
-    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
-        # Padding
-        return
-
     if pid == 2:
-        # Q RMS norm
+        # Q RMS norm. Runs for every row: under DCP a negative slot only
+        # means another rank owns this token's KV slot, but the query is
+        # still needed on every rank (queries are not sharded), so the
+        # slot-based skip below must not gate it. Padding rows do harmless
+        # row-local extra work (no position load, no cache write).
         q_block = tl.arange(0, Q_BLOCK_SIZE)
         q_mask = q_block < Q_DIM
         q_c = tl.load(q_c_ptr + tok_idx * q_c_stride + q_block, mask=q_mask, other=0.0)
         q_c_rms_w = tl.load(q_rms_norm_w_ptr + q_block, mask=q_mask)
         q_c = _rms_norm(q_c, q_c_rms_w, q_rms_eps, Q_DIM)
         tl.store(q_c_out_ptr + tok_idx * q_c_out_stride + q_block, q_c, mask=q_mask)
-    elif pid == 1:
+        return
+
+    if slot_mapping_ptr is None:
+        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
+            return
+    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
+        # Padding, or (under DCP) a token whose KV slot another rank owns:
+        # skip the K-side norms and cache writes.
+        return
+
+    if pid == 1:
         # KV RMS Norm + KV RoPE + MLA concat_and_cache.
         # Merged so the normed kv_c and RoPE'd k_pe can be written
         # to the MLA KV cache directly without a separate kernel.
