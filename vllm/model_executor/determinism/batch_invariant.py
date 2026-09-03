@@ -10,7 +10,6 @@ import torch
 import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_descriptor_matmul_config,
-    _get_matmul_config,
     resolve_tuned_matmul_configs,
 )
 from vllm.platforms import current_platform
@@ -43,95 +42,274 @@ def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M):
     return pid_m, pid_n
 
 
-@triton.jit(launch_metadata=_matmul_launch_metadata)
-def matmul_kernel_persistent(
-    a_ptr,
-    b_ptr,
-    c_ptr,  #
+# Batch-invariant matmul: every output element is one fp32 accumulation over K
+# in ascending order, from identical `tl.dot` instructions. What is summed is a
+# function of (K, N, dtype) only -- never of M: K is cut into S chunks of
+# k_chunk, each chunk is accumulated from zero, and the chunk partials are added
+# in ascending order before the bias and the single rounding. BLOCK_SIZE_K
+# groups the k-tiles inside a chunk, so it is fixed per dtype for the same
+# reason. Everything else -- tile height, how many chunks a CTA walks, whether
+# the partials are summed by the last program of a tile or by a second kernel --
+# only regroups work and may follow M.
+_SPLIT_K_MAX_N = 64
+_SPLIT_K_MIN_K = 1024
+_SPLIT_K_CHUNK_ALIGN = 64
+_SPLIT_K_MAX_WORKSPACE_BYTES = 256 * 1024 * 1024
+
+
+def _block_size_k(dtype: torch.dtype) -> int:
+    """k-tile per `tl.dot`; fixed per dtype, as in the kernel this replaces."""
+    return 32 if dtype == torch.float32 else 64
+
+
+def _split_k_plan(K: int, N: int) -> tuple[int, int]:
+    """(chunks, k_per_chunk) from (K, N) only.
+
+    Skinny-N GEMMs (the DSv4 indexer's weights_proj is M x 4096 @ 4096 x 64)
+    map onto a single column of CTAs and run latency-bound, which is what the
+    chunks are for. From N = 128 up the tiles already spread over the SMs and
+    the chunked accumulation only costs -- measured 1.5-4x slower than one pass
+    over K once M is large -- so those shapes keep the single pass, and with it
+    the arithmetic they have today.
+    """
+    if N > _SPLIT_K_MAX_N or K < _SPLIT_K_MIN_K:
+        return 1, K
+    want = max(1, min(16, K // 512))
+    per = (K + want - 1) // want
+    k_chunk = (
+        (per + _SPLIT_K_CHUNK_ALIGN - 1) // _SPLIT_K_CHUNK_ALIGN
+    ) * _SPLIT_K_CHUNK_ALIGN
+    return (K + k_chunk - 1) // k_chunk, k_chunk
+
+
+@triton.jit
+def _reduce_tile(
+    ws_ptr,
+    c_ptr,
     bias_ptr,
     M,
     N,
-    K,  #
+    S: tl.constexpr,
+    stride_cm,
+    stride_cn,
+    offs_m,
+    offs_n,
+    mask,
+    HAS_BIAS: tl.constexpr,
+    WS_LARGE: tl.constexpr,
+):
+    """C = round(sum_j ws[j] + bias), chunk partials in ascending order."""
+    mn = M * N
+    if WS_LARGE:
+        mn = mn.to(tl.int64)
+    idx = offs_m[:, None] * N + offs_n[None, :]
+    total = tl.zeros(idx.shape, dtype=tl.float32)
+    for j in tl.static_range(S):
+        total += tl.load(ws_ptr + j * mn + idx, mask=mask, other=0.0)
+    if HAS_BIAS:
+        total += tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0).to(tl.float32)[
+            None, :
+        ]
+    tl.store(
+        c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
+        total.to(c_ptr.dtype.element_ty),
+        mask=mask,
+    )
+
+
+@triton.jit(launch_metadata=_matmul_launch_metadata)
+def matmul_kernel_batch_invariant(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    bias_ptr,
+    ws_ptr,
+    lock_ptr,
+    M,
+    N,
+    K,
+    k_chunk,
     stride_am,
     stride_ak,
     stride_bk,
     stride_bn,
     stride_cm,
     stride_cn,
-    BLOCK_SIZE_M: tl.constexpr,  #
-    BLOCK_SIZE_N: tl.constexpr,  #
-    BLOCK_SIZE_K: tl.constexpr,  #
-    GROUP_SIZE_M: tl.constexpr,  #
-    NUM_SMS: tl.constexpr,  #
+    S: tl.constexpr,
+    CHUNKS_PER_CTA: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
     A_LARGE: tl.constexpr,
     B_LARGE: tl.constexpr,
     C_LARGE: tl.constexpr,
+    WS_LARGE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    FUSED_REDUCE: tl.constexpr,
 ):
-    start_pid = tl.program_id(axis=0)
+    """One program per (output tile, group of CHUNKS_PER_CTA chunks).
+
+    ``CHUNKS_PER_CTA == S`` walks every chunk and writes the result; otherwise
+    the program writes its chunk partial and, with FUSED_REDUCE, the last
+    program of the tile sums them. All three produce the same fp32 sum.
+    """
+    tile_id = tl.program_id(axis=0)
+    chunk_group = tl.program_id(axis=1)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    num_tiles = num_pid_m * num_pid_n
-
-    tile_id_c = start_pid - NUM_SMS
-
-    offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
 
-    for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
-        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
-        start_m = pid_m * BLOCK_SIZE_M
-        start_n = pid_n * BLOCK_SIZE_N
-        offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
-        offs_bn = start_n + tl.arange(0, BLOCK_SIZE_N)
-        if A_LARGE:
-            offs_am = offs_am.to(tl.int64)
-        if B_LARGE:
-            offs_bn = offs_bn.to(tl.int64)
-        offs_am = tl.where(offs_am < M, offs_am, 0)
-        offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-        offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    if A_LARGE:
+        offs_am = offs_am.to(tl.int64)
+    if B_LARGE:
+        offs_bn = offs_bn.to(tl.int64)
+    offs_am = tl.where(offs_am < M, offs_am, 0)
+    offs_bn = tl.where(offs_bn < N, offs_bn, 0)
+    offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
 
+    total = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for j in tl.static_range(CHUNKS_PER_CTA):
+        chunk = chunk_group * CHUNKS_PER_CTA + j
+        k_start = chunk * k_chunk
+        k_stop = tl.minimum(K, k_start + k_chunk)
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for ki in range(k_tiles):
+        for ki in range(tl.cdiv(k_stop - k_start, BLOCK_SIZE_K)):
             if A_LARGE or B_LARGE:
-                offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
+                offs_k = (
+                    k_start
+                    + ki * BLOCK_SIZE_K
+                    + tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
+                )
             else:
-                offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+                offs_k = k_start + ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             a_ptrs = a_ptr + (
                 offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
             )
             b_ptrs = b_ptr + (
                 offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
             )
-
-            a = tl.load(
-                a_ptrs, mask=offs_k_for_mask[None, :] < K - ki * BLOCK_SIZE_K, other=0.0
-            )
-            b = tl.load(
-                b_ptrs, mask=offs_k_for_mask[:, None] < K - ki * BLOCK_SIZE_K, other=0.0
-            )
+            k_mask = offs_k_for_mask < k_stop - k_start - ki * BLOCK_SIZE_K
+            a = tl.load(a_ptrs, mask=k_mask[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=k_mask[:, None], other=0.0)
             accumulator = tl.dot(a, b, accumulator)
+        total += accumulator
 
-        tile_id_c += NUM_SMS
-        pid_m, pid_n = _compute_pid(
-            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M
-        )
-        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        if C_LARGE:
-            offs_cm = offs_cm.to(tl.int64)
-            offs_cn = offs_cn.to(tl.int64)
-        c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    if C_LARGE:
+        offs_cm = offs_cm.to(tl.int64)
+        offs_cn = offs_cn.to(tl.int64)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    if CHUNKS_PER_CTA == S:
         if HAS_BIAS:
-            bias_ptrs = bias_ptr + offs_cn
-            bias = tl.load(bias_ptrs, mask=offs_cn < N, other=0.0).to(tl.float32)
-            accumulator += bias
-        c = accumulator.to(c_ptr.dtype.element_ty)
-        tl.store(c_ptrs, c, mask=c_mask)
+            total += tl.load(bias_ptr + offs_cn, mask=offs_cn < N, other=0.0).to(
+                tl.float32
+            )[None, :]
+        tl.store(
+            c_ptr + offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn,
+            total.to(c_ptr.dtype.element_ty),
+            mask=c_mask,
+        )
+    else:
+        mn = M * N
+        if WS_LARGE:
+            mn = mn.to(tl.int64)
+        idx = offs_cm[:, None] * N + offs_cn[None, :]
+        tl.store(ws_ptr + chunk_group * mn + idx, total, mask=c_mask)
+        if FUSED_REDUCE:
+            ticket = tl.atomic_add(lock_ptr + tile_id, 1, sem="acq_rel", scope="gpu")
+            if ticket % S == S - 1:
+                _reduce_tile(
+                    ws_ptr,
+                    c_ptr,
+                    bias_ptr,
+                    M,
+                    N,
+                    S,
+                    stride_cm,
+                    stride_cn,
+                    offs_cm,
+                    offs_cn,
+                    c_mask,
+                    HAS_BIAS,
+                    WS_LARGE,
+                )
+
+
+@triton.jit(launch_metadata=_matmul_launch_metadata)
+def matmul_reduce_kernel(
+    ws_ptr,
+    c_ptr,
+    bias_ptr,
+    M,
+    N,
+    S: tl.constexpr,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    C_LARGE: tl.constexpr,
+    WS_LARGE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    offs_m = (pid // num_pid_n) * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = (pid % num_pid_n) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    if C_LARGE:
+        offs_m = offs_m.to(tl.int64)
+        offs_n = offs_n.to(tl.int64)
+    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    _reduce_tile(
+        ws_ptr,
+        c_ptr,
+        bias_ptr,
+        M,
+        N,
+        S,
+        stride_cm,
+        stride_cn,
+        offs_m,
+        offs_n,
+        mask,
+        HAS_BIAS,
+        WS_LARGE,
+    )
+
+
+def _tile_config(
+    M: int, N: int, dtype: torch.dtype, mode: str
+) -> tuple[int, int, int, int]:
+    """(BLOCK_SIZE_M, BLOCK_SIZE_N, num_warps, num_stages).
+
+    Tiles only regroup rows and columns; they never change a row's sum, so they
+    are free to follow M and the execution mode. ``split`` wants short tiles --
+    its parallelism has to come from somewhere; ``walk`` holds a second fp32
+    accumulator for the running chunk and so wants a tile that still fits in
+    registers; ``single`` wants the widest tile it can get.
+    """
+    if dtype == torch.float32:
+        return (128 if M > 64 else 64), 128, 8, 3
+    if mode == "split":
+        return (16 if M <= 512 else (32 if M <= 2048 else 128)), 64, 4, 3
+    if mode == "walk":
+        block_m = 16 if M <= 16 else (64 if M <= 64 else 128)
+        if N <= 64:
+            return block_m, 64, 4, 3
+        return block_m, 128, 8, 3
+    block_m = 16 if M <= 16 else (64 if M <= 64 else 128)
+    if N <= 128:
+        return block_m, 64 if N <= 64 else 128, 4, 3
+    # Widen the tile only once N alone can still hand every SM one.
+    block_n = 128 if (M <= 16 or N <= 512) else 256
+    return block_m, (block_n if dtype != torch.float16 else _fp16_block_size_n), 8, 3
 
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
@@ -281,76 +459,106 @@ def matmul_descriptor_persistent(
 def matmul_persistent(
     a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
-    # Check constraints.
+    """Batch-invariant ``a @ b (+ bias)`` for 2D operands."""
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
     assert bias is None or bias.dim() == 1, (
         "Currently assuming bias is 1D, let Horace know if you run into this"
     )
-    NUM_SMS = num_compute_units(a.device.index)
     M, K = a.shape
     K, N = b.shape
-    dtype = a.dtype
-    # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    if M == 0 or N == 0:
+        return c
+    if K == 0:
+        return c.zero_() if bias is None else c.copy_(bias.to(c.dtype).expand(M, N))
 
-    # 1D launch kernel where each block gets its own program.
-    def grid(META):
-        return (
-            min(
-                NUM_SMS,
-                triton.cdiv(M, META["BLOCK_SIZE_M"])
-                * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-            ),
+    S, k_chunk = _split_k_plan(K, N)
+    block_k = _block_size_k(a.dtype)
+
+    # Execution choice. Spreading the chunks over the SMs is what makes a
+    # skinny GEMM fast, but it costs a workspace, so one program walks every
+    # chunk when the tiles alone already fill the GPU or the workspace would be
+    # unreasonable. Walking every chunk and summing the partials in order are
+    # the same additions in the same order, so either may be picked from M.
+    walk_all = S == 1
+    if not walk_all:
+        bm, bn, _, _ = _tile_config(M, N, a.dtype, "split")
+        tiles = triton.cdiv(M, bm) * triton.cdiv(N, bn)
+        ws_bytes = S * M * N * 4
+        walk_all = (
+            tiles >= 4 * num_compute_units(a.device.index)
+            # Not worth moving more scratch than the operands themselves.
+            or ws_bytes > (M * K + K * N) * a.element_size()
+            or ws_bytes > _SPLIT_K_MAX_WORKSPACE_BYTES
         )
+    block_m, block_n, num_warps, num_stages = _tile_config(
+        M, N, a.dtype, "single" if S == 1 else ("walk" if walk_all else "split")
+    )
+    num_tiles = triton.cdiv(M, block_m) * triton.cdiv(N, block_n)
+    ws_elems = S * M * N
+    chunks_per_cta = S if walk_all else 1
+    # The fused reduction saves the second launch while the tile is small
+    # enough that the reducing program's extra accumulator is cheap.
+    fused = not walk_all and num_tiles <= 32 and block_m <= 32
 
-    configs = {
-        torch.bfloat16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float16: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": _fp16_block_size_n,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 8,
-            "num_stages": 3,
-            "num_warps": 8,
-        },
-        torch.float32: {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": _fp32_block_size_n if N == 1 else 128,
-            "BLOCK_SIZE_K": 32,
-            "GROUP_SIZE_M": 8,
-            "num_stages": _fp32_num_stages if N == 1 else 3,
-            "num_warps": 8,
-        },
-    }
-    matmul_kernel_persistent[grid](
+    ws = (
+        torch.empty(ws_elems, device=a.device, dtype=torch.float32)
+        if not walk_all
+        else c
+    )
+    lock = torch.zeros(num_tiles, device=a.device, dtype=torch.int32) if fused else c
+    matmul_kernel_batch_invariant[(num_tiles, S // chunks_per_cta)](
         a,
         b,
-        c,  #
-        bias,
+        c,
+        bias if bias is not None else a,
+        ws,
+        lock,
         M,
         N,
-        K,  #
+        K,
+        k_chunk,
         a.stride(0),
-        a.stride(1),  #
+        a.stride(1),
         b.stride(0),
-        b.stride(1),  #
+        b.stride(1),
         c.stride(0),
-        c.stride(1),  #
-        NUM_SMS=NUM_SMS,  #
+        c.stride(1),
+        S=S,
+        CHUNKS_PER_CTA=chunks_per_cta,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=8,
         A_LARGE=a.numel() > 2**31,
         B_LARGE=b.numel() > 2**31,
         C_LARGE=c.numel() > 2**31,
+        WS_LARGE=ws_elems > 2**31,
         HAS_BIAS=bias is not None,
-        **_get_matmul_config(M, N, K, dtype, configs[dtype]),
+        FUSED_REDUCE=fused,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
+    if not walk_all and not fused:
+        red_m = min(64, max(16, triton.next_power_of_2(M)))
+        red_n = 64 if N <= 64 else 128
+        matmul_reduce_kernel[(triton.cdiv(M, red_m) * triton.cdiv(N, red_n),)](
+            ws,
+            c,
+            bias if bias is not None else c,
+            M,
+            N,
+            S,
+            c.stride(0),
+            c.stride(1),
+            BLOCK_SIZE_M=red_m,
+            BLOCK_SIZE_N=red_n,
+            C_LARGE=c.numel() > 2**31,
+            WS_LARGE=ws_elems > 2**31,
+            HAS_BIAS=bias is not None,
+            num_warps=4,
+        )
     return c
 
 
