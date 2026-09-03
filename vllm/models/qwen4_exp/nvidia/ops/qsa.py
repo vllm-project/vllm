@@ -11,7 +11,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
 
 @triton.jit
@@ -598,8 +597,6 @@ def warmup_qsa_sparse_paged_attention(
 
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
-    key_cache = canonicalize_singleton_dim_strides(key_cache)
-    value_cache = canonicalize_singleton_dim_strides(value_cache)
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
