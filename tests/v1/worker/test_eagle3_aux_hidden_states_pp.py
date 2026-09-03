@@ -11,9 +11,9 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
 )
 
 
-def test_aux_layers_are_sorted():
+def test_aux_layers_are_sorted_and_deduplicated():
     model = EagleModelMixin()
-    model._set_aux_hidden_state_layers((48, 3, 90, 24))
+    model._set_aux_hidden_state_layers((48, 3, 90, 24, 48))
     assert model.aux_hidden_state_layers == (3, 24, 48, 90)
 
 

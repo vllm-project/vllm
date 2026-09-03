@@ -1581,7 +1581,7 @@ class EagleModelMixin:
     _aux_upstream_total_cached: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.aux_hidden_state_layers = tuple(sorted(layers))
+        self.aux_hidden_state_layers = tuple(sorted(set(layers)))
         self._aux_slot_base_cached = 0
         self._aux_upstream_total_cached = 0
         self._cache_aux_pp_layout()
