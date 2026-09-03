@@ -151,6 +151,9 @@ def test_scheduler_only_tracks_token_ids_for_kv_events():
             assert tracker.token_ids is None
             assert req_meta.token_ids is None
 
+        tracker.allocated_block_ids[0].append(99)
+        assert req_meta.block_ids == ([0, 1],)
+
 
 def _make_preemption_scheduler_output():
     return SimpleNamespace(
@@ -474,6 +477,28 @@ def test_pending_load_does_not_co_queue_save():
     # And the save watermark does not advance for a save that was never queued.
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
+
+
+def test_pending_rejected_child_load_does_not_emit_empty_save():
+    """An unselected MultiConnector child must remain idle."""
+    scheduler = _make_bare_scheduler()
+    _make_pending_load_unfinished_request(
+        scheduler,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=(),
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=False,
+    )
+
+    meta = scheduler.build_connector_meta(_make_pending_load_scheduler_output())
+
+    assert meta.requests == []
+    assert "req-0" not in scheduler.load_specs
+    assert "req-0" not in scheduler._request_trackers
 
 
 def _make_resumed_unfinished_request(

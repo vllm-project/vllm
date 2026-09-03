@@ -937,6 +937,21 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not self.is_live_store_job(req_meta):
                 return
 
+            # Scheduler and worker cache groups form a wire contract. Refuse
+            # incomplete metadata before indexing it or publishing a partial
+            # logical cache entry.
+            if len(block_ids_per_group) != len(self.token_databases):
+                logger.error(
+                    "Rejecting Mooncake store job with cache-group mismatch "
+                    "(req=%s, store_job_id=%s, metadata_groups=%d, "
+                    "worker_groups=%d)",
+                    req_id,
+                    req_meta.store_job_id,
+                    len(block_ids_per_group),
+                    len(self.token_databases),
+                )
+                return
+
             if self.enable_kv_event:
                 retry_token_ids = self._get_retry_token_ids(req_meta)
                 if retry_token_ids is not None and event_token_ids is not None:

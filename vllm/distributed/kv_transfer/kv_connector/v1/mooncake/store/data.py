@@ -774,6 +774,11 @@ class ReqMeta:
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
+        # MultiConnector probes all children and marks unselected loads as
+        # rejected. A rejected lookup is not a worker operation and must not
+        # be reinterpreted as a save.
+        if load_spec is not None and not load_spec.can_load:
+            return None
         input_token_len = tracker.token_len
 
         token_ids_start = tracker.num_saved_tokens
@@ -817,7 +822,10 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
-            block_ids=tracker.allocated_block_ids,
+            # The scheduler keeps extending the tracker while the worker
+            # handles this metadata asynchronously. Own the block table used
+            # by this job instead of observing future allocations.
+            block_ids=tuple(group.copy() for group in tracker.allocated_block_ids),
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
