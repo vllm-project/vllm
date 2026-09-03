@@ -24,13 +24,13 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
+from vllm.parser.engine.events import EventType, SemanticEvent
+from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.metrics import (
     classify_completed_tool_call,
     record_tool_call_completed,
 )
-from vllm.parser.engine.events import EventType, SemanticEvent
-from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
-from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,

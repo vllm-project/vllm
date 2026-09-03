@@ -50,9 +50,7 @@ _WEATHER_TOOL = ChatCompletionToolsParam(
 _HERMES_VALID = (
     '<tool_call>{"name": "get_weather", "arguments": {"city": "Dallas"}}</tool_call>'
 )
-_HERMES_INVALID_ARGS = (
-    '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>'
-)
+_HERMES_INVALID_ARGS = '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>'
 _HERMES_UNKNOWN = (
     '<tool_call>{"name": "not_a_tool", "arguments": {"city": "Dallas"}}</tool_call>'
 )
@@ -257,9 +255,7 @@ class TestParserEngineCompletedMetrics:
             request_type=RequestType.CHAT_COMPLETIONS.value,
             validation_outcome=ValidationOutcome.VALID.value,
         )
-        _, _, tool_calls = engine.parse(
-            _HERMES_UNKNOWN, _chat_request([_WEATHER_TOOL])
-        )
+        _, _, tool_calls = engine.parse(_HERMES_UNKNOWN, _chat_request([_WEATHER_TOOL]))
         assert tool_calls is None
         assert (
             _completed_value(
