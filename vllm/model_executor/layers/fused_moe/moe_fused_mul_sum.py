@@ -1,75 +1,228 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
-def moe_fused_mul_sum_kernel(
-    inputs_ptr,
-    topk_weights_ptr,
-    outputs_ptr,
-    top_ids_ptr,
-    expert_map_ptr,
-    num_valid_tokens_ptr,
-    stride_m,
-    has_topk_ids: tl.constexpr,
-    has_expert_map: tl.constexpr,
-    has_num_valid: tl.constexpr,
-    top_k: tl.constexpr,
-    hidden_size: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    # One CTA owns one token's output row. Resolve which slots to sum once per
-    # row (the decision is invariant over hidden tiles); the `if take` branch is
-    # block-uniform, so padding slots are skipped rather than masked-and-loaded.
-    pid_m = tl.program_id(0)
-    # Bound to the real recv rows [0, num_recv). Under cudagraph decode the grid
-    # is the static padded token count, and padding rows past num_recv carry
-    # stale ids and stale NaN in `inputs`; returning before any load leaves their
-    # output rows untouched instead of summing that garbage. The constexpr guard
-    # short-circuits, so num_valid_tokens_ptr is only read when it is provided.
-    if has_num_valid and pid_m >= tl.load(num_valid_tokens_ptr).to(tl.int32):
-        return
-    w_row = topk_weights_ptr + pid_m * top_k
+class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        input_dtype: torch.dtype
+        topk_weights_dtype: torch.dtype
+        output_dtype: torch.dtype
+        topk_ids_dtype: torch.dtype | None
+        expert_map_dtype: torch.dtype | None
+        num_valid_tokens_dtype: torch.dtype | None
+        stride_m: int
+        top_k: int
+        hidden_size: int
+        block_k: int
+        num_warps: int
+        num_stages: int
 
-    takes = ()
-    weights = ()
-    if has_topk_ids:
-        any_valid = 0
-        for n in tl.static_range(top_k):
-            id_val = tl.load(top_ids_ptr + pid_m * top_k + n)
-            valid = id_val >= 0
-            any_valid += valid.to(tl.int32)
-            take = valid
-            if has_expert_map:
-                local_id = tl.load(expert_map_ptr + tl.where(valid, id_val, 0))
-                take = valid & (local_id >= 0)
-            takes += (take,)  # type: ignore[assignment]
-            weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
-        # All-padding rows early-return untouched (decode contract past num_recv).
-        if any_valid == 0:
+    @staticmethod
+    @triton.jit
+    def kernel(
+        inputs_ptr,
+        topk_weights_ptr,
+        outputs_ptr,
+        top_ids_ptr,
+        expert_map_ptr,
+        num_valid_tokens_ptr,
+        stride_m,
+        has_topk_ids: tl.constexpr,
+        has_expert_map: tl.constexpr,
+        has_num_valid: tl.constexpr,
+        top_k: tl.constexpr,
+        hidden_size: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        # One CTA owns one token's output row. Resolve which slots to sum once per
+        # row (the decision is invariant over hidden tiles); the `if take` branch is
+        # block-uniform, so padding slots are skipped rather than masked-and-loaded.
+        pid_m = tl.program_id(0)
+        # Bound to the real recv rows [0, num_recv). Under cudagraph decode the grid
+        # is the static padded token count, and padding rows past num_recv carry
+        # stale ids and stale NaN in `inputs`; returning before any load leaves their
+        # output rows untouched instead of summing that garbage. The constexpr guard
+        # short-circuits, so num_valid_tokens_ptr is only read when it is provided.
+        if has_num_valid and pid_m >= tl.load(num_valid_tokens_ptr).to(tl.int32):
             return
-    else:
-        for n in tl.static_range(top_k):
-            takes += (True,)  # type: ignore[assignment]
-            weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
+        w_row = topk_weights_ptr + pid_m * top_k
 
-    n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
-    a_row = inputs_ptr + pid_m * stride_m
-    out_row = outputs_ptr + pid_m * hidden_size
+        takes = ()
+        weights = ()
+        if has_topk_ids:
+            any_valid = 0
+            for n in tl.static_range(top_k):
+                id_val = tl.load(top_ids_ptr + pid_m * top_k + n)
+                valid = id_val >= 0
+                any_valid += valid.to(tl.int32)
+                take = valid
+                if has_expert_map:
+                    local_id = tl.load(expert_map_ptr + tl.where(valid, id_val, 0))
+                    take = valid & (local_id >= 0)
+                takes += (take,)  # type: ignore[assignment]
+                weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
+            # All-padding rows early-return untouched (decode contract past num_recv).
+            if any_valid == 0:
+                return
+        else:
+            for n in tl.static_range(top_k):
+                takes += (True,)  # type: ignore[assignment]
+                weights += (tl.load(w_row + n).to(tl.float32),)  # type: ignore[assignment]
 
-    for t in tl.range(0, n_tiles):
-        offs_k = t * BLOCK_K + tl.arange(0, BLOCK_K)
-        kmask = offs_k < hidden_size
-        acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
-        for n in tl.static_range(top_k):
-            if takes[n]:
-                a = tl.load(a_row + n * hidden_size + offs_k, mask=kmask, other=0.0)
-                acc += a.to(tl.float32) * weights[n]
-        tl.store(out_row + offs_k, acc.to(outputs_ptr.dtype.element_ty), mask=kmask)
+        n_tiles: tl.constexpr = (hidden_size + BLOCK_K - 1) // BLOCK_K
+        a_row = inputs_ptr + pid_m * stride_m
+        out_row = outputs_ptr + pid_m * hidden_size
+
+        for t in tl.range(0, n_tiles):
+            offs_k = t * BLOCK_K + tl.arange(0, BLOCK_K)
+            kmask = offs_k < hidden_size
+            acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+            for n in tl.static_range(top_k):
+                if takes[n]:
+                    a = tl.load(a_row + n * hidden_size + offs_k, mask=kmask, other=0.0)
+                    acc += a.to(tl.float32) * weights[n]
+            tl.store(out_row + offs_k, acc.to(outputs_ptr.dtype.element_ty), mask=kmask)
+
+    def dispatch(
+        self,
+        *,
+        hidden_size: int,
+        element_size: int,
+        **compile_key_fields: Any,
+    ) -> CompileKey:
+        is_fp32 = element_size > 2
+        max_block_k = 256 if is_fp32 else 512
+        block_k = max(128, min(triton.next_power_of_2(hidden_size), max_block_k))
+        return self.CompileKey(
+            **compile_key_fields,
+            hidden_size=hidden_size,
+            block_k=block_k,
+            num_warps=4 if is_fp32 else 2,
+            num_stages=3,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        hidden_size = hf_config.hidden_size
+        top_k = hf_config.num_experts_per_tok
+        input_dtypes = zip_inputs(
+            dict(input_dtype=vllm_config.model_config.dtype, element_size=2),
+            dict(input_dtype=torch.float32, element_size=4),
+        )
+        pointer_variants = zip_inputs(
+            dict(
+                topk_ids_dtype=None,
+                expert_map_dtype=None,
+                num_valid_tokens_dtype=None,
+            ),
+            dict(
+                topk_ids_dtype=torch.int32,
+                expert_map_dtype=None,
+                num_valid_tokens_dtype=None,
+            ),
+            dict(
+                topk_ids_dtype=torch.int32,
+                expert_map_dtype=torch.int32,
+                num_valid_tokens_dtype=None,
+            ),
+            dict(
+                topk_ids_dtype=torch.int32,
+                expert_map_dtype=None,
+                num_valid_tokens_dtype=torch.int32,
+            ),
+            dict(
+                topk_ids_dtype=torch.int32,
+                expert_map_dtype=torch.int32,
+                num_valid_tokens_dtype=torch.int32,
+            ),
+        )
+        return self._trace_dispatch(self.dispatch)(
+            input_dtypes,
+            pointer_variants,
+            topk_weights_dtype=torch.float32,
+            output_dtype=(vllm_config.model_config.dtype, torch.float32),
+            stride_m=top_k * hidden_size,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            _when=lambda *, input_dtype, output_dtype: input_dtype == output_dtype,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            inputs=TritonWarmupTensor(
+                compile_key.input_dtype,
+                shape=(1, compile_key.top_k, compile_key.hidden_size),
+            ),
+            topk_weights=TritonWarmupTensor(
+                compile_key.topk_weights_dtype,
+                shape=(1, compile_key.top_k),
+            ),
+            outputs=TritonWarmupTensor(
+                compile_key.output_dtype,
+                shape=(1, compile_key.hidden_size),
+            ),
+            topk_ids=(
+                TritonWarmupTensor(
+                    compile_key.topk_ids_dtype,
+                    shape=(1, compile_key.top_k),
+                )
+                if compile_key.topk_ids_dtype is not None
+                else None
+            ),
+            expert_map=(
+                TritonWarmupTensor(compile_key.expert_map_dtype)
+                if compile_key.expert_map_dtype is not None
+                else None
+            ),
+            num_valid_tokens=(
+                TritonWarmupTensor(compile_key.num_valid_tokens_dtype)
+                if compile_key.num_valid_tokens_dtype is not None
+                else None
+            ),
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        inputs: torch.Tensor,
+        topk_weights: torch.Tensor,
+        outputs: torch.Tensor,
+        topk_ids: torch.Tensor | None,
+        expert_map: torch.Tensor | None,
+        num_valid_tokens: torch.Tensor | None,
+    ) -> LaunchSpec:
+        num_tokens, top_k, hidden_size = inputs.shape
+        block_k, num_warps, num_stages = _heuristic_config(
+            hidden_size,
+            inputs.element_size(),
+        )
+        return (num_tokens,), dict(
+            top_ids_ptr=topk_ids,
+            stride_m=top_k * hidden_size,
+            has_topk_ids=topk_ids is not None,
+            has_expert_map=expert_map is not None,
+            has_num_valid=num_valid_tokens is not None,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            BLOCK_K=block_k,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
 
 
 def _heuristic_config(
@@ -146,27 +299,16 @@ def moe_fused_mul_sum(
         assert topk_ids.dtype in (torch.int32, torch.int64)
 
     if not isinstance(inputs, FakeTensor):
-        BLOCK_K, num_warps, num_stages = _heuristic_config(
-            hidden_size,
-            inputs.element_size(),
-        )
-        grid = (num_tokens,)
-        moe_fused_mul_sum_kernel[grid](
+        _MOE_FUSED_MUL_SUM_KERNEL(
             inputs,
             topk_weights,
             outputs,
             topk_ids,
             expert_map,
             num_valid_tokens,
-            top_k * hidden_size,
-            topk_ids is not None,
-            expert_map is not None,
-            num_valid_tokens is not None,
-            top_k,
-            hidden_size,
-            BLOCK_K,
-            num_warps=num_warps,
-            num_stages=num_stages,
         )
 
     return outputs
+
+
+_MOE_FUSED_MUL_SUM_KERNEL = MoeFusedMulSumKernel()

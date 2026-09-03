@@ -42,11 +42,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
     WarmupIntRange,
     zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -308,7 +313,7 @@ def expert_triton_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
+class BatchedTritonKernel(VllmTritonJitKernel["BatchedTritonKernel.CompileKey"]):
     @dataclass(frozen=True)
     class CompileKey:
         dtype: torch.dtype
@@ -518,7 +523,7 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         return self.CompileKey(
             dtype=dtype,
             e=num_experts,
-            max_num_tokens=max_num_tokens,
+            max_num_tokens=triton_scalar_specialization_rep(max_num_tokens),
             n=launch_n,
             k=launch_k,
             group_n=group_n,
@@ -551,7 +556,6 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         ):
             return []
 
-        max_tokens = min(max_tokens, 1024)
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(
                 dict(
@@ -597,9 +601,9 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             use_td=(False, True),
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(
+        self, compile_key: CompileKey
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         scale_cols = (
             triton.cdiv(compile_key.k, compile_key.group_k)
             if compile_key.group_k > 0
@@ -626,7 +630,7 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             shape=(compile_key.e, compile_key.n, scale_cols),
         )
         int32_ptr = TritonWarmupTensor(torch.int32, shape=(compile_key.e,))
-        warmup(
+        args = (
             a_ptr,
             b_ptr,
             c_ptr,
@@ -635,8 +639,10 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             compile_key.max_num_tokens,
             compile_key.k,
             compile_key.n,
-            scale_ptr,
-            b_scale_ptr,
+            scale_ptr if compile_key.use_fp8_w8a8 else None,
+            b_scale_ptr
+            if compile_key.use_fp8_w8a8 or compile_key.use_int8_w8a16
+            else None,
             b_scale_ptr,
             compile_key.max_num_tokens * compile_key.k,
             compile_key.k,
@@ -658,15 +664,17 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
             compile_key.use_fp8_w8a8,
             compile_key.use_int8_w8a16,
             compile_key.per_act_token_quant,
+        )
+        return args, dict(
             BLOCK_M=compile_key.block_m,
             BLOCK_N=compile_key.block_n,
             BLOCK_K=compile_key.block_k,
             USE_TD=compile_key.use_td,
-            grid=(1,),
             num_warps=compile_key.num_warps,
             num_stages=compile_key.num_stages,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         A: torch.Tensor,
@@ -682,25 +690,13 @@ class BatchedTritonKernel(VllmJitKernel["BatchedTritonKernel.CompileKey"]):
         USE_TD: bool,
         num_warps: int,
         num_stages: int,
-    ) -> Any:
+    ) -> LaunchSpec:
         grid = (
             expert_num_tokens.size(0),
             triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
         )
-        return self.kernel[grid](
-            A,
-            B,
-            C,
-            expert_num_tokens,
-            compute_type,
-            max_num_tokens,
-            *args,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            BLOCK_K=BLOCK_K,
-            USE_TD=USE_TD,
-            num_warps=num_warps,
-            num_stages=num_stages,
+        return grid, dict(
+            a_ptr=A, b_ptr=B, c_ptr=C, num_warps=num_warps, num_stages=num_stages
         )
 
 

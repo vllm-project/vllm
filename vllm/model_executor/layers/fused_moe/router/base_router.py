@@ -11,11 +11,12 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
     TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -23,26 +24,22 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
 
-    class EplbMapAndRecordKernel(VllmJitKernel["EplbMapAndRecordKernel.CompileKey"]):
-        def __init__(self) -> None:
-            self.block_size = 256
-            super().__init__()
+    class EplbMapAndRecordKernel(
+        VllmTritonJitKernel["EplbMapAndRecordKernel.CompileKey"]
+    ):
+        BLOCK_SIZE = 256
 
         @dataclass(frozen=True)
         class CompileKey:
             has_num_unpadded: bool
+            num_logical_experts: int
+            map_slots: int
+            out_size: int
             num_active_experts: int
             block_size: int
 
         @staticmethod
-        @triton.jit(
-            do_not_specialize=[
-                "num_logical_experts",
-                "map_slots",
-                "out_size",
-                "numel",
-            ]
-        )
+        @triton.jit(do_not_specialize=["numel"])
         def kernel(
             topk_ids_ptr,
             logical_replica_count_ptr,
@@ -123,12 +120,20 @@ if current_platform.is_cuda_alike():
             self,
             *,
             has_num_unpadded: bool,
+            num_logical_experts: int,
+            map_slots: int,
+            out_size: int,
             num_active_experts: int,
         ) -> CompileKey:
             return self.CompileKey(
                 has_num_unpadded=has_num_unpadded,
-                num_active_experts=num_active_experts,
-                block_size=self.block_size,
+                num_logical_experts=triton_scalar_specialization_rep(
+                    num_logical_experts
+                ),
+                map_slots=triton_scalar_specialization_rep(map_slots),
+                out_size=triton_scalar_specialization_rep(out_size),
+                num_active_experts=triton_scalar_specialization_rep(num_active_experts),
+                block_size=self.BLOCK_SIZE,
             )
 
         def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -136,35 +141,38 @@ if current_platform.is_cuda_alike():
             if not bool(getattr(parallel_config, "enable_eplb", False)):
                 return []
             top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-            if top_k <= 0:
+            num_logical_experts = vllm_config.model_config.hf_config.n_routed_experts
+            num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+            if top_k <= 0 or num_logical_experts <= 0:
                 return []
             return self._trace_dispatch(self.dispatch)(
                 has_num_unpadded=(False, True),
+                num_logical_experts=num_logical_experts,
+                map_slots=1024,
+                out_size=num_logical_experts + num_redundant_experts,
                 num_active_experts=top_k,
             )
 
-        def compile(self, compile_key: CompileKey) -> None:
-            warmup = getattr(self.kernel, "warmup", None)
-            assert warmup is not None
+        def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
             int32_ptr = TritonWarmupTensor(torch.int32)
-            warmup(
-                int32_ptr,
-                int32_ptr,
-                int32_ptr,
-                int32_ptr,
-                int32_ptr,
-                TritonWarmupTensor(torch.bool),
-                int32_ptr if compile_key.has_num_unpadded else None,
-                1,
-                1,
-                1,
-                1,
-                compile_key.num_active_experts,
-                HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
-                BLOCK_SIZE=compile_key.block_size,
-                grid=(1,),
+            return dict(
+                topk_ids=int32_ptr,
+                logical_replica_count=int32_ptr,
+                logical_to_physical_map=int32_ptr,
+                out=int32_ptr,
+                expert_load_view=int32_ptr,
+                record_enabled=TritonWarmupTensor(torch.bool),
+                num_unpadded_tokens=(
+                    int32_ptr if compile_key.has_num_unpadded else None
+                ),
+                num_logical_experts=compile_key.num_logical_experts,
+                map_slots=compile_key.map_slots,
+                out_size=compile_key.out_size,
+                numel=1,
+                num_active_experts=compile_key.num_active_experts,
             )
 
+        @kernel_launcher
         def __call__(
             self,
             topk_ids: torch.Tensor,
@@ -179,27 +187,14 @@ if current_platform.is_cuda_alike():
             out_size: int,
             numel: int,
             num_active_experts: int,
-        ) -> None:
-            compile_key = self.dispatch(
-                has_num_unpadded=num_unpadded_tokens is not None,
-                num_active_experts=num_active_experts,
-            )
-            grid = (triton.cdiv(numel, compile_key.block_size),)
-            self.kernel[grid](
-                topk_ids,
-                logical_replica_count,
-                logical_to_physical_map,
-                out,
-                expert_load_view,
-                record_enabled,
-                num_unpadded_tokens,
-                num_logical_experts,
-                map_slots,
-                out_size,
-                numel,
-                num_active_experts,
-                HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
-                BLOCK_SIZE=compile_key.block_size,
+        ) -> LaunchSpec:
+            grid = (triton.cdiv(numel, self.BLOCK_SIZE),)
+            return grid, dict(
+                logical_to_physical_ptr=logical_to_physical_map,
+                out_ids_ptr=out,
+                out_ptr=expert_load_view,
+                HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
+                BLOCK_SIZE=self.BLOCK_SIZE,
             )
 
     _EPLB_MAP_AND_RECORD_KERNEL = EplbMapAndRecordKernel()

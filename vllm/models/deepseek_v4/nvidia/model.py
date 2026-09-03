@@ -705,18 +705,19 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 self.top_k,
                 "fp8xfp4",
             )
-        _PREPARE_MEGAMOE_INPUTS_KERNEL(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-            is_padding=is_padding,
-            shared_x_sf=shared_x_sf,
-            shared_block_m=shared_block_m,
-        )
+        if num_tokens > 0:
+            _PREPARE_MEGAMOE_INPUTS_KERNEL(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                symm_buffer.x[:num_tokens],
+                symm_buffer.x_sf[:num_tokens],
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+                is_padding=is_padding,
+                shared_x_sf=shared_x_sf,
+                shared_block_m=shared_block_m,
+            )
 
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
