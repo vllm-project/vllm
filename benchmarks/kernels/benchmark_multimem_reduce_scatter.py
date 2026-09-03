@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark production TP8 reduce-scatter backends on one SM103 node.
+"""Benchmark production TP8 reduce-scatter backends on one SM100/SM103 node.
 
 The multimem candidate includes the device-to-device copy into its persistent
 symmetric input buffer. Timings use pointer-distinct CUDA graphs and report the
@@ -382,9 +382,9 @@ def main() -> None:
     world_size = dist.get_world_size(device_group)
     device = torch.device("cuda", local_rank)
     capability = torch.cuda.get_device_capability(device)
-    if world_size != 8 or capability != (10, 3):
+    if world_size != 8 or capability not in ((10, 0), (10, 3)):
         raise RuntimeError(
-            f"This first benchmark targets TP8 SM103, got TP{world_size} SM{capability}"
+            f"This benchmark targets TP8 SM100/SM103, got TP{world_size} SM{capability}"
         )
 
     max_message_bytes = max(args.message_bytes)

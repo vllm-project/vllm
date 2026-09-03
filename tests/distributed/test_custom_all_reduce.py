@@ -111,10 +111,12 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
 @pytest.mark.parametrize(
     ("same_node", "world_size", "device_capability", "expected"),
     [
+        (True, 8, (10, 0), True),
         (True, 8, (10, 3), True),
         (False, 8, (10, 3), False),
         (True, 4, (10, 3), False),
-        (True, 8, (10, 0), False),
+        (True, 8, (10, 1), False),
+        (True, 8, (9, 0), False),
     ],
 )
 def test_mnnvl_multimem_reduce_scatter_platform_gate(
@@ -125,7 +127,7 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
     expected,
 ):
     def is_device_capability(capability, device_id):
-        assert capability == (10, 3)
+        assert capability in ((10, 0), (10, 3))
         assert device_id == 3
         return device_capability == capability
 

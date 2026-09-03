@@ -110,7 +110,10 @@ def _supports_mnnvl_multimem_reduce_scatter(
         same_node
         and world_size == 8
         and device.index is not None
-        and current_platform.is_device_capability((10, 3), device.index)
+        and (
+            current_platform.is_device_capability((10, 0), device.index)
+            or current_platform.is_device_capability((10, 3), device.index)
+        )
     )
 
 

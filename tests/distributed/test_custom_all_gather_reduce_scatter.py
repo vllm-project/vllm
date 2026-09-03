@@ -54,9 +54,9 @@ def _supports_multimem():
     )
 
 
-def _supports_sm103():
+def _supports_sm100_or_sm103():
     capability = current_platform.get_device_capability()
-    return current_platform.is_cuda() and capability == (10, 3)
+    return current_platform.is_cuda() and capability in ((10, 0), (10, 3))
 
 
 def _payload(value, device):
@@ -378,8 +378,8 @@ def _run_multimem_reduce_scatter_test(
 
 
 @pytest.mark.skipif(
-    not _supports_sm103(),
-    reason="The low-SM MNNVL reduce-scatter path currently targets SM103.",
+    not _supports_sm100_or_sm103(),
+    reason="The low-SM MNNVL reduce-scatter path requires SM100 or SM103.",
 )
 def test_mnnvl_multimem_reduce_scatter(monkeypatch: pytest.MonkeyPatch):
     if torch.accelerator.device_count() < 8:
