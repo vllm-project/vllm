@@ -757,3 +757,30 @@ def test_cutlass_fp8_group_gemm(
         baseline = baseline_tensors[g]
         c = out_tensors_stacked[expert_offsets[g] : expert_offsets[g + 1]]
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
+
+
+@pytest.mark.parametrize("m", [8192, 12288])
+@pytest.mark.parametrize("n,k", [(2048, 2560), (2560, 6144)])
+@pytest.mark.parametrize("chunk", [4096, 2048])
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="FP8 blockwise is not supported on this GPU type.",
+)
+def test_cutlass_fp8_blockwise_m_chunk_matches_single_launch(
+    m: int, n: int, k: int, chunk: int
+):
+    """M-chunking the blockwise GEMM (used on SM 12.x, see cutlass.py) must be
+    bit-identical to the single launch, including with the column-major
+    activation scales the kernel expects."""
+    from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+        chunked_blockwise_scaled_mm,
+    )
+
+    a = to_fp8(torch.randn((m, k), device="cuda"))
+    b = to_fp8(torch.randn((n, k), device="cuda"))  # [N, K] as the kernel API takes it
+    scale_a = torch.rand((m, k // 128), device="cuda", dtype=torch.float32) + 0.5
+    scale_a = scale_a.t().contiguous().t()  # column-major, as QuantFP8 emits it
+    scale_b = torch.rand((n // 128, k // 128), device="cuda", dtype=torch.float32) + 0.5
+    single = ops.cutlass_scaled_mm(a, b.t(), scale_a, scale_b.t(), torch.bfloat16, None)
+    chunked = chunked_blockwise_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16, chunk)
+    assert torch.equal(single, chunked)

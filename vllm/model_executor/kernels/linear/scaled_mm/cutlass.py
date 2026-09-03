@@ -317,6 +317,9 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
+        chunk = blockwise_fp8_m_chunk()
+        if chunk and A.shape[0] > chunk:
+            return chunked_blockwise_scaled_mm(A, B, As, Bs, out_dtype, chunk)
         return ops.cutlass_scaled_mm(
             A,
             B.T,
@@ -324,6 +327,60 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             scale_a=As,
             scale_b=Bs.T,
         )
+
+
+# On SM 12.x (GB10, RTX PRO 6000 Blackwell) the CUTLASS blockwise FP8 GEMM loses
+# most of its throughput once M spans many tile rows: measured on a GB10 for a
+# 16384x2560 weight, 163 TFLOPS at M=4096 but 95 at M=8192 and 51 at M=16384,
+# while the same GEMM issued as 4096-row chunks stays at ~160 TFLOPS at every M
+# (cuBLASLt's row-wise FP8 path degrades identically, its per-tensor path does
+# not). Consistent with the 24 MiB L2 no longer holding the weight operand
+# across tile rows. Chunking M is exact: the K-reduction per output element is
+# unchanged, and the chunked result is bit-identical to the single launch.
+_BLOCKWISE_FP8_M_CHUNK_SM12X = 4096
+_blockwise_fp8_m_chunk: int | None = None
+
+
+def blockwise_fp8_m_chunk() -> int:
+    """Rows per launch for the blockwise FP8 GEMM, 0 = no chunking."""
+    global _blockwise_fp8_m_chunk
+    if _blockwise_fp8_m_chunk is None:
+        _blockwise_fp8_m_chunk = (
+            _BLOCKWISE_FP8_M_CHUNK_SM12X
+            if current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+            else 0
+        )
+    return _blockwise_fp8_m_chunk
+
+
+def chunked_blockwise_scaled_mm(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    out_dtype: torch.dtype,
+    chunk: int,
+) -> torch.Tensor:
+    """`ops.cutlass_scaled_mm(A, B.T, As, Bs.T)` issued in `chunk`-row pieces.
+
+    The kernel derives the layout of the per-token-group activation scales
+    from its own M (column-major, M fastest), so each chunk's scales must be
+    re-materialised in that layout; a row slice of the full tensor would be
+    read with the wrong stride.
+    """
+    M = A.shape[0]
+    out = torch.empty((M, B.shape[0]), dtype=out_dtype, device=A.device)
+    for i in range(0, M, chunk):
+        As_c = As[i : i + chunk].t().contiguous().t()
+        out[i : i + chunk] = ops.cutlass_scaled_mm(
+            A[i : i + chunk].contiguous(),
+            B.T,
+            out_dtype=out_dtype,
+            scale_a=As_c,
+            scale_b=Bs.T,
+        )
+    return out
 
 
 def cutlass_scaled_mm(
