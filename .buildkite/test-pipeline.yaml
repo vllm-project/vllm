@@ -1,0 +1,8 @@
+# This file has been deprecated as of Feb 18, 2026. The content has already been migrated to:
+
+# .buildkite/test_areas for test jobs
+# .buildkite/image_build for image building jobs
+# .buildkite/hardware_tests for jobs running on other hardwares (Intel, Ascend NPU, Arm, etc..)
+# .buildkite/ci_config.yaml for configuration of CI pipeline
+
+# If you need to make changes to CI, please find the relevant file in these directories and make changes there.

@@ -1,0 +1,45 @@
+name: 💻 Usage
+description: Raise an issue here if you don't know how to use vllm.
+title: "[Usage]: "
+labels: ["usage"]
+
+body:
+- type: markdown
+  attributes:
+    value: >
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+sort%3Acreated-desc+).
+- type: textarea
+  attributes:
+    label: Your current environment
+    description: |
+      Please run the following and paste the output below.
+      ```sh
+      wget https://raw.githubusercontent.com/vllm-project/vllm/main/vllm/collect_env.py
+      # For security purposes, please feel free to check the contents of collect_env.py before running it.
+      python collect_env.py
+      ```
+      It is suggested to download and execute the latest script, as vllm might frequently update the diagnosis information needed for accurately and quickly responding to issues.
+    value: |
+      ```text
+      The output of `python collect_env.py`
+      ```
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: How would you like to use vllm
+    description: |
+      A detailed description of how you want to use vllm.
+    value: |
+      I want to run inference of a [specific model](put link here). I don't know how to integrate it with vllm.
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
+- type: checkboxes
+  id: askllm
+  attributes:
+    label: Before submitting a new issue...
+    options:
+      - label: Make sure you already searched for relevant issues, and asked the chatbot living at the bottom right corner of the [documentation page](https://docs.vllm.ai/en/latest/), which can answer lots of frequently asked questions.
+        required: true
