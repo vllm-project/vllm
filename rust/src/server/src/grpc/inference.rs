@@ -45,30 +45,42 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
         .and_then(|params| params.get("do_remote_prefill"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let Some(ec_items) = text_request
+    let ec_items = text_request
         .sampling_params
         .vllm_xargs
         .as_ref()
         .and_then(|args| args.get("ec_transfer_params"))
         .and_then(|params| params.get("ec_items"))
         .and_then(serde_json::Value::as_array)
-        .cloned()
-    else {
+        .cloned();
+
+    // Decode uses EC metadata only to prepare the prompt; EngineCore consumes KV.
+    if is_decode_kv_consumer {
+        if let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
+            args.remove("ec_transfer_params");
+        }
+    }
+
+    let Some(ec_items) = ec_items else {
         return;
     };
     let Some(features) = text_request.mm_features.as_mut() else {
         return;
     };
+    let ec_items_by_hash: std::collections::HashMap<_, _> = ec_items
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(|item| {
+            item.get("mm_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(|mm_hash| (mm_hash, item))
+        })
+        .collect();
 
-    for (feature, item) in features.iter_mut().zip(ec_items) {
-        let Some(item) = item.as_object() else {
+    for feature in features.iter_mut() {
+        let Some(item) = ec_items_by_hash.get(feature.identifier.as_str()) else {
             continue;
         };
-        if item.get("mm_hash").and_then(serde_json::Value::as_str)
-            != Some(feature.identifier.as_str())
-        {
-            continue;
-        }
         let Some(data) = feature.data.as_mut() else {
             continue;
         };
@@ -81,13 +93,6 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
             continue;
         }
         data.retain(|key, _| metadata_keys.contains(key));
-    }
-
-    // Decode uses EC metadata only to prepare the prompt; EngineCore consumes KV.
-    if is_decode_kv_consumer {
-        if let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
-            args.remove("ec_transfer_params");
-        }
     }
 }
 
@@ -161,8 +166,8 @@ impl InferenceServiceImpl {
                     .map_err(|error| Status::internal(error.to_report_string()))?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
-                apply_encoder_cache_placeholders(&mut text_request);
             }
+            apply_encoder_cache_placeholders(&mut text_request);
 
             Ok(text_request)
         }
