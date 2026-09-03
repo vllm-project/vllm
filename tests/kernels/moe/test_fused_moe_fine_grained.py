@@ -212,6 +212,36 @@ def test_fused_experts_expert_map():
         torch.testing.assert_close(out_with_map, out_no_map, atol=0.0, rtol=0.0)
 
 
+def test_prepare_expert_assignment_with_expert_map():
+    """Verify naive bypass remaps expert IDs via non-identity expert_map."""
+    device = torch.device("cuda:0")
+    E = 128
+    top_k = 8
+    M = 1  # M * top_k * 4 = 32 <= 128, so naive path is active
+
+    topk_ids = torch.randint(0, E, (M, top_k), dtype=torch.int32, device=device)
+
+    # Non-identity expert_map: reverse mapping
+    expert_map = torch.arange(E - 1, -1, -1, dtype=torch.int32, device=device)
+    config = {"BLOCK_SIZE_M": 64}
+
+    sorted_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
+        topk_ids,
+        config,
+        num_tokens=M,
+        top_k_num=top_k,
+        global_num_experts=E,
+        expert_map=expert_map,
+        ignore_invalid_experts=False,
+    )
+
+    # Naive path should be active
+    assert sorted_ids is None
+    # Expert IDs should be remapped through expert_map
+    expected_ids = expert_map[topk_ids.view(-1)]
+    torch.testing.assert_close(expert_ids, expected_ids, atol=0, rtol=0)
+
+
 def test_moe_sum_dispatch():
     """Verify moe_sum dispatches correctly for 2-arg and 4-arg paths."""
     device = torch.device("cuda:0")
