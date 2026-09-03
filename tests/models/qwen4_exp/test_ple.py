@@ -14,6 +14,9 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
+)
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -286,6 +289,37 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
 
     quant_config.ignored_layers = [f"{prefix}.shard_0"]
     assert _get_ple_embedding_quant_method(quant_config, prefix) is None
+
+
+def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    prefix: {"quant_algo": "FP8"},
+                    "model.language_model.layers.2.moe.gate_proj": {
+                        "quant_algo": "NVFP4"
+                    },
+                },
+            }
+        }
+    )
+
+    assert isinstance(
+        _get_ple_embedding_quant_method(quant_config, prefix),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+    assert (
+        _get_ple_embedding_quant_method(
+            quant_config,
+            "model.language_model.layers.2.moe.gate_proj",
+        )
+        is None
+    )
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
