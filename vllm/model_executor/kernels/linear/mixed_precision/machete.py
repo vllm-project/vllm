@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
 
 import torch
 
@@ -12,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.machete_utils import (
     query_machete_supported_quant_types,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
@@ -34,7 +32,6 @@ class MacheteLinearKernel(MPLinearKernel):
 
         if not current_platform.is_device_capability(90):
             return False, "Machete requires compute capability of 90 (Hopper)"
-
 
         if c.weight_type not in query_machete_supported_quant_types(c.zero_points):
             return (
