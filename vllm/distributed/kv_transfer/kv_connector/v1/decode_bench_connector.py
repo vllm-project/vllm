@@ -263,6 +263,7 @@ class DecodeBenchConnectorScheduler:
             return
 
         total_computed_tokens = request.num_tokens - 1
+        num_local_computed_tokens = total_computed_tokens - num_external_tokens
         block_ids_per_group_list: list[list[int]] = []
         for group_idx, (
             group,
@@ -282,9 +283,7 @@ class DecodeBenchConnectorScheduler:
             )
             if not is_circular_buffer:
                 num_computed_blocks = cdiv(total_computed_tokens, group_block_size)
-                external_block_start = (
-                    total_computed_tokens - num_external_tokens
-                ) // group_block_size
+                external_block_start = num_local_computed_tokens // group_block_size
                 assert (
                     0
                     <= external_block_start

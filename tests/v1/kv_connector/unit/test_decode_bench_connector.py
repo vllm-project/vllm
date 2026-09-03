@@ -194,6 +194,43 @@ def test_decode_bench_connector_basic():
             assert torch.allclose(block_data, torch.tensor(0.015))
 
 
+def test_decode_bench_connector_prefix_hit_fills_only_suffix_blocks():
+    """A local prefix-cache hit shifts the fill to the suffix blocks."""
+    block_size = 16
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=100)
+
+    prefix = list(range(1, 1 + block_size * 3))
+    req1 = runner.new_request(prefix)
+    _, metadata = runner.run_single_step()
+    (prefix_block_ids,), _ = metadata.reqs_to_fill[req1.request_id]
+    assert len(prefix_block_ids) == 3
+
+    scheduler_output = runner.scheduler.schedule()
+    runner.scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            reqs=runner.scheduler.running,
+            token_id=EOS_TOKEN_ID,
+            use_eos=True,
+        ),
+    )
+    assert not runner.scheduler.running
+
+    suffix = list(range(1000, 1000 + block_size * 2))
+    req2 = runner.new_request(prefix + suffix)
+    _, metadata = runner.run_single_step()
+    (fill_block_ids,), num_tokens_to_fill = metadata.reqs_to_fill[req2.request_id]
+
+    req2_block_ids = runner.scheduler.kv_cache_manager.get_block_ids(req2.request_id)[0]
+    assert req2_block_ids[:3] == prefix_block_ids
+    assert num_tokens_to_fill == len(suffix) - 1
+    assert fill_block_ids == req2_block_ids[3:5]
+    assert set(fill_block_ids).isdisjoint(prefix_block_ids)
+    for kv_cache in runner.kv_caches.values():
+        for block_id in fill_block_ids:
+            assert torch.allclose(kv_cache[block_id], torch.tensor(0.015))
+
+
 def test_decode_bench_connector_fills_each_hma_group():
     """Each cache group is filled using its own block IDs."""
     block_size = 16
