@@ -44,10 +44,10 @@ steps:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
   mirror:
     amd:
-      label: ":amd: (MI300) MiniMax Reduce RMS Kernels"
+      label: ":amd: (MI355) MiniMax Reduce RMS Kernels"
       dind: false
-      device: mi300_2
-      timeout_in_minutes: 40
+      device: mi355_2
+      timeout_in_minutes: 45
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
