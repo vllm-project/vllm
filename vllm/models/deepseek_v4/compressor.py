@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -447,6 +448,7 @@ class DeepseekCompressor(nn.Module):
             current_platform.is_cuda()
             and current_platform.has_device_capability(90)
             and self.head_dim == 512
+            and has_cutedsl()
         ):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
@@ -474,8 +476,8 @@ class DeepseekCompressor(nn.Module):
             # the portable Triton sparse compressor for fp8_ds_mla.
             if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
                 raise NotImplementedError(
-                    "DeepSeek V4 full-row KV cache on pre-SM90 CUDA requires "
-                    "the CuTeDSL sparse compressor; use fp8_ds_mla KV cache"
+                    "DeepSeek V4 full-row KV cache on CUDA requires the CuTeDSL "
+                    "sparse compressor; install cutlass or use fp8_ds_mla KV cache"
                 )
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
