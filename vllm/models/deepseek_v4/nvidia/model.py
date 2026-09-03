@@ -196,11 +196,20 @@ class DeepGemmMegaMoEExperts(nn.Module):
     @staticmethod
     def source_weight_block_size_from_quant_config(
         quant_config: QuantizationConfig | None,
+        layer: nn.Module | None = None,
+        prefix: str | None = None,
     ) -> tuple[int, int] | None:
         if quant_config is None:
             return None
-        if DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config):
+        if DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config, layer, prefix):
             return None
+        if quant_config.get_name() == "compressed-tensors" and prefix is not None:
+            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
+            if (
+                callable(get_scheme_dict)
+                and get_scheme_dict(layer or nn.Identity(), prefix) is None
+            ):
+                return None
         block_size = getattr(quant_config, "weight_block_size", None)
         if (
             quant_config.get_name() != "fp8"
@@ -219,9 +228,18 @@ class DeepGemmMegaMoEExperts(nn.Module):
         return (block_size[0], block_size[1])
 
     @staticmethod
-    def source_is_nvfp4(quant_config: QuantizationConfig | None) -> bool:
+    def source_is_nvfp4(
+        quant_config: QuantizationConfig | None,
+        layer: nn.Module | None = None,
+        prefix: str | None = None,
+    ) -> bool:
         if quant_config is None or quant_config.get_name() != "compressed-tensors":
             return False
+        if prefix is not None:
+            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
+            if callable(get_scheme_dict):
+                scheme = get_scheme_dict(layer or nn.Identity(), prefix)
+                return bool(scheme and scheme.get("format") == "nvfp4-pack-quantized")
         config = getattr(quant_config, "config", None) or {}
         return any(
             group.get("format") == "nvfp4-pack-quantized"
@@ -1390,7 +1408,9 @@ class DeepseekV4MoE(nn.Module):
         )
         if self.use_fi_mega_moe:
             expert_kwargs["activation_clamp"] = activation_clamp
-        elif DeepGemmMegaMoEExperts.source_is_nvfp4(vllm_config.quant_config):
+        elif DeepGemmMegaMoEExperts.source_is_nvfp4(
+            vllm_config.quant_config, self, f"{prefix}.experts"
+        ):
             expert_kwargs["source_nvfp4"] = True
         self.experts = experts_cls(vllm_config, **expert_kwargs)
 

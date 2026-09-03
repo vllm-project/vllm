@@ -29,6 +29,15 @@ class _FakeNvfp4QuantConfig:
         return "compressed-tensors"
 
 
+class _FakeMixedNvfp4QuantConfig(_FakeNvfp4QuantConfig):
+    ignore = ["re:model.layers.78.*"]
+
+    def get_scheme_dict(self, _layer, layer_name):
+        if layer_name.startswith("model.layers.78."):
+            return None
+        return {"format": "nvfp4-pack-quantized"}
+
+
 def test_mega_moe_request_applies_to_mtp_model_config():
     vllm_config = SimpleNamespace(
         kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe")
@@ -58,6 +67,21 @@ def test_nvfp4_expert_quantization_is_detected():
     assert DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config)
     assert (
         DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(quant_config)
+        is None
+    )
+
+
+def test_ignored_mtp_layer_uses_unquantized_mega_moe_weights():
+    quant_config = _FakeMixedNvfp4QuantConfig()
+    prefix = "model.layers.78.mtp_block.mlp"
+
+    assert not DeepGemmMegaMoEExperts.source_is_nvfp4(
+        quant_config, torch.nn.Identity(), prefix
+    )
+    assert (
+        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+            quant_config, torch.nn.Identity(), prefix
+        )
         is None
     )
 

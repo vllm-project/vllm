@@ -247,10 +247,12 @@ class Glm5NextMoE(nn.Module):
 
             source_weight_block_size = (
                 DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
-                    quant_config
+                    quant_config, self, prefix
                 )
             )
-            source_nvfp4 = DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config)
+            source_nvfp4 = DeepGemmMegaMoEExperts.source_is_nvfp4(
+                quant_config, self, prefix
+            )
 
             if self.n_physical_experts % self.ep_size != 0:
                 raise ValueError(

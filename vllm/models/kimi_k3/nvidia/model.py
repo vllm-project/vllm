@@ -689,7 +689,9 @@ class KimiMoE(nn.Module):
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
-                source_nvfp4=DeepseekV4MegaMoEExperts.source_is_nvfp4(quant_config),
+                source_nvfp4=DeepseekV4MegaMoEExperts.source_is_nvfp4(
+                    quant_config, self, f"{prefix}.experts"
+                ),
                 prefix=f"{prefix}.experts",
                 activation="situ",
                 activation_beta=activation_situ_beta,
