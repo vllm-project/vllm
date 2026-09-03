@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -15,6 +16,9 @@ class AsyncScheduler(Scheduler):
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
         self.pp_size = self.parallel_config.pipeline_parallel_size
+        # Decode stagger; must match PPHandler's ring depth. pp_size spreads
+        # decodes across microbatches; 1 runs decode at full batch per step.
+        self.decode_stagger = self.pp_size if envs.VLLM_PP_DECODE_MICROBATCH else 1
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
@@ -46,7 +50,9 @@ class AsyncScheduler(Scheduler):
             if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be
                 # scheduled for decode (for PP microbatching).
-                request.next_decode_eligible_step = self.current_step + self.pp_size
+                request.next_decode_eligible_step = (
+                    self.current_step + self.decode_stagger
+                )
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int], is_stale: bool = False

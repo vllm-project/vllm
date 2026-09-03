@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -65,12 +66,13 @@ class PPHandler:
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
 
-        # On non-last ranks, a FIFO with one entry per in-flight step: the entry
-        # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
-        # with pp_size None placeholders so the first pp_size consumes are no-ops.
-        # None means no postprocess is pending for that step (broadcast skipped).
+        # FIFO on non-last ranks: entry pushed at step T is consumed
+        # `ring_depth` steps later. Depth must match AsyncScheduler.decode_stagger
+        # (pp_size, or 1 when microbatching is off). Pre-seeded with None
+        # placeholders so early consumes are no-ops.
+        ring_depth = get_pp_group().world_size if envs.VLLM_PP_DECODE_MICROBATCH else 1
         self.queue: deque[PendingRecv | None] = (
-            deque() if self.is_last_rank else deque([None] * get_pp_group().world_size)
+            deque() if self.is_last_rank else deque([None] * ring_depth)
         )
 
         # Per req-index generation counter, incremented every time a request
@@ -87,8 +89,8 @@ class PPHandler:
         self.req_idx_gen_np[req_idx] += 1
 
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
-        """Consume the entry from pp_size steps ago and wait for its recv event,
-        then filter out entries whose request was freed since `receive`.
+        """Consume the entry from `ring_depth` steps ago, wait for its recv
+        event, then drop entries whose request was freed since `receive`.
         """
         if not self.queue:
             return None
