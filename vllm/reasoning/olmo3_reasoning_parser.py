@@ -110,7 +110,9 @@ class Olmo3ReasoningBuffer:
             if end_think_idx > 0:
                 # this covers the case there's content before
                 # the end of the reasoning block
-                return DeltaMessage(reasoning=pretext)
+                content = self.buffer or None
+                self.buffer = ""
+                return DeltaMessage(reasoning=pretext, content=content)
 
         if self.state == Olmo3ReasoningState.REASONING:
             # we are inside reasoning block, return and empty
