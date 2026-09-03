@@ -141,6 +141,7 @@ class Olmo3ReasoningBuffer:
         return len(self.buffer)
 
     def add_text(self, delta_text: str) -> DeltaMessage | None:
+        """Append streamed text and return any newly complete delta."""
         # we start by adding the delta text to the buffer
         self.buffer += delta_text
 
