@@ -122,6 +122,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         draft_model_config=draft_model_config,
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
+        enable_adaptive_verification=False,
     )
     vllm_config = SimpleNamespace(
         speculative_config=speculative_config,
