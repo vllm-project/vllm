@@ -102,7 +102,10 @@ def _resolve_dsv4_kv_cache_dtype(
     """
     if use_fp8_ds_mla_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
-        assert kv_cache_dtype.startswith("fp8"), (
+        # The layout requires fp8 storage, so "auto" also resolves to
+        # fp8_ds_mla, like _canonicalize_sparse_mla_kv_cache_dtype does for
+        # FLASHMLA_SPARSE / FLASHINFER_MLA_SPARSE_SM120.
+        assert kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8"), (
             f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
             f"got {kv_cache_dtype}"
         )

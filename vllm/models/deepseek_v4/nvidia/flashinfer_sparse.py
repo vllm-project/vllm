@@ -157,7 +157,9 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
                 return "kv_cache_dtype not supported"
             return None
         if device_capability.major == 12:
-            if kv_cache_dtype not in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
+            # "auto" is accepted and resolved to fp8_ds_mla at layer
+            # construction (see _resolve_dsv4_kv_cache_dtype).
+            if kv_cache_dtype not in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
                 return "kv_cache_dtype not supported"
             from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
