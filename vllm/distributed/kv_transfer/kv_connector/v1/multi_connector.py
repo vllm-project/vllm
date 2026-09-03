@@ -340,10 +340,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.stage_host_mirror_mapping(slot_mappings, num_tokens)
 
-    def finish_host_mirror_forward(self) -> None:
-        for c in self._connectors:
-            c.finish_host_mirror_forward()
-
     def reset_capture_state(self) -> None:
         for c in self._connectors:
             c.reset_capture_state()

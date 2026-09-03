@@ -662,22 +662,32 @@ class HiSparseCoordinator:
             while token_position < end_position:
                 page_idx, row_offset = divmod(token_position, block_size)
                 num_rows = min(block_size - row_offset, end_position - token_position)
+                # A page without a GPU copy has no mirror source, and a page
+                # without a host block has no destination. Skip just that page:
+                # its neighbours in the window are still mirrorable, and a
+                # window only ever moves forward, so dropping them here would
+                # leave their host rows permanently stale.
                 source_starts = []
                 for blocks in resident_blocks:
                     assert blocks is not None
                     if page_idx >= len(blocks) or blocks[page_idx].is_null:
-                        return ()
+                        break
                     source_starts.append(
                         blocks[page_idx].block_id * block_size + row_offset
                     )
+                if len(source_starts) != len(resident_blocks):
+                    token_position += num_rows
+                    continue
                 host_block_idx, destination_page_offset = divmod(
                     page_idx, self.pages_per_host_block
                 )
                 if host_block_idx >= len(host_blocks):
-                    return ()
+                    token_position += num_rows
+                    continue
                 host_block = host_blocks[host_block_idx]
                 if host_block.is_null:
-                    return ()
+                    token_position += num_rows
+                    continue
                 destination_page = (
                     host_block.block_id * self.pages_per_host_block
                     + destination_page_offset

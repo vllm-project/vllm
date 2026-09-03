@@ -300,9 +300,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self._prepare_eplb_forward(num_tokens)
 
-        mirror_staged = self.stage_draft_host_mirror(
-            slot_mappings, prefill_batch_desc.num_tokens, dummy_run
-        )
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
@@ -322,7 +319,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 mm_inputs=mm_inputs,
             )
         self.on_prefill_end(num_reqs)
-        self.finish_draft_host_mirror(mirror_staged)
 
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -523,9 +519,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 )
 
             self.current_draft_step.fill_(step)
-            mirror_staged = self.stage_draft_host_mirror(
-                slot_mappings_by_layer, batch_desc.num_tokens, dummy_run
-            )
 
             if batch_desc.cg_mode == CUDAGraphMode.FULL:
                 assert self.decode_cudagraph_manager is not None
@@ -539,7 +532,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=batch_desc.cg_mode,
                 )
-            self.finish_draft_host_mirror(mirror_staged)
 
     def _fused_multi_step_decode(
         self,
