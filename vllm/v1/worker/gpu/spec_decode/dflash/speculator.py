@@ -427,12 +427,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+        # Requests whose drafts can never be scheduled next step.
         no_draft_mask = input_batch.no_draft_mask_np
-        if no_draft_mask is not None and self.dp_size == 1 and no_draft_mask.all():
-            # No request's drafts can be scheduled next step; the context KV written
-            # above keeps the drafter in sync, so skip the query forward and draft
-            # sampling. With DP, the query phase must still run on every rank.
-            return self.draft_tokens[:num_reqs]
+        want_skip_drafts = bool(no_draft_mask is not None and no_draft_mask.all())
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(dp_sync, num_reqs, self.num_query_per_req)
@@ -448,8 +445,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,
+            want_skip_drafts=want_skip_drafts,
             dp_sync=batch_sync,
         )
+
+        skip_drafts = (
+            batch_sync.skip_drafts if batch_sync is not None else want_skip_drafts
+        )
+        if skip_drafts:
+            # No rank needs draft tokens this step; the context KV written
+            # above keeps the drafter in sync, so skip the query forward and
+            # draft sampling on every rank.
+            return self.draft_tokens[:num_reqs]
+
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (

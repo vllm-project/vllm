@@ -1592,6 +1592,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        # Whether every request in this batch has unusable drafts, in which
+        # case drafting can be skipped entirely (agreed across DP ranks).
+        no_draft_req_ids = scheduler_output.no_draft_req_ids
+        want_skip_drafts = no_draft_req_ids is not None and all(
+            req_id in no_draft_req_ids
+            for req_id in scheduler_output.num_scheduled_tokens
+        )
+
         batch_desc, dp_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1602,6 +1610,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            want_skip_drafts=want_skip_drafts,
         )
 
         if batch_desc.num_tokens == 0:

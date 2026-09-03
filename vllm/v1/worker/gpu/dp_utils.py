@@ -36,6 +36,10 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
+    # Whether every rank may skip draft proposals this step (all of each
+    # rank's scheduled requests have unusable drafts). Agreed via the same
+    # collective, so speculators can branch on it without diverging.
+    skip_drafts: bool = False
 
 
 def sync_cudagraph_and_dp_padding(
@@ -48,20 +52,22 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    want_skip_drafts: bool = False,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
-    Coordinates the batch descriptor and DP padding across all ranks.
+    Coordinates the batch descriptor, DP padding and draft-skipping across all ranks.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = num_reqs
+    tensor[5][dp_rank] = int(want_skip_drafts)
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
@@ -69,6 +75,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_counts_across_dp = tensor[2]
     max_query_lens_across_dp = tensor[3]
     num_reqs_across_dp = tensor[4]
+    skip_drafts = bool(int(tensor[5].min().item()) == 1)
 
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
     synced_uniform_token_count: int | None = int(uniform_token_counts_across_dp[0])
@@ -99,6 +106,7 @@ def sync_cudagraph_and_dp_padding(
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
                 num_reqs=int(num_reqs_across_dp.max().item()),
+                skip_drafts=skip_drafts,
             ),
         )
 
@@ -138,6 +146,7 @@ def sync_cudagraph_and_dp_padding(
             and synced_desc.num_reqs is not None
             else int(num_reqs_across_dp.max().item())
         ),
+        skip_drafts=skip_drafts,
     )
 
 
@@ -151,6 +160,7 @@ def dispatch_cg_and_sync_dp(
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
+    want_skip_drafts: bool = False,
     dp_sync: DPSyncState | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
@@ -175,6 +185,9 @@ def dispatch_cg_and_sync_dp(
         need_eager: Force `CUDAGraphMode.NONE` instead of dispatching.
         num_active_loras: Active LoRA count for this rank. Does not need
             cross-rank agreement; it never changes a bucket's token count.
+        want_skip_drafts: Whether this rank's batch consists only of requests
+            whose drafts can never be scheduled. Agreed across ranks (all must
+            want the skip) into `DPSyncState.skip_drafts`.
         dp_sync: Agreement from a prior dispatch over this same batch, to reuse.
             Must come from a batch with this same padded `num_tokens` and the
             same `uniform_token_count`; `num_reqs` may differ, as neither
@@ -239,4 +252,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        want_skip_drafts=want_skip_drafts,
     )
