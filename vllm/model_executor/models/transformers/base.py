@@ -416,8 +416,8 @@ class Base(
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
                 attrsetter(name)(module, PPMissingLayer())
 
-    def _vocab_embedding_ids(self) -> set[int]:
-        """ids of the `nn.Embedding`s in `self.model` which hold a vocab table."""
+    def _vocab_embeddings(self) -> set[nn.Embedding]:
+        """The `nn.Embedding`s in `self.model` which hold a vocab table."""
 
         def vocab_sizes(config: PretrainedConfig):
             for key, value in vars(config).items():
@@ -429,17 +429,17 @@ class Base(
         sizes = set(vocab_sizes(self.config))
         # `get_input_embeddings` may return a module which composes the `nn.Embedding`,
         # or a `PPMissingLayer` if the embeddings are not on this pipeline stage
-        ids = {
-            id(module)
+        embeddings = {
+            module
             for module in self.model.get_input_embeddings().modules()
             if isinstance(module, nn.Embedding)
         }
-        ids.update(
-            id(module)
+        embeddings.update(
+            module
             for module in self.model.modules()
             if isinstance(module, nn.Embedding) and module.num_embeddings in sizes
         )
-        return ids
+        return embeddings
 
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
@@ -473,7 +473,7 @@ class Base(
         # Detect fusable patterns once per module class (cached, so this is cheap)
         fusers = Fusers(self.model, self.vllm_config)
 
-        vocab_embedding_ids = self._vocab_embedding_ids()
+        vocab_embeddings = self._vocab_embeddings()
 
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
@@ -524,7 +524,7 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
-                elif id(child_module) in vocab_embedding_ids:
+                elif child_module in vocab_embeddings:
                     new_module = replace_embedding_class(
                         child_module, self.quant_config, prefix=qual_name
                     )
