@@ -27,6 +27,55 @@ def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
     )
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "model_dtype,cache_dtype,expected_kv_dtype",
+    [
+        (torch.float16, "auto", torch.float16),
+        (torch.bfloat16, "auto", torch.bfloat16),
+        (torch.float16, "bfloat16", torch.bfloat16),
+        (torch.bfloat16, "float16", torch.float16),
+    ],
+)
+def test_triton_sparse_mla_warmup_uses_configured_dtypes(
+    monkeypatch, model_dtype, cache_dtype, expected_kv_dtype
+):
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla import triton_mla_sparse
+
+    calls = set()
+    monkeypatch.setattr(
+        triton_mla_sparse,
+        "get_current_vllm_config_or_none",
+        lambda: SimpleNamespace(
+            model_config=SimpleNamespace(dtype=model_dtype),
+            cache_config=SimpleNamespace(block_size=64),
+        ),
+    )
+    monkeypatch.setattr(
+        triton_mla_sparse,
+        "triton_mla_sparse_attention",
+        lambda q, kv, *args, **kwargs: calls.add((q.dtype, kv.dtype)),
+    )
+    for name in (
+        "warmup_fp8_mqa_logits_triton",
+        "warmup_fp8_paged_mqa_logits_triton",
+    ):
+        monkeypatch.setattr(triton_mla_sparse, name, lambda **kwargs: None)
+    impl = SimpleNamespace(
+        topk_indices_buffer=torch.empty(1, 1, 16),
+        num_heads=16,
+        softmax_scale=1.0,
+        _sm_count=1,
+        kv_cache_dtype=cache_dtype,
+    )
+
+    triton_mla_sparse.TritonMLASparseImpl._warmup_autotune(impl, SimpleNamespace())
+
+    assert calls == {(model_dtype, expected_kv_dtype)}
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
