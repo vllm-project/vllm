@@ -749,6 +749,7 @@ def get_weight_block_size_safety(config, default_value=None):
 
 
 def get_model_params(config):
+    """Extract MoE dimensions (E, topk, intermediate_size, hidden_size) from config."""
     architectures = getattr(config, "architectures", None) or [type(config).__name__]
     architecture = architectures[0]
 
@@ -797,7 +798,11 @@ def get_model_params(config):
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif architecture == "DiffusionGemmaForBlockDiffusion":
+    elif architecture in (
+        "DiffusionGemmaForBlockDiffusion",
+        "Gemma4ForConditionalGeneration",
+        "Gemma4ForCausalLM",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.top_k_experts
