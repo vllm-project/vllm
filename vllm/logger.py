@@ -90,6 +90,12 @@ def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
     logger.warning(msg, *args, stacklevel=3)
 
 
+@lru_cache
+def _print_error_once(logger: Logger, msg: str, *args: Hashable) -> None:
+    # Set the stacklevel to 3 to print the original caller's line info
+    logger.error(msg, *args, stacklevel=3)
+
+
 LogScope = Literal["process", "global", "local"]
 
 
@@ -144,12 +150,22 @@ class _VllmLogger(Logger):
             return
         _print_warning_once(self, msg, *args)
 
+    def error_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
+        """
+        As [`error`][logging.Logger.error], but subsequent calls with
+        the same message are silently dropped.
+        """
+        if not _should_log_with_scope(scope):
+            return
+        _print_error_once(self, msg, *args)
+
 
 # Pre-defined methods mapping to avoid repeated dictionary creation
 _METHODS_TO_PATCH = {
     "debug_once": _VllmLogger.debug_once,
     "info_once": _VllmLogger.info_once,
     "warning_once": _VllmLogger.warning_once,
+    "error_once": _VllmLogger.error_once,
 }
 
 

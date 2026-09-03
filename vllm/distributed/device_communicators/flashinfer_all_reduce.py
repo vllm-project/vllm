@@ -218,7 +218,7 @@ def get_fi_ar_workspace(
             f"with backend={backend}"
         )
     else:
-        logger.warning_once(
+        logger.error_once(
             "Failed to initialize FlashInfer Allreduce norm fusion workspace "
             f"with backend={backend}"
         )
@@ -292,7 +292,7 @@ def get_fi_ar_quant_workspace(
             f"fusion workspace with backend={backend}"
         )
     else:
-        logger.warning_once(
+        logger.error_once(
             "Failed to initialize FlashInfer Allreduce norm quantization "
             f"fusion workspace with backend={backend}"
         )
