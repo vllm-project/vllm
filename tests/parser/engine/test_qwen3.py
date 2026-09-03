@@ -24,6 +24,7 @@ from vllm.parser.qwen3 import (
     TOOL_CALL_START,
     qwen3_config,
 )
+from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 
 @pytest.fixture
@@ -142,6 +143,36 @@ class TestNonStreaming:
         assert result.content is not None
         assert "Let me check the weather" in result.content
         assert result.tool_calls[0].function.name == "get_weather"
+
+    @pytest.mark.parametrize(
+        "before,between,after",
+        [("", "", "Final answer."), ("  Before. ", " Between. ", " After.  ")],
+    )
+    def test_tool_adapter_preserves_text_after_tool_calls(
+        self, mock_tokenizer, mock_request, before, between, after
+    ):
+        """The serving adapter must retain all prose around ordered tool calls."""
+        parser = Qwen3EngineToolParser(mock_tokenizer)
+        text = (
+            f"{before}<tool_call><function=get_weather>"
+            "<parameter=city>Tokyo</parameter></function></tool_call>"
+            f"{between}<tool_call><function=get_time>"
+            "<parameter=timezone>Asia/Tokyo</parameter></function></tool_call>"
+            f"{after}"
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.content == (before + between + after).strip()
+        assert result.tools_called
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "get_weather",
+            "get_time",
+        ]
+        assert [json.loads(tc.function.arguments) for tc in result.tool_calls] == [
+            {"city": "Tokyo"},
+            {"timezone": "Asia/Tokyo"},
+        ]
 
     def test_escaped_strings(self, parser, mock_request):
         text = (
