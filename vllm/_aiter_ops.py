@@ -1994,6 +1994,49 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_fused_qk_rope_cache_mla_enabled(cls) -> bool:
+        # No dedicated switch: the fused rope + KV-cache + fp8-query path is a
+        # kernel substitution on the AITER MLA backend, gated by capability in
+        # MLAAttention; VLLM_ROCM_USE_AITER_MLA=0 is the opt-out.
+        return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @staticmethod
+    def fused_qk_rope_concat_and_cache_mla(
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool,
+    ) -> None:
+        from aiter import fused_qk_rope_concat_and_cache_mla
+
+        fused_qk_rope_concat_and_cache_mla(
+            q_nope,
+            q_pe,
+            kv_c,
+            k_pe,
+            kv_cache,
+            q_out,
+            slot_mapping,
+            k_scale,
+            q_scale,
+            positions,
+            cos_cache,
+            sin_cache,
+            is_neox=is_neox,
+            is_nope_first=True,
+        )
+
+    @classmethod
+    @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
         from vllm.platforms.rocm import get_cdna_version
 
