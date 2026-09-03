@@ -115,7 +115,7 @@ TOPK = 16
         (20, 128, torch.bfloat16, torch.float16, True, (16, False)),
     ],
 )
-def test_amd_decode_score_fallback_launch_policy(
+def test_amd_decode_score_split_launch_policy(
     num_reqs: int,
     head_dim: int,
     query_dtype: torch.dtype,
@@ -124,11 +124,11 @@ def test_amd_decode_score_fallback_launch_policy(
     expected: tuple[int, bool],
 ):
     from vllm.models.minimax_m3.amd.ops.index_topk import (
-        _decode_score_fallback_launch_policy,
+        _decode_score_split_launch_policy,
     )
 
     assert (
-        _decode_score_fallback_launch_policy(
+        _decode_score_split_launch_policy(
             num_reqs,
             head_dim,
             query_dtype,
@@ -230,8 +230,8 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_index_score_balanced_kernel,
         _decode_index_score_kernel,
-        _decode_score_fallback_launch_policy,
         _decode_score_program_budget,
+        _decode_score_split_launch_policy,
     )
 
     set_random_seed(0)
@@ -270,7 +270,7 @@ def test_amd_optimized_decode_score_bitwise_and_graph_replay(
     )
     optimized_chunks = None
     if budget is None:
-        optimized_chunks, use_high_batch_config = _decode_score_fallback_launch_policy(
+        optimized_chunks, use_high_batch_config = _decode_score_split_launch_policy(
             num_reqs,
             head_dim,
             idx_q.dtype,

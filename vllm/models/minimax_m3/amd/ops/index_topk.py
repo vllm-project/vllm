@@ -31,7 +31,7 @@ SPARSE_BLOCK_SIZE = 128
 DECODE_SCORE_BALANCED_PROGRAM_BUDGET = 1024
 DECODE_SCORE_HIGH_BATCH_PROGRAM_BUDGET = 768
 MAX_DECODE_SCORE_BALANCED_REQUESTS = 11
-DECODE_SCORE_FALLBACK_TARGET_GRID = 512
+DECODE_SCORE_DEFAULT_TARGET_GRID = 512
 DECODE_SCORE_GFX950_HIGH_BATCH_TARGET_GRID = 1024
 MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 20
 MAX_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 64
@@ -63,7 +63,7 @@ def _decode_score_program_budget(
     return None
 
 
-def _decode_score_fallback_launch_policy(
+def _decode_score_split_launch_policy(
     num_reqs: int,
     head_dim: int,
     query_dtype: torch.dtype,
@@ -71,7 +71,7 @@ def _decode_score_fallback_launch_policy(
     *,
     is_gfx950: bool,
 ) -> tuple[int, bool]:
-    """Choose the shape-only fallback split and high-batch specialization."""
+    """Choose the generic split-K launch and high-batch specialization."""
     use_high_batch_config = (
         is_gfx950
         and MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS
@@ -84,7 +84,7 @@ def _decode_score_fallback_launch_policy(
     target_grid = (
         DECODE_SCORE_GFX950_HIGH_BATCH_TARGET_GRID
         if use_high_batch_config
-        else DECODE_SCORE_FALLBACK_TARGET_GRID
+        else DECODE_SCORE_DEFAULT_TARGET_GRID
     )
     target = max(
         1,
@@ -1473,7 +1473,7 @@ def minimax_m3_index_decode(
     else:
         # Increase independent work for the measured high-batch gfx950 decode
         # range while preserving the deployed split for every other shape.
-        num_kv_chunks, use_high_batch_config = _decode_score_fallback_launch_policy(
+        num_kv_chunks, use_high_batch_config = _decode_score_split_launch_policy(
             num_reqs,
             head_dim,
             idx_q.dtype,
