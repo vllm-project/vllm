@@ -250,7 +250,7 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
                                                torch::stable::Tensor const& b_scales) {
   int M = a.size(0);
   // more heuristic tuning can be done here by checking N/K dimensions as well
-  bool swap_ab = (M <= 64) || (M % 4 != 0);
+  bool swap_ab = (M <= 64);
 
   if (!swap_ab) {
     if (M <= 256) {

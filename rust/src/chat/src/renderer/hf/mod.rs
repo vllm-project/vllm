@@ -290,6 +290,7 @@ struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
     parameters: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
     strict: Option<bool>,
 }
 
@@ -1278,6 +1279,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_preserves_openai_tool_field_order() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![ChatTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+        }];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some("{% for key, value in tools[0].function.items() %}{{ key }}|{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "name|description|parameters|");
+    }
+
+    #[test]
+    fn chat_template_preserves_python_optional_tool_fields() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![
+            ChatTool {
+                name: "without_strict".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+            },
+            ChatTool {
+                name: "with_strict".to_string(),
+                description: Some("description".to_string()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(false),
+            },
+        ];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some(
+                "{% for tool in tools %}{% for key, value in tool.function.items() %}{{ key }}={{ value|tojson }}|{% endfor %};{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;"
+        );
     }
 
     #[test]

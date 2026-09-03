@@ -49,6 +49,8 @@ pub enum Error {
     UnexpectedHandshakeIdentity { expected: Vec<u8>, actual: Vec<u8> },
     #[error("unexpected startup handshake message: {message}")]
     UnexpectedHandshakeMessage { message: String },
+    #[error("invalid engine-core client configuration: {message}")]
+    InvalidClientConfig { message: String },
     #[error("unexpected non-control output on coordinator path: {message}")]
     UnexpectedCoordinatorOutput { message: String },
     #[error("unexpected output on main dispatcher path: {message}")]

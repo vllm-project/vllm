@@ -12,7 +12,7 @@ import torch
 
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
+    get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
@@ -35,20 +35,20 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
-def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+def get_kv_connector_cache_layout(vllm_config: VllmConfig | None = None):
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout is
     # used for faster transfer.
-    vllm_config = get_current_vllm_config()
+    if vllm_config is None:
+        vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
         connector_cls = KVConnectorFactory.get_connector_class(kv_config)
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(vllm_config)
         if required_kvcache_layout is not None:
             return required_kvcache_layout
-        logger.info_once(
-            "Connectors do not specify a kv cache layout, defaulting to NHD."
-        )
-    return "NHD"
+    return None
 
 
 class KVOutputAggregator:
@@ -288,11 +288,11 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """
-    Transforms the layout of received KV cache to the local block_size and HND.
+    Transforms the layout of received KV cache to the local block_size and LBHNC.
     (Only works for local blocksize > remote blocksize)
 
-    prefill is HND, smaller block_size
-    decode(local) is NHD, larger block_size
+    prefill is LBHNC, smaller block_size
+    decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
@@ -404,6 +404,9 @@ class EngineTransferInfo:
     end_layer: int = 0
     """Exclusive global index after the last layer owned by this PP rank."""
 
+    remote_dcp_size: int = 1
+    """Remote decode context parallel size."""
+
 
 # ---- Transfer topology ----
 
@@ -420,54 +423,13 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    dcp_size: int = 1
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
         self.local_physical_heads = max(1, self.total_num_kv_heads // self.tp_size)
 
         self._engines: dict[tuple[EngineId, int], EngineTransferInfo] = {}
-
-        # Figure out whether the first dimension of the cache is K/V
-        # or num_blocks.
-        attn_backend = self.attn_backends[0]
-        if not self.is_mamba:
-            _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1,
-                block_size=_MOCK_BLOCK_SIZE,
-                num_kv_heads=1,
-                head_size=1,
-            )
-            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-            assert kv_cache_shape[0] == 1, (
-                "KV cache layout must be blocks-first; expected mocked "
-                f"num_blocks=1 in leading dim, got shape {kv_cache_shape}."
-            )
-            if not self.is_mla:
-                assert len(kv_cache_shape) == 4, (
-                    "Attention KV cache layout must be standardized as "
-                    "[num_blocks, num_kv_heads, block_size, content_size], "
-                    f"got shape {kv_cache_shape}."
-                )
-
-        self._cross_layers_blocks = False
-        if self.tensor_shape is not None:
-            self._cross_layers_blocks = (
-                len(self.tensor_shape) == len(kv_cache_shape) + 1
-            )
-
-        if self._cross_layers_blocks:
-            logger.debug("Using cross-layer KV cache")
-            _MOCK_NUM_LAYERS = 80
-            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                assert self.tensor_shape is not None
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
     # ============================================================
     # Engine registration
@@ -503,23 +465,14 @@ class TransferTopology:
         for key in [k for k in self._engines if k[0] == remote_engine_id]:
             del self._engines[key]
 
-    # ============================================================
-    # Layout properties
-    # ============================================================
-
     @property
-    def cross_layers_blocks(self) -> bool:
-        return self._cross_layers_blocks
+    def dcp_rank(self) -> int:
+        """This rank's DCP coverage rank.
 
-    @property
-    def virtually_split_kv_in_blocks(self) -> bool:
-        # Whether to logically split each block into two separately-indexable
-        # sub-regions. With K and V packed into the content dim, an attention
-        # block transfers as a single unit — no K/V sub-split is needed. Only
-        # Mamba still needs this, to index its two state regions (conv/ssm)
-        # separately. Not applicable to cross-layer blocks (per-layer
-        # interleaving means a simple half-split does not separate the parts).
-        return self.is_mamba and not self._cross_layers_blocks
+        with ``dcp_size in (1, tp_size)`` enforced at the connector boundary, a
+        rank's DCP identity is always exactly ``tp_rank % dcp_size``.
+        """
+        return self.tp_rank % self.dcp_size
 
     # ============================================================
     # Common methods
@@ -574,17 +527,69 @@ class TransferTopology:
         """Whether the local engine's KV cache is replicated."""
         return self.is_mla or self.tp_size > self.total_num_kv_heads
 
-    def handshake_target_ranks(self, remote_tp_size: int) -> list[int]:
+    def dcp_source_ranks(self, remote_tp_size: int, remote_dcp_size: int) -> list[int]:
+        """Remote ranks whose DCP slice overlaps mine (MLA, ``remote_dcp_size > 1``).
+
+        Shared by ``handshake_target_ranks`` (who to query metadata from) and
+        ``compute_tp_mapping`` (who to actually read from) — for MLA the two
+        questions have the identical answer, since DCP sharding is the only
+        thing keeping a remote rank from being interchangeable with any other.
+        """
+        local_dcp_size = self.dcp_size
+        local_dcp_rank = self.dcp_rank
+        if local_dcp_size <= remote_dcp_size:
+            # Keep every remote rank whose slice sits inside mine. When
+            # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
+            # every remote rank, since no single one holds the whole sequence.
+            return [
+                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
+            ]
+        # Local finer-grained: exactly one remote rank covers my whole slice
+        return [local_dcp_rank % remote_dcp_size]
+
+    def handshake_target_ranks(
+        self, remote_tp_size: int, remote_dcp_size: int = 1
+    ) -> list[int]:
         """Pre-registration: compute which remote TP ranks to handshake with.
 
-        Pure math based on local/remote TP sizes — does not require
-        the remote engine to be registered yet.
+        Pure math based on local/remote TP (and DCP, when the remote shards
+        its KV cache) sizes — does not require the remote engine to be
+        registered yet.
+
+        DCP support is scoped to ``dcp_size in (1, tp_size)`` on each side
+        and DCP sizes that divide one another: neither side ever has a
+        partially-duplicated, partially-sharded KV cache. When the
+        remote is not sharded (``remote_dcp_size == 1``) this reduces
+        exactly to the DTP>=PTP case, since a sharded local side
+        already has ``tp_size == dcp_size``.
         """
+        if remote_dcp_size > 1:
+            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+
+    def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
+        """How many local ranks (in aggregate) read from a given remote rank.
+
+        Used by the producer side to know how many reader notifications to
+        wait for before freeing a request's blocks. Reuses ``tp_ratio``
+        whenever the remote isn't sharded — a sharded local side already
+        has ``tp_size == dcp_size``, so the existing TP-ratio formula is
+        already correct there unmodified.
+        """
+        if remote_dcp_size > 1:
+            if self.dcp_size == 1:
+                # Replicated locally: every local rank reads every shard.
+                return self.tp_size
+            # Both sharded, different degrees.
+            return max(1, self.dcp_size // remote_dcp_size)
+        # Remote replicated: `tp_ratio` local ranks share each remote rank
+        # when local_tp >= remote_tp, else each remote rank has one reader.
+        return max(1, self.tp_ratio(remote_tp_size))
 
     def target_remote_ranks(
         self, remote_engine_id: EngineId, remote_pp_rank: int = 0
@@ -611,6 +616,8 @@ class TransferTopology:
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"remote_pp={remote_pp_rank}, "
+            f"local_dcp={self.dcp_size}, "
+            f"remote_dcp={info.remote_dcp_size}, "
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )

@@ -399,9 +399,14 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
-    checkpoint_skip_substrs = ("confidence_head", "embed_tokens", "lm_head")
-
     hf_to_vllm_mapper = WeightsMapper(
+        # confidence_head is training-only. The frozen target embedding and LM
+        # head are shared after this draft-specific checkpoint is loaded.
+        orig_to_new_substr={
+            "confidence_head": None,
+            "embed_tokens": None,
+            "lm_head": None,
+        },
         orig_to_new_prefix={"": "model."},
         orig_to_new_stacked={
             ".gate_proj": (".gate_up_proj", 0),
@@ -477,12 +482,7 @@ class K3DSparkForCausalLM(nn.Module):
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # confidence_head is training-only. The frozen target embedding and LM
-        # head are shared after this draft-specific checkpoint is loaded.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=list(self.checkpoint_skip_substrs),
-        )
+        loader = AutoWeightsLoader(self)
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

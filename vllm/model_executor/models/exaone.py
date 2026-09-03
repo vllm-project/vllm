@@ -446,11 +446,5 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            # With tie_word_embeddings, we can skip lm_head.weight
-            # The weight might appear unnecessarily in the files if the model is
-            # processed with quantization, LoRA, fine-tuning, etc.
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
