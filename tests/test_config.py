@@ -2611,11 +2611,11 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
 
 
 def test_structured_outputs_config_max_whitespace_cnt_default():
-    """Test that max_whitespace_cnt defaults to 2."""
+    """Test that max_whitespace_cnt defaults to 8."""
     from vllm.config import StructuredOutputsConfig
 
     config = StructuredOutputsConfig()
-    assert config.max_whitespace_cnt == 2
+    assert config.max_whitespace_cnt == 8
 
 
 def test_structured_outputs_config_max_whitespace_cnt_custom():

@@ -57,21 +57,21 @@ class TestMaxWhitespaceCnt:
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
     def test_max_whitespace_cnt_default(self, mock_xgr, mock_vllm_config):
-        """Verify default max_whitespace_cnt=2 is passed to compile_json_schema."""
+        """Verify default max_whitespace_cnt=8 is passed to compile_json_schema."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
             mock_compiled
         )
         mock_xgr.TokenizerInfo.from_huggingface.return_value = Mock()
 
-        backend = self._make_backend(mock_vllm_config, max_whitespace_cnt=2)
+        backend = self._make_backend(mock_vllm_config, max_whitespace_cnt=8)
 
         backend.compile_grammar(StructuredOutputOptions.JSON, '{"type": "object"}')
 
         call = mock_xgr.GrammarCompiler.return_value.compile_json_schema
         call.assert_called_once()
         kwargs = call.call_args.kwargs
-        assert kwargs.get("max_whitespace_cnt") == 2
+        assert kwargs.get("max_whitespace_cnt") == 8
         assert kwargs.get("any_whitespace") is True
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
