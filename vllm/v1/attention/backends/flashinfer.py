@@ -568,6 +568,10 @@ class FlashInferDecodeKernel(Enum):
     TRTLLM_GEN = "trtllm-gen"
 
 
+def _is_xqa_head_dim_supported(head_dim: int) -> bool:
+    return 16 <= head_dim <= 256 and head_dim % 16 == 0
+
+
 @dataclass
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
@@ -822,7 +826,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # the wider groups fall back to native FlashInfer decode.
         if (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
-            and not (16 <= self.head_dim <= 256 and self.head_dim % 16 == 0)
+            and not _is_xqa_head_dim_supported(self.head_dim)
         ):
             logger.warning_once(
                 "FlashInfer XQA decode does not support head_dim=%d; "
@@ -989,6 +993,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_qo_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
+        is_xqa_arch = current_platform.is_device_capability(
+            90
+        ) or current_platform.is_device_capability_family(120)
         has_uniform_batch_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
@@ -999,13 +1006,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
                 is_prefill=False,
-            ):
+            ) or (is_xqa_arch and not _is_xqa_head_dim_supported(spec.head_size)):
                 has_uniform_batch_support = False
                 break
-
-        is_xqa_arch = current_platform.is_device_capability(
-            90
-        ) or current_platform.is_device_capability_family(120)
 
         use_non_causal = vllm_config.attention_config.use_non_causal
         if has_uniform_batch_support and (not use_non_causal or is_xqa_arch):
@@ -1367,8 +1370,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             sinks_would_be_dropped = self.use_dcp or use_cascade
             if self.has_sinks and sinks_would_be_dropped:
                 raise NotImplementedError(
-                    "FlashInfer backend does not support attention sinks on "
-                    "the DCP prefill or cascade path."
+                    "FlashInfer BatchDCPPrefillWrapper and "
+                    "MultiLevelCascadeAttentionWrapper do not support attention sinks. "
+                    "Please use TRTLLM on Blackwell or FlashAttention on earlier GPUs."
                 )
 
             if not self.global_hyperparameters.has_same_window_lefts:

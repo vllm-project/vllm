@@ -1113,6 +1113,18 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
         )
         == AttentionCGSupport.UNIFORM_BATCH
     )
+    wide_head_kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=kv_cache_spec.num_kv_heads,
+        head_size=512,
+        dtype=vllm_config.model_config.dtype,
+    )
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, wide_head_kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
     assert isinstance(
         attn_metadata.decode,
         flashinfer_backend.FlashInferTrtllmAPIDecode,
