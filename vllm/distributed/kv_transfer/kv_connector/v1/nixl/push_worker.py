@@ -39,6 +39,7 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 import msgspec
+from vllm.logger import init_logger
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
@@ -55,9 +56,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
     _is_attention_spec,
+    compute_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
-from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     import torch
@@ -313,6 +314,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             reg_data["remote_host"],
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
+            dcp_size=reg_data.get("remote_dcp_size", 1),
             pp_size=remote_pp_size,
             # D only ever sends PUSH_REG notifs to P and never reads or writes
             # P's memory in push mode, so it never needs the transfer
@@ -436,6 +438,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["decode_host"],
             registration_data["decode_port"],
             registration_data["decode_tp_size"],
+            dcp_size=registration_data.get("decode_dcp_size", 1),
+            pp_size=registration_data.get("decode_pp_size", 1),
         )
         if fut is not None:
 
@@ -462,6 +466,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
+        if self._kda_transport is not None:
+            self._kda_transport.stage_groups([list(group) for group in logical_local])
         physical_local = self._logical_to_kernel_block_ids(
             logical_local, self._physical_blocks_per_logical_kv_block
         )
@@ -730,11 +736,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
                 if (meta := self._recving_metadata.get(req_id)) is not None:
-                    # Consumer waits for one notif per producer rank writing
-                    # here: pp_size stages * producers-per-consumer (>1 when
-                    # producer TP > consumer TP; tp_size is the producer TP).
-                    producers_per_consumer = max(1, int(tp_size) // self.world_size)
-                    expected_notifs = meta.pp_size * producers_per_consumer
+                    # Consumer waits for one notification from every producer
+                    # rank whose group mapping writes into this rank. DCP can
+                    # make multiple homogeneous-TP producers overlap for MLA,
+                    # while KDA target state remains rank-sharded.
+                    producer_plan = compute_tp_mapping(
+                        transfer_topology=self.transfer_topo,
+                        remote_tp_size=int(tp_size),
+                        group_spec_types=self._group_spec_types,
+                        remote_dcp_size=meta.dcp_size,
+                    )
+                    producers_per_consumer = len(producer_plan.all_source_ranks)
+                    # Homogeneous PP pairs stage i with stage i. The legacy
+                    # PP-sharded producer -> PP1 consumer path still receives
+                    # one notification from every producer stage.
+                    stage_matched_pp = self.pp_size > 1 and self.pp_size == meta.pp_size
+                    expected_notifs = producers_per_consumer * (
+                        1 if stage_matched_pp else meta.pp_size
+                    )
                     self.consumer_notification_counts_by_req[req_id] += 1
                     notifs = self.consumer_notification_counts_by_req[req_id]
                     if notifs < expected_notifs:

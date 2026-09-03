@@ -8,6 +8,17 @@ from itertools import chain, count
 from typing import Any, Literal
 
 import torch
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
+    ExampleConnector,
+)
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm import SamplingParams
 from vllm.config import (
@@ -26,14 +37,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
-    ExampleConnector,
-)
-from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -41,9 +44,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request
-from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
 
@@ -596,6 +596,7 @@ def make_nixl_push_scheduler(
     # vllm_config is consulted for parallel_config.tensor_parallel_size.
     vllm_config = MagicMock()
     vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.parallel_config.pipeline_parallel_size = 1
     sched.vllm_config = vllm_config
 
     # Push-specific state.

@@ -19,6 +19,25 @@ import msgspec
 import numpy as np
 import torch
 import zmq
+from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
+    KDATargetStateTransport,
+    kda_target_state_transport_enabled,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+from vllm.distributed.parallel_state import (
+    get_pcp_group,
+    get_pp_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.utils import select_common_block_size
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
@@ -31,7 +50,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -60,17 +78,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
-from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
-from vllm.distributed.parallel_state import (
-    get_pcp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
-from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.network_utils import make_zmq_path
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -83,8 +90,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     iter_layer_specs,
 )
-from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -158,16 +163,16 @@ class NixlBaseConnectorWorker:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
         if self._has_mamba:
-            assert self._conv_decomp is not None
-            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
-            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
-            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
-            # Count only the regions that actually hold SSM state; must match
-            # the descriptors emitted by _build_mamba_local.
-            num_ssm_regions = (
-                len(self._ssm_region_indices or self.block_len_per_layer)
-                * ssm_regions_per_layer
-            )
+            if getattr(self, "_kda_transport", None) is not None:
+                num_ssm_regions = len(self._ssm_region_indices)
+            else:
+                assert self._conv_decomp is not None
+                # NIXL regions per SSM layer = conv sub-projections + temporal.
+                ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+                num_ssm_regions = (
+                    len(self._ssm_region_indices or self.block_len_per_layer)
+                    * ssm_regions_per_layer
+                )
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -200,11 +205,21 @@ class NixlBaseConnectorWorker:
             spec_type = self._group_spec_types[i]
             if _is_attention_spec(spec_type):
                 # A scratch cache lives only in its own regions; every other
-                # attention group spans all of them.
+                # attention group spans all attention-backed HMA regions.
+                # KDA target-state staging uses independent allocations and
+                # must only be addressed by the SSM group's block table.
                 fa_region_ids = (
                     np.asarray(self._scratch_region_indices, dtype=np.int32)
                     if spec_type is CircularBufferSpec
-                    else np.arange(self.num_regions, dtype=np.int32)
+                    else np.asarray(
+                        [
+                            region_id
+                            for region_id in range(self.num_regions)
+                            if self._kda_transport is None
+                            or region_id not in self._ssm_region_indices
+                        ],
+                        dtype=np.int32,
+                    )
                 )[:, None]
                 all_descs.append(
                     (fa_region_ids * num_blocks + group_arr[None, :]).ravel()
@@ -376,6 +391,10 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
+        self._kda_target_state_enabled = kda_target_state_transport_enabled(
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
+        self._kda_transport: KDATargetStateTransport | None = None
         # Per-layer specs, unwrapping UniformTypeKVCacheSpecs group wrappers.
         self._layer_specs: dict[str, KVCacheSpec] = {}
         for group in kv_cache_config.transfer_groups:
@@ -486,7 +505,7 @@ class NixlBaseConnectorWorker:
         # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
         # replicated or fully sharded. A DCP rank is always derivable this way.
         self.dcp_rank = self.tp_rank % self.dcp_size
-        if self._has_mamba and self.dcp_size > 1:
+        if self._has_mamba and self.dcp_size > 1 and not self._kda_target_state_enabled:
             # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
             raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
 
@@ -557,22 +576,12 @@ class NixlBaseConnectorWorker:
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
 
-        # PP>1 (push mode): this worker holds a contiguous layer slice and
-        # transfers into the matching sub-range of a PP=1 remote's regions.
+        # PP>1: each worker holds a contiguous layer slice. Homogeneous P/D
+        # deployments transfer only between matching PP stages; the legacy
+        # PP-sharded producer -> PP1 consumer path keeps using region slicing.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_rank = get_pp_group().rank_in_group if self.pp_size > 1 else 0
         self._remote_region_offset = 0
-        # PP push slices regions per layer (uniform count); HMA breaks that.
-        if self.pp_size > 1 and self._is_hma_required:
-            raise NotImplementedError(
-                "NixlPushConnector does not support pipeline_parallel_size > 1 "
-                "with hybrid KV cache layouts (HMA) yet."
-            )
-        # Decode-side PP is unsupported (completions counted per consumer rank).
-        if vllm_config.kv_transfer_config.kv_role == "kv_consumer" and self.pp_size > 1:
-            raise NotImplementedError(
-                "NixlPushConnector consumer (decode) does not support "
-                "pipeline_parallel_size > 1."
-            )
         # Keep heartbeat handshakes to a PP-sharded producer notif-only.
         self._hb_handshake_notif_only = False
 
@@ -791,9 +800,10 @@ class NixlBaseConnectorWorker:
         best_rtt = float("inf")
         best_offset: float | None = None
 
+        remote_pp_ranks = self._remote_pp_ranks_for_handshake(remote_pp_size)
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
-                range(remote_pp_size), p_remote_ranks
+                remote_pp_ranks, p_remote_ranks
             ):
                 logger.debug(
                     "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
@@ -903,6 +913,26 @@ class NixlBaseConnectorWorker:
 
         assert best_offset is not None
         return remote_rank_to_agent_name, best_offset
+
+    def _remote_pp_ranks_for_handshake(self, remote_pp_size: int) -> tuple[int, ...]:
+        """Return the remote PP stages this worker may exchange KV with.
+
+        Hybrid KDA/MLA state is safe for PP only when both deployments use the
+        same pipeline partition: stage ``i`` then exchanges only with stage
+        ``i``. Mismatched HMA PP layouts remain fail-closed because slicing a
+        heterogeneous layer/state layout by a uniform region offset is unsafe.
+        """
+        if remote_pp_size < 1:
+            raise ValueError(f"remote_pp_size must be positive, got {remote_pp_size}")
+        if self.pp_size == remote_pp_size:
+            return (self.pp_rank,)
+        if self._is_hma_required and (self.pp_size > 1 or remote_pp_size > 1):
+            raise NotImplementedError(
+                "NIXL HMA pipeline transfer requires homogeneous pipeline "
+                "parallelism with matching P/D stage partitions; "
+                f"local PP={self.pp_size}, remote PP={remote_pp_size}."
+            )
+        return tuple(range(remote_pp_size))
 
     def _add_notif_only_remote_agent(
         self, metadata: NixlAgentMetadata, remote_tp_size: int, remote_dcp_size: int = 1
@@ -1129,6 +1159,24 @@ class NixlBaseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
+        if self._kda_target_state_enabled:
+            if self.use_host_buffer:
+                raise NotImplementedError(
+                    "KDA target-state transport does not support host staging"
+                )
+            self._kda_transport = KDATargetStateTransport.create(
+                kv_caches, self.kv_cache_config
+            )
+            if not self._kda_transport.layers:
+                raise ValueError(
+                    "KDA target-state transport was enabled but no KDA layers exist"
+                )
+            sample = next(iter(self._kda_transport.layers.values())).regions
+            self._mamba_ssm_size = (
+                sample[0].content_len_bytes,
+                sample[1].content_len_bytes,
+            )
+
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1280,28 +1328,54 @@ class NixlBaseConnectorWorker:
             # Memory registration follows allocations, while transfer regions follow
             # logical layers (or contiguous head segments). This keeps strided
             # cross-layer views inside their registered allocation.
-            if storage_addr not in seen_storage_addresses:
-                seen_storage_addresses.add(storage_addr)
-                self.device_id = max(cache.get_device(), 0)
-                caches_data.append((storage_addr, storage.nbytes(), self.device_id, ""))
+            def register_storage(tensor: torch.Tensor) -> None:
+                storage = tensor.untyped_storage()
+                storage_addr = storage.data_ptr()
+                if storage_addr not in seen_storage_addresses:
+                    seen_storage_addresses.add(storage_addr)
+                    self.device_id = max(tensor.get_device(), 0)
+                    caches_data.append(
+                        (storage_addr, storage.nbytes(), self.device_id, "")
+                    )
 
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
             )
 
             if isinstance(layer_spec, MambaSpec):
-                physical_ratio = self._physical_blocks_per_logical_kv_block
-                block_len = physical_page_size // physical_ratio
-                block_stride = physical_page_size
-                if self._is_csa_linear and cache.ndim != 1:
-                    # CSA-linear packs multiple cache owners in each block, so
-                    # state views advance by the packed block stride.
-                    block_stride = cache.stride(0) * cache.element_size()
-                assert block_stride % physical_ratio == 0
-                region_specs = [
-                    (cache.data_ptr(), block_len, block_stride // physical_ratio)
-                ]
+                if self._kda_transport is not None:
+                    regions = self._kda_transport.regions_for_layer(layer_name)
+                    if not regions:
+                        raise ValueError(
+                            f"Missing KDA transport regions for {layer_name}"
+                        )
+                    for region in regions:
+                        register_storage(region.tensor)
+                    region_specs = [
+                        (
+                            region.tensor.data_ptr(),
+                            region.content_len_bytes,
+                            region.block_stride_bytes,
+                        )
+                        for region in regions
+                    ]
+                else:
+                    register_storage(cache)
+                    physical_ratio = self._physical_blocks_per_logical_kv_block
+                    block_len = physical_page_size // physical_ratio
+                    block_stride = physical_page_size
+                    if self._is_csa_linear and cache.ndim != 1:
+                        # CSA-linear packs multiple cache owners in each block, so
+                        # state views advance by the packed block stride.
+                        block_stride = cache.stride(0) * cache.element_size()
+                    assert block_stride % physical_ratio == 0
+                    region_specs = [
+                        (cache.data_ptr(), block_len, block_stride // physical_ratio)
+                    ]
             else:
+                register_storage(cache)
+                storage = cache.untyped_storage()
+                storage_addr = storage.data_ptr()
                 if cache.ndim == 1:
                     # Flat byte view: HMA tensors shared between layer types carry
                     # no block dimension, so stride(0) is 1 byte. Blocks abut, so
@@ -1390,7 +1464,8 @@ class NixlBaseConnectorWorker:
             # When there's a mismatch between kbs<>bs, we rely on HMA to ensure
             # caches are either [NB, PS] or [NB*r, PS/r] where r is bs/kbs.
             if (
-                self._physical_blocks_per_logical_kv_block == 1
+                self._kda_transport is None
+                and self._physical_blocks_per_logical_kv_block == 1
                 and cache.shape[0] != num_blocks
             ):
                 raise AssertionError(
@@ -1421,7 +1496,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(seen_base_addresses)
 
-        if self.pp_size > 1:
+        if self.pp_size > 1 and not self._is_hma_required:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
                 self.vllm_config.parallel_config
             )
@@ -1429,6 +1504,9 @@ class NixlBaseConnectorWorker:
             assert num_local_layers > 0 and self.num_regions % num_local_layers == 0
             regions_per_layer = self.num_regions // num_local_layers
             self._remote_region_offset = regions_per_layer * start_layer
+        # HMA regions are not uniform per transformer layer. Homogeneous PP
+        # never slices them: stage i handshakes directly with remote stage i,
+        # whose descriptor list already covers the same layer/state partition.
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
@@ -1524,6 +1602,17 @@ class NixlBaseConnectorWorker:
         ratio-expanded (see _compute_desc_ids).
         """
         assert base_addresses, "Local KV cache base addresses must not be empty."
+        if getattr(self, "_kda_transport", None) is not None:
+            num_blocks = self._logical_num_blocks
+            block_arange = np.arange(num_blocks, dtype=np.uint64)
+            parts = []
+            for region_index in self._ssm_region_indices:
+                block_len = self.block_len_per_layer[region_index]
+                block_stride = self.block_stride_per_layer[region_index]
+                block_addrs = base_addresses[region_index] + block_arange * block_stride
+                parts.append(self._stack_descs(block_addrs, block_len, self.device_id))
+            return np.concatenate(parts)
+
         assert self._conv_decomp is not None
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
@@ -1565,6 +1654,33 @@ class NixlBaseConnectorWorker:
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
         )
+        if getattr(self, "_kda_transport", None) is not None:
+            num_blocks = nixl_agent_meta.num_blocks // (
+                transfer_info.remote_physical_blocks_per_logical
+            )
+            block_arange = np.arange(num_blocks, dtype=np.uint64)
+            parts = []
+            for region_index in self._ssm_region_indices:
+                local_len = self.block_len_per_layer[region_index]
+                remote_len = nixl_agent_meta.block_lens[region_index]
+                if local_len != remote_len:
+                    raise ValueError(
+                        "KDA target-state region length mismatch: "
+                        f"local={local_len}, remote={remote_len}, "
+                        f"region={region_index}"
+                    )
+                remote_stride = nixl_agent_meta.block_strides[region_index]
+                block_addrs = (
+                    nixl_agent_meta.kv_caches_base_addr[region_index]
+                    + block_arange * remote_stride
+                )
+                parts.append(
+                    self._stack_descs(
+                        block_addrs, remote_len, nixl_agent_meta.device_id
+                    )
+                )
+            return np.concatenate(parts)
+
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
         # Mamba conv state is always TP-sharded, even when attention KV
@@ -2363,6 +2479,11 @@ class NixlBaseConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            if self._kda_transport is not None:
+                self._kda_transport.materialize_groups(
+                    [list(group) for group in meta.local_block_ids]
+                )
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block

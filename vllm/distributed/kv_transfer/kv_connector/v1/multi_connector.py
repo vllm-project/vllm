@@ -6,20 +6,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-
-from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp,
-    KVConnectorBase_V1,
-    KVConnectorHandshakeMetadata,
-    KVConnectorMetadata,
-    KVConnectorRole,
-    KVConnectorWorkerMetadata,
-    SupportsHMA,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -31,13 +19,26 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
+    KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
+    KVConnectorMetadata,
+    KVConnectorRole,
+    KVConnectorWorkerMetadata,
+    SupportsHMA,
+)
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -151,6 +152,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return False
 
     @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        connectors_config = extra_config.get("connectors", [])
+        return bool(connectors_config) and all(
+            KVConnectorFactory.supports_kda_recoverssm_config(
+                KVTransferConfig(**connector_config)
+            )
+            for connector_config in connectors_config
+        )
+
+    @classmethod
     def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Return True only if every configured child connector supports HMA."""
         connectors_config = kv_transfer_config.kv_connector_extra_config.get(
@@ -165,6 +176,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if not KVConnectorFactory.supports_hma_config(child_config):
                 return False
         return True
+
+    @classmethod
+    def all_children_support_kda_recoverssm(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return cls.supports_kda_recoverssm_transport(
+            kv_transfer_config.kv_connector_extra_config
+        )
 
     def __init__(
         self,

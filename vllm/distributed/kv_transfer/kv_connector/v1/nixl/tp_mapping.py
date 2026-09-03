@@ -110,7 +110,11 @@ def compute_tp_mapping(
     # --- SSM source ranks ---
     has_ssm = any(_is_ssm_spec(t) for t in group_spec_types)
     if has_ssm:
-        if tp_size < remote_tp_size:
+        if tp_size == remote_tp_size:
+            # Unlike replicated MLA pages, SSM target state remains TP
+            # sharded even when DCP makes multiple attention ranks overlap.
+            ssm_ranks = [tp_rank]
+        elif tp_size < remote_tp_size:
             abs_tp = remote_tp_size // tp_size
             ssm_ranks = list(range(tp_rank * abs_tp, (tp_rank + 1) * abs_tp))
         else:

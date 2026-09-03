@@ -46,14 +46,12 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -64,8 +62,10 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
 CopyBlocksOp = Callable[
@@ -634,6 +634,16 @@ class KVConnectorBase_V1(ABC):
             True if this connector requires PIECEWISE CUDA graph mode,
             False otherwise.
         """
+        return False
+
+    @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        """Whether this connector explicitly supports KDA target-state transport."""
+        return False
+
+    @classmethod
+    def supports_dspark_context_transport(cls, extra_config: dict[str, Any]) -> bool:
+        """Whether this connector transports DSpark prompt-context KV."""
         return False
 
     def get_finished_count(self) -> int | None:

@@ -31,6 +31,7 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
+from vllm.v1.outputs import KVConnectorOutput
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
@@ -44,7 +45,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_push_scheduler
 
@@ -152,6 +152,7 @@ class TestPushScheduler:
         assert reg["decode_engine_id"] == sched.engine_id
         assert reg["decode_host"] == sched.side_channel_host
         assert reg["decode_port"] == sched.side_channel_port
+        assert reg["decode_pp_size"] == 1
         assert reg["local_block_ids"] == ([10, 11, 12],)
         assert reg["remote_engine_id"] == "prefill-engine"
 
@@ -354,11 +355,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.tp_rank = 0
         w.pcp_rank = 0
         w.world_size = 1
+        w.pp_size = 1
+        w.pp_rank = 0
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
+        w._is_hma_required = False
         w._is_csa_linear = False
         w._group_spec_types = (FullAttentionSpec,)
         w._engine_ttl = 0.0
@@ -386,6 +390,7 @@ def _registration_data(
     decode_host: str = "10.0.0.2",
     decode_port: int = 5602,
     decode_tp_size: int = 1,
+    decode_pp_size: int = 1,
     local_block_ids=((100, 101, 102),),
     remote_engine_id: str = "prefill-engine",
     remote_host: str = "10.0.0.1",
@@ -398,6 +403,7 @@ def _registration_data(
         "decode_host": decode_host,
         "decode_port": decode_port,
         "decode_tp_size": decode_tp_size,
+        "decode_pp_size": decode_pp_size,
         "local_block_ids": local_block_ids,
         "remote_engine_id": remote_engine_id,
         "remote_host": remote_host,
@@ -573,12 +579,21 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
 
     fut: Future = Future()
-    w._ensure_handshake = lambda *a, **k: fut
+    handshake_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    rd = _registration_data("req-hs", decode_engine_id="decode-engine")
+    def pending_handshake(*args, **kwargs):
+        handshake_calls.append((args, kwargs))
+        return fut
+
+    w._ensure_handshake = pending_handshake
+
+    rd = _registration_data(
+        "req-hs", decode_engine_id="decode-engine", decode_pp_size=2
+    )
     _real_do_start_push_kv(w, "req-hs", ([1, 2, 3],), rd)
 
     # Handshake pending -> nothing issued, nothing queued, no wake.
+    assert handshake_calls[0][1]["pp_size"] == 2
     assert xfer_calls == []
     assert w._deferred_push_inbox.qsize() == 0
     assert not w._push_writer_wake.is_set()
@@ -1053,6 +1068,59 @@ class TestPushPipelineParallel:
         assert w._get_new_notifs() == set()
         assert request_id in w._recving_transfers
         assert request_id not in w.consumer_notification_counts_by_req
+
+    def test_homogeneous_pp_completion_uses_matching_stage_only(self):
+        """PP2 -> PP2 needs one notification from the matching P stage."""
+        w = _StubWriterWorker.fresh()
+        w.pp_size = 2
+        w.pp_rank = 1
+        w.transfer_topo = MagicMock()
+        request_id = "req-pp-2-matched"
+        w._recving_metadata[request_id] = MagicMock(pp_size=2)
+
+        w._pending_completion_notifs.put(f"{request_id}:1".encode())
+        assert w._get_new_notifs() == set()
+        assert request_id in w._recving_transfers
+        assert request_id not in w.consumer_notification_counts_by_req
+
+    def test_hybrid_dcp_completion_waits_for_all_overlapping_producers(self):
+        w = _StubWriterWorker.fresh()
+        w._has_mamba = True
+        w.use_mla = True
+        w._group_spec_types = (FullAttentionSpec,)
+        w.transfer_topo = MagicMock()
+        request_id = "req-dcp-overlap"
+        w._recving_metadata[request_id] = MagicMock(pp_size=1, tp_size=8, dcp_size=4)
+        notif = f"{request_id}:8".encode()
+
+        mapping = MagicMock(all_source_ranks=(0, 4))
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker."
+            "compute_tp_mapping",
+            return_value=mapping,
+        ):
+            w._pending_completion_notifs.put(notif)
+            assert w._get_new_notifs() == set()
+            assert request_id not in w._recving_transfers
+
+            w._pending_completion_notifs.put(notif)
+            assert w._get_new_notifs() == set()
+            assert request_id in w._recving_transfers
+
+    def test_homogeneous_pp_handshake_selects_matching_stage(self):
+        w = _StubWriterWorker.fresh()
+        w.pp_size = 2
+        w.pp_rank = 1
+        w._is_hma_required = True
+        assert w._remote_pp_ranks_for_handshake(2) == (1,)
+
+    def test_hma_mismatched_pp_fails_closed(self):
+        w = _StubWriterWorker.fresh()
+        w.pp_size = 2
+        w.pp_rank = 0
+        w._is_hma_required = True
+        with pytest.raises(NotImplementedError, match="homogeneous pipeline"):
+            w._remote_pp_ranks_for_handshake(1)
 
     def test_req_meta_reads_pp_size_from_kv_transfer_params(self):
         """D learns the producer's pp_size from kv_transfer_params (forwarded
