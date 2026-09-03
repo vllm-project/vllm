@@ -5,9 +5,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.parser.parser_manager import ParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.k2_horizon_tool_parser import K2HorizonToolParser
