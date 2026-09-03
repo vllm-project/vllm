@@ -1219,11 +1219,10 @@ timm==1.0.17
     #   -r requirements/test/cuda.in
     #   open-clip-torch
     #   segmentation-models-pytorch
-tokenizers==0.22.2
+tokenizers==0.23.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/cuda.in
     #   cohere
     #   transformers
 torch==2.13.0+cu130
@@ -1282,7 +1281,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.15.0
+transformers==5.16.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
