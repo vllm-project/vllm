@@ -1234,12 +1234,15 @@ def position_meshgrid_from_sizes(
 
     pos_ids = [_hw_position_ids(height, width) for height, width in grid_sizes]
     num_pos = sum(p.shape[0] for p in pos_ids)
-    pinned = torch.empty(
+    pin_memory = (
+        PIN_MEMORY and device is not None and torch.device(device).type == "cuda"
+    )
+    positions = torch.empty(
         (num_pos, 2),
         dtype=pos_ids[0].dtype,
-        pin_memory=PIN_MEMORY,
+        pin_memory=pin_memory,
     )
-    positions = torch.cat(pos_ids, dim=0, out=pinned)
+    torch.cat(pos_ids, dim=0, out=positions)
     if device is None:
         return positions
     return positions.to(device, non_blocking=True)

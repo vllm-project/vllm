@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 from mistral_common.multimodal import download_image
 from mistral_common.protocol.instruct.chunk import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -15,7 +16,17 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.distributed.parallel_state import (
+    graph_capture,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.inputs import MultiModalDataBuiltins
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -36,6 +47,8 @@ from vllm.model_executor.models.pixtral import (
     position_meshgrid_from_sizes,
 )
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -143,6 +156,10 @@ _requires_cuda = pytest.mark.skipif(
     not current_platform.is_cuda() or not torch.cuda.is_available(),
     reason="Pixtral encoder CUDA graph coverage requires a CUDA GPU",
 )
+_requires_two_gpus = pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="Pixtral TP=2 CUDA graph coverage requires two CUDA GPUs",
+)
 
 MAX_MODEL_LEN = [8192, 65536]
 
@@ -158,6 +175,7 @@ FIXTURE_LOGPROBS_CHAT = {
 OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
 
 
+@_requires_cuda
 @pytest.mark.parametrize(
     "backend",
     [
@@ -224,6 +242,8 @@ def test_position_meshgrid_from_sizes_matches_ij_meshgrid() -> None:
     )
     actual = position_meshgrid_from_sizes(grid_sizes)
     torch.testing.assert_close(actual, expected)
+    actual_on_cpu = position_meshgrid_from_sizes(grid_sizes, device=torch.device("cpu"))
+    torch.testing.assert_close(actual_on_cpu, expected)
     assert position_meshgrid_from_sizes([]).shape == (0, 2)
 
 
@@ -579,6 +599,62 @@ def test_pixtral_encoder_cudagraph_matches_eager(
     _assert_pixtral_outputs_close(replay_actual, replay_expected)
     assert manager.graph_hits == 6
     assert manager.graph_misses == 0
+
+
+@_requires_two_gpus
+def test_pixtral_encoder_cudagraph_tp2_matches_eager() -> None:
+    world_size = 2
+    mp.spawn(
+        _run_pixtral_encoder_cudagraph_tp2,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def _run_pixtral_encoder_cudagraph_tp2(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+) -> None:
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+    try:
+        with set_current_vllm_config(vllm_config):
+            init_distributed_environment()
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
+            assert get_tensor_model_parallel_world_size() == world_size
+
+            torch.manual_seed(0)
+            model = _make_tiny_pixtral_encoder(
+                AttentionBackendEnum.FLASH_ATTN,
+                merge_size=1,
+                vllm_config=vllm_config,
+            )
+            manager = _make_pixtral_encoder_cudagraph_manager(model)
+            mm_kwargs = {"images": _make_pixtral_images([(2, 2)], merge_size=1)}
+            expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+
+            with graph_capture(device=device):
+                manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+            actual = manager.execute(mm_kwargs)
+            _assert_pixtral_outputs_close(actual, expected)
+            assert manager.graph_hits == 1
+            assert manager.graph_misses == 0
+    finally:
+        cleanup_dist_env_and_memory()
 
 
 @_requires_cuda

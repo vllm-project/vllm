@@ -99,15 +99,23 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: ":nvidia: (B200) Pixtral Encoder CUDA Graphs"
+- label: ":nvidia: (B200) Pixtral FlashInfer Encoder CUDA Graphs"
   key: pixtral-encoder-cudagraph-b200
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
-  - vllm/
+  - vllm/config/multimodal.py
+  - vllm/model_executor/layers/attention/
+  - vllm/model_executor/models/pixtral.py
+  - vllm/model_executor/models/vision.py
+  - vllm/platforms/cuda.py
+  - vllm/utils/flashinfer.py
+  - vllm/v1/attention/ops/vit_attn_wrappers.py
+  - vllm/v1/worker/encoder_cudagraph.py
+  - vllm/v1/worker/encoder_cudagraph_defs.py
   - tests/models/multimodal/generation/test_pixtral.py
   commands:
-    - pytest -v -s models/multimodal/generation/test_pixtral.py -k "not chat"
+    - pytest -v -s models/multimodal/generation/test_pixtral.py -k "flashinfer and (matches_eager or ignores_poisoned_padding_tail)"
 
 - label: ":nvidia: (H200) Multimodal Processor"
   key: multi-modal-processor
