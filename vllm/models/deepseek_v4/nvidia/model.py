@@ -1016,10 +1016,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
         deep_gemm = _import_deep_gemm()
 
         group = get_ep_group().device_group
-        device = torch.accelerator.current_device_index()
+        assert self._transformed_l1_weights is not None
+        l1_weight = self._transformed_l1_weights
+        device = (l1_weight[0] if isinstance(l1_weight, tuple) else l1_weight).device
+        assert device.index is not None
         key = (
             id(group),
-            device,
+            device.index,
             self.num_experts,
             self.max_num_tokens,
             self.top_k,
@@ -1030,18 +1033,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
         )
         symm_buffer = self._symm_buffer_cache.get(key)
         if symm_buffer is None:
-            symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-                group,
-                self.num_experts,
-                self.max_num_tokens,
-                self.top_k,
-                self.hidden_size,
-                self.intermediate_size,
-                num_shared_experts=(
-                    self.num_shared_experts if self.has_fused_shared_experts else 0
-                ),
-                mma_type=self.mma_type,
-            )
+            with torch.accelerator.device_index(device.index):
+                symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+                    group,
+                    self.num_experts,
+                    self.max_num_tokens,
+                    self.top_k,
+                    self.hidden_size,
+                    self.intermediate_size,
+                    num_shared_experts=(
+                        self.num_shared_experts if self.has_fused_shared_experts else 0
+                    ),
+                    mma_type=self.mma_type,
+                )
             self._symm_buffer_cache[key] = symm_buffer
         return symm_buffer
 
