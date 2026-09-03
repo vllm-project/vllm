@@ -8,7 +8,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -296,7 +295,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = hidden_states + self.ple(
+            hidden_states = self.ple(
                 hidden_states,
                 input_ids,
                 query_start_loc,
@@ -379,17 +378,6 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-        "query_start_loc": 0,
-        "ngram_context": 0,
-        "deepstack_input_embeds": 0,
-    }
-)
 class Qwen4ExpModel(nn.Module):
     hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
