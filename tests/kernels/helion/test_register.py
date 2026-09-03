@@ -110,7 +110,7 @@ def configured_kernel(sample_kernel, sample_configs, config_manager_with_test_co
             return_value=config_manager_with_test_configs,
         ),
         patch(
-            "vllm.kernels.helion.utils.get_canonical_gpu_name",
+            "vllm.kernels.helion.utils.get_config_gpu_name",
             return_value="nvidia_h200",
         ),
         patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -177,7 +177,7 @@ def create_configured_kernel_with_configs(
             return_value=mock_config_manager,
         ),
         patch(
-            "vllm.kernels.helion.utils.get_canonical_gpu_name",
+            "vllm.kernels.helion.utils.get_config_gpu_name",
             return_value=platform,
         ),
         patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -210,7 +210,7 @@ class TestConfiguredHelionKernel:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             pytest.raises(RuntimeError, match="No config picker registered"),
@@ -287,7 +287,7 @@ class TestConfiguredHelionKernel:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
         ):
@@ -331,7 +331,7 @@ class TestConfiguredHelionKernel:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
         ):
@@ -383,7 +383,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -418,7 +418,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -453,7 +453,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -491,7 +491,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -530,7 +530,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -575,7 +575,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,
@@ -600,7 +600,7 @@ class TestHelionKernelWrapper:
     def test_init_eagerly_initializes_hop_path(self):
         """Test that register_kernel eagerly builds the configured kernel
         on the HOP path (no custom op registration needed)."""
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
+        from vllm.kernels.helion.utils import get_config_gpu_name
 
         configs: dict[CaseKey, helion.Config] = {
             CaseKey.default(): helion.Config(block_sizes=[4, 4])
@@ -608,8 +608,8 @@ class TestHelionKernelWrapper:
         with (
             dummy_kernel_registry(configs=configs) as register,
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                wraps=get_canonical_gpu_name,
+                "vllm.kernels.helion.utils.get_config_gpu_name",
+                wraps=get_config_gpu_name,
             ) as mock_gpu,
         ):
             wrapper = register(
@@ -620,8 +620,8 @@ class TestHelionKernelWrapper:
             assert wrapper._configured_kernel is not None
 
         with patch(
-            "vllm.kernels.helion.utils.get_canonical_gpu_name",
-            side_effect=AssertionError("get_canonical_gpu_name called during __call__"),
+            "vllm.kernels.helion.utils.get_config_gpu_name",
+            side_effect=AssertionError("get_config_gpu_name called during __call__"),
         ):
             x = torch.randn(4, 4, device="cuda")
             y = torch.randn(4, 4, device="cuda")
@@ -635,13 +635,13 @@ class TestHelionKernelWrapper:
     def test_init_eagerly_initializes(self):
         """Test that register_kernel eagerly loads configs and detects GPU
         during construction so __call__ needs no further initialization."""
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
+        from vllm.kernels.helion.utils import get_config_gpu_name
 
         with (
             dummy_kernel_registry() as register,
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
-                wraps=get_canonical_gpu_name,
+                "vllm.kernels.helion.utils.get_config_gpu_name",
+                wraps=get_config_gpu_name,
             ) as mock_gpu,
         ):
             wrapper = register(
@@ -678,7 +678,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch.object(torch.ops, "vllm_helion", mock_namespace),
@@ -732,7 +732,7 @@ class TestHelionKernelWrapper:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch.object(torch.ops, "vllm_helion", mock_namespace),
@@ -937,7 +937,7 @@ class TestKernelRegistry:
                 return_value=mock_config_manager,
             ),
             patch(
-                "vllm.kernels.helion.utils.get_canonical_gpu_name",
+                "vllm.kernels.helion.utils.get_config_gpu_name",
                 return_value="nvidia_h200",
             ),
             patch("vllm.kernels.helion.register.helion.kernel") as mock_kernel,

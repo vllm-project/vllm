@@ -25,6 +25,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.helion import (
+    HelionFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
@@ -46,6 +49,7 @@ SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    HelionFP8ScaledMMLinearKernel,
 }
 
 
