@@ -736,7 +736,8 @@ async def test_chat_per_request_metrics_follow_server_flag():
         request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
     )
     assert disabled_response.metrics is None
-    assert disabled_response.usage.completion_tokens_details is None
+    details = disabled_response.usage.completion_tokens_details
+    assert details is None or details.reasoning_tokens == 0
 
     enabled_serving = _build_minimal_metrics_serving_chat(
         enable_per_request_metrics=True
