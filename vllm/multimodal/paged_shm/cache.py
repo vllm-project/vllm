@@ -207,7 +207,7 @@ class PagedShmCache:
             raise  # re-raise original exception
 
     def get_item(
-        self, mm_hash: str, skip_tensor_payload: bool = True
+        self, mm_hash: str, skip_tensor_payload: bool = False
     ) -> MultiModalProcessorCacheOutItem:
         """
         Read and decode an item from shared memory.
@@ -272,15 +272,15 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
         Update the cache with the given item and return the cached representation.
 
         If `mm_item` is provided, we treat it as a cache hit, record stats, and
-        store it. Otherwise, we treat it as a miss and read from SHM (should not
-        happen for sender).
+        store it. Otherwise, we treat it as a miss and read from SHM.
         """
         if mm_item is not None:
             self._stats.record_access(is_hit=False)
             return self.create_item(mm_item, mm_hash)
         else:
             self._stats.record_access(is_hit=True)
-            return self.get_item(mm_hash, skip_tensor_payload=True)
+            _, prompt_updates =self.get_item(mm_hash, skip_tensor_payload=True)
+            return None, prompt_updates
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """No‑op for sender; items are already in SHM when created."""
