@@ -456,62 +456,54 @@ def _assert_pixtral_outputs_close(
     assert len(actual) == len(expected)
     for actual_item, expected_item in zip(actual, expected):
         assert actual_item.shape == expected_item.shape
+        # Graph and eager run the same kernels on the same inputs, so they
+        # should agree far more tightly than a generic bf16 tolerance.
         torch.testing.assert_close(
             actual_item,
             expected_item,
-            atol=1e-2,
-            rtol=1e-2,
+            atol=2e-3,
+            rtol=2e-3,
         )
 
 
-def _replay_pixtral_graph_with_poisoned_tail(
-    manager: EncoderCudaGraphManager,
-    mm_kwargs: dict[str, Any],
-    token_budget: int,
-) -> list[torch.Tensor]:
-    graph_meta = manager.budget_graphs["default"][token_budget]
-    replay = manager.model.prepare_encoder_cudagraph_replay_buffers(
-        mm_kwargs,
-        manager.max_batch_size,
-        manager.max_frames_per_batch,
-    )
-    for key, buf in graph_meta.input_buffers.items():
-        src = replay.values.get(key)
-        if src is None:
-            continue
-        if src.ndim == 0:
-            buf.copy_(src)
+def _poison_cudagraph_padding(monkeypatch) -> dict[str, bool]:
+    """Fill cudagraph input padding with NaN instead of zeros during replay.
+
+    Swapping the manager's default padding logic lets ``manager.execute()`` run
+    the real replay path with every float buffer's padded tail poisoned.
+    ``cu_seqlens``/``sequence_lengths`` are deliberately untouched -- they have
+    their own entries in ``padding_logics``, and it is those model-supplied
+    paddings that must keep the poison away from real tokens.
+
+    Integer buffers keep zero padding: ``merge_indices`` is used as
+    ``image_features[merge_indices]``, so an out-of-range pad index would be an
+    illegal memory access rather than a detectable NaN.
+
+    Returns:
+        Flags recording whether float and integer buffers were actually padded,
+        so a caller can reject a batch that filled the budget exactly and made
+        the poison a no-op.
+    """
+    padded = {"float": False, "int": False}
+
+    def poisoning_copy(dst: torch.Tensor, src: torch.Tensor) -> None:
+        is_float = dst.is_floating_point() or dst.is_complex()
+        if dst.shape[0] > src.shape[0]:
+            padded["float" if is_float else "int"] = True
+        if is_float:
+            dst.fill_(torch.nan)
         else:
-            padding_logic = manager.config.padding_logics.get(
-                key, manager._copy_padded_buffer
-            )
-            padding_logic(buf, src)
+            dst.zero_()
+        dst[: src.shape[0]].copy_(src)
 
-    pixel_values = replay.values["pixel_values"]
-    assert pixel_values is not None
-    real_input_tokens = pixel_values.shape[0]
-    captured_pixels = graph_meta.input_buffers["pixel_values"]
-    captured_freqs = graph_meta.input_buffers["freqs_cis"]
-    assert real_input_tokens < captured_pixels.shape[0]
-    captured_pixels[real_input_tokens:] = torch.nan
-    captured_freqs[real_input_tokens:] = torch.nan
-
-    graph_meta.graph.replay()
-
-    per_item_out_tokens = [
-        spec.output_tokens
-        for spec in manager.model.get_encoder_cudagraph_item_specs(mm_kwargs)
-    ]
-    dest: dict[int, torch.Tensor] = {}
-    manager.model.postprocess_encoder_output(
-        {"default": graph_meta.output_buffer},
-        list(range(len(per_item_out_tokens))),
-        per_item_out_tokens,
-        dest,
-        clone=True,
-        batch_mm_kwargs=mm_kwargs,
+    # _copy_padded_buffer is a staticmethod looked up via self, so the
+    # replacement must be wrapped to avoid binding self as the first argument.
+    monkeypatch.setattr(
+        EncoderCudaGraphManager,
+        "_copy_padded_buffer",
+        staticmethod(poisoning_copy),
     )
-    return [dest[i] for i in range(len(per_item_out_tokens))]
+    return padded
 
 
 @_requires_cuda
@@ -537,6 +529,17 @@ def test_pixtral_encoder_cudagraph_matches_eager(
         default_vllm_config,
     )
     manager = _make_pixtral_encoder_cudagraph_manager(model)
+
+    expected_cu_seqlens_padding = (
+        PixtralForConditionalGeneration._pad_encoder_cudagraph_flashinfer_cu_seqlens
+        if backend == AttentionBackendEnum.FLASHINFER
+        else PixtralForConditionalGeneration._pad_encoder_cudagraph_cumulative_seqlens
+    )
+    assert (
+        manager.config.padding_logics["cu_seqlens"].__func__
+        is expected_cu_seqlens_padding
+    )
+
     manager.capture(graph_pool=current_platform.graph_pool_handle())
 
     graph = manager.budget_graphs["default"][_CUDA_GRAPH_TOKEN_BUDGET]
@@ -613,26 +616,54 @@ def test_pixtral_encoder_cudagraph_budget_boundary_and_fallback(
 
 
 @_requires_cuda
+@pytest.mark.parametrize(
+    "backend",
+    [AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.FLASHINFER],
+    ids=["flash-attn", "flashinfer"],
+)
+@pytest.mark.parametrize("merge_size", [1, 2], ids=["pixtral", "ministral"])
 def test_pixtral_encoder_cudagraph_ignores_poisoned_padding_tail(
+    backend: AttentionBackendEnum,
+    merge_size: int,
     default_vllm_config,
     dist_init,
+    monkeypatch,
 ) -> None:
+    """Padding must never reach real tokens, whatever is left in the tail.
+
+    The attention metadata padding (``cu_seqlens``, and the two-section
+    FlashInfer offsets plus ``sequence_lengths``) is what isolates the unused
+    tail of the capture buffers. Poisoning that tail with NaN turns a leak into
+    a hard failure instead of a plausible-looking number.
+    """
+    if backend == AttentionBackendEnum.FLASHINFER and not _IS_BLACKWELL_OR_NEWER:
+        pytest.skip("Pixtral FlashInfer CUDA graph coverage requires SM100 or newer")
+
     torch.manual_seed(0)
     model = _make_tiny_pixtral_encoder(
-        AttentionBackendEnum.FLASH_ATTN,
-        1,
+        backend,
+        merge_size,
         default_vllm_config,
     )
     manager = _make_pixtral_encoder_cudagraph_manager(model)
     manager.capture(graph_pool=current_platform.graph_pool_handle())
 
     mm_kwargs = {
-        "images": _make_pixtral_images([(1, 2), (2, 1)], merge_size=1),
+        "images": _make_pixtral_images([(1, 2), (2, 1)], merge_size),
     }
     expected = _get_eager_pixtral_outputs(model, mm_kwargs)
-    actual = _replay_pixtral_graph_with_poisoned_tail(
-        manager, mm_kwargs, _CUDA_GRAPH_TOKEN_BUDGET
-    )
+
+    padded = _poison_cudagraph_padding(monkeypatch)
+    actual = manager.execute(mm_kwargs)
+
+    assert padded["float"], "batch filled the budget exactly; poison was a no-op"
+    if merge_size > 1:
+        assert padded["int"], "merge_indices was not padded; poison was a no-op"
+    assert manager.graph_misses == 0
+
+    # Assert on the post-processed items, not on the raw output buffer: for
+    # merge_size=1 the padded output rows are legitimately NaN, and
+    # scatter_output_slices never hands them to a caller.
     for item in actual:
         assert torch.isfinite(item.float()).all()
     _assert_pixtral_outputs_close(actual, expected)
@@ -732,6 +763,51 @@ def test_pixtral_encoder_cudagraph_multi_budget_capacity_map(
 
 
 @_requires_cuda
+def test_pixtral_encoder_cudagraph_survives_recapture(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    """Capture, release, capture again -- the sequence the model runner runs.
+
+    Memory profiling captures encoder graphs with a throwaway manager and
+    clears them, then the real manager captures again against the same model.
+    ``_encoder_cudagraph_input_capacities`` is keyed by buffer address and is
+    never cleared, so a second capture must re-register its own buffers before
+    any replay reads them.
+    """
+    torch.manual_seed(0)
+    merge_size = 2
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+
+    profiling_manager = _make_pixtral_encoder_cudagraph_manager(model)
+    profiling_manager.capture(graph_pool=current_platform.graph_pool_handle())
+    profiling_manager.clear()
+
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    graph_meta = manager.budget_graphs["default"][_CUDA_GRAPH_TOKEN_BUDGET]
+    input_capacity = graph_meta.input_buffers["pixel_values"].shape[0]
+    capacities = model._encoder_cudagraph_input_capacities
+    for key in ("cu_seqlens", "sequence_lengths"):
+        buf = graph_meta.input_buffers.get(key)
+        if buf is not None:
+            assert capacities[buf.data_ptr()] == input_capacity
+
+    mm_kwargs = {
+        "images": _make_pixtral_images([(1, 1), (1, 2)], merge_size),
+    }
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    assert manager.graph_misses == 0
+
+
+@_requires_cuda
 def test_pixtral_encoder_cudagraph_manager_init_uses_budget_range(
     default_vllm_config,
     dist_init,
@@ -762,8 +838,14 @@ def test_pixtral_encoder_cudagraph_manager_init_uses_budget_range(
     expected_batch_size = min(max_budget // min_budget, _CUDA_GRAPH_TOKEN_BUDGET)
     assert manager.max_batch_size == expected_batch_size
     assert manager.config.modalities == ["image"]
-    assert "cu_seqlens" in manager.config.padding_logics
-    assert "sequence_lengths" in manager.config.padding_logics
+    assert (
+        manager.config.padding_logics["cu_seqlens"].__func__
+        is PixtralForConditionalGeneration._pad_encoder_cudagraph_cumulative_seqlens
+    )
+    assert (
+        manager.config.padding_logics["sequence_lengths"].__func__
+        is PixtralForConditionalGeneration._pad_encoder_cudagraph_sequence_lengths
+    )
 
     manager.capture(graph_pool=current_platform.graph_pool_handle())
     mm_kwargs = {"images": _make_pixtral_images([(1, 1)], merge_size=1)}
@@ -772,6 +854,58 @@ def test_pixtral_encoder_cudagraph_manager_init_uses_budget_range(
     _assert_pixtral_outputs_close(actual, expected)
     assert manager.graph_hits == 1
     assert manager.graph_misses == 0
+
+
+@pytest.mark.parametrize(
+    "use_data_parallel,tp_size,expected_divisor",
+    [
+        (False, 1, 1),
+        (False, 2, 2),
+        # The ViT data-parallel path replicates the encoder, so TP does not
+        # shard the hidden dimension and the offsets must not be divided.
+        (True, 2, 1),
+    ],
+)
+def test_pixtral_encoder_cudagraph_flashinfer_offset_scale_follows_tp(
+    use_data_parallel: bool,
+    tp_size: int,
+    expected_divisor: int,
+    monkeypatch,
+) -> None:
+    """FlashInfer offsets are byte-strides, so they must track the TP shard."""
+    hidden_size = 128
+    input_capacity = 8
+
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_args = SimpleNamespace(hidden_size=hidden_size)
+
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    src_cu_seqlens = torch.cat((src_qko, src_v))
+    dst_cu_seqlens = torch.empty_like(src_cu_seqlens)
+    model._encoder_cudagraph_input_capacities = {
+        dst_cu_seqlens.data_ptr(): input_capacity
+    }
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.pixtral.is_vit_use_data_parallel",
+        lambda: use_data_parallel,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.pixtral.get_tensor_model_parallel_world_size",
+        lambda: tp_size,
+    )
+    model._pad_encoder_cudagraph_flashinfer_cu_seqlens(dst_cu_seqlens, src_cu_seqlens)
+
+    expected = torch.empty_like(src_cu_seqlens)
+    _pad_pixtral_flashinfer_cu_seqlens(
+        expected,
+        src_cu_seqlens,
+        input_capacity,
+        hidden_size // expected_divisor,
+    )
+    assert dst_cu_seqlens.tolist() == expected.tolist()
 
 
 @pytest.mark.parametrize(
