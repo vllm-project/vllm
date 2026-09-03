@@ -7,28 +7,63 @@
 # <repo>:nightly-<commit>.
 # Run when NIGHTLY=1 after the matching build-*-release-image step has pushed to ECR.
 #
-# Usage: push-nightly-builds-rocm.sh [DOCKERHUB_REPO] [ECR_TAG_SUFFIX]
-#   Defaults target ROCm; the ROCk images pass "vllm/vllm-openai-rock" and "rock".
+# Usage: push-nightly-builds-rocm.sh [DOCKERHUB_REPO ECR_TAG_SUFFIX]
+#   Pass both arguments or neither. The default target is ROCm; the ROCk images
+#   pass "vllm/vllm-openai-rock" and "rock".
 #
 # Local testing (no push to Docker Hub):
-#   BUILDKITE_COMMIT=<commit-with-rocm-image-in-ecr> DRY_RUN=1 bash .buildkite/scripts/push-nightly-builds-rocm.sh
+#   BASE_ECR_IMAGE=<full-base-image-reference> \
+#     BUILDKITE_COMMIT=<commit-with-image-in-ecr> DRY_RUN=1 \
+#     bash .buildkite/scripts/push-nightly-builds-rocm.sh
 # Requires: AWS CLI configured (for ECR public login), Docker. For full run: Docker Hub login.
 
-set -ex
+set -euxo pipefail
+
+usage() {
+  echo "Usage: $0 [DOCKERHUB_REPO ECR_TAG_SUFFIX]" >&2
+}
+
+case "$#" in
+  0)
+    DOCKERHUB_REPO="vllm/vllm-openai-rocm"
+    ECR_TAG_SUFFIX="rocm"
+    ;;
+  2)
+    if [[ -z "$1" || -z "$2" ]]; then
+      usage
+      exit 2
+    fi
+    DOCKERHUB_REPO="$1"
+    ECR_TAG_SUFFIX="$2"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
 
 # Use BUILDKITE_COMMIT from env (required; set to a commit that has the image in ECR for local test)
 BUILDKITE_COMMIT="${BUILDKITE_COMMIT:?Set BUILDKITE_COMMIT to the commit SHA that has the image in ECR (e.g. from a previous release pipeline run)}"
 DRY_RUN="${DRY_RUN:-0}"
 
-DOCKERHUB_REPO="${1:-vllm/vllm-openai-rocm}"
-ECR_TAG_SUFFIX="${2:-rocm}"
 ECR_REPO="public.ecr.aws/q9t5s3a7/vllm-release-repo"
 
 # Get the base image ECR tag (set by the build-*-release-image pipeline step)
-BASE_ORIG_TAG="$(buildkite-agent meta-data get "${ECR_TAG_SUFFIX}-base-ecr-tag" 2>/dev/null || echo "")"
-if [ -z "$BASE_ORIG_TAG" ]; then
-  echo "WARNING: ${ECR_TAG_SUFFIX}-base-ecr-tag metadata not found, falling back to commit-based tag"
-  BASE_ORIG_TAG="${ECR_REPO}:${BUILDKITE_COMMIT}-${ECR_TAG_SUFFIX}-base"
+BASE_METADATA_KEY="${ECR_TAG_SUFFIX}-base-ecr-tag"
+if [[ -n "${BASE_ECR_IMAGE:-}" ]]; then
+  if [[ "$DRY_RUN" != "1" ]]; then
+    echo "ERROR: BASE_ECR_IMAGE may only be used with DRY_RUN=1" >&2
+    exit 1
+  fi
+  BASE_ORIG_TAG="$BASE_ECR_IMAGE"
+elif ! BASE_ORIG_TAG="$(buildkite-agent meta-data get "$BASE_METADATA_KEY")"; then
+  echo "ERROR: Failed to read required Buildkite metadata '$BASE_METADATA_KEY'" >&2
+  exit 1
+fi
+if [[ -z "$BASE_ORIG_TAG" ]]; then
+  echo "ERROR: Required Buildkite metadata '$BASE_METADATA_KEY' is empty" >&2
+  echo "Set BASE_ECR_IMAGE to the full ECR base image reference for local testing" >&2
+  exit 1
 fi
 
 ORIG_TAG="${BUILDKITE_COMMIT}-${ECR_TAG_SUFFIX}"
