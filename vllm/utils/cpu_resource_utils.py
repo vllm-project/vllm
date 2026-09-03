@@ -119,58 +119,53 @@ def parse_id_list(raw_str: str) -> list[int]:
     return sorted(list(set(result)))
 
 
-def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
-    if sys.platform == "darwin":
-        # MacOS has no memory node
-        vm = psutil.virtual_memory()
-        total_memory, available_memory = vm.total, vm.available
-    else:
-        meminfo_path = f"/sys/devices/system/node/node{node_id}/meminfo"
-        if not os.path.exists(meminfo_path):
-            # Non-NUMA systems (e.g. many RISC-V boards, and some
-            # containers) don't expose per-node meminfo. Fall back to
-            # system-wide numbers from psutil.
-            vm = psutil.virtual_memory()
-            total_memory, available_memory = vm.total, vm.available
-        else:
-            meminfo = {}
-            with open(meminfo_path) as f:
-                for line in f:
-                    # Each line looks like: "Node 0 MemTotal: 97421888 kB"
-                    parts = line.split()
-                    key = parts[2].rstrip(":")
-                    # convert to Bytes
-                    value = int(parts[3]) * 1024
-                    meminfo[key] = value
-
-            total_memory = meminfo["MemTotal"]
-            free_memory = meminfo["MemFree"]
-            active_file_memory = meminfo["Active(file)"]
-            inactive_file_memory = meminfo["Inactive(file)"]
-            reclaimable_memory = meminfo["SReclaimable"]
-            available_memory = (
-                free_memory
-                + active_file_memory
-                + inactive_file_memory
-                + reclaimable_memory
-            )
-
-    # Honor cgroup memory limit (containers / k8s pods), on every path
-    # above -- not just the NUMA-meminfo one. Host-wide numbers (NUMA
-    # meminfo or psutil) would otherwise apply gpu_memory_utilization to
-    # host RAM instead of the pod's limit on non-NUMA hosts too. cgroup
-    # does not expose per-NUMA-node limits, so we just clamp the totals
-    # against the pod-wide limit here.
+def _with_cgroup_clamp(total_memory: int, available_memory: int) -> MemoryNodeInfo:
+    """Honor cgroup memory limit (containers / k8s pods). Host-wide numbers
+    (NUMA meminfo or psutil) would otherwise apply gpu_memory_utilization to
+    host RAM instead of the pod's limit. cgroup does not expose per-NUMA-node
+    limits, so we just clamp the totals against the pod-wide limit here."""
     cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
     if cgroup_limit is not None and cgroup_limit < total_memory:
         total_memory = cgroup_limit
         cgroup_available = cgroup_limit - (cgroup_usage or 0)
         available_memory = max(0, min(available_memory, cgroup_available))
+    return MemoryNodeInfo(total_memory=total_memory, available_memory=available_memory)
 
-    return MemoryNodeInfo(
-        total_memory=total_memory,
-        available_memory=available_memory,
+
+def get_memory_node_info(node_id: int = 0) -> MemoryNodeInfo:
+    if sys.platform == "darwin":
+        # MacOS has no memory node
+        vm = psutil.virtual_memory()
+        return _with_cgroup_clamp(vm.total, vm.available)
+
+    meminfo_path = f"/sys/devices/system/node/node{node_id}/meminfo"
+    if not os.path.exists(meminfo_path):
+        # Non-NUMA systems (e.g. many RISC-V boards, and some containers)
+        # don't expose per-node meminfo. Fall back to system-wide numbers
+        # from psutil.
+        vm = psutil.virtual_memory()
+        return _with_cgroup_clamp(vm.total, vm.available)
+
+    meminfo = {}
+    with open(meminfo_path) as f:
+        for line in f:
+            # Each line looks like: "Node 0 MemTotal: 97421888 kB"
+            parts = line.split()
+            key = parts[2].rstrip(":")
+            # convert to Bytes
+            value = int(parts[3]) * 1024
+            meminfo[key] = value
+
+    total_memory = meminfo["MemTotal"]
+    free_memory = meminfo["MemFree"]
+    active_file_memory = meminfo["Active(file)"]
+    inactive_file_memory = meminfo["Inactive(file)"]
+    reclaimable_memory = meminfo["SReclaimable"]
+    available_memory = (
+        free_memory + active_file_memory + inactive_file_memory + reclaimable_memory
     )
+
+    return _with_cgroup_clamp(total_memory, available_memory)
 
 
 def get_allowed_cpu_list() -> list[LogicalCPUInfo]:
