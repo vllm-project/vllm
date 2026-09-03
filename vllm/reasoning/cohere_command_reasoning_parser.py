@@ -628,6 +628,21 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
 
         return has_end_token
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        count = 0
+        depth = 0
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                depth += 1
+                continue
+            if token_id == self.end_token_id:
+                if depth > 0:
+                    depth -= 1
+                continue
+            if depth > 0:
+                count += 1
+        return count
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:

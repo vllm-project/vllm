@@ -253,6 +253,25 @@ class TestIsReasoningEnd:
         )
 
 
+@pytest.mark.parametrize(
+    "parser_cls",
+    [
+        CohereCommand3ReasoningParser,
+        CohereCommand4ReasoningParser,
+    ],
+    ids=["cmd3", "cmd4"],
+)
+def test_count_reasoning_tokens(tokenizer, parser_cls):
+    parser = parser_cls(tokenizer)
+    start = parser.start_token_id
+    end = parser.end_token_id
+
+    assert parser.count_reasoning_tokens([99, start, 11, 12, end, 100]) == 2
+    assert parser.count_reasoning_tokens([end, start, 1, start, 2, end, 3, end]) == 3
+    assert parser.count_reasoning_tokens([start, 1, 2]) == 2
+    assert parser.count_reasoning_tokens([1, 2, end]) == 0
+
+
 SCHEMA_A = {"type": "object", "properties": {"a": {"type": "string"}}}
 SCHEMA_B = {"type": "object", "properties": {"b": {"type": "number"}}}
 GET_WEATHER_TOOL = {
