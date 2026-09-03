@@ -672,6 +672,11 @@ class ParserEngine(Parser):
             reasoning = reasoning.rstrip() or None
 
         content = delta.content if delta else None
+        # A complete parse must include text deferred for streaming ordering.
+        if self._deferred_content:
+            deferred_delta = self._events_to_delta([], finished=True)
+            if deferred_delta and deferred_delta.content:
+                content = (content or "") + deferred_delta.content
         if content:
             content = self._strip_content_whitespace(
                 content, tool_call_info.tools_called
