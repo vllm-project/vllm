@@ -311,8 +311,7 @@ class Pard2ForCausalLMMixin:
             # ships both, so the proposer keeps the draft's copies (not the target's).
             process_eagle_weight(self, name)
 
-        skip_substrs = ["mask_hidden"]
-        loader = AutoWeightsLoader(self, skip_prefixes=None, skip_substrs=skip_substrs)
+        loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(model_weights.items())
 
         # target_proj ships separately in warp_model.bin.
