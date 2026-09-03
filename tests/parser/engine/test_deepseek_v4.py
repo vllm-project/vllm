@@ -42,6 +42,7 @@ from vllm.parser.engine.registered_adapters import (
 
 _THINK_START_ID = 50
 _THINK_END_ID = 51
+_TOOL_START_ID = 52
 
 _PARAM_OPEN = '｜DSML｜parameter name="{name}" string="{is_str}">'
 _PARAM_CLOSE = "</｜DSML｜parameter>"
@@ -57,6 +58,7 @@ def mock_tokenizer():
         {
             DSML_THINK_START: _THINK_START_ID,
             DSML_THINK_END: _THINK_END_ID,
+            DSML_TOOL_START: _TOOL_START_ID,
         }
     )
 
@@ -426,6 +428,12 @@ class TestImplicitReasoningEnd:
         assert reasoning == "Let me look up the weather."
         assert DSML_TOOL_START not in reasoning
         assert DSML_INVOKE_PREFIX not in reasoning
+
+    def test_boundary_tracker_uses_implicit_end_transition(self, thinking_parser):
+        tracker = thinking_parser.create_reasoning_end_tracker([], False)
+
+        assert tracker is not None
+        assert tracker.preview([7, _TOOL_START_ID, 8]) == 1
 
     def test_streaming_tool_extraction_implicit_end(
         self, thinking_parser, mock_request

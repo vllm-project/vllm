@@ -65,6 +65,8 @@ class TestReasoningStructuredOutput:
         request.structured_output_request.grammar = Mock()
         request.structured_output_request.reasoning_parser_kwargs = None
         request.structured_output_request.reasoner = None
+        request.structured_output_request.reasoning_end_tracker = None
+        request.structured_output_request.reasoning_end_tracker_initialized = False
         request.structured_output_request.grammar.is_terminated = Mock(
             return_value=False
         )
@@ -403,3 +405,133 @@ class TestReasoningStructuredOutput:
         assert manager_with_reasoner.trim_reasoning_for_advance(
             mock_request_with_structured_output, new_token_ids
         ) == [271, 5005]
+
+    def test_should_advance_uses_tracker_boundary_offset(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """An engine tracker supplies the boundary without prefix rescans."""
+
+        class Tracker:
+            reasoning_ended = False
+
+            def preview(self, token_ids):
+                raise AssertionError("should_advance must commit accepted tokens")
+
+            def commit(self, token_ids):
+                assert token_ids == [9, 198, 248069, 271]
+                self.reasoning_ended = True
+                return 2
+
+        class TrackerReasoner:
+            def create_reasoning_end_tracker(self, input_ids, reasoning_ended):
+                assert input_ids == [1, 2, 3]
+                assert reasoning_ended is False
+                return Tracker()
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                raise AssertionError("tracker path must not rescan token prefixes")
+
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = TrackerReasoner()
+        new_token_ids = [9, 198, 248069, 271]
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3] + new_token_ids
+
+        assert manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+        assert structured_req.reasoning_end_token_index == 5
+        assert manager_with_reasoner.trim_reasoning_for_advance(
+            mock_request_with_structured_output, new_token_ids
+        ) == [271]
+
+    def test_should_advance_without_new_tokens_only_previews_tracker(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Speculative queries must not consume the request tracker."""
+        tracker = Mock()
+        tracker.preview.return_value = 0
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoning_end_token_index = None
+        structured_req.reasoning_end_tracker = tracker
+        structured_req.reasoning_end_tracker_initialized = True
+        mock_request_with_structured_output.num_computed_tokens = 7
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+        assert manager_with_reasoner.should_advance(mock_request_with_structured_output)
+
+        assert tracker.preview.call_count == 2
+        tracker.commit.assert_not_called()
+        assert structured_req.reasoning_ended is False
+        assert structured_req.reasoning_end_token_index is None
+
+    def test_cached_tracker_avoids_copying_token_history(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Tracker lookup must not slice the accumulated token prefix."""
+
+        class SliceCountingList(list):
+            slice_count = 0
+
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    self.slice_count += 1
+                return super().__getitem__(index)
+
+        tracker = Mock()
+        tracker.preview.return_value = None
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoning_end_tracker = tracker
+        structured_req.reasoning_end_tracker_initialized = True
+        token_ids = SliceCountingList([1, 2, 3, 4, 5, 6, 7, 8])
+        mock_request_with_structured_output.all_token_ids = token_ids
+
+        assert not manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        assert token_ids.slice_count == 0
+
+    def test_unavailable_tracker_factory_is_attempted_once(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """A failed tracker capability check is cached per request."""
+
+        class SliceCountingList(list):
+            slice_count = 0
+
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    self.slice_count += 1
+                return super().__getitem__(index)
+
+        reasoner = Mock()
+        reasoner.create_reasoning_end_tracker.return_value = None
+        reasoner.is_reasoning_end_streaming.return_value = False
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.reasoner = reasoner
+        token_ids = SliceCountingList([1, 2, 3, 4, 5, 6, 7, 8])
+        mock_request_with_structured_output.all_token_ids = token_ids
+
+        assert not manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+        assert not manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        reasoner.create_reasoning_end_tracker.assert_called_once()
+        assert token_ids.slice_count == 1

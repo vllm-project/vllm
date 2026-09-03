@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
     from vllm.reasoning import ReasoningParser
     from vllm.v1.request import Request
 else:
@@ -111,6 +112,23 @@ class StructuredOutputManager:
                 **parser_kwargs,
             )
         return structured_req.reasoner
+
+    def _get_reasoning_end_tracker(
+        self,
+        request: "Request",
+        reasoner: "ReasoningParser",
+        input_ids: Sequence[int],
+    ) -> "ReasoningEndTracker | None":
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        tracker = structured_req.reasoning_end_tracker
+        if not structured_req.reasoning_end_tracker_initialized:
+            factory = getattr(reasoner, "create_reasoning_end_tracker", None)
+            if factory is not None:
+                tracker = factory(input_ids, structured_req.reasoning_ended)
+            structured_req.reasoning_end_tracker = tracker
+            structured_req.reasoning_end_tracker_initialized = True
+        return tracker
 
     def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:
@@ -292,12 +310,22 @@ class StructuredOutputManager:
 
                 reasoner = None if apply_bitmask else self._get_reasoner(request)
                 detect_reasoning_end = reasoner is not None
+                tracker = (
+                    self._get_reasoning_end_tracker(
+                        request, reasoner, request.all_token_ids
+                    )
+                    if reasoner is not None
+                    else None
+                )
                 simulated_buf: list[int] | None = None
                 history_len = 0
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                previewed_end = (
+                    tracker.preview(req_tokens) if tracker is not None else None
+                )
                 for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     advance_grammar = apply_bitmask
@@ -309,12 +337,18 @@ class StructuredOutputManager:
                         and reasoner is not None
                         and not apply_bitmask
                     ):
-                        if simulated_buf is None:
-                            history = list(request.all_token_ids)
-                            history_len = len(history)
-                            simulated_buf = history + list(req_tokens)
-                        simulated = simulated_buf[: history_len + i + 1]
-                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
+                        if tracker is not None:
+                            reasoning_ends_here = i == previewed_end
+                        else:
+                            if simulated_buf is None:
+                                history = list(request.all_token_ids)
+                                history_len = len(history)
+                                simulated_buf = history + list(req_tokens)
+                            simulated = simulated_buf[: history_len + i + 1]
+                            reasoning_ends_here = reasoner.is_reasoning_end_streaming(
+                                simulated, [token]
+                            )
+                        if reasoning_ends_here:
                             # Reasoning ended mid-window. Constrain the rest
                             # of the window via bitmask. Skip grammar advance
                             # through the marker (it is reasoning content);
@@ -388,6 +422,9 @@ class StructuredOutputManager:
                 structured_req.reasoning_ended = reasoner.is_reasoning_end(
                     request.prompt_token_ids or []
                 )
+                self._get_reasoning_end_tracker(
+                    request, reasoner, request.all_token_ids
+                )
             return structured_req.reasoning_ended
         return True
 
@@ -427,7 +464,7 @@ class StructuredOutputManager:
         # count remains > 0 after the step and the computed delta window
         # starts past the reasoning-end marker.
         all_token_ids = request.all_token_ids
-        if new_token_ids:
+        if new_token_ids is not None:
             # The tokens were already appended this step, so the step window
             # starts exactly len(new_token_ids) from the end.
             start = len(all_token_ids) - len(new_token_ids)
@@ -440,11 +477,35 @@ class StructuredOutputManager:
                 else max(len(all_token_ids) + delta_from, 0)
             )
             delta_ids = itertools.islice(all_token_ids, start, None)
-        if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
+        tracker = structured_req.reasoning_end_tracker
+        if not structured_req.reasoning_end_tracker_initialized:
+            tracker = self._get_reasoning_end_tracker(
+                request, reasoner, all_token_ids[:start]
+            )
+        if tracker is not None:
+            delta_ids = list(delta_ids)
+            end_offset = (
+                tracker.commit(delta_ids)
+                if new_token_ids is not None
+                else tracker.preview(delta_ids)
+            )
+            reasoning_ended = end_offset is not None
+        else:
+            reasoning_ended = reasoner.is_reasoning_end_streaming(
+                all_token_ids, delta_ids
+            )
+            end_offset = None
+        if reasoning_ended:
+            if tracker is not None and new_token_ids is None:
+                return True
             structured_req.reasoning_ended = True
 
             # Record the boundary so the scheduler can exclude reasoning tokens.
-            end_index = self._find_reasoning_end_index(reasoner, all_token_ids, start)
+            end_index = (
+                start + end_offset
+                if end_offset is not None
+                else self._find_reasoning_end_index(reasoner, all_token_ids, start)
+            )
 
             structured_req.reasoning_end_token_index = end_index
             return True

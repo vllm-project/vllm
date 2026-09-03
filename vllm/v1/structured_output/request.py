@@ -15,6 +15,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 
 if TYPE_CHECKING:
+    from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
     from vllm.reasoning import ReasoningParser
 
 
@@ -35,6 +36,8 @@ class StructuredOutputRequest:
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
+    reasoning_end_tracker: "ReasoningEndTracker | None" = None
+    reasoning_end_tracker_initialized: bool = False
 
     @staticmethod
     def from_sampling_params(

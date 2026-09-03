@@ -7,6 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
@@ -39,6 +40,9 @@ from vllm.tool_parsers.streaming import (
 )
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
 
 
 @dataclass
@@ -188,6 +192,14 @@ class Parser:
         state.history_tool_call_cnt_initialized = True
 
     # ========== Reasoning Parser Methods ==========
+
+    def create_reasoning_end_tracker(
+        self,
+        input_ids: Sequence[int],
+        reasoning_ended: bool | None = None,
+    ) -> "ReasoningEndTracker | None":
+        """Create request-local reasoning-end state when supported."""
+        return None
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
@@ -405,6 +417,16 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return None, model_output
         return self._reasoning_parser.extract_reasoning(model_output, request)
+
+    def create_reasoning_end_tracker(
+        self,
+        input_ids: Sequence[int],
+        reasoning_ended: bool | None = None,
+    ) -> "ReasoningEndTracker | None":
+        factory = getattr(self._reasoning_parser, "create_reasoning_end_tracker", None)
+        if factory is None:
+            return None
+        return factory(input_ids, reasoning_ended)
 
     def _get_function_name(
         self, request: ChatCompletionRequest | ResponsesRequest

@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
 from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
@@ -130,6 +131,151 @@ def _make_engine(
         tools=tools,
         parser_engine_config=cfg,
     )
+
+
+class TestReasoningEndTracker:
+    def test_preview_does_not_mutate_and_commit_does(self):
+        tracker = _make_engine().create_reasoning_end_tracker([], False)
+
+        assert tracker is not None
+        assert tracker.preview([10, 201, 11]) == 1
+        assert tracker.reasoning_ended is False
+        assert tracker.preview([10, 201, 11]) == 1
+
+        assert tracker.commit([10, 201, 11]) == 1
+        assert tracker.reasoning_ended is True
+        assert tracker.preview([201]) is None
+
+    def test_multi_token_boundary_spans_commits(self):
+        tracker = ReasoningEndTracker(((41, 42, 43),), False)
+
+        assert tracker.commit([7, 41]) is None
+        assert tracker.preview([42, 43, 9]) == 1
+        assert tracker.reasoning_ended is False
+        assert tracker.commit([42]) is None
+        assert tracker.commit([43, 9]) == 0
+        assert tracker.reasoning_ended is True
+
+    def test_input_suffix_primes_split_boundary(self):
+        tracker = ReasoningEndTracker(((41, 42, 43),), False, [7, 41, 42])
+
+        assert tracker.commit([43, 9]) == 0
+
+    def test_text_only_end_terminal_uses_parser_fallback(self):
+        config = ParserEngineConfig(
+            name="text_only_reasoning_end",
+            terminals={"THINK_END": "xy"},
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                )
+            },
+            initial_state=ParserState.REASONING,
+        )
+        tokenizer = make_mock_tokenizer({})
+        tokenizer.encode.return_value = [41, 42, 43]
+        tracker = ParserEngine(
+            tokenizer, parser_engine_config=config
+        ).create_reasoning_end_tracker([], False)
+
+        assert tracker is None
+        tokenizer.encode.assert_not_called()
+
+    def test_unresolved_end_terminal_disables_whole_tracker(self):
+        config = ParserEngineConfig(
+            name="partially_resolved_reasoning_end",
+            token_id_terminals={
+                "THINK_END": "</think>",
+                "TOOL_START": "<tool_call>",
+            },
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+                (ParserState.REASONING, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS,
+                    (EventType.REASONING_END,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+        )
+
+        engine = _make_engine(config, vocab={"</think>": 201})
+        tracker = engine.create_reasoning_end_tracker(
+            [],
+            False,
+        )
+
+        assert tracker is None
+
+    def test_end_transition_outside_reasoning_uses_parser_fallback(self):
+        config = ParserEngineConfig(
+            name="content_reasoning_end",
+            token_id_terminals={"TOOL_START": "<tool_call>"},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS,
+                    (EventType.REASONING_END,),
+                )
+            },
+        )
+
+        tracker = _make_engine(config).create_reasoning_end_tracker([], False)
+
+        assert tracker is None
+
+    def test_non_reasoning_end_transition_does_not_disable_tracker(self):
+        config = _combined_config()
+        config.transitions[(ParserState.REASONING, "TOOL_START")] = Transition(
+            ParserState.TOOL_ARGS,
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
+        )
+        config.transitions[(ParserState.CONTENT, "TOOL_START")] = Transition(
+            ParserState.TOOL_ARGS,
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
+        )
+
+        tracker = _make_engine(config).create_reasoning_end_tracker([], False)
+
+        assert tracker is not None
+        assert tracker.preview([8, 202, 9]) == 1
+
+    def test_unreported_reasoning_exit_uses_parser_fallback(self):
+        config = ParserEngineConfig(
+            name="unreported_reasoning_exit",
+            token_id_terminals={
+                "THINK_END": "</think>",
+                "TOOL_START": "<tool_call>",
+            },
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+                (ParserState.REASONING, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS,
+                    (EventType.TOOL_CALL_START,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+        )
+
+        tracker = _make_engine(config).create_reasoning_end_tracker([], False)
+
+        assert tracker is None
+
+    def test_configured_tool_opener_can_end_reasoning(self):
+        config = _combined_config()
+        config.transitions[(ParserState.REASONING, "TOOL_START")] = Transition(
+            ParserState.TOOL_ARGS,
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
+        )
+        tracker = _make_engine(config).create_reasoning_end_tracker([], False)
+
+        assert tracker is not None
+        assert tracker.preview([8, 202, 9]) == 1
 
 
 # ── TestEventsToDelta ────────────────────────────────────────────────
@@ -918,6 +1064,9 @@ def test_parser_manager_preserves_shared_engine_adapters(monkeypatch):
     assert parser.tool_parser is not None
     assert parser.reasoning_parser._parser_engine_cls is _CombinedTestEngine
     assert parser.tool_parser._parser_engine_cls is _CombinedTestEngine
+    tracker = parser.create_reasoning_end_tracker([], False)
+    assert tracker is not None
+    assert tracker.preview([10, 201, 11]) == 1
     request = _make_delegating_request()
     token_ids = [ord("a"), ord("b"), 201, ord("c")]
     reasoning, content, _ = parser.parse(

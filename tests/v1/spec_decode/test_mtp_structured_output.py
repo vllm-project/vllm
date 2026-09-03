@@ -155,6 +155,15 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
 
     marker = tokenizer.encode("\n")[0]
 
+    class Tracker:
+        reasoning_ended = False
+
+        def preview(self, token_ids):
+            return list(token_ids).index(marker)
+
+        def commit(self, token_ids):
+            raise AssertionError("speculative bitmask preview must not commit")
+
     class StubReasoner:
         def __init__(self, *_, **__):
             self.end_token_id = marker
@@ -163,7 +172,10 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
             return marker in list(input_ids)
 
         def is_reasoning_end_streaming(self, input_ids, delta_ids):
-            return marker in list(delta_ids)
+            raise AssertionError("tracker path must not rescan draft prefixes")
+
+        def create_reasoning_end_tracker(self, input_ids, reasoning_ended):
+            return Tracker()
 
     manager.reasoner_cls = StubReasoner
     request.structured_output_request.reasoner = StubReasoner()

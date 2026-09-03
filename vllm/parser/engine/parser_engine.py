@@ -26,6 +26,7 @@ from vllm.logger import init_logger
 from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
+from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
@@ -152,6 +153,39 @@ class ParserEngine(Parser):
             for token in parser_engine_config.turn_boundary_tokens
             if (token_id := vocab.get(token)) is not None
         )
+
+    def create_reasoning_end_tracker(
+        self,
+        input_ids: Sequence[int],
+        reasoning_ended: bool | None = None,
+    ) -> ReasoningEndTracker | None:
+        """Create a tracker when token-only matching is state-safe."""
+        config = self.parser_engine_config
+        end_terminals: list[str] = []
+        for (state, terminal), transition in config.transitions.items():
+            if state != ParserState.REASONING:
+                continue
+            ends_reasoning = EventType.REASONING_END in transition.events
+            if ends_reasoning:
+                end_terminals.append(terminal)
+            elif transition.next_state != ParserState.REASONING:
+                return None
+
+        boundaries = []
+        for terminal in dict.fromkeys(end_terminals):
+            text = config.token_id_terminals.get(terminal)
+            if text is None or (token_id := self.vocab.get(text)) is None:
+                return None
+            boundaries.append((token_id,))
+        if not boundaries:
+            return None
+
+        ended = (
+            self.is_reasoning_end(list(input_ids))
+            if reasoning_ended is None
+            else reasoning_ended
+        )
+        return ReasoningEndTracker(tuple(boundaries), ended, input_ids)
 
     @property
     def reasoning_start_str(self) -> str | None:

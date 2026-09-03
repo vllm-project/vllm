@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.parser.engine.parser_engine import ParserEngine
+    from vllm.parser.engine.reasoning_end_tracker import ReasoningEndTracker
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.utils import Tool
 
@@ -64,6 +65,15 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
+
+    def create_reasoning_end_tracker(
+        self,
+        input_ids: Sequence[int],
+        reasoning_ended: bool | None = None,
+    ) -> ReasoningEndTracker | None:
+        return self._parser_engine.create_reasoning_end_tracker(
+            input_ids, reasoning_ended
+        )
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
