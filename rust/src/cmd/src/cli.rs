@@ -22,15 +22,15 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
-use vllm_chat::ReasoningParserFactory;
 use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RenderConfig, RendererSelection,
-    TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
+    RendererSelection, TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -186,6 +186,12 @@ pub struct SharedRuntimeArgs {
     /// public model ID.
     pub model: String,
 
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
+
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
     #[arg(
@@ -262,6 +268,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// LoRA adapters to load before serving, each as `name=path` or a JSON
+    /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
+    /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    #[serde(default)]
+    pub lora_modules: Vec<LoraModulePath>,
 
     /// The format to render message content within a chat template.
     ///
@@ -482,6 +495,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
@@ -491,6 +505,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -535,6 +550,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
@@ -544,6 +560,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,

@@ -12,6 +12,7 @@ import pytest
 
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
@@ -192,7 +193,7 @@ def test_multiple_lora_requests():
     assert len(PROMPTS) == len(outputs)
 
     # Exception raised, if the size of params does not match the size of prompts
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
 
     # Single LoRARequest should be applied to every prompt
