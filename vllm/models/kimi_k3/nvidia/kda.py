@@ -447,8 +447,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             and self.quant_config._resolve_quant_algo(in_proj_prefix) == "FP8_PB_WO"
             else 16
         )
-        remainder = local_output_size % alignment
-        self.in_proj_padding = 0 if remainder == 0 else alignment - remainder
+        self.in_proj_padding = -local_output_size % alignment
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(

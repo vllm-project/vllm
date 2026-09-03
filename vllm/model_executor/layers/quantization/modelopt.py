@@ -2215,7 +2215,12 @@ def maybe_fuse_global_scales(layer) -> None:
         )
 
 
-def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
+def select_linear_kernel(
+    spec: QuantSpec,
+    layer,
+    rt: RuntimeDtypes,
+    weight_shape: tuple[int, int] | None = None,
+):
     """Thin family dispatcher on the weight key: nvfp4 / mxfp8 / fp8."""
     w = spec.weight
     assert isinstance(w, QuantKey), f"resolve() must supply a weight key, got {w!r}"
@@ -2235,7 +2240,7 @@ def select_linear_kernel(spec: QuantSpec, layer, rt: RuntimeDtypes):
         weight_quant_key=w,
         input_dtype=rt.input_dtype,
         out_dtype=rt.out_dtype,
-        weight_shape=layer.weight.shape,
+        weight_shape=weight_shape or layer.weight.shape,
         module_name=type(layer).__name__,
     )
 
@@ -2254,6 +2259,10 @@ class FormatScheme:
 
     def extra_weights(self, layer, shapes: "Shapes", ctx: CkptCtx, wl) -> None:
         """Register format-level params (after the key schemes' weights)."""
+
+    def kernel_weight_shape(self, layer) -> tuple[int, int]:
+        """Return the weight shape the selected kernel will receive."""
+        return tuple(layer.weight.shape)
 
     def pre_process(self, layer) -> None:
         """Run before the key schemes' ``process``."""
@@ -2283,6 +2292,10 @@ class _Fp8PbWoPartialBlock(FormatScheme):
     scale from ``KFp8Block128`` already matches the padded block count, so only
     the weight rows and the output need adjusting.
     """
+
+    def kernel_weight_shape(self, layer) -> tuple[int, int]:
+        out, in_ = layer.weight.shape
+        return (cdiv(out, 128) * 128, in_)
 
     def post_process(self, layer) -> None:
         w = layer.weight
@@ -2405,7 +2418,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
         rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
-        self.kernel = select_linear_kernel(self.spec, layer, rt)
+        self.kernel = select_linear_kernel(
+            self.spec,
+            layer,
+            rt,
+            weight_shape=self.fmt.kernel_weight_shape(layer),
+        )
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
