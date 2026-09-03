@@ -7,7 +7,8 @@ WORKDIR /workspace/vllm
 # Install some basic utilities
 RUN apt-get update && apt-get install -y \
     git \
-    ffmpeg libsm6 libxext6 libgl1 && \
+    ffmpeg libsm6 libxext6 libgl1 \
+    protobuf-compiler && \
     rm -rf /var/lib/apt/lists/*
 
 # Build vLLM.
@@ -27,6 +28,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
         -r requirements/tpu.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements/build/rust.txt && \
+    bash build_rust.sh
 
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e .
 
