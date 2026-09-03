@@ -1073,8 +1073,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # the packed query and describe it through the trtllm-gen varlen
             # API instead of incorrectly treating every request as q_len=1.
             decode_q_lens = (
-                qo_indptr_cpu[1 : num_decodes + 1]
-                - qo_indptr_cpu[:num_decodes]
+                qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
             )
             max_q_len = int(decode_q_lens.max().item())
             if max_q_len > 1:
