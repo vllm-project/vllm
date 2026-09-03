@@ -47,6 +47,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    should_ignore_layer,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype as dequantize_nvfp4_to_dtype,
 )
@@ -203,13 +206,12 @@ class DeepGemmMegaMoEExperts(nn.Module):
             return None
         if DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config, layer, prefix):
             return None
-        if quant_config.get_name() == "compressed-tensors" and prefix is not None:
-            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
-            if (
-                callable(get_scheme_dict)
-                and get_scheme_dict(layer or nn.Identity(), prefix) is None
-            ):
-                return None
+        if (
+            quant_config.get_name() == "compressed-tensors"
+            and prefix is not None
+            and should_ignore_layer(prefix, ignore=getattr(quant_config, "ignore", ()))
+        ):
+            return None
         block_size = getattr(quant_config, "weight_block_size", None)
         if (
             quant_config.get_name() != "fp8"
@@ -235,11 +237,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
     ) -> bool:
         if quant_config is None or quant_config.get_name() != "compressed-tensors":
             return False
-        if prefix is not None:
-            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
-            if callable(get_scheme_dict):
-                scheme = get_scheme_dict(layer or nn.Identity(), prefix)
-                return bool(scheme and scheme.get("format") == "nvfp4-pack-quantized")
+        if prefix is not None and should_ignore_layer(
+            prefix, ignore=getattr(quant_config, "ignore", ())
+        ):
+            return False
         config = getattr(quant_config, "config", None) or {}
         return any(
             group.get("format") == "nvfp4-pack-quantized"
