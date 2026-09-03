@@ -167,7 +167,18 @@ class QSAIndexer(nn.Module):
 
     @property
     def output_width(self) -> int:
+        """Selection (index) columns per row."""
         return self.token_topk + self.compress_ratio - 1
+
+    @property
+    def packed_output_width(self) -> int:
+        """Packed selection-buffer width: output_width + 1.
+
+        The trailing column holds each row's valid-entry count (written by
+        the expand kernel) — never a token index; the sparse attention
+        kernel reads it as its tile-loop bound.
+        """
+        return self.output_width + 1
 
     def _metadata(
         self,
@@ -219,11 +230,13 @@ class QSAIndexer(nn.Module):
             if self.skip_topk and out is not None:
                 return out
             result = torch.full(
-                (hidden_states.shape[0], self.output_width),
+                (hidden_states.shape[0], self.packed_output_width),
                 -1,
                 dtype=torch.int32,
                 device=hidden_states.device,
             )
+            # Inert rows carry a zero valid count (empty loop bound), not -1.
+            result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
                 return out
@@ -357,11 +370,11 @@ class QSAIndexer(nn.Module):
         if out is None:
             out = torch.empty(
                 num_tokens,
-                self.output_width,
+                self.packed_output_width,
                 dtype=torch.int32,
                 device=q.device,
             )
-        elif out.shape != (num_tokens, self.output_width):
+        elif out.shape != (num_tokens, self.packed_output_width):
             raise ValueError("QSA selection output has an invalid shape")
 
         num_decode_tokens = compressed_metadata.num_decode_tokens

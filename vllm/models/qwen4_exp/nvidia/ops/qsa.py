@@ -21,8 +21,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     indices_ptr,
     block_table_ptr,
     token_to_req_ptr,
-    logical_positions_ptr,
-    seq_lens_ptr,
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
@@ -51,14 +49,18 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    BLOCK_TOPK: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
     split_id = tl.program_id(2)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+
+    # The packed selection buffer carries one TRAILING COUNT COLUMN per row
+    # (column TOPK of a TOPK+1-wide buffer): the row's valid-entry count,
+    # written by the expand kernel. It is never a token index — the tile loop
+    # and the index load below only ever cover columns [0, TOPK).
+    valid_count = tl.load(indices_ptr + row * stride_indices_row + TOPK)
 
     head_offsets = tl.arange(0, BLOCK_M)
     dim_offsets = tl.arange(0, HEAD_DIM)
@@ -78,14 +80,6 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
     softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
 
-    # compute bounds (use int32)
-    position = tl.load(logical_positions_ptr + row).to(tl.int32)
-    seq_len = tl.load(seq_lens_ptr + safe_request).to(tl.int32)
-    visible = tl.minimum((position + 1) // COMPRESS_RATIO, seq_len // COMPRESS_RATIO)
-    valid_count = (
-        tl.minimum(visible, BLOCK_TOPK) * COMPRESS_RATIO
-        + (position + 1) % COMPRESS_RATIO
-    )
     tile_end = tl.minimum(NUM_TILES, tl.cdiv(tl.minimum(valid_count, TOPK), BLOCK_N))
 
     for tile in range(split_id, tile_end, NUM_SPLITS):
@@ -417,24 +411,35 @@ def _compress_qsa_groups_kernel(
     )
 
 
-def _splitk_config(base_programs: int, is_prefill: bool) -> tuple[int, int, int]:
-    """Return (BLOCK_N, target_splits, num_warps) for the split-K kernel.
+def _select_config(
+    num_rows: int, num_kv_heads: int, is_prefill: bool, num_columns: int
+) -> tuple[int, int, int, int]:
+    """Select (block_n, num_warps, num_tiles, num_splits) for the kernel.
 
-    Tuned on GB300 for the Qwen3.8-Flash-Next TP1, TP2, and TP4 shapes.
+    Tuned on GB300 for the Qwen3.8-Flash-Next TP1/TP2/TP4 shapes, keyed on
+    base_programs = num_rows * num_kv_heads. The bp > 2048 region splits on
+    is_prefill (capture-stable: at FULL-graph capture max_query_len is the
+    uniform decode/verify length).
     """
+    base_programs = num_rows * num_kv_heads
     if base_programs > 2048:
-        return (32, 1, 1) if is_prefill else (64, 1, 2)
-    if base_programs <= 24:
-        return 32, 64, 4
-    if base_programs <= 64:
-        return 32, 16, 1
-    if base_programs <= 256:
-        return 32, 8, 1
-    if base_programs <= 640:
-        return 64, 4, 2
-    if base_programs <= 1024:
-        return 32, 4, 1
-    return 64, 1, 2
+        BLOCK_N, target_splits, num_warps = (32, 1, 1) if is_prefill else (64, 1, 2)
+    elif base_programs <= 24:
+        BLOCK_N, target_splits, num_warps = 32, 64, 4
+    elif base_programs <= 64:
+        BLOCK_N, target_splits, num_warps = 32, 16, 1
+    elif base_programs <= 256:
+        BLOCK_N, target_splits, num_warps = 32, 8, 1
+    elif base_programs <= 640:
+        BLOCK_N, target_splits, num_warps = 64, 4, 2
+    elif base_programs <= 1024:
+        BLOCK_N, target_splits, num_warps = 32, 4, 1
+    else:
+        BLOCK_N, target_splits, num_warps = 64, 1, 2
+    num_tiles = triton.cdiv(num_columns, BLOCK_N)
+    # Never more splits than tiles, never empty.
+    num_splits = min(target_splits, num_tiles)
+    return BLOCK_N, num_warps, num_tiles, num_splits
 
 
 def qsa_sparse_paged_attention(
@@ -444,15 +449,16 @@ def qsa_sparse_paged_attention(
     logical_indices: torch.Tensor,
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
-    logical_positions: torch.Tensor,
-    seq_lens: torch.Tensor,
-    compress_ratio: int,
     is_prefill: bool,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 K/V caches.
 
-    is_prefill only steers the top of the config table; see _splitk_config.
+    logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
+    with the trailing column holding each row's valid-entry count (written by
+    the expand kernel; never a token index). The kernel reads it as the
+    tile-loop bound. is_prefill only steers the top of the config table; see
+    _select_config.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -462,8 +468,10 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention metadata has invalid shapes")
     if not all(k_cache.shape[:3]) or not all(block_table.shape):
         raise ValueError("QSA sparse attention cache and block table must be nonempty")
-    if logical_indices.shape[1] <= 0:
-        raise ValueError("QSA sparse attention requires a positive selection width")
+    if logical_indices.shape[1] < 2:
+        raise ValueError(
+            "QSA packed indices need selection columns plus the count column"
+        )
     if q.shape[2] != k_cache.shape[3] or q.shape[1] % k_cache.shape[2]:
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
@@ -477,16 +485,7 @@ def qsa_sparse_paged_attention(
     assert q.stride(2) == k_cache.stride(3) == v_cache.stride(3) == 1
     assert logical_indices.stride(1) == block_table.stride(1) == 1
     assert token_to_req.stride(0) == 1
-    assert logical_positions.dtype == torch.int64
-    assert seq_lens.dtype == torch.int32
-    assert logical_positions.shape == (q.shape[0],)
-    assert logical_positions.stride(0) == 1
-    assert seq_lens.shape == (block_table.shape[0],) and seq_lens.stride(0) == 1
-    assert logical_positions.device == seq_lens.device == q.device
-    assert compress_ratio > 0
 
-    # Selection width = block_topk * compress_ratio + compress_ratio - 1.
-    block_topk = (logical_indices.shape[1] + 1 - compress_ratio) // compress_ratio
     if out is None:
         out = torch.empty_like(q)
     if out.shape != q.shape:
@@ -498,13 +497,10 @@ def qsa_sparse_paged_attention(
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
-    base_programs = q.shape[0] * k_cache.shape[2]
-    block_n, target_splits, partial_warps = _splitk_config(base_programs, is_prefill)
-
-    num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
-    # Avoid empty splits when the selection width is smaller than the profile.
-    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-    num_splits = min(max_useful_splits, target_splits)
+    selection_width = logical_indices.shape[1] - 1  # trailing column is the count
+    block_n, partial_warps, num_tiles, num_splits = _select_config(
+        q.shape[0], k_cache.shape[2], is_prefill, selection_width
+    )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
     if num_splits == 1:
@@ -530,8 +526,6 @@ def qsa_sparse_paged_attention(
         logical_indices,
         block_table,
         token_to_req,
-        logical_positions,
-        seq_lens,
         partial_output,
         partial_lse,
         out,
@@ -550,7 +544,7 @@ def qsa_sparse_paged_attention(
         q.shape[0],
         k_cache.shape[0],
         block_table.shape[0],
-        TOPK=logical_indices.shape[1],
+        TOPK=selection_width,
         PAGE_SIZE=k_cache.shape[1],
         PAGE_TABLE_WIDTH=block_table.shape[1],
         GROUP_SIZE=group_size,
@@ -560,8 +554,6 @@ def qsa_sparse_paged_attention(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        COMPRESS_RATIO=compress_ratio,
-        BLOCK_TOPK=block_topk,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -591,7 +583,6 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
-    compress_ratio: int,
 ) -> tuple[tuple[int, int, int], ...]:
     """Compile every production-reachable split-K/merge specialization."""
 
@@ -600,12 +591,11 @@ def warmup_qsa_sparse_paged_attention(
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
-    block_topk = (selection_width + 1 - compress_ratio) // compress_ratio
 
     # Every config the dispatch can pick for this group size.
     profiles = {
-        _splitk_config(base_programs, is_prefill)
-        for base_programs in range(1, 8193)
+        _select_config(num_rows, num_kv_heads, is_prefill, selection_width)
+        for num_rows in range(1, 8193)
         for is_prefill in (False, True)
     }
 
@@ -626,15 +616,14 @@ def warmup_qsa_sparse_paged_attention(
         shape=tuple(value_cache.shape),
         strides=tuple(value_cache.stride()),
     )
-    indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width))
+    # +1: the packed buffer's trailing count column.
+    indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
     block_table_ptr = TritonWarmupTensor(
         block_table.dtype,
         shape=tuple(block_table.shape),
         strides=tuple(block_table.stride()),
     )
     token_to_req_ptr = TritonWarmupTensor(torch.int32)
-    logical_positions_ptr = TritonWarmupTensor(torch.int64)
-    seq_lens_ptr = TritonWarmupTensor(torch.int32)
     output_ptr = TritonWarmupTensor(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )
@@ -643,10 +632,7 @@ def warmup_qsa_sparse_paged_attention(
     num_cache_blocks = triton_scalar_specialization_rep(kv_cache.shape[0])
 
     warmed = []
-    for block_n, target_splits, warps in sorted(profiles):
-        num_tiles = triton.cdiv(selection_width, block_n)
-        max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-        num_splits = min(max_useful_splits, target_splits)
+    for block_n, warps, num_tiles, num_splits in sorted(profiles):
         if num_splits == 1:
             partial_output_ptr = output_ptr
             partial_lse_ptr = output_ptr
@@ -665,8 +651,6 @@ def warmup_qsa_sparse_paged_attention(
             indices_ptr,
             block_table_ptr,
             token_to_req_ptr,
-            logical_positions_ptr,
-            seq_lens_ptr,
             partial_output_ptr,
             partial_lse_ptr,
             output_ptr,
@@ -678,7 +662,7 @@ def warmup_qsa_sparse_paged_attention(
             value_cache.stride(0),
             value_cache.stride(1),
             value_cache.stride(2),
-            selection_width,
+            selection_width + 1,
             block_table.stride(0),
             row_stride,
             head_stride,
@@ -695,8 +679,6 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            COMPRESS_RATIO=compress_ratio,
-            BLOCK_TOPK=block_topk,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),

@@ -123,9 +123,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
-        logical_positions: torch.Tensor,
-        seq_lens: torch.Tensor,
-        compress_ratio: int,
         is_prefill: bool,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -161,9 +158,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             logical_indices,
             attn_metadata.block_table,
             token_to_req,
-            logical_positions[:num_tokens],
-            seq_lens,
-            compress_ratio,
             is_prefill,
             output[:num_tokens],
         )
@@ -316,11 +310,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             prefix=f"{prefix}.indexer",
         )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # PACKED selection buffer: the trailing column holds each row's
+        # valid-entry count (written by the expand kernel) — never a token
+        # index; the sparse attention kernel reads it as its loop bound.
+        # MTP skip_topk steps reuse rows frozen from step 0; the count is
+        # a row column, so compaction/reuse keep it paired with the content.
         self.register_buffer(
             "topk_indices_buffer",
             torch.empty(
                 max_tokens,
-                self.indexer.output_width,
+                self.indexer.packed_output_width,
                 dtype=torch.int32,
             ),
             persistent=False,
@@ -375,10 +374,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             positions,
             self.topk_indices_buffer[:num_tokens],
         )
-        if selected.shape != (
-            num_tokens,
-            self.indexer.output_width,
-        ):
+        if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
         impl = cast(Qwen4ExpQSAFlashAttentionImpl, self.impl)
         impl.do_kv_cache_update(
@@ -387,10 +383,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             value,
             self.kv_cache,
             main_metadata.slot_mapping,
-        )
-        compressed_metadata = cast(
-            QSAForwardMetadata,
-            metadata[self.indexer.compressed_key_cache.prefix],
         )
         impl.forward_qsa(
             self,
@@ -401,9 +393,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
-            logical_positions=compressed_metadata.logical_positions,
-            seq_lens=compressed_metadata.seq_lens,
-            compress_ratio=self.indexer.compress_ratio,
             is_prefill=main_metadata.max_query_len > self._max_decode_query_len,
         )
 

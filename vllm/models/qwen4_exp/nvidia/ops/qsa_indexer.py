@@ -262,6 +262,15 @@ def _expand_qsa_indices_kernel(
         tl.where(valid, token, -1),
         mask=columns < OUTPUT_WIDTH,
     )
+    # TRAILING COUNT COLUMN: the packed buffer is OUTPUT_WIDTH+1 wide; the
+    # last column holds this row's valid-entry count (expanded blocks plus
+    # causal tail). It is NOT a token index — the sparse attention kernel
+    # reads it as the row's tile-loop bound.
+    if tl.program_id(1) == 0:
+        tl.store(
+            output_ptr + row * stride_output_row + OUTPUT_WIDTH * stride_output_column,
+            expanded_count + tail_count,
+        )
 
 
 def _decode_tiles_per_program(num_requests: int, columns: int) -> int:
@@ -430,7 +439,10 @@ def expand_qsa_block_indices(
     output_width = token_topk + compress_ratio - 1
     assert block_indices.shape == (query_positions.numel(), block_topk)
     assert visible_blocks.shape == query_positions.shape
-    assert out.shape == (block_indices.shape[0], output_width)
+    # +1: the packed buffer's trailing column holds each row's valid-entry
+    # count (never a token index); the index region below only writes
+    # columns [0, output_width).
+    assert out.shape == (block_indices.shape[0], output_width + 1)
     column_block = 256
     grid = (block_indices.shape[0], triton.cdiv(output_width, column_block))
     _expand_qsa_indices_kernel[grid](
