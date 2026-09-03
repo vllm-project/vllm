@@ -2125,7 +2125,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 "flight. Wait for the pause future to resolve before "
                 "resuming."
             )
-        if self.engines_running:
+        # New Elastic EP ranks have unpaused schedulers but waves disabled.
+        if not self.is_scheduler_paused() and not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
 

@@ -7,18 +7,21 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import SamplingParams
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core import DPEngineCoreProc
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
@@ -258,6 +261,47 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
 DP_PAUSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("pause_state", "engines_running", "ignore_start_dp_wave", "expected_sync"),
+    [
+        (PauseState.UNPAUSED, False, False, False),
+        (PauseState.UNPAUSED, True, False, False),
+        (PauseState.PAUSED_NEW, False, True, True),
+        (PauseState.PAUSED_ALL, False, True, True),
+        pytest.param(PauseState.UNPAUSED, False, True, True, id="elastic-ep-new-rank"),
+    ],
+)
+def test_dp_resume_preserves_barrier_participation(
+    monkeypatch: pytest.MonkeyPatch,
+    pause_state: PauseState,
+    engines_running: bool,
+    ignore_start_dp_wave: bool,
+    expected_sync: bool,
+):
+    """Only paused or newly joined ranks need the resume barrier."""
+    core = object.__new__(DPEngineCoreProc)
+    core.pending_pause = False
+    core.engines_running = engines_running
+    core.ignore_start_dp_wave = ignore_start_dp_wave
+    core.scheduler = MagicMock(pause_state=pause_state)
+    core.scheduler.has_unfinished_requests.return_value = True
+    core.dp_group = object()
+    synchronize = MagicMock(return_value=True)
+    monkeypatch.setattr(ParallelConfig, "has_unfinished_dp", synchronize)
+
+    core.resume_scheduler()
+
+    if expected_sync:
+        synchronize.assert_called_once_with(core.dp_group, True)
+        core.scheduler.set_pause_state.assert_called_once_with(PauseState.UNPAUSED)
+        assert core.engines_running
+    else:
+        synchronize.assert_not_called()
+        assert core.engines_running == engines_running
+    assert not core.ignore_start_dp_wave
 
 
 def _get_dp_pause_engine_args(expert_parallel: bool) -> AsyncEngineArgs:
