@@ -279,7 +279,7 @@ class PagedShmSenderCache(PagedShmCache, BaseMultiModalProcessorCache):
             return self.create_item(mm_item, mm_hash)
         else:
             self._stats.record_access(is_hit=True)
-            _, prompt_updates =self.get_item(mm_hash, skip_tensor_payload=True)
+            _, prompt_updates = self.get_item(mm_hash, skip_tensor_payload=True)
             return None, prompt_updates
 
     def touch_sender_cache_item(self, mm_hash: str) -> None:
