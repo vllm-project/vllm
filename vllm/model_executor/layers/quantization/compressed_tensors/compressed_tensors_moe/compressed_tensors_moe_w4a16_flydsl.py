@@ -18,12 +18,17 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    rocm_aiter_fused_experts,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
+
+_AITER_INT4_DTYPE = getattr(torch, "int4", torch.uint8)
 
 
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
@@ -81,7 +86,7 @@ def _gptq_int32_to_flydsl_packed(w_int32):
 
     # FlyDSL interleaved int4 packing
     packed = _pack_shuffled_int8_to_packed_int4_no_perm(shuffled).contiguous()
-    return packed.view(E, N, K // 2)
+    return packed.view(E, N, K // 2).view(_AITER_INT4_DTYPE)
 
 
 class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
@@ -247,14 +252,16 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         # Convert w13 weights
         w13 = layer.w13_weight_packed.data
         w13 = _gptq_int32_to_flydsl_packed(w13)
-        w13 = w13.view(-1).contiguous()
-        layer.w13_weight_packed = torch.nn.Parameter(w13, requires_grad=False)
+        layer.w13_weight_packed = torch.nn.Parameter(
+            w13.contiguous(), requires_grad=False
+        )
 
         # Convert w2 weights
         w2 = layer.w2_weight_packed.data
         w2 = _gptq_int32_to_flydsl_packed(w2)
-        w2 = w2.view(-1).contiguous()
-        layer.w2_weight_packed = torch.nn.Parameter(w2, requires_grad=False)
+        layer.w2_weight_packed = torch.nn.Parameter(
+            w2.contiguous(), requires_grad=False
+        )
 
         # Convert scales for FlyDSL:
         #   per-row:   [E, 1, N] -> squeeze -> [E, N]
@@ -318,24 +325,17 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import (
-            fused_flydsl_moe,
-        )
-
         assert self.moe_quant_config is not None
 
-        return fused_flydsl_moe(
-            x,
-            layer.w13_weight_packed,
-            layer.w2_weight_packed,
-            self.num_experts,
-            self.inter_dim,
-            topk_weights,
-            topk_ids,
-            w1_scale=self.moe_quant_config.w1_scale,
-            w2_scale=self.moe_quant_config.w2_scale,
-            topk=topk_weights.shape[-1],
-            group_size=self.group_size,
-            doweight_stage1=layer.apply_router_weight_on_input,
-            scale_is_bf16=True,
+        return rocm_aiter_fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            moe_config=self.moe,
+            activation=self.moe.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            quant_config=self.moe_quant_config,
+            output_dtype=x.dtype,
         )
