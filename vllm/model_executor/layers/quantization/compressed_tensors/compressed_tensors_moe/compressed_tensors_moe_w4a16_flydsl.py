@@ -178,7 +178,6 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
-        set_weight_attrs(w2_scale, {"load_full_w2": False})
 
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False

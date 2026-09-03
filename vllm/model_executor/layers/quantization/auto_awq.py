@@ -557,11 +557,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             }
         )
 
-        intermediate_size_full = extra_weight_attrs.pop(
-            "intermediate_size_full", intermediate_size_per_partition
-        )
-        self.is_k_full = intermediate_size_per_partition == intermediate_size_full
-
         w13_qweight = Parameter(
             torch.empty(
                 num_experts,
@@ -671,10 +666,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            _,  # w13_g_idx
-            _,  # w2_g_idx
-            _,  # w13_g_idx_sort_indices
-            _,  # w2_g_idx_sort_indices
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -717,7 +708,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            is_k_full=self.is_k_full,
             routing_tables=layer._expert_routing_tables(),
         )
 

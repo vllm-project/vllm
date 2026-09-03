@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from compressed_tensors.quantization import (
+    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -81,6 +82,48 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def _compressed_tensors_actorder_config(actorder):
+    return {
+        "format": "pack-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 4,
+                    "type": "int",
+                    "strategy": "group",
+                    "group_size": 128,
+                    "symmetric": True,
+                    "dynamic": False,
+                    "actorder": actorder,
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
+)
+def test_compressed_tensors_rejects_runtime_activation_order(actorder):
+    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+        CompressedTensorsConfig.from_config(
+            _compressed_tensors_actorder_config(actorder)
+        )
+
+
+@pytest.mark.parametrize(
+    "actorder", [ActivationOrdering.STATIC, ActivationOrdering.WEIGHT, False, None]
+)
+def test_compressed_tensors_accepts_preordered_weights(actorder):
+    config = CompressedTensorsConfig.from_config(
+        _compressed_tensors_actorder_config(actorder)
+    )
+    assert config.target_scheme_map["Linear"]["weights"].actorder == (
+        actorder.value if isinstance(actorder, ActivationOrdering) else None
+    )
 
 
 @pytest.mark.parametrize(
@@ -913,22 +956,6 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
-
-
-@pytest.mark.parametrize(
-    "part,expected",
-    [
-        (64, (False, 64, True)),
-        (128, (False, 128, True)),
-    ],
-)
-def test_wna16_moe_w2_scale_sharding(part, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
-        CompressedTensorsWNA16MoEMethod,
-    )
-
-    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(part)
-    assert result == expected
 
 
 @pytest.mark.parametrize("num_bits", range(2, 9))

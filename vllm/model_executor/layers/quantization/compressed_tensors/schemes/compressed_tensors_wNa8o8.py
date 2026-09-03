@@ -166,7 +166,7 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         # Scale: per-output-channel, or per group along the input dim under TP.
         group_size = self.group_size if self.group_size != -1 else input_size
         partitioned = not marlin_repeat_scales_on_all_ranks(
-            False, self.group_size, input_size != input_size_per_partition
+            self.group_size, input_size != input_size_per_partition
         )
         scales = (input_size_per_partition if partitioned else input_size) // group_size
         scale_data = torch.empty(out, scales, dtype=params_dtype)

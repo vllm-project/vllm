@@ -141,7 +141,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         group_size = self.group_size if self.group_size != -1 else input_size
         row_parallel = input_size != input_size_per_partition
         partition_scales = not marlin_repeat_scales_on_all_ranks(
-            False, self.group_size, row_parallel
+            self.group_size, row_parallel
         )
 
         scales_and_zp_size = input_size // group_size

@@ -215,20 +215,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         assert shape[1] is not None and shape[2] is not None
         return shape[0], shape[1], shape[2]
 
-    @staticmethod
-    def _w2_scale_sharding(
-        intermediate_size_per_partition: int,
-    ) -> tuple[bool, int, bool]:
-        """Decide how to shard w2 group scales across TP for WNA16 Marlin MoE.
-
-        Runtime activation ordering is unsupported, so scales always shard
-        normally per TP rank.
-        """
-        load_full_w2 = False
-        w2_scales_size = intermediate_size_per_partition
-        is_k_full = True
-        return load_full_w2, w2_scales_size, is_k_full
-
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -238,8 +224,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
@@ -277,10 +261,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        load_full_w2, w2_scales_size, self.is_k_full = self._w2_scale_sharding(
-            intermediate_size_per_partition,
-        )
-
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
@@ -291,10 +271,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                     f"({hidden_size}) to be divisible by group_size "
                     f"({self.group_size})."
                 )
-            if (
-                not load_full_w2
-                and intermediate_size_per_partition % self.group_size != 0
-            ):
+            if intermediate_size_per_partition % self.group_size != 0:
                 raise ValueError(
                     "CompressedTensors WNA16 MoE with static group "
                     "scales requires the MoE intermediate size per "
@@ -304,7 +281,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                     "otherwise cross TP shard boundaries; use a compatible TP "
                     "size or enable expert parallelism."
                 )
-            num_groups_w2 = w2_scales_size // self.group_size
+            num_groups_w2 = intermediate_size_per_partition // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 
         if not self.symmetric:
@@ -362,7 +339,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_weight_scale", w2_scale)
         set_weight_attrs(w2_scale, extra_weight_attrs)
-        set_weight_attrs(w2_scale, {"load_full_w2": load_full_w2})
 
         if not self.symmetric:
             w13_zp = torch.nn.Parameter(
@@ -423,7 +399,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             experts_cls=self.experts_cls,
             backend=self.wna16_backend,
             routing_tables=layer._expert_routing_tables(),
-            is_k_full=self.is_k_full,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -437,8 +412,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2=layer.w2_weight_packed,
             w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w13_g_idx=None,
-            w2_g_idx=None,
             w13_qzeros=getattr(layer, "w13_weight_zero_point", None),
             w2_qzeros=getattr(layer, "w2_weight_zero_point", None),
         )
@@ -452,10 +425,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             w2_qweight,
             w13_scales,
             w2_scales,
-            _,  # w13_g_idx
-            _,  # w2_g_idx
-            _,  # w13_g_idx_sort_indices
-            _,  # w2_g_idx_sort_indices
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,

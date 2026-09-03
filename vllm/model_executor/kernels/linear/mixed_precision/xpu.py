@@ -88,7 +88,6 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             setattr(
                 layer, self.w_zp_name, Parameter(weight_zero_point, requires_grad=False)
             )
-        setattr(layer, "g_idx", None)
 
     def apply_weights(
         self,
@@ -98,7 +97,6 @@ class XPUwNa16LinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         w_q, w_s, w_zp = self._get_weight_params(layer)
-        w_gidx = getattr(layer, "g_idx", None)
         out = torch.ops._xpu_C.int4_gemm_w4a16(
             reshaped_x,
             w_q.t(),
@@ -106,7 +104,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             w_s,
             w_zp,
             self.config.group_size,
-            w_gidx,
+            None,  # Retained by the external XPU op ABI.
         )
         return out
 
@@ -213,7 +211,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
             layer.weight_scale,
             layer.weight_zero_point,
             self.config.group_size,
-            None,  # g_idx not currently supported
+            None,  # Retained by the external XPU op ABI.
             bias,
         )
 

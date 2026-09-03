@@ -178,13 +178,11 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # GPTQ-INT4
     {
         "b_type": scalar_types.uint4b8,
-        "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": scalar_types.uint8b128,
-        "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
@@ -794,27 +792,22 @@ def test_fused_moe_wn16(
 
 
 MARLIN_MOE_SCENARIOS = [
-    # (m, n, k, e, topk, ep_size, act_order, is_k_full)
-    # No act_order: is_k_full=True matches usual case (marlin_is_k_full).
+    # (m, n, k, e, topk, ep_size)
     # N>=256 required for Marlin kernel thread config for MXFP8.
     # Single token, small matrices
-    (1, 128, 256, 5, 2, 1, False, True),
+    (1, 128, 256, 5, 2, 1),
     # Single token, large matrices
-    (1, 1024, 2048, 5, 2, 1, False, True),
+    (1, 1024, 2048, 5, 2, 1),
     # Unaligned m, small matrices
-    (133, 256, 256, 5, 2, 1, False, True),
+    (133, 256, 256, 5, 2, 1),
     # Unaligned m, large matrices
-    (133, 1024, 2048, 12, 3, 1, False, True),
+    (133, 1024, 2048, 12, 3, 1),
     # Aligned batch, small matrices
-    (128, 256, 256, 5, 2, 1, False, True),
+    (128, 256, 256, 5, 2, 1),
     # Aligned batch, large matrices
-    (128, 1024, 2048, 12, 3, 1, False, True),
+    (128, 1024, 2048, 12, 3, 1),
     # Expert parallelism
-    (64, 1024, 2048, 12, 3, 4, False, True),
-    # Act order with is_k_full=True (no tensor parallelism)
-    (1, 1024, 2048, 5, 2, 1, True, True),
-    # Act order with is_k_full=False (tensor parallelism)
-    (133, 256, 256, 5, 2, 1, True, False),
+    (64, 1024, 2048, 12, 3, 4),
 ]
 
 
@@ -832,17 +825,13 @@ def marlin_moe_generate_valid_test_cases():
         e,
         topk,
         ep_size,
-        act_order,
-        is_k_full,
     ):
         group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
         if group_size > 0 and k % group_size != 0:
             return False
-        if act_order and group_size in [-1, k, n]:
-            return False
         if group_size in [k, n]:
             return False
-        if b_type == scalar_types.float8_e4m3fn and group_size == 32 and is_k_full:
+        if b_type == scalar_types.float8_e4m3fn and group_size == 32:
             return False
         return a_type.size_bits < 16 or a_type is c_type
 
@@ -858,8 +847,6 @@ def marlin_moe_generate_valid_test_cases():
             )
         )
 
-        supports_act_order = quant_test_config.get("support_act_order", False)
-
         for sub_case in inner_combinations:
             if (
                 sub_case[0] == scalar_types.float8_e4m3fn
@@ -869,10 +856,8 @@ def marlin_moe_generate_valid_test_cases():
                 continue
 
             for scenario in MARLIN_MOE_SCENARIOS:
-                m, n, k, e, topk, ep_size, act_order, is_k_full = scenario
-                if act_order and not supports_act_order:
-                    continue
-                args = sub_case + (m, n, k, e, topk, ep_size, act_order, is_k_full)
+                m, n, k, e, topk, ep_size = scenario
+                args = sub_case + (m, n, k, e, topk, ep_size)
                 if is_valid(*args):
                     cases.append(args)
     return cases
@@ -885,9 +870,7 @@ class MarlinMoEWeightData:
     scales: torch.Tensor
     global_scale: torch.Tensor | None
     a_scales_factor: torch.Tensor | None
-    g_idx: torch.Tensor | None
     zeros: torch.Tensor | None
-    sort_indices: torch.Tensor | None
     marlin_bias: torch.Tensor | None
 
     @staticmethod
@@ -895,15 +878,12 @@ class MarlinMoEWeightData:
         w: torch.Tensor,
         quant_type: ScalarType,
         group_size: int,
-        act_order: bool | None = None,
         bias: torch.Tensor | None = None,
         input_type: ScalarType = None,
     ) -> "MarlinMoEWeightData":
         assert w.ndim == 3
 
         has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
-        k = w.shape[-1]
-
         if input_type == scalar_types.int8:
             input_dtype = torch.int8
         elif input_type == scalar_types.float8_e4m3fn:
@@ -916,8 +896,6 @@ class MarlinMoEWeightData:
         scales_l: list[torch.Tensor] = []
         global_scale_l: list[torch.Tensor] = []
         zeros_l: list[torch.Tensor] = []
-        g_idx_l: list[torch.Tensor] = []
-        sort_indices_l: list[torch.Tensor] = []
         bias_l: list[torch.Tensor] = []
 
         for i in range(w.shape[0]):
@@ -959,21 +937,16 @@ class MarlinMoEWeightData:
                 scales_l.append(scales)
                 zeros_l.append(zeros)
             else:
-                test_perm = torch.randperm(k)
-                w_ref, qweight, scales, g_idx, sort_indices, _ = marlin_quantize(
+                w_ref, qweight, scales = marlin_quantize(
                     w[i].transpose(1, 0),
                     quant_type,
                     group_size,
-                    act_order,
-                    test_perm,
                     input_dtype=input_dtype,
                 )
 
                 w_ref_l.append(w_ref.T)
                 qweight_l.append(qweight)
                 scales_l.append(scales)
-                g_idx_l.append(g_idx)
-                sort_indices_l.append(sort_indices)
 
             if bias is not None:
                 bias_l.append(marlin_permute_bias(bias[i]))
@@ -982,9 +955,7 @@ class MarlinMoEWeightData:
         qweight = stack_and_dev(qweight_l).contiguous()
         scales = stack_and_dev(scales_l)
         global_scale = stack_and_dev(global_scale_l) if global_scale_l else None
-        g_idx = stack_and_dev(g_idx_l) if g_idx_l else None
         zeros = stack_and_dev(zeros_l) if zeros_l else None
-        sort_indices = stack_and_dev(sort_indices_l) if sort_indices_l else None
         marlin_bias = stack_and_dev(bias_l) if bias_l else None
 
         a_scales_factor = None
@@ -999,19 +970,14 @@ class MarlinMoEWeightData:
             scales=scales,
             global_scale=global_scale,
             a_scales_factor=a_scales_factor,
-            g_idx=g_idx,
             zeros=zeros,
-            sort_indices=sort_indices,
             marlin_bias=marlin_bias,
         )
 
 
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
-    (
-        "a_type, b_type, c_type, group_blocks,"
-        "m, n, k, e, topk, ep_size, act_order, is_k_full"
-    ),
+    ("a_type, b_type, c_type, group_blocks,m, n, k, e, topk, ep_size"),
     marlin_moe_generate_valid_test_cases(),
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
@@ -1027,8 +993,6 @@ def test_fused_marlin_moe(
     e: int,
     topk: int,
     ep_size: int,
-    act_order: bool,
-    is_k_full: bool,
 ):
     set_random_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
@@ -1065,7 +1029,6 @@ def test_fused_marlin_moe(
         w=w1,
         quant_type=b_type,
         group_size=group_size,
-        act_order=act_order,
         input_type=a_type,
     )
 
@@ -1073,7 +1036,6 @@ def test_fused_marlin_moe(
         w=w2,
         quant_type=b_type,
         group_size=group_size,
-        act_order=act_order,
         input_type=a_type,
     )
 
@@ -1127,17 +1089,12 @@ def test_fused_marlin_moe(
         expert_map=e_map,
         global_scale1=w1_data.global_scale,
         global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
         input_global_scale1=w1_data.a_scales_factor,
         input_global_scale2=w2_data.a_scales_factor,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
         w1_zeros=w1_data.zeros,
         w2_zeros=w2_data.zeros,
         input_dtype=a_dtype,
         quant_type_id=b_type.id,
-        is_k_full=is_k_full,
         activation_func=instance_activation,
     )
 
@@ -1154,8 +1111,6 @@ def test_fused_marlin_moe_with_bias(m):
     e, topk = 32, 4
     n, k = 2048, 2048
     group_size = 128
-    act_order = False
-    is_k_full = True
     quant_type = scalar_types.uint4b8
     dtype = torch.half
 
@@ -1169,7 +1124,6 @@ def test_fused_marlin_moe_with_bias(m):
         w=w1,
         quant_type=quant_type,
         group_size=group_size,
-        act_order=act_order,
         bias=b_bias1,
     )
 
@@ -1177,7 +1131,6 @@ def test_fused_marlin_moe_with_bias(m):
         w=w2,
         quant_type=quant_type,
         group_size=group_size,
-        act_order=act_order,
         bias=b_bias2,
     )
 
@@ -1204,14 +1157,9 @@ def test_fused_marlin_moe_with_bias(m):
         expert_map=None,
         global_scale1=w1_data.global_scale,
         global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
         w1_zeros=w1_data.zeros,
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
-        is_k_full=is_k_full,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
@@ -1235,7 +1183,6 @@ def test_fused_marlin_moe_non_gated(
     set_random_seed(42)
 
     group_size = 16  # NVFP4 group size
-    is_k_full = True
     quant_type = scalar_types.float4_e2m1f
     dtype = torch.bfloat16
 
@@ -1248,14 +1195,12 @@ def test_fused_marlin_moe_non_gated(
         w=w1,
         quant_type=quant_type,
         group_size=group_size,
-        act_order=False,
     )
 
     w2_data = MarlinMoEWeightData.make(
         w=w2,
         quant_type=quant_type,
         group_size=group_size,
-        act_order=False,
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -1286,14 +1231,9 @@ def test_fused_marlin_moe_non_gated(
         expert_map=None,
         global_scale1=w1_data.global_scale,
         global_scale2=w2_data.global_scale,
-        g_idx1=w1_data.g_idx,
-        g_idx2=w2_data.g_idx,
-        sort_indices1=w1_data.sort_indices,
-        sort_indices2=w2_data.sort_indices,
         w1_zeros=w1_data.zeros,
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
-        is_k_full=is_k_full,
         activation=activation,
     )
 
@@ -1612,14 +1552,9 @@ def test_batched_marlin_activation_uses_expert_token_counts(
         quant_type_id=0,
         a1_gscale=None,
         a2_gscale=None,
-        w13_g_idx=None,
-        w2_g_idx=None,
-        w13_g_idx_sort_indices=None,
-        w2_g_idx_sort_indices=None,
         w1_zp=None,
         w2_zp=None,
         input_dtype=None,
-        is_k_full=True,
         activation_config=ApplyMoEActivationConfig(
             clamp_limit=3.0, alpha=1.3, beta=0.5
         ),
@@ -1982,14 +1917,12 @@ def test_batched_fused_marlin_moe(
         w=w1,
         quant_type=quant_dtype,
         group_size=group_size,
-        act_order=None,
         input_type=input_type,
     )
     w2_data = MarlinMoEWeightData.make(
         w=w2,
         quant_type=quant_dtype,
         group_size=group_size,
-        act_order=None,
         input_type=input_type,
     )
 
@@ -2101,14 +2034,9 @@ def test_batched_fused_marlin_moe(
         "expert_map": None,
         "global_scale1": w1_data.global_scale,
         "global_scale2": w2_data.global_scale,
-        "g_idx1": w1_data.g_idx,
-        "g_idx2": w2_data.g_idx,
-        "sort_indices1": w1_data.sort_indices,
-        "sort_indices2": w2_data.sort_indices,
         "w1_zeros": w1_data.zeros,
         "w2_zeros": w2_data.zeros,
         "quant_type_id": quant_dtype.id,
-        "is_k_full": True,
     }
     if input_dtype is not None:
         kwargs["input_dtype"] = input_dtype

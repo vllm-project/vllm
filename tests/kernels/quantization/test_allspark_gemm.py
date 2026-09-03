@@ -70,7 +70,7 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     input = rand_data((m, k), dtype=dtype)
     weight = rand_data((k, n), dtype=dtype)
 
-    # Quantize (and apply act_order if provided)
+    # Quantize weights.
     w_ref, qw, s, zp = quantize_weights(
         weight, scalar_types.uint8b128, group_size, has_zp
     )

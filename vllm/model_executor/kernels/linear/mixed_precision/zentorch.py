@@ -60,8 +60,6 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         Constraints (any failure -> ``cpu_gemm_wna16`` path via ``super()``
         with ``layer`` untouched).
         """
-        # g_idx is always None (activation ordering no longer supported)
-
         weight_packed = getattr(layer, self.w_q_name, None)
         weight_scale = getattr(layer, self.w_s_name, None)
         if weight_packed is None or weight_scale is None:
@@ -106,7 +104,7 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         if not self._zentorch_woq_eligible(layer):
             logger.info_once(
                 "[zen_cpu] ZentorchWNA16 fast path not eligible for this "
-                "layer (AWQ pack layout, g_idx, or non-int32 storage); "
+                "layer (AWQ pack layout or non-int32 storage); "
                 "falling back to CPUWNA16LinearKernel (cpu_gemm_wna16)."
             )
             super().process_weights_after_loading(layer)

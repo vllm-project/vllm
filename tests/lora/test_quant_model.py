@@ -24,7 +24,8 @@ MODELS: list[ModelWithQuantization]
 if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
-            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", quantization="gptq"
+            model_path="LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+            quantization="gptq",
         ),
     ]
 else:
@@ -33,7 +34,8 @@ else:
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", quantization="awq"
         ),
         ModelWithQuantization(
-            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", quantization="gptq"
+            model_path="LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+            quantization="gptq",
         ),
     ]
 

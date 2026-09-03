@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
+    normalize_and_validate_gptq_desc_act,
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -114,16 +115,7 @@ class AutoGPTQConfig(QuantizationConfig):
         modules_in_block_to_quantize: list[str] | None = None,
     ) -> None:
         super().__init__()
-        if desc_act and group_size == -1:
-            # In this case, act_order == True is the same as act_order == False
-            # (since we have only one group per output channel)
-            desc_act = False
-        if desc_act:
-            raise ValueError(
-                "GPTQ group activation ordering (desc_act=True) is no longer "
-                "supported. Use a checkpoint with static activation ordering "
-                "or desc_act=False."
-            )
+        desc_act = normalize_and_validate_gptq_desc_act(desc_act, group_size, dynamic)
 
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -155,7 +147,7 @@ class AutoGPTQConfig(QuantizationConfig):
 
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
-        self.desc_act = desc_act
+        self.desc_act: bool = desc_act
         self.lm_head_quantized = lm_head_quantized
         self.full_config = full_config
 
@@ -195,6 +187,14 @@ class AutoGPTQConfig(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
+
+    @staticmethod
+    def get_checkpoint_weight_mapper():
+        # Some desc_act=False checkpoints still serialize the sequential g_idx
+        # tensor. It is redundant once runtime activation ordering is disabled.
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "AutoGPTQConfig":
@@ -369,7 +369,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(
-            False, self.quant_config.group_size, is_row_parallel
+            self.quant_config.group_size, is_row_parallel
         ):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
@@ -503,10 +503,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             assert self.quant_config.quant_type.size_bits == 8, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
-
-        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-
-        self.is_k_full = True
 
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
@@ -654,8 +650,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
-            w13_g_idx=None,
-            w2_g_idx=None,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
             w13_qzeros=getattr(layer, "w13_qzeros", None),
@@ -672,10 +666,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            _,  # w13_g_idx
-            _,  # w2_g_idx
-            _,  # w13_g_idx_sort_indices
-            _,  # w2_g_idx_sort_indices
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -710,7 +700,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            is_k_full=self.is_k_full,
             routing_tables=layer._expert_routing_tables(),
         )
 

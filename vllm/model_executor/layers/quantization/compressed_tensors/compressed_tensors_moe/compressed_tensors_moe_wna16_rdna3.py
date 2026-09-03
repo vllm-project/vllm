@@ -65,15 +65,14 @@ class CompressedTensorsWNA16RDNA3MoEMethod(CompressedTensorsWNA16MoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.w13_weight_packed.device
         num_experts = layer.w13_weight_packed.shape[0]
-        empty_g_idx = torch.empty(0, dtype=torch.int32, device=device)
 
         # Shuffle weights in-place per expert (exllama nibble interleave)
         for e in range(num_experts):
             w13_e = layer.w13_weight_packed.data[e].contiguous()
-            ops.gptq_shuffle(w13_e, empty_g_idx, 4)
+            ops.gptq_shuffle(w13_e, 4)
             layer.w13_weight_packed.data[e] = w13_e
             w2_e = layer.w2_weight_packed.data[e].contiguous()
-            ops.gptq_shuffle(w2_e, empty_g_idx, 4)
+            ops.gptq_shuffle(w2_e, 4)
             layer.w2_weight_packed.data[e] = w2_e
 
         # Keep scales as [E, groups, N] in activation dtype

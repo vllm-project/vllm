@@ -186,7 +186,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, w_zp = self._get_weight_params(layer)
-        w_gidx = getattr(layer, "g_idx", None)
         if layer.use_w4a8:
             x = ops.int4_scaled_mm_cpu(
                 x=x,
@@ -201,7 +200,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
                 q_weight=w_q,
                 scales=w_s,
                 zeros=w_zp,
-                g_idx=w_gidx,
                 bias=bias,
                 pack_factor=8,  # 32 // 4
                 isa_hint=layer.isa_hint,
