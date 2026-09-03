@@ -14,6 +14,15 @@ def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: i
     )
 
 
+def test_deepseek_v4_sparse_mla_rejects_sm75():
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    from vllm.platforms.interface import DeviceCapability
+
+    assert not DeepseekV4SparseMLABackend.supports_compute_capability(
+        DeviceCapability(7, 5)
+    )
+
+
 @pytest.mark.parametrize("major,expected", [(7, False), (8, True), (12, True)])
 def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
     from vllm.platforms.interface import DeviceCapability
