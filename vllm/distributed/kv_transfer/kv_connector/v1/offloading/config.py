@@ -54,7 +54,20 @@ def build_offloading_config(
     )
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
-    for group in groups:
+    # Only prefix-cacheable groups are addressed by block hashes, so only they
+    # are constrained by the hash granularity. A group that opts out (e.g.
+    # CircularBufferSpec, a one-block-per-request ring whose block size is
+    # unrelated to the hash unit) never has block hashes computed over it;
+    # asserting divisibility on it makes native offloading unbootable on any
+    # hybrid model carrying such a group. Mirrors the prefix_cacheable filter
+    # resolve_kv_cache_block_sizes() applies when deriving tokens_per_hash,
+    # fallback included.
+    hashable_groups = [
+        offload_group
+        for cache_group, offload_group in zip(kv_cache_config.kv_cache_groups, groups)
+        if cache_group.kv_cache_spec.prefix_cacheable
+    ] or groups
+    for group in hashable_groups:
         assert group.tokens_per_block % tokens_per_hash == 0, (
             f"tokens_per_block={group.tokens_per_block} not divisible by "
             f"tokens_per_hash={tokens_per_hash}. "
