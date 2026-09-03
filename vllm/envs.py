@@ -216,6 +216,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
+    VLLM_FLASHINFER_PREFILL_BACKEND: Literal["auto", "cute-dsl-prims"] = "auto"
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1742,6 +1743,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
             for v in os.environ["VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS"].split(",")
             if v.strip()
         ]
+    ),
+    # Select the implementation used by FlashInfer's native paged prefill
+    # wrapper. The CuTe DSL primitives backend is an opt-in SM120 FP8 path.
+    "VLLM_FLASHINFER_PREFILL_BACKEND": env_with_choices(
+        "VLLM_FLASHINFER_PREFILL_BACKEND",
+        "auto",
+        ["auto", "cute-dsl-prims"],
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
