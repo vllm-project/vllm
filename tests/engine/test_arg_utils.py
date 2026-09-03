@@ -464,6 +464,25 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
+def test_multi_node_world_size_includes_pcp(monkeypatch):
+    """PCP expands the process world size, so the --nnodes divisibility check
+    must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
+    size of 1 and the launch is rejected before the engine starts."""
+    import vllm.config.vllm
+
+    # PCP requires the V2 model runner, which is gated on Triton.
+    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=2,
+        nnodes=2,
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.parallel_config.world_size == 2
+
+
 def test_prefix_cache_default():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
