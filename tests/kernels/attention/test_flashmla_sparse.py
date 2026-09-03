@@ -14,6 +14,19 @@ def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: i
     )
 
 
+@pytest.mark.parametrize("major,expected", [(7, False), (8, True), (12, True)])
+def test_triton_sparse_mla_requires_sm80(major: int, expected: bool):
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.triton_mla_sparse import (
+        TritonMLASparseBackend,
+    )
+
+    assert (
+        TritonMLASparseBackend.supports_compute_capability(DeviceCapability(major, 0))
+        is expected
+    )
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
