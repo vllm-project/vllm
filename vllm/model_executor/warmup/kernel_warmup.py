@@ -44,6 +44,7 @@ from vllm.model_executor.warmup.replayssm_warmup import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.import_utils import has_cutedsl
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -162,7 +163,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        fa4_cutedsl_warmup(worker)
+        if has_cutedsl():
+            fa4_cutedsl_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
@@ -179,8 +181,9 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if process_local_only:
         return
 
-    flashinfer_sparse_mla_decode_autotune_warmup(worker)
-    deepseek_v4_sparse_mla_attention_warmup(worker)
+    if not current_platform.is_xpu():
+        flashinfer_sparse_mla_decode_autotune_warmup(worker)
+        deepseek_v4_sparse_mla_attention_warmup(worker)
 
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
