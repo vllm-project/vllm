@@ -123,6 +123,7 @@ def sync_cudagraph_and_dp_padding(
         # into them and does no work there, the same way a dummy run does.
         # Microbatched steps run eager for now; no CUDA graphs are captured for
         # them yet, so there is nothing to dispatch to.
+        assert parallel_config is not None
         ubatch_num_tokens = int(num_tokens_across_dp.max().item())
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
@@ -135,6 +136,7 @@ def sync_cudagraph_and_dp_padding(
             ),
             uniform_token_count=synced_uniform_token_count,
             eager=True,
+            num_reqs=int(num_reqs_across_dp.max().item()),
         )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))

@@ -52,7 +52,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, get_backend_names
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -988,7 +988,12 @@ class DiffusionGemmaModelState(ModelState):
         attn_groups,
         kv_cache_config,
         for_capture=False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, (
+            f"DBO is not supported when running with {type(self).__name__} "
+            f"(Attention backends: {get_backend_names(attn_groups)})."
+        )
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
