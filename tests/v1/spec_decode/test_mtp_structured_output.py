@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -390,3 +391,107 @@ def test_trim_reasoning_for_advance():
     next_step = [post, post]
     request.append_output_token_ids(next_step)
     assert manager.trim_reasoning_for_advance(request, next_step) == next_step
+
+
+class _EngineReasonerStub(ParserEngineReasoningAdapter):
+    """Adapter-typed reasoner with a fixed end-token set and no real engine."""
+
+    def __init__(self, end_token_ids):
+        self._end_token_ids = frozenset(end_token_ids)
+        self.windows: list[list[int]] = []
+
+    @property
+    def reasoning_end_token_ids(self):
+        return self._end_token_ids
+
+    def find_reasoning_end_offset(self, token_ids):
+        self.windows.append(list(token_ids))
+        for offset, token in enumerate(token_ids):
+            if token in self._end_token_ids:
+                return offset
+        return None
+
+    def is_reasoning_end(self, input_ids):
+        return any(token in self._end_token_ids for token in input_ids)
+
+    def is_reasoning_end_streaming(self, input_ids, delta_ids):
+        raise AssertionError("engine path must not rescan draft prefixes")
+
+
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_engine_reasoner_ends_midwindow_with_padding(backend):
+    """Engine reasoners see the draft window once, without -1 padding."""
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
+    grammar = request.structured_output_request.grammar
+
+    assert grammar.accept_tokens(request.request_id, prompt)
+
+    marker = tokenizer.encode("\n")[0]
+    reasoner = _EngineReasonerStub({marker})
+    manager.reasoner_cls = _EngineReasonerStub
+    request.structured_output_request.reasoner = reasoner
+    request.structured_output_request.reasoning_ended = False
+
+    pre = tokenizer.encode(" ")[0]
+    post = tokenizer.encode(",")[0]
+    drafts = [pre, marker, post, -1]
+
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+
+    assert bitmask is not None
+    assert bitmask.shape[0] == len(drafts) + 1
+    assert (bitmask[0] == -1).all()
+    assert (bitmask[1] == -1).all()
+    assert not (bitmask[2] == -1).all()
+    assert reasoner.windows == [[pre, marker, post]]
+    assert not grammar.is_terminated()
+
+
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_bitmask_legacy_multi_token_marker_constrains_bonus_row(backend):
+    """A legacy marker visible only on the whole window ends reasoning at the
+    window's last draft, so the bonus row is constrained (parity with
+    should_advance, which records that same index).
+    """
+    tokenizer, manager, request, prompt = _make_manager_and_request(backend)
+    grammar = request.structured_output_request.grammar
+
+    assert grammar.accept_tokens(request.request_id, prompt)
+
+    first = tokenizer.encode(" ")[0]
+    second = tokenizer.encode("\n")[0]
+
+    class TwoTokenMarkerReasoner:
+        def __init__(self, *_, **__):
+            pass
+
+        def is_reasoning_end(self, input_ids):
+            return self.is_reasoning_end_streaming(input_ids, input_ids)
+
+        def is_reasoning_end_streaming(self, input_ids, delta_ids):
+            delta = list(delta_ids)
+            return any(
+                delta[i : i + 2] == [first, second] for i in range(len(delta) - 1)
+            )
+
+    manager.reasoner_cls = TwoTokenMarkerReasoner
+    request.structured_output_request.reasoner = TwoTokenMarkerReasoner()
+    request.structured_output_request.reasoning_ended = False
+
+    drafts = [first, second]
+    bitmask = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: drafts},
+    )
+
+    assert bitmask is not None
+    assert bitmask.shape[0] == len(drafts) + 1
+    assert (bitmask[0] == -1).all()
+    assert (bitmask[1] == -1).all()
+    assert not (bitmask[-1] == -1).all()
+    assert not grammar.is_terminated()
