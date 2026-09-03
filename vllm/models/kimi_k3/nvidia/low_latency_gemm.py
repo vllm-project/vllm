@@ -663,7 +663,9 @@ def _is_packed_row_major(tensor: torch.Tensor) -> bool:
 
 def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
     return (
-        _is_packed_row_major(x)
+        x.dim() == 2
+        and x.stride(1) == 1
+        and (x.shape[0] == 1 or x.stride(0) % 8 == 0)
         and _is_packed_row_major(weight)
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -676,7 +678,8 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
 
 def _residual_ok(x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor) -> bool:
     return (
-        residual.dim() == 2
+        _is_packed_row_major(x)
+        and residual.dim() == 2
         and residual.dtype == torch.bfloat16
         and residual.is_cuda
         and residual.device == x.device
@@ -693,6 +696,8 @@ def _run_plan(
         return None
     backend, config = entry
     if backend == "cute":
+        if x.shape[0] != 1 and not _is_packed_row_major(x):
+            return None
         if not shape_dynamic_skinny_gemm.is_available():
             return None
         return shape_dynamic_skinny_gemm(x, weight, config, None)
