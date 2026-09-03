@@ -66,7 +66,6 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     HiSparseHotSpec,
     HiSparseResidentSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -2507,13 +2506,12 @@ def _glm5_like_kv_cache_spec_with_tail(
             cast(MLAAttentionSpec, kv_cache_spec[f"layers.{i}.indexer"]),
             tokens_per_state=kpool,
         )
-        kv_cache_spec[f"layers.{i}.tail"] = KpoolTailSpec(
+        kv_cache_spec[f"layers.{i}.tail"] = CircularBufferSpec(
             block_size=kpool,
             num_kv_heads=2,
             head_size=128,
             head_size_v=0,
             dtype=torch.bfloat16,
-            sliding_window=kpool,
         )
     return kv_cache_spec
 
@@ -2625,7 +2623,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
         for group in groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         and all(
-            isinstance(spec, KpoolTailSpec)
+            isinstance(spec, CircularBufferSpec)
             for spec in group.kv_cache_spec.kv_cache_specs.values()
         )
     )
@@ -2633,7 +2631,7 @@ def test_get_kv_cache_config_kpool_tail_coowns_indexer_tensor():
     # so the runner's strided view rides the indexer storage.
     assert not tail_group.kv_cache_spec.prefix_cacheable
     tail_inner = cast(
-        KpoolTailSpec, tail_group.kv_cache_spec.kv_cache_specs["layers.3.tail"]
+        CircularBufferSpec, tail_group.kv_cache_spec.kv_cache_specs["layers.3.tail"]
     )
     assert tail_inner.page_size_padded == idx_page
 
