@@ -948,8 +948,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Otherwise, match Q dtype to the KV cache dtype.
         if cache_dtype.startswith("fp8"):
-            # FP8-Q requires an fp8 tensor-core attention path
-            # (FI native fa3 on SM90, trtllm-gen/XQA on SM100).
+            # FP8-Q requires an fp8 tensor-core attention path. SM90 uses
+            # native FA3 for prefill; XQA decode on SM90/SM12x is handled
+            # above with model-dtype Q, while SM100 uses trtllm-gen.
             # Architectures with only fa2 (e.g. SM89, SM120) cannot
             # consume FP8 queries, so keep the model dtype for Q there.
             if current_platform.is_device_capability(
