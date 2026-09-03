@@ -379,7 +379,11 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
-        sample_positions = self.input_buffers.positions[last_token_indices]
+        positions = self.input_buffers.positions[last_token_indices]
+        # The output hidden state at position P (= positions) and the token id
+        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
+        # position before the sampled token, so the net adjustment is +1.
+        sample_src_positions = positions + 1
         idx_mapping = self.idx_mapping[:num_reqs]
 
         # Cache the trailing token's ids, hidden states (and embeddings for
@@ -417,7 +421,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             sample_hidden_states = last_hidden_states[last_token_indices]
             draft_tokens = self.sample_draft(
                 sample_hidden_states,
-                sample_positions,
+                sample_src_positions,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
@@ -448,7 +452,8 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
                     idx_mapping,
                     num_reqs,
                 )
-                sample_positions += 1
+                # Advance the draft sampling key.
+                sample_src_positions += 1
 
 
 @triton.jit

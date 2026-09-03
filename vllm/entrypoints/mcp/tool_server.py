@@ -58,14 +58,14 @@ def post_process_tools_description(
 ) -> "ListToolsResult":
     # Adapt the MCP tool result for Harmony
     for tool in list_tools_result.tools:
-        tool.inputSchema = trim_schema(tool.inputSchema)
+        tool.input_schema = trim_schema(tool.input_schema)
 
     # Some tools schema don't need to be part of the prompt (e.g. simple text
     # in text out for Python)
     list_tools_result.tools = [
         tool
         for tool in list_tools_result.tools
-        if getattr(tool.annotations, "include_in_prompt", True)
+        if (tool.meta or {}).get("include_in_prompt", True)
     ]
 
     return list_tools_result
@@ -121,13 +121,13 @@ class MCPToolServer(ToolServer):
             list_tools_response = post_process_tools_description(list_tools_response)
 
             tool_from_mcp = ToolNamespaceConfig(
-                name=initialize_response.serverInfo.name,
+                name=initialize_response.server_info.name,
                 description=initialize_response.instructions,
                 tools=[
                     ToolDescription.new(
                         name=tool.name,
                         description=tool.description,
-                        parameters=tool.inputSchema,
+                        parameters=tool.input_schema,
                     )
                     for tool in list_tools_response.tools
                 ],

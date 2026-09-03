@@ -1019,7 +1019,7 @@ class Gemma4ForConditionalGeneration(
     mm_prefix_clamp_sliding_window: bool = True
     supports_tower_connector_lora = True
 
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
