@@ -2,7 +2,7 @@ group: LoRA
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) LoRA Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) LoRA Shard %N"
   device: h200_35gb
   key: lora
   timeout_in_minutes: 40
@@ -27,10 +27,12 @@ steps:
       - image-build-amd
 
 
-- label: ":nvidia: (L4) LoRA TP (Distributed)"
+- label: ":nvidia: (L4) LoRA TP (Distributed) %N"
   key: lora-tp-distributed
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
+  device: l4
   num_devices: 4
+  parallelism: 4
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
@@ -43,20 +45,22 @@ steps:
     - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
-    - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
-    - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
-    - pytest -v -s -x lora/test_gemma4_tp.py
+    # Timing-balanced static split from per-file walls in builds 83921/83936.
+    - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
+    - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
   mirror:
     amd:
-      label: ":amd: (MI300) LoRA TP (Distributed)"
+      label: ":amd: (MI300) LoRA TP (Distributed) %N"
       dind: false
       device: mi300_4
       working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 55
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -65,10 +69,13 @@ steps:
       - vllm/platforms/rocm.py
       - tests/lora
       commands:
-      - pytest -v -s -x lora/test_chatglm3_tp.py
-      - pytest -v -s -x lora/test_llama_tp.py
-      - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
-      - pytest -v -s -x lora/test_olmoe_tp.py
-      - pytest -v -s -x lora/test_gptoss_tp.py
-      - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
-      - pytest -v -s -x lora/test_gemma4_tp.py
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
+      - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+      - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
