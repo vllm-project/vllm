@@ -32,12 +32,14 @@ from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
     from vllm.models.glm5next.amd.ops.kpool_compress import (
+        expand_pools_and_append_tail,
         kpool_compress_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
     )
 else:
     from vllm.models.glm5next.nvidia.ops.kpool_compress import (
+        expand_pools_and_append_tail,
         kpool_compress_and_write_cache,
         kpool_decode_update_and_maybe_write_cache_batched,
         kpool_seed_tail_cache,
@@ -50,6 +52,20 @@ NUM_BLOCKS = 32
 ROUND_SCALE = True
 FP8_DTYPE = current_platform.fp8_dtype()
 FP8_MAX = torch.finfo(FP8_DTYPE).max
+
+
+def test_expand_pools_rejects_ids_outside_completed_pool_count():
+    pool_ids = torch.tensor([[0, 1, -1, -2, 2, 9]], dtype=torch.int64, device="cuda")
+    seq_lens = torch.tensor([10], dtype=torch.int32, device="cuda")
+
+    out = expand_pools_and_append_tail(pool_ids, seq_lens, pool_size=4)
+
+    expected = torch.tensor(
+        [[*range(8), *([-1] * 16), 8, 9, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    torch.testing.assert_close(out, expected)
 
 
 def _make_caches():

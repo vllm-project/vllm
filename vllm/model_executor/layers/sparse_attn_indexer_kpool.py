@@ -535,8 +535,13 @@ def sparse_attn_indexer_kpool(
             # expand each pool back to its kpool constituent tokens.
             select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
             if index_kpool > 1:
-                pool_topk = torch.empty(
-                    (num_rows, select_k), dtype=torch.int32, device=logits.device
+                # Top-k kernels may leave slots unwritten when a row has fewer
+                # than select_k pools.
+                pool_topk = torch.full(
+                    (num_rows, select_k),
+                    -1,
+                    dtype=torch.int32,
+                    device=logits.device,
                 )
                 topk_dst = pool_topk
             else:
@@ -581,7 +586,8 @@ def sparse_attn_indexer_kpool(
                         pool_ids, q_seq, index_kpool
                     )
                 else:
-                    valid = pool_ids >= 0
+                    pool_lens = chunk.cu_seqlen_ke - chunk.cu_seqlen_ks
+                    valid = (pool_ids >= 0) & (pool_ids < pool_lens[:, None])
                     expanded = kpool_ops.expand_pools_to_tokens(
                         pool_ids, valid, topk_tokens, index_kpool
                     )
@@ -798,8 +804,11 @@ def sparse_attn_indexer_kpool(
         # then expand each pool back to its kpool tokens.
         select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
         if index_kpool > 1:
-            pool_topk = torch.empty(
-                (num_rows, select_k), dtype=torch.int32, device=logits.device
+            pool_topk = torch.full(
+                (num_rows, select_k),
+                -1,
+                dtype=torch.int32,
+                device=logits.device,
             )
             topk_dst = pool_topk
         else:
