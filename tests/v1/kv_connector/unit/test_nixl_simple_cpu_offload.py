@@ -305,7 +305,7 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     assert hit_tokens is not None and hit_tokens > 0
     assert mc._requests_to_connector[req2.request_id] == 1
     assert is_async is True
-    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == [("cpu", hit_tokens)]
+    assert mc.get_external_cache_hit_sources(req2, hit_tokens) == [("host", hit_tokens)]
 
 
 @pytest.mark.parametrize("swa_enabled", [False, True], ids=["fa_only", "fa_sw"])

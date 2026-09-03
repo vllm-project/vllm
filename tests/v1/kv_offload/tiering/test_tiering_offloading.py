@@ -530,7 +530,7 @@ class TestTieringOffloadingManager:
             self.manager.get_load_source(block, _CTX) == "external" for block in blocks
         )
 
-        # A later request sees the blocks as ordinary CPU-primary hits.
+        # A later request sees the blocks as ordinary host-memory primary hits.
         later_context = ReqContext(req_id="later")
         self.manager.on_new_request(later_context)
         assert all(
@@ -538,7 +538,7 @@ class TestTieringOffloadingManager:
             for block in blocks
         )
         assert all(
-            self.manager.get_load_source(block, later_context) == "cpu"
+            self.manager.get_load_source(block, later_context) == "host"
             for block in blocks
         )
 

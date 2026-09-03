@@ -8,7 +8,7 @@ class CacheHitSource(str, Enum):
     """Bounded origins for cached prompt tokens."""
 
     DEVICE = "device"
-    CPU = "cpu"
+    HOST = "host"
     DISK = "disk"
     P2P = "p2p"
     EXTERNAL = "external"
@@ -17,9 +17,9 @@ class CacheHitSource(str, Enum):
 _SOURCE_ALIASES = {
     "device": CacheHitSource.DEVICE,
     "gpu": CacheHitSource.DEVICE,
-    "cpu": CacheHitSource.CPU,
-    "dram": CacheHitSource.CPU,
-    "host": CacheHitSource.CPU,
+    "cpu": CacheHitSource.HOST,
+    "dram": CacheHitSource.HOST,
+    "host": CacheHitSource.HOST,
     "disk": CacheHitSource.DISK,
     "file": CacheHitSource.DISK,
     "fs": CacheHitSource.DISK,
