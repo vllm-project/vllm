@@ -42,9 +42,12 @@ from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
+    alloc_kda_mxfp4,
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
     make_decode_norm_weight_loader,
+    mxfp4_layout_for_oproj,
+    wrap_kda_mxfp4,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     chunk_kda_with_fused_gate,
@@ -287,15 +290,65 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
+        # Allocate the MXFP4 pair next to o_proj
+        mxfp4_layout = mxfp4_layout_for_oproj(self.o_proj)
+        mxfp4_data = mxfp4_scale = None
+        if mxfp4_layout is not None and self._kda_hip_decode_mxfp4_ready():
+            mxfp4_data, mxfp4_scale = alloc_kda_mxfp4(
+                num_tokens,
+                self.local_num_heads * self.head_dim,
+                mxfp4_layout,
+                hidden_states.device,
+            )
+
         self._forward(
             mixed_qkv=mixed_qkv,
             g1=g1,
             g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
+            mxfp4_data=mxfp4_data,
+            mxfp4_scale=mxfp4_scale,
+            mxfp4_layout=mxfp4_layout if mxfp4_data is not None else "",
         )
+        if mxfp4_data is not None:
+            attn_metadata_raw = get_forward_context().attn_metadata
+            m_meta = attn_metadata_raw.get(self.prefix)
+            written = (
+                m_meta.num_actual_tokens
+                if m_meta is not None
+                else num_tokens
+            )
+            orig_shape = torch.Size(
+                (written, self.local_num_heads * self.head_dim)
+            )
+            output[:] = self.o_proj(
+                wrap_kda_mxfp4(
+                    mxfp4_data,
+                    mxfp4_scale,
+                    orig_shape,
+                    hidden_states.dtype,
+                    self.o_proj,
+                )
+            )[0]
+            return
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _kda_hip_decode_mxfp4_ready(self) -> bool:
+        attn_metadata_raw = get_forward_context().attn_metadata
+        if attn_metadata_raw is None or not isinstance(attn_metadata_raw, dict):
+            return False
+        m = attn_metadata_raw.get(self.prefix)
+        if m is None:
+            return False
+        return (
+            self.decode_conv1d_weight is not None
+            and self.decode_norm_weight is not None
+            and m.spec_sequence_masks is None
+            and m.num_prefills == 0
+            and m.num_decodes > 0
+        )
 
     @eager_break_during_capture
     def _forward(
@@ -305,6 +358,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        mxfp4_data: torch.Tensor | None = None,
+        mxfp4_scale: torch.Tensor | None = None,
+        mxfp4_layout: str = "",
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -364,6 +420,17 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 output_gate=g2[:num_actual_tokens],
                 norm_weight=self.decode_norm_weight,
                 norm_eps=self.o_norm.eps,
+                mxfp4_out=(
+                    mxfp4_data[:num_actual_tokens]
+                    if mxfp4_data is not None and mxfp4_layout == "plain"
+                    else mxfp4_data
+                ),
+                mxfp4_scale=(
+                    mxfp4_scale[:num_actual_tokens]
+                    if mxfp4_scale is not None and mxfp4_layout == "plain"
+                    else mxfp4_scale
+                ),
+                mxfp4_layout=mxfp4_layout,
             )
             return
 

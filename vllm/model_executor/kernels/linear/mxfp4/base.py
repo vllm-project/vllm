@@ -37,6 +37,18 @@ class MxFp4LinearKernel(ABC):
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
         self.config = config
+    
+    def input_quant_key(self) -> QuantKey | None:
+        """Return the input quantization scheme this kernel can consume.
+
+        None means the kernel quantizes its own input.
+        """
+        return None
+    
+    def input_quant_layout(self) -> str | None:
+        """Scale-buffer ABI when consuming a QuantizedActivation.
+        """
+        return None
 
     @classmethod
     @abstractmethod

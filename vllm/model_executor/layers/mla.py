@@ -220,7 +220,17 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_dcp_replicated=q_dcp_replicated,
         )
 
+        return self._gated_o_proj(attn_out, hidden_states)
+
+    def _gated_o_proj(
+        self,
+        attn_out: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the optional sigmoid output gate, then o_proj.
+
+        Override point for vendor-specific gate and output-projection paths.
+        """
         if self.g_proj is not None:
             attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
-
         return self.o_proj(attn_out)[0]

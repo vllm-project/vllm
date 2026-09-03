@@ -12,11 +12,20 @@
  * The recurrent state is [128, 128] fp32 per (sequence, head), read and written
  * once per token, so the kernel is bound by that 128 KiB of HBM traffic and the
  * shape is chosen to reach streaming bandwidth rather than to minimize FLOPs.
+ *
+ * Optional MXFP4 epilogue: when mxfp4_out/mxfp4_scale are set, the gated RMSNorm
+ * result is quantized in-kernel (groups of 32, never straddling a head) and
+ * stored as packed e2m1 + e8m0 instead of BF16. `mxfp4_layout` selects Triton's
+ * column-major scale view ("plain") or AITER ASM's shuffled-scale view
+ * ("shuffled"). Packed A codes are identical; only scale placement and A-row
+ * padding differ.
  */
 
 #include <cstdint>
 #include <array>
+#include <cmath>
 #include <optional>
+#include <string>
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
@@ -24,6 +33,12 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "../torch_utils.h"
+
+// 0: BF16 out (mxfp4 buffers unused). 1: Triton column-major e8m0. 2: ASM
+// shuffled e8m0 (aiter shuffle_scale / mx_scale_shuffle_idx).
+constexpr int kMxfp4None = 0;
+constexpr int kMxfp4Plain = 1;
+constexpr int kMxfp4Shuffled = 2;
 
 namespace {
 
@@ -56,7 +71,86 @@ struct KdaDecodeStrides {
   int64_t onorm_row;
   int64_t conv_slot;
   int64_t state_slot;
+  int64_t mxfp4_row;
+  int64_t scale_row;
+  int64_t scale_col;
+  int scale_n_pad;
 };
+
+// AITER _mxfp4_quant_op: round amax toward a power of two, e8m0 = floor(log2)
+// minus 2 (e2m1's max exponent), then fp32->e2m1 with the same denorm/normal
+// rounding. Even element in the low nibble, odd in the high nibble.
+__device__ __forceinline__ void mxfp4_amax_to_scale(float amax, float& quant_scale,
+                                                    uint8_t& e8m0) {
+  uint32_t bits = __float_as_uint(amax);
+  bits = (bits + 0x200000u) & 0xFF800000u;
+  float amax_p2 = __uint_as_float(bits);
+  float unbiased = floorf(log2f(amax_p2)) - 2.0f;
+  unbiased = fminf(fmaxf(unbiased, -127.0f), 127.0f);
+  e8m0 = static_cast<uint8_t>(static_cast<int>(unbiased) + 127);
+  quant_scale = exp2f(-unbiased);
+}
+
+__device__ __forceinline__ uint8_t mxfp4_quantize_e2m1(float x, float quant_scale) {
+  float qx = x * quant_scale;
+  uint32_t bits = __float_as_uint(qx);
+  uint32_t sign = bits & 0x80000000u;
+  bits ^= sign;
+  float abs_qx = __uint_as_float(bits);
+  uint8_t e2m1;
+  if (abs_qx >= 6.0f) {
+    e2m1 = 0x7;
+  } else if (abs_qx < 1.0f) {
+    constexpr uint32_t denorm_mask_int = 149u << 23;
+    uint32_t denormal_x =
+        __float_as_uint(abs_qx + __uint_as_float(denorm_mask_int));
+    denormal_x -= denorm_mask_int;
+    e2m1 = static_cast<uint8_t>(denormal_x);
+  } else {
+    uint32_t normal_x = bits;
+    uint32_t mant_odd = (normal_x >> 22) & 1u;
+    uint32_t val_to_add =
+        (static_cast<uint32_t>(static_cast<int32_t>(1 - 127)) << 23) +
+        (1u << 21) - 1u;
+    normal_x += val_to_add;
+    normal_x += mant_odd;
+    normal_x >>= 22;
+    e2m1 = static_cast<uint8_t>(normal_x);
+  }
+  return static_cast<uint8_t>(e2m1 | (sign >> 28));
+}
+
+// Flat byte offset matching aiter shuffle_scale:
+// view(sm/32, 2, 16, sn/8, 2, 4).permute(0, 3, 5, 2, 4, 1).view(sm, sn)
+__device__ __forceinline__ int64_t mx_scale_shuffle_idx(int scale_n_pad, int row,
+                                                        int col) {
+  const int r0 = row / 32;
+  const int r1 = (row % 32) / 16;
+  const int r2 = row % 16;
+  const int c0 = col / 8;
+  const int c1 = (col % 8) / 4;
+  const int c2 = col % 4;
+  return (((((static_cast<int64_t>(r0) * (scale_n_pad / 8) + c0) * 4 + c2) *
+                16 +
+            r2) *
+               2 +
+           c1) *
+              2 +
+          r1);
+}
+
+__device__ __forceinline__ void store_mxfp4_scale(uint8_t* scale, int layout,
+                                                  int i_n, int i_hv, int group,
+                                                  uint8_t e8,
+                                                  KdaDecodeStrides strides) {
+  const int col = i_hv * 4 + group;
+  if (layout == kMxfp4Shuffled) {
+    scale[mx_scale_shuffle_idx(strides.scale_n_pad, i_n, col)] = e8;
+  } else {
+    scale[static_cast<int64_t>(i_n) * strides.scale_row +
+          static_cast<int64_t>(col) * strides.scale_col] = e8;
+  }
+}
 
 __device__ __forceinline__ float bf16_load(const bf16_t* ptr, int64_t idx) {
   return __bfloat162float(ptr[idx]);
@@ -161,8 +255,9 @@ __global__ __launch_bounds__(kThreads) void kda_decode_fusion_kernel(
     const float* __restrict__ dt_bias, const bf16_t* __restrict__ beta,
     const bf16_t* __restrict__ onorm_g, const float* __restrict__ onorm_weight,
     const int* __restrict__ ssm_state_indices, float* __restrict__ state,
-    bf16_t* __restrict__ out, float lower_bound, float scale, float onorm_eps,
-    KdaDecodeStrides strides) {
+    bf16_t* __restrict__ out, uint8_t* __restrict__ mxfp4_out,
+    uint8_t* __restrict__ mxfp4_scale, int mxfp4_layout, float lower_bound,
+    float scale, float onorm_eps, KdaDecodeStrides strides) {
   const int tid = threadIdx.x;
 
   // Heads are the fast grid axis so that adjacent workgroups walk adjacent
@@ -181,7 +276,17 @@ __global__ __launch_bounds__(kThreads) void kda_decode_fusion_kernel(
   // rewrite slot 0's state for nothing. `slot` is block-uniform, so returning
   // here is safe with respect to the __syncthreads() calls below.
   if (slot <= 0) {
-    if (tid < kDimV) {
+    if (mxfp4_out != nullptr) {
+      // e8m0=0 is _mxfp4_quant_op's encoding of an all-zero group.
+      if (tid < kDimV / 2) {
+        mxfp4_out[static_cast<int64_t>(i_n) * strides.mxfp4_row + i_hv * 64 +
+                  tid] = 0;
+      }
+      if (tid < 4) {
+        store_mxfp4_scale(mxfp4_scale, mxfp4_layout, i_n, i_hv, tid, 0,
+                          strides);
+      }
+    } else if (tid < kDimV) {
       out[static_cast<int64_t>(i_n) * kLocalDim + i_hv * kDimV + tid] =
           bf16_store(0.0f);
     }
@@ -201,6 +306,7 @@ __global__ __launch_bounds__(kThreads) void kda_decode_fusion_kernel(
   __shared__ float s_v[kDimV];
   __shared__ float s_o[kDimV];
   __shared__ float s_reduce[kPartialBase + kRows];
+  __shared__ float s_qscale[4];
   float pre_onorm_gate = 0.0f;
   float pre_onorm_weight = 0.0f;
 
@@ -459,9 +565,41 @@ __global__ __launch_bounds__(kThreads) void kda_decode_fusion_kernel(
         rsqrtf(s_reduce[kSumsqSlot] / static_cast<float>(kDimV) + onorm_eps);
     if (tid >= kThreads - kDimV) {
       const int v = tid - (kThreads - kDimV);
-      const int64_t out_idx = i_n * kLocalDim + i_hv * kDimV + v;
-      out[out_idx] =
-          bf16_store(s_o[v] * rstd * pre_onorm_weight * pre_onorm_gate);
+      const float y = s_o[v] * rstd * pre_onorm_weight * pre_onorm_gate;
+      if (mxfp4_out == nullptr) {
+        const int64_t out_idx = i_n * kLocalDim + i_hv * kDimV + v;
+        out[out_idx] = bf16_store(y);
+      } else {
+        // Keep fp32 in LDS so amax/quant never see a BF16 round-trip.
+        s_o[v] = y;
+      }
+    }
+    if (mxfp4_out != nullptr) {
+      __syncthreads();
+      if (tid < 4) {
+        float amax = 0.0f;
+#pragma unroll
+        for (int i = 0; i < 32; ++i) {
+          amax = fmaxf(amax, fabsf(s_o[tid * 32 + i]));
+        }
+        float qscale;
+        uint8_t e8;
+        mxfp4_amax_to_scale(amax, qscale, e8);
+        s_qscale[tid] = qscale;
+        store_mxfp4_scale(mxfp4_scale, mxfp4_layout, i_n, i_hv, tid, e8,
+                          strides);
+      }
+      __syncthreads();
+      if (tid >= kThreads - kDimV) {
+        const int v = tid - (kThreads - kDimV);
+        if ((v & 1) == 0) {
+          const float qscale = s_qscale[v / 32];
+          const uint8_t lo = mxfp4_quantize_e2m1(s_o[v], qscale);
+          const uint8_t hi = mxfp4_quantize_e2m1(s_o[v + 1], qscale);
+          mxfp4_out[static_cast<int64_t>(i_n) * strides.mxfp4_row + i_hv * 64 +
+                    (v / 2)] = static_cast<uint8_t>(lo | (hi << 4));
+        }
+      }
     }
   } else {
     __syncthreads();
@@ -481,8 +619,9 @@ void launch_kda_decode_raw(
     const void* bias_k, const void* bias_v, void* cs_q, void* cs_k, void* cs_v,
     const float* a_log, const void* g, const float* dt_bias, const void* beta,
     const void* onorm_g, const float* onorm_weight,
-    const int* ssm_state_indices, float* state, void* out, int B,
-    float lower_bound, float scale, float onorm_eps, KdaDecodeStrides strides,
+    const int* ssm_state_indices, float* state, void* out, uint8_t* mxfp4_out,
+    uint8_t* mxfp4_scale, int mxfp4_layout, int B, float lower_bound,
+    float scale, float onorm_eps, KdaDecodeStrides strides,
     hipStream_t stream) {
   kda_decode_fusion_kernel<kApplyOnorm, kConvStateChannelStride,
                            kConvStateTapStride, kHeads, kUpdateConvState,
@@ -502,8 +641,8 @@ void launch_kda_decode_raw(
           reinterpret_cast<const bf16_t*>(g), dt_bias,
           reinterpret_cast<const bf16_t*>(beta),
           reinterpret_cast<const bf16_t*>(onorm_g), onorm_weight,
-          ssm_state_indices, state, reinterpret_cast<bf16_t*>(out), lower_bound,
-          scale, onorm_eps, strides);
+          ssm_state_indices, state, reinterpret_cast<bf16_t*>(out), mxfp4_out,
+          mxfp4_scale, mxfp4_layout, lower_bound, scale, onorm_eps, strides);
 }
 
 struct KdaDecodeLaunchParams {
@@ -528,6 +667,9 @@ struct KdaDecodeLaunchParams {
   const int* ssm_state_indices;
   float* state;
   void* out;
+  uint8_t* mxfp4_out;
+  uint8_t* mxfp4_scale;
+  int mxfp4_layout;
   int B;
   int H;
   bool update_conv_cache;
@@ -548,8 +690,9 @@ void dispatch_kda_decode_conv(const KdaDecodeLaunchParams& p) {
                         kApplyBetaSigmoid, CS_CHANNEL_STRIDE, CS_TAP_STRIDE>( \
       p.x_q, p.x_k, p.x_v, p.w_q_t, p.w_k_t, p.w_v_t, p.bias_q, p.bias_k,     \
       p.bias_v, p.cs_q, p.cs_k, p.cs_v, p.a_log, p.g, p.dt_bias, p.beta,      \
-      p.onorm_g, p.onorm_weight, p.ssm_state_indices, p.state, p.out, p.B,    \
-      p.lower_bound, p.scale, p.onorm_eps, p.strides, p.stream)
+      p.onorm_g, p.onorm_weight, p.ssm_state_indices, p.state, p.out,         \
+      p.mxfp4_out, p.mxfp4_scale, p.mxfp4_layout, p.B, p.lower_bound,         \
+      p.scale, p.onorm_eps, p.strides, p.stream)
   // SD packs (tap, channel) per slot while DS packs (channel, tap); both are
   // baked into the kernel as compile-time strides.
 #define LAUNCH_KDA_DECODE(UPDATE_CONV)                            \
@@ -632,7 +775,10 @@ void fused_kda_decode(
     torch::stable::Tensor const& state_indices, torch::stable::Tensor& state,
     torch::stable::Tensor& out, std::optional<double> lower_bound,
     std::optional<torch::stable::Tensor> output_gate,
-    std::optional<torch::stable::Tensor> norm_weight, double norm_eps) {
+    std::optional<torch::stable::Tensor> norm_weight, double norm_eps,
+    std::optional<torch::stable::Tensor> mxfp4_out,
+    std::optional<torch::stable::Tensor> mxfp4_scale,
+    std::string const& mxfp4_layout) {
   using torch::headeronly::ScalarType;
   constexpr int kHeadDim = 128;
   constexpr int kConvWidth = 4;
@@ -763,6 +909,71 @@ void fused_kda_decode(
     output_gate_row_stride = output_gate->stride(row_dim);
   }
 
+  bool const emit_mxfp4 = mxfp4_out.has_value();
+  STD_TORCH_CHECK(emit_mxfp4 == mxfp4_scale.has_value(),
+                  "mxfp4_out and mxfp4_scale must be provided together");
+  uint8_t* mxfp4_out_ptr = nullptr;
+  uint8_t* mxfp4_scale_ptr = nullptr;
+  int mxfp4_layout_id = kMxfp4None;
+  int64_t mxfp4_row_stride = 0;
+  int64_t scale_row_stride = 0;
+  int64_t scale_col_stride = 0;
+  int scale_n_pad = 0;
+  if (emit_mxfp4) {
+    STD_TORCH_CHECK(apply_onorm,
+                    "MXFP4 output requires output_gate and norm_weight");
+    STD_TORCH_CHECK(mxfp4_out->is_cuda() &&
+                        mxfp4_out->scalar_type() == ScalarType::Byte,
+                    "mxfp4_out must be a GPU uint8 tensor");
+    STD_TORCH_CHECK(mxfp4_scale->is_cuda() &&
+                        mxfp4_scale->scalar_type() == ScalarType::Byte,
+                    "mxfp4_scale must be a GPU uint8 tensor");
+    int64_t const n_groups = dim / 32;
+    if (mxfp4_layout == "plain") {
+      mxfp4_layout_id = kMxfp4Plain;
+      STD_TORCH_CHECK(mxfp4_out->dim() == 2 &&
+                          mxfp4_out->size(0) >= batch_size &&
+                          mxfp4_out->size(1) == dim / 2 &&
+                          mxfp4_out->stride(1) == 1,
+                      "plain mxfp4_out must have shape [>=B, H * 64] "
+                      "contiguous in K");
+      STD_TORCH_CHECK(mxfp4_scale->dim() == 2 &&
+                          mxfp4_scale->size(0) >= batch_size &&
+                          mxfp4_scale->size(1) == n_groups,
+                      "plain mxfp4_scale must have shape [>=B, H * 4]");
+      scale_n_pad = static_cast<int>(n_groups);
+    } else if (mxfp4_layout == "shuffled") {
+      mxfp4_layout_id = kMxfp4Shuffled;
+      int64_t const pad_m32 = (batch_size + 31) / 32 * 32;
+      int64_t const pad_m256 = (batch_size + 255) / 256 * 256;
+      int64_t const pad_n8 = (n_groups + 7) / 8 * 8;
+      STD_TORCH_CHECK(mxfp4_out->dim() == 2 &&
+                          mxfp4_out->size(0) >= pad_m32 &&
+                          mxfp4_out->size(1) == dim / 2 &&
+                          mxfp4_out->stride(1) == 1,
+                      "shuffled mxfp4_out must have shape [>=pad32(B), H * 64] "
+                      "contiguous in K");
+      STD_TORCH_CHECK(mxfp4_scale->is_contiguous() && mxfp4_scale->dim() == 2 &&
+                          mxfp4_scale->size(0) >= pad_m256 &&
+                          mxfp4_scale->size(1) >= pad_n8,
+                      "shuffled mxfp4_scale must be contiguous with shape "
+                      "[>=pad256(B), >=pad8(H * 4)]");
+      scale_n_pad = static_cast<int>(mxfp4_scale->size(1));
+    } else {
+      STD_TORCH_CHECK(false,
+                      "mxfp4_layout must be 'plain' or 'shuffled', got ",
+                      mxfp4_layout);
+    }
+    mxfp4_out_ptr = static_cast<uint8_t*>(mxfp4_out->data_ptr());
+    mxfp4_scale_ptr = static_cast<uint8_t*>(mxfp4_scale->data_ptr());
+    mxfp4_row_stride = mxfp4_out->stride(0);
+    scale_row_stride = mxfp4_scale->stride(0);
+    scale_col_stride = mxfp4_scale->stride(1);
+  } else {
+    STD_TORCH_CHECK(mxfp4_layout.empty(),
+                    "mxfp4_layout must be empty when mxfp4 buffers are omitted");
+  }
+
   void const* bias_ptr = nullptr;
   if (bias.has_value()) {
     STD_TORCH_CHECK(bias->is_cuda() && bias->scalar_type() == ScalarType::Float,
@@ -812,6 +1023,9 @@ void fused_kda_decode(
       static_cast<int const*>(state_indices.data_ptr()),
       static_cast<float*>(state.data_ptr()),
       out.data_ptr(),
+      mxfp4_out_ptr,
+      mxfp4_scale_ptr,
+      mxfp4_layout_id,
       batch_size,
       static_cast<int>(num_heads),
       true,
@@ -820,7 +1034,8 @@ void fused_kda_decode(
       0.08838834764831845f,
       static_cast<float>(norm_eps),
       KdaDecodeStrides{x.stride(0), raw_beta.stride(1), output_gate_row_stride,
-                       conv_state.stride(0), state.stride(0)},
+                       conv_state.stride(0), state.stride(0), mxfp4_row_stride,
+                       scale_row_stride, scale_col_stride, scale_n_pad},
       get_current_cuda_stream(x.get_device_index())};
   dispatch_kda_decode_features(params, apply_onorm, use_lower_bound, true);
   hipError_t const error = hipGetLastError();
