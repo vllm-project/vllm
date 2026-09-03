@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import uuid
 
+import pytest
+
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
 from vllm.config.ec_transfer import ECTransferConfig
@@ -9,6 +11,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.distributed.nixl_utils import NixlWrapper
 
 _N = 16
 _BS = 64
@@ -54,6 +57,7 @@ def test_string_false_in_extra_config_leaves_nixl_off(monkeypatch):
     s.shutdown()
 
 
+@pytest.mark.skipif(NixlWrapper is None, reason="Requires NIXL package")
 def test_gate_on_wires_data_transport_and_producer_session(monkeypatch):
     # Port 0 lets the OS pick an ephemeral port so the real ZMQ ROUTER bind
     # in ProducerSession.start() cannot collide with another test/process.

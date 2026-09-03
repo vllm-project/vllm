@@ -157,7 +157,9 @@ class ConsumerXfer:
         try:
             state = self.data.check_xfer_state(self.transfer_handle)
         except Exception:
-            logger.exception("EC: check_xfer_state failed for mm_hash=%s", self.mm_hash)
+            logger.exception(
+                "EC Connector: check_xfer_state failed for mm_hash=%s", self.mm_hash
+            )
             self.data.release_xfer_handle(self.transfer_handle)
             self.transfer_handle = None
             return XferState.READ_FAILED
@@ -171,7 +173,8 @@ class ConsumerXfer:
                 self._quarantined = True
                 self.deadline = now + _CONSUMER_QUARANTINE_TIMEOUT_S
                 logger.warning(
-                    "EC: READ for mm_hash=%s from %s:%d timed out; quarantining",
+                    "EC Connector: READ for mm_hash=%s from %s:%d timed out; "
+                    "quarantining",
                     self.mm_hash,
                     self.addr[0],
                     self.addr[1],
@@ -179,7 +182,9 @@ class ConsumerXfer:
                 return XferState.QUARANTINED
             return XferState.READING
         logger.warning(
-            "EC: READ for mm_hash=%s unexpected NIXL state %r", self.mm_hash, state
+            "EC Connector: READ for mm_hash=%s unexpected NIXL state %r",
+            self.mm_hash,
+            state,
         )
         self.data.release_xfer_handle(self.transfer_handle)
         self.transfer_handle = None
@@ -193,7 +198,8 @@ class ConsumerXfer:
             self.data.release_xfer_handle(self.transfer_handle)
             self.transfer_handle = None
             logger.warning(
-                "EC: quarantined mm_hash=%s from %s:%d timed out; evicting blocks",
+                "EC Connector: quarantined mm_hash=%s from %s:%d timed out; "
+                "evicting blocks",
                 self.mm_hash,
                 self.addr[0],
                 self.addr[1],
@@ -203,7 +209,8 @@ class ConsumerXfer:
             state = self.data.check_xfer_state(self.transfer_handle)
         except Exception:
             logger.exception(
-                "EC: check_xfer_state failed for quarantined mm_hash=%s", self.mm_hash
+                "EC Connector: check_xfer_state failed for quarantined mm_hash=%s",
+                self.mm_hash,
             )
             state = None
         if state == "PROC":
@@ -211,7 +218,9 @@ class ConsumerXfer:
         self.data.release_xfer_handle(self.transfer_handle)
         self.transfer_handle = None
         logger.debug(
-            "EC: quarantined mm_hash=%s settled (state=%s)", self.mm_hash, state
+            "EC Connector: quarantined mm_hash=%s settled (state=%s)",
+            self.mm_hash,
+            state,
         )
         return XferState.SETTLED
 
@@ -275,7 +284,7 @@ class ProducerSession:
             try:
                 req = self._req_decoder.decode(payload)
             except (msgspec.DecodeError, msgspec.ValidationError):
-                logger.warning("ec: dropped malformed XferReq")
+                logger.warning("EC Connector: dropped malformed XferReq")
                 continue
             ack = self._grant_or_nack(req)
             self._transport.send(identity, self._req_encoder.encode(ack))
@@ -285,11 +294,23 @@ class ProducerSession:
 
     def _grant_or_nack(self, req: XferReq) -> XferAck:
         if req.connector_version != EC_CONNECTOR_VERSION:
-            logger.warning("EC: incompatible version for mm_hash=%s", req.mm_hash)
+            logger.warning(
+                "EC Connector: incompatible version for mm_hash=%s", req.mm_hash
+            )
             return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_VERSION)
         if req.compatibility_hash != self._compat_hash:
-            logger.warning("EC: incompatible compat hash for mm_hash=%s", req.mm_hash)
+            logger.warning(
+                "EC Connector: incompatible compat hash for mm_hash=%s", req.mm_hash
+            )
             return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INCOMPAT)
+        if not req.session_id:
+            # Grants are keyed by (session_id, mm_hash), so an omitted id from
+            # one peer aliases another's: the first completion would unpin
+            # blocks the other peer is still reading.
+            logger.warning(
+                "EC Connector: XferReq without session_id for mm_hash=%s", req.mm_hash
+            )
+            return XferAck(mm_hash=req.mm_hash, status=XferStatus.NACK_INTERNAL)
         entry = self._cache.pin_if_ready(req.mm_hash)
         if entry is None or not entry.ready:
             status = (
@@ -297,13 +318,18 @@ class ProducerSession:
             )
             logger.log(
                 logging.INFO if status in EXPECTED_NACKS else logging.WARNING,
-                "EC: mm_hash=%s not serveable in local cache (%s); NACKing",
+                "EC Connector: mm_hash=%s not serveable in local cache (%s); NACKing",
                 req.mm_hash,
                 status.name,
             )
             return XferAck(mm_hash=req.mm_hash, status=status)
         block_indices = list(entry.block_ids)
         key = f"{req.session_id}:{req.mm_hash}"
+        if key in self._active_xfers:
+            # This peer is re-requesting a grant it still holds, having timed
+            # out waiting. Overwriting it drops the pin taken for it, which
+            # neither a completion nor the sweep would ever release.
+            self._cache.unpin(req.mm_hash)
         self._active_xfers[key] = ProducerXfer(
             mm_hash=req.mm_hash,
             block_indices=block_indices,
@@ -328,11 +354,15 @@ class ProducerSession:
         try:
             notifs = self._data.get_new_notifs()
         except Exception:
-            logger.exception("EC: get_new_notifs failed")
+            logger.exception("EC Connector: get_new_notifs failed")
             return
         for msgs in notifs.values():
             for msg in msgs:
-                key = msg.decode("utf-8")  # "{session_id}:{mm_hash}"
+                try:
+                    key = msg.decode("utf-8")  # "{session_id}:{mm_hash}"
+                except Exception:
+                    logger.exception("EC Connector: Dropped malformed NIXL notif")
+                    continue
                 xfer = self._active_xfers.pop(key, None)
                 if xfer is not None:
                     self._cache.unpin(xfer.mm_hash)
@@ -442,7 +472,7 @@ class ConsumerSession:
         )
         self._xfers[mm_hash] = xfer
         logger.debug(
-            "EC: XferReq sent mm_hash=%s to %s:%d",
+            "EC Connector: XferReq sent mm_hash=%s to %s:%d",
             mm_hash,
             self._addr[0],
             self._addr[1],
@@ -459,7 +489,7 @@ class ConsumerSession:
                 ack = self._decoder.decode(raw)
             except (msgspec.DecodeError, msgspec.ValidationError):
                 logger.warning(
-                    "ec: dropped malformed XferAck from %s:%d",
+                    "EC Connector: dropped malformed XferAck from %s:%d",
                     self._addr[0],
                     self._addr[1],
                 )
@@ -490,7 +520,7 @@ class ConsumerSession:
         if ack.status != XferStatus.OK:
             logger.log(
                 logging.INFO if ack.status in EXPECTED_NACKS else logging.WARNING,
-                "EC: NACK %s from %s:%d for mm_hash=%s",
+                "EC Connector: NACK %s from %s:%d for mm_hash=%s",
                 ack.status.name,
                 self._addr[0],
                 self._addr[1],
@@ -510,7 +540,7 @@ class ConsumerSession:
             agent_name = self._ensure_registered(ack.agent_metadata, ack.mem_descriptor)
         except Exception:
             logger.exception(
-                "EC: failed to register peer %s:%d for mm_hash=%s",
+                "EC Connector: failed to register peer %s:%d for mm_hash=%s",
                 self._addr[0],
                 self._addr[1],
                 ack.mm_hash,
@@ -529,7 +559,7 @@ class ConsumerSession:
             return self._nixl_agent_name
         if self._nixl_agent_name is not None:
             logger.info(
-                "EC: producer %s:%d restarted; re-registering",
+                "EC Connector: producer %s:%d restarted; re-registering",
                 self._addr[0],
                 self._addr[1],
             )
@@ -538,7 +568,7 @@ class ConsumerSession:
         self._nixl_agent_name = agent_name
         self._nixl_metadata_bytes = metadata
         logger.debug(
-            "EC: registered peer %s:%d agent=%s",
+            "EC Connector: registered peer %s:%d agent=%s",
             self._addr[0],
             self._addr[1],
             agent_name,
