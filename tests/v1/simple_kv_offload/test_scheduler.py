@@ -38,6 +38,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -2075,3 +2076,137 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Non-prefix-cacheable scratch groups (e.g. the QSA key ring)
+# ---------------------------------------------------------------------------
+QSA_RING_BLOCK_SIZE = 4
+
+
+def _make_qsa_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
+    """Full attention plus a non-prefix-cacheable QSA ring scratch group.
+
+    Mirrors Qwen3.8-Flash-Next: the ring holds one fixed block per request
+    whose block size is the ring capacity, not the cache block size.
+    """
+    register_all_kvcache_specs(vllm_config=None)
+    full_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    ring_spec = CircularBufferSpec(
+        block_size=QSA_RING_BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        head_size_v=0,
+        dtype=DTYPE,
+    )
+    assert not ring_spec.prefix_cacheable
+    groups = [
+        KVCacheGroupSpec(["layer_0"], full_spec),
+        KVCacheGroupSpec(["qsa_ring"], ring_spec),
+    ]
+    tensors = [
+        KVCacheTensor(
+            size=group.kv_cache_spec.page_size_bytes * num_blocks,
+            layers=list(group.layer_names),
+            layer_stride=group.kv_cache_spec.page_size_bytes * num_blocks,
+            block_stride=group.kv_cache_spec.page_size_bytes,
+        )
+        for group in groups
+    ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=groups,
+    )
+
+
+def _make_qsa_scheduler(
+    lazy: bool = False,
+) -> tuple[SimpleCPUOffloadScheduler, BlockPool]:
+    kv_cache_config = _make_qsa_hybrid_kv_cache_config(num_blocks=16)
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=_BYTES_PER_BLOCK * 8 * 2,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        lazy_offload=lazy,
+    )
+    gpu_pool = BlockPool(
+        num_gpu_blocks=16, enable_caching=True, hash_block_size=BLOCK_SIZE
+    )
+    sched.bind_gpu_block_pool(gpu_pool)
+    return sched, gpu_pool
+
+
+def test_qsa_ring_group_is_never_stored_or_loaded() -> None:
+    """The ring scratch block must not enter store or load transfer pairs,
+    while the prefix-cacheable group still round-trips through the CPU."""
+    sched, gpu_pool = _make_qsa_scheduler(lazy=False)
+    assert sched.fa_gidx == 0
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    fa_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    # The ring block is never hashed: it covers no token range.
+    ring_block = gpu_pool.get_new_blocks(1)[0]
+    kv_blocks = KVCacheBlocks(blocks=(fa_blocks, [ring_block]))
+    req.num_computed_tokens = num_blocks * BLOCK_SIZE
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert sorted(meta.store_gpu_blocks) == sorted(b.block_id for b in fa_blocks)
+    assert ring_block.block_id not in meta.store_gpu_blocks
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-qsa-load",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * BLOCK_SIZE
+    assert is_async is True
+
+    fa_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    ring_block2 = gpu_pool.get_new_blocks(1)[0]
+    kv_blocks2 = KVCacheBlocks(blocks=(fa_blocks2, [ring_block2]))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    meta2 = sched.build_connector_meta(make_scheduler_output({req2.request_id: 1}))
+    assert sorted(meta2.load_gpu_blocks) == sorted(b.block_id for b in fa_blocks2)
+    assert ring_block2.block_id not in meta2.load_gpu_blocks
+    assert len(meta2.load_cpu_blocks) == num_blocks
+
+
+def test_lazy_target_blocks_ignore_non_prefix_cacheable_groups() -> None:
+    """A scratch group can never be offloaded and holds one block per request,
+    so it must not inflate the lazy-mode free-block target (its tiny block size
+    would otherwise dominate the estimate)."""
+    with_ring = _make_qsa_hybrid_kv_cache_config(num_blocks=16)
+    without_ring = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=with_ring.kv_cache_tensors[:1],
+        kv_cache_groups=with_ring.kv_cache_groups[:1],
+    )
+    max_batched = 64
+    target_with = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        with_ring, max_batched
+    )
+    target_without = SimpleCPUOffloadScheduler._estimate_lazy_target_blocks(
+        without_ring, max_batched
+    )
+    assert target_with == target_without
