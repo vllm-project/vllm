@@ -148,7 +148,7 @@ is_available_on_devpi() {
 
     if pip index versions "${pkg}" \
         --index-url "${IBM_DEVPI_URL}" 2>/dev/null |
-        grep -q "${version}"; then
+        grep -F "${version}" >/dev/null; then
 
         echo "${pkg}==${version} is available on DevPI"
         return 0
