@@ -186,34 +186,59 @@ class FixFunctionalizationPass(VllmInductorPass):
                 and at_target
                 == torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default
             ):
-                # AOTAutograd functionalizes `q[..., nope_dim:] = rope_result` into
-                # a sequence of aten ops on q: view+slice+copy+slice_scatter.
-                # Since the fused MLA RoPE op mutates q_pe in-place, we can remove
-                # the redundant copy and slice_scatter ops during defunctionalization.
+                # The fused op mutates q_pe (a strided slice of q) and k_pe (a
+                # split view of kv_lora) in place, so functionalization
+                # reflects each output back into its base with redundant
+                # scatter chains we can drop. Two graph shapes occur:
+                # (a) fusion-pass-produced (`q[..., nope_dim:] = rope_result`):
+                #     getitem[1] -> copy -> slice_scatter, with separate
+                #     slice/view temporaries;
+                # (b) manual call site (the op called directly on the views,
+                #     see MultiHeadLatentAttentionWrapper.forward):
+                #     getitem[1] -> slice_scatter(base, getitem[1], ...) with
+                #     no copy node, and likewise for getitem[2].
+                # In both, the defunctionalized op already wrote the base's
+                # storage, so the scattered result is just the base.
                 getitem_nodes = self.getitem_users(node)
                 q_pe_out = getitem_nodes[1]
 
+                copy_temp = None
                 for user in list(q_pe_out.users):
                     if is_func(user, torch.ops.aten.copy.default):
                         copy_temp = user
-                slice_temp = copy_temp.args[0]
-                for user in list(copy_temp.users):
-                    if is_func(user, torch.ops.aten.slice_scatter.default):
-                        slice_scatter_temp = user
-                view_temp = slice_scatter_temp.args[0]
+                if copy_temp is not None:
+                    # shape (a)
+                    slice_temp = copy_temp.args[0]
+                    for user in list(copy_temp.users):
+                        if is_func(user, torch.ops.aten.slice_scatter.default):
+                            slice_scatter_temp = user
+                    view_temp = slice_scatter_temp.args[0]
 
-                view_orig = slice_temp.args[0]
-                slice_scatter_temp.replace_all_uses_with(view_orig)
-                self._remove(slice_scatter_temp)
-                self._remove(copy_temp)
-                self._remove(slice_temp)
-                self._remove(view_temp)
-                self._remove(q_pe_out)
+                    view_orig = slice_temp.args[0]
+                    slice_scatter_temp.replace_all_uses_with(view_orig)
+                    self._remove(slice_scatter_temp)
+                    self._remove(copy_temp)
+                    self._remove(slice_temp)
+                    self._remove(view_temp)
+                    self._remove(q_pe_out)
+                else:
+                    # shape (b)
+                    for user in list(q_pe_out.users):
+                        if is_func(user, torch.ops.aten.slice_scatter.default):
+                            user.replace_all_uses_with(user.args[0])
+                            self._remove(user)
+                    q_pe_out.replace_all_uses_with(node.kwargs["q_pe"])
+                    self._remove(q_pe_out)
 
                 # defunctionalize k_pe manually; self.replace_users_with_mutated_args
                 # does not support only replacing specific kwargs
                 k_pe_in = node.kwargs["k_pe"]
                 k_pe_out = getitem_nodes[2]
+                for user in list(k_pe_out.users):
+                    # shape (b): rotated k_pe scattered back into its split base
+                    if is_func(user, torch.ops.aten.slice_scatter.default):
+                        user.replace_all_uses_with(user.args[0])
+                        self._remove(user)
                 k_pe_out.replace_all_uses_with(k_pe_in)
                 self._remove(k_pe_out)
 
