@@ -73,7 +73,9 @@ def test_fit_kpool_indices_rejects_narrow_input():
         ("auto", 512, 0, 2, 2, 1, True),
         ("fp8", 512, 1, 0, 0, 32, False),
         ("auto", 576, 1, 0, 0, 32, False),
-        ("auto", 512, 0, 2, 4, 2, False),
+        ("auto", 512, 0, 2, 4, 2, True),
+        ("auto", 512, 0, 2, 12, 6, True),
+        ("auto", 512, 0, 0, 0, 0, False),
     ],
 )
 def test_rocm_sparse_triton_route(
@@ -85,6 +87,7 @@ def test_rocm_sparse_triton_route(
     max_query_len,
     expected,
 ):
+    """Validate Triton routing for prefill, decode, and MTP verification."""
     assert (
         _use_rocm_sparse_triton(
             kv_cache_dtype=kv_cache_dtype,
