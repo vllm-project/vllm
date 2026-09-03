@@ -203,16 +203,16 @@ class LogprobsTensors(NamedTuple):
         )
 
 
-class PromptTokenLogprobsTensors(NamedTuple):
-    """Scores for caller-selected token IDs at prompt positions."""
+class TokenIdLogprobsTensors(NamedTuple):
+    """Logprobs for caller-selected token IDs, one fixed-width row per position."""
 
     token_ids: torch.Tensor
     logprobs: torch.Tensor
 
-    def to_cpu_nonblocking(self) -> "PromptTokenLogprobsTensors":
+    def to_cpu_nonblocking(self) -> "TokenIdLogprobsTensors":
         if self.token_ids.device.type == "cpu":
             return self
-        return PromptTokenLogprobsTensors(
+        return TokenIdLogprobsTensors(
             self.token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
         )
@@ -224,8 +224,8 @@ class PromptTokenLogprobsTensors(NamedTuple):
         ]
 
     @staticmethod
-    def cat(tensors: Sequence["PromptTokenLogprobsTensors"]):
-        return PromptTokenLogprobsTensors(
+    def cat(tensors: Sequence["TokenIdLogprobsTensors"]):
+        return TokenIdLogprobsTensors(
             torch.cat([t.token_ids for t in tensors]),
             torch.cat([t.logprobs for t in tensors]),
         )
@@ -385,9 +385,9 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
-    # req_id -> caller-selected prompt token scores. Kept separate from
+    # req_id -> logprobs for caller-selected prompt token IDs. Kept separate from
     # prompt_logprobs_dict because it has no implicit target/rank columns.
-    prompt_token_logprobs_dict: dict[str, PromptTokenLogprobsTensors] = field(
+    prompt_token_id_logprobs_dict: dict[str, TokenIdLogprobsTensors] = field(
         default_factory=dict
     )
 

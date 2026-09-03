@@ -1866,8 +1866,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.prompt_len.np,
         )
         if self.prompt_logprobs_worker.prompt_logprob_token_ids:
-            prompt_token_logprobs_dict = (
-                self.prompt_logprobs_worker.compute_prompt_token_logprobs(
+            prompt_token_id_logprobs_dict = (
+                self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
                     self.model.compute_logits,
                     hidden_states,
                     input_batch,
@@ -1875,7 +1875,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             )
         else:
-            prompt_token_logprobs_dict = {}
+            prompt_token_id_logprobs_dict = {}
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -1885,7 +1885,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
-            prompt_token_logprobs_dict=prompt_token_logprobs_dict,
+            prompt_token_id_logprobs_dict=prompt_token_id_logprobs_dict,
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(

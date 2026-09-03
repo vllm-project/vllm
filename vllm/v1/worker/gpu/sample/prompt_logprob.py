@@ -8,7 +8,7 @@ import torch
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import LogprobsTensors, PromptTokenLogprobsTensors
+from vllm.v1.outputs import LogprobsTensors, TokenIdLogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import (
     compute_topk_scores,
@@ -23,8 +23,8 @@ class PromptLogprobsWorker:
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.prompt_logprob_token_ids: dict[str, tuple[list[int], int]] = {}
-        self.in_progress_prompt_token_logprobs: dict[
-            str, list[PromptTokenLogprobsTensors]
+        self.in_progress_prompt_token_id_logprobs: dict[
+            str, list[TokenIdLogprobsTensors]
         ] = {}
         # req_idx -> list of in-progress LogprobsTensors
         self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
@@ -40,24 +40,24 @@ class PromptLogprobsWorker:
                 list(sampling_params.prompt_logprob_token_ids),
                 sampling_params.prompt_logprob_start or 0,
             )
-            self.in_progress_prompt_token_logprobs[req_id] = []
+            self.in_progress_prompt_token_id_logprobs[req_id] = []
 
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
         self.prompt_logprob_token_ids.pop(req_id, None)
-        self.in_progress_prompt_token_logprobs.pop(req_id, None)
+        self.in_progress_prompt_token_id_logprobs.pop(req_id, None)
 
-    def compute_prompt_token_logprobs(
+    def compute_prompt_token_id_logprobs(
         self,
         logits_fn: Callable[[torch.Tensor], torch.Tensor],
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         prompt_lens: np.ndarray,
-    ) -> dict[str, PromptTokenLogprobsTensors]:
+    ) -> dict[str, TokenIdLogprobsTensors]:
         """Compute fixed-ID scores and aggregate them across prompt chunks."""
         if not self.prompt_logprob_token_ids:
             return {}
-        out: dict[str, PromptTokenLogprobsTensors] = {}
+        out: dict[str, TokenIdLogprobsTensors] = {}
         for i, req_id in enumerate(input_batch.req_ids):
             request_data = self.prompt_logprob_token_ids.get(req_id)
             if request_data is None:
@@ -67,7 +67,7 @@ class PromptLogprobsWorker:
             row_end = int(input_batch.query_start_loc_np[i + 1])
             state_idx = int(input_batch.idx_mapping_np[i])
             prompt_row_start = int(input_batch.num_computed_prefill_tokens_np[i])
-            pending = self.in_progress_prompt_token_logprobs[req_id]
+            pending = self.in_progress_prompt_token_id_logprobs[req_id]
             if prompt_row_start == 0 and pending:
                 pending.clear()
             row_start += max(prompt_start - prompt_row_start, 0)
@@ -86,13 +86,13 @@ class PromptLogprobsWorker:
                 dtype=torch.int64,
                 device=hidden_states.device,
             ).expand(row_end - row_start, -1)
-            scores = compute_prompt_token_logprobs_with_chunking(
+            scores = compute_prompt_token_id_logprobs_with_chunking(
                 ids,
                 hidden_states[row_start:row_end],
                 logits_fn,
                 self.logprobs_mode,
             )
-            part = PromptTokenLogprobsTensors(
+            part = TokenIdLogprobsTensors(
                 scores.token_ids,
                 scores.logprobs,
             )
@@ -100,7 +100,7 @@ class PromptLogprobsWorker:
                 pending.append(part)
                 continue
             if pending:
-                part = PromptTokenLogprobsTensors.cat([*pending, part])
+                part = TokenIdLogprobsTensors.cat([*pending, part])
                 pending.clear()
             out[req_id] = part
         return out
@@ -308,12 +308,12 @@ def compute_prompt_logprobs_with_chunking(
     return token_ids, scores, ranks
 
 
-def compute_prompt_token_logprobs_with_chunking(
+def compute_prompt_token_id_logprobs_with_chunking(
     candidate_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
     logprobs_mode: LogprobsMode = "raw_logprobs",
-) -> PromptTokenLogprobsTensors:
+) -> TokenIdLogprobsTensors:
     """Gather caller-selected IDs from prompt logits without prompt-logprob semantics.
 
     ``candidate_token_ids`` has one fixed-width row per scored prompt position.
@@ -339,13 +339,13 @@ def compute_prompt_token_logprobs_with_chunking(
         ids_chunks.append(ids)
         score_chunks.append(scores)
     if not ids_chunks:
-        return PromptTokenLogprobsTensors(
+        return TokenIdLogprobsTensors(
             candidate_token_ids,
             candidate_token_ids.new_empty(
                 candidate_token_ids.shape, dtype=torch.float32
             ),
         )
-    return PromptTokenLogprobsTensors(
+    return TokenIdLogprobsTensors(
         torch.cat(ids_chunks) if len(ids_chunks) > 1 else ids_chunks[0],
         torch.cat(score_chunks) if len(score_chunks) > 1 else score_chunks[0],
     )

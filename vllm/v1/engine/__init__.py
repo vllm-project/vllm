@@ -24,8 +24,8 @@ from vllm.v1.metrics.stats import (
 from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
-    PromptTokenLogprobsTensors,
     SamplingMaskLists,
+    TokenIdLogprobsTensors,
 )
 from vllm.v1.serial_utils import UtilityResult
 
@@ -239,7 +239,7 @@ class EngineCoreOutput(
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     # Keep optional additions at the end to preserve array-like serialization.
-    prompt_token_logprobs: PromptTokenLogprobsTensors | None = None
+    prompt_token_id_logprobs: TokenIdLogprobsTensors | None = None
 
     @property
     def finished(self) -> bool:
