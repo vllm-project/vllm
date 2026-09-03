@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -16,21 +17,34 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 )
 
 
+# The aiter sparse kernels also handle 16 and 32, so extend rather than replace the
+# base declaration -- narrowing it to [16, 32] made select_common_block_size silently
+# downgrade a requested 64 to 32 via its largest-divisor fallback.
 class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
-        return [16, 32]
+        return list(
+            set(ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32])
+        )
 
 
 class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
-        return [16, 32]
+        return list(
+            set(DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32])
+        )
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
     def get_attn_backend(self):
         return DeepseekV32ROCmIndexerBackend
+
+    @property
+    def uses_shuffled_layout(self) -> bool:
+        # aiter's gather/insert pair shuffles the cache above block size 1:
+        # [n_blocks, blk/16, head_dim/16, 16, 16] instead of [n_blocks, blk, head_dim].
+        return self.kv_cache.ndim == 3 and self.kv_cache.shape[1] != 1
 
 
 class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
@@ -100,14 +114,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         q_nope = q_nope.transpose(0, 1)  # (N, tokens, P)
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            ql_nope = batched_gemm_a16wfp4(
+            ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                 q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
             ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
             )
@@ -152,14 +162,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            batched_gemm_a16wfp4(
+            rocm_aiter_ops.batched_gemm_a16wfp4(
                 x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
             )
         elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
             rocm_aiter_ops.triton_fp8_bmm(
                 x,
                 self.W_V,
@@ -202,6 +208,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
+            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -211,6 +218,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_norm_eps = 1e-6
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
+            indexer_cache_shuffled = False
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
@@ -241,6 +249,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
+            indexer_cache_shuffled=indexer_cache_shuffled,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
