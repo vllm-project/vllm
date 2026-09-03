@@ -54,6 +54,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Unmatched `ec_items` entries are a protocol desync, not a per-request
+# event: warn on the first few, then only once in a while.
+_MAX_UNRESOLVED_TRANSFER_ID_WARNINGS = 5
+
 _LEASE_TTL_SECONDS = 300
 _DRAIN_MIN_INTERVAL = 0.005
 _MAX_PENDING_EVENTS = 4096
@@ -144,6 +148,7 @@ class ECMooncakeScheduler:
         self._metadata_fields_cache: dict[str, set[str]] = {}
         self._consumer_metrics_started_at = time.monotonic()
         self._consumer_scheduler_metrics: Counter[str] = Counter()
+        self._unresolved_transfer_ids = 0
         self._drain_pending = True
         self._drained_at = 0.0
         self._pending_cancels: dict[str, Future[Any]] = {}
@@ -418,6 +423,44 @@ class ECMooncakeScheduler:
         self._consumer_scheduler_metrics["missing_event"] += 1
         return False
 
+    def _warn_unresolved_transfer_id(
+        self, request: Any, index: int, where: str
+    ) -> None:
+        """Report an `ec_items` entry that cannot be matched to a feature.
+
+        A caller that cannot resolve a transfer id has to fall back to a
+        locally invented one or skip its bookkeeping entirely, and either way
+        the two sides of a transfer stop agreeing on its name. That desyncs
+        silently -- reservations are never released and only surface minutes
+        later as a full buffer pool -- so say it out loud the first time.
+
+        `mm_hash` in `ec_items` must be a value some engine reported, never one
+        the caller derived itself: `mm_features[i].identifier` folds in the
+        engine's media_io_kwargs and mm_processor_kwargs, so a media uuid alone
+        no longer equals it. Omit the field to match by position instead.
+        """
+        self._unresolved_transfer_ids += 1
+        count = self._unresolved_transfer_ids
+        if count > _MAX_UNRESOLVED_TRANSFER_ID_WARNINGS and count % 1000:
+            return
+        params = getattr(request, "ec_transfer_params", None)
+        items = (params or {}).get("ec_items") or []
+        logger.warning(
+            "EC Mooncake could not resolve a transfer id at %s for req=%s "
+            "index=%d: feature identifier=%s does not match any of the %d "
+            "ec_items %s (ec_transfer_params present=%s). Occurrence %d. "
+            "ec_items[].mm_hash must echo an engine-reported identifier, or "
+            "be omitted so the entry is matched by position.",
+            where,
+            request.request_id,
+            index,
+            request.mm_features[index].identifier[:16],
+            len(items),
+            [str(item.get("mm_hash"))[:16] for item in items[:4]],
+            params is not None,
+            count,
+        )
+
     @staticmethod
     def _request_transfer_id(request: Any, index: int) -> str | None:
         params = getattr(request, "ec_transfer_params", None) or {}
@@ -495,6 +538,13 @@ class ECMooncakeScheduler:
         mm_hash = request.mm_features[index].identifier
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
+            # Still push: after the proxy has rewritten the item to embeds the
+            # consumer has no media left to fall back on, so a nameless push
+            # beats none. But the consumer knows this transfer by the id it
+            # sent, not by the one invented here, so its cancel will never
+            # reach the reservation this push is about to take.
+            if consumer_zmq:
+                self._warn_unresolved_transfer_id(request, index, "push prepare")
             transfer_id = f"{request.request_id}:{index}"
         if not consumer_zmq or transfer_id in self._prepared_push_transfer_ids:
             return
@@ -525,6 +575,7 @@ class ECMooncakeScheduler:
             return
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
+            self._warn_unresolved_transfer_id(request, index, "encoder-cache free")
             return
         self._queue_cancel(
             transfer_id,
@@ -537,6 +588,9 @@ class ECMooncakeScheduler:
     ) -> ECConnectorMetadata:
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self._transfers.release_ready(mm_hash, time.monotonic())
+        for transfer_id in self._transfers.drain_orphaned():
+            self._consumer_scheduler_metrics["reservations_orphaned"] += 1
+            self._queue_cancel(transfer_id)
         meta = ECMooncakeConnectorMetadata()
         for push_spec in self._pushes_to_prepare.values():
             meta.add_push(push_spec)
@@ -595,6 +649,7 @@ class ECMooncakeScheduler:
             for index in range(len(request.mm_features)):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
+                    self._warn_unresolved_transfer_id(request, index, "request finish")
                     continue
                 self._queue_cancel(
                     transfer_id,

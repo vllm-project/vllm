@@ -120,9 +120,24 @@ class SchedulerTransferTable:
         self._hash_index: dict[str, deque[str]] = {}
         self._loads_to_dispatch: OrderedDict[str, None] = OrderedDict()
         self._unavailable_requests: set[str] = set()
+        # Records expired straight out of READY/RESIDENT: the consumer worker
+        # still holds their push reservation, and nothing else tells it to let
+        # go, so the destination buffer would sit pinned until the lease TTL.
+        self._orphaned: list[str] = []
 
     def get(self, transfer_id: str) -> SchedulerTransfer | None:
         return self._records.get(transfer_id)
+
+    def drain_orphaned(self) -> list[str]:
+        """Transfer IDs expired out of READY/RESIDENT since the last drain.
+
+        The caller must release the consumer worker's reservation for each:
+        `cancel()` still accepts an EXPIRED record, so the usual cancel path
+        applies.
+        """
+        orphaned = self._orphaned
+        self._orphaned = []
+        return orphaned
 
     def records_for_hash(
         self,
@@ -408,6 +423,11 @@ class SchedulerTransferTable:
             if now is None:
                 raise ValueError("Terminal transition requires a timestamp")
             record.deadline = now + self._tombstone_ttl
+        if state is SchedulerTransferState.EXPIRED and record.state in (
+            SchedulerTransferState.READY,
+            SchedulerTransferState.RESIDENT,
+        ):
+            self._orphaned.append(record.transfer_id)
         record.state = state
         record.last_error = error
         self._records.move_to_end(record.transfer_id)

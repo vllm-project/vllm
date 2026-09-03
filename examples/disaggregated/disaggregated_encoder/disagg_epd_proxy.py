@@ -155,6 +155,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             meta = dict(item_meta.get(idx) or {})
             idx += 1
             item_uuid = meta.pop("mm_hash", None)
+            ec_mm_hash = meta.pop("ec_mm_hash", None) or item_uuid
             transfer_id = meta.pop("transfer_id", None)
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
@@ -176,7 +177,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             )
             if transfer_id is not None:
                 transfer_items.append(
-                    {"mm_hash": item_uuid, "transfer_id": transfer_id}
+                    {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
                 )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
@@ -281,9 +282,17 @@ async def fanout_encoder_primer(
             "stream": False,
         }
         if consumer_zmq is not None:
+            # No mm_hash here on purpose. The encoder's own
+            # `mm_features[i].identifier` is derived from the uuid *and* the
+            # engine's media_io_kwargs / mm_processor_kwargs, so this proxy
+            # cannot know it before the encoder runs. Sending the bare uuid
+            # would fail the connector's hash match and make the producer
+            # invent its own transfer id, which the consumer could then never
+            # cancel. Omitting it lets the connector match by position, which
+            # is exact: one encoder request carries exactly one item.
             encoder_req["ec_transfer_params"] = {
                 "consumer_zmq": consumer_zmq,
-                "ec_items": [{"mm_hash": item_uuid, "transfer_id": transfer_id}],
+                "ec_items": [{"transfer_id": transfer_id}],
             }
         tasks.append(
             encode_session.post(
@@ -334,9 +343,17 @@ async def fanout_encoder_primer(
             reported = []
         if reported and idx in item_uuids:
             # One item per encoder request, so the first entry is this item's.
+            # The uuid this proxy assigned is what makes both instances derive
+            # the same cache key, so it stays the item's `uuid`. It is NOT the
+            # key the connectors use: when media_io_kwargs or
+            # mm_processor_kwargs are set, the engine re-hashes the uuid
+            # together with them, so `mm_features[i].identifier` is a derived
+            # value. The encoder already reported that derived value; carry it
+            # through separately instead of overwriting it.
             item_meta[idx] = {
                 **reported[0],
                 "mm_hash": item_uuids[idx],
+                "ec_mm_hash": reported[0].get("mm_hash"),
                 "transfer_id": item_transfer_ids[idx],
             }
 
