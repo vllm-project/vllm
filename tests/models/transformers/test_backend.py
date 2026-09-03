@@ -6,6 +6,7 @@ import ast
 import contextlib
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -662,6 +663,26 @@ def test_attention_layer_index_is_the_modules_own():
     assert not any(f.validate(a, None) for f, a in zip(fusers, attentions))
     text_config._attn_implementation = VLLM_ATTN_IMPL
     assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
+
+
+def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+    """Models selected by the permissive registry fail clearly without dispatch."""
+    monkeypatch.setattr(
+        "vllm.model_executor.models.transformers.base.get_pp_indices",
+        lambda *_: (0, 1),
+    )
+    model = SimpleNamespace(
+        text_config=SimpleNamespace(num_hidden_layers=1),
+        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
+        attention_fusers={},
+        _get_attn_cls=lambda: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Layer 0 does not dispatch through the Transformers attention interface",
+    ):
+        Base.create_attention_instances(model)
 
 
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
