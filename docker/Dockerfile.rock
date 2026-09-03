@@ -878,6 +878,7 @@ ENV VLLM_GPU_SYNC_CHECK=error
 # -----------------------
 # Final vLLM image
 FROM mori_base AS final_common
+ENV UV_COMPILE_BYTECODE=1
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 

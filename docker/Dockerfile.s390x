@@ -161,6 +161,7 @@ ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:/opt/rh/gcc-toolset-14/root/usr/lib64:$LD_LIBRARY_PATH"
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 ENV UV_LINK_MODE=copy
+ENV UV_COMPILE_BYTECODE=1
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1

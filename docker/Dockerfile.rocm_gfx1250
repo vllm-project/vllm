@@ -646,6 +646,7 @@ RUN mkdir src && mv vllm src/vllm
 # -----------------------
 # Final vLLM image
 FROM mori_base AS final
+ENV UV_COMPILE_BYTECODE=1
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
