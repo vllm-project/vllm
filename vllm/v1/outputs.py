@@ -11,9 +11,11 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -23,6 +25,7 @@ else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    ECConnectorWorkerMetadata = object
 
 
 class LogprobsLists(NamedTuple):
@@ -96,33 +99,47 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
-    # [num_reqs]
+    # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None
+    # [num_reqs + 1]. Set instead of cu_num_generated_tokens when the
+    # boundaries only exist on device (adaptive verification); rides along on
+    # the async D2H copy.
+    cu_num_generated_tokens_tensor: torch.Tensor | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
+        if cu_num_generated_tokens is None:
+            if self.cu_num_generated_tokens_tensor is not None:
+                cu_num_generated_tokens = self.cu_num_generated_tokens_tensor.tolist()
+            else:
+                cu_num_generated_tokens = self.cu_num_generated_tokens
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens
-            if cu_num_generated_tokens is not None
-            else self.cu_num_generated_tokens,
+            cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
         if self.logprob_token_ids.device.type == "cpu":
             return self
+        cu_tensor = self.cu_num_generated_tokens_tensor
+        if cu_tensor is not None:
+            cu_tensor = cu_tensor.to("cpu", non_blocking=True)
         return LogprobsTensors(
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
             self.cu_num_generated_tokens,
+            cu_tensor,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
         """Filter the logprobs tensors with the given bool mask."""
         assert self.cu_num_generated_tokens is None, (
             "filter can't be used with cu_num_generated_tokens"
+        )
+        assert self.cu_num_generated_tokens_tensor is None, (
+            "filter can't be used with cu_num_generated_tokens_tensor"
         )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
@@ -145,6 +162,9 @@ class LogprobsTensors(NamedTuple):
             if cu_num_generated_tokens is None:
                 return tensor
             return tensor._replace(cu_num_generated_tokens=cu_num_generated_tokens)
+        # The multi-chunk path rebuilds boundaries from the CPU layout, which
+        # the device-only boundaries of adaptive verification never use.
+        assert all(tensor.cu_num_generated_tokens_tensor is None for tensor in tensors)
         return LogprobsTensors(
             logprob_token_ids=torch.cat(
                 [tensor.logprob_token_ids for tensor in tensors]
@@ -163,11 +183,18 @@ class LogprobsTensors(NamedTuple):
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
-            (num_positions, num_tokens_per_position), dtype=torch.int32, device="cpu"
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
-        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
-        selected_token_ranks = torch.empty(
-            num_positions, dtype=torch.int32, device="cpu"
+        logprobs = logprob_token_ids.new_empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.float32,
+            pin_memory=PIN_MEMORY,
+        )
+        selected_token_ranks = logprob_token_ids.new_empty(
+            num_positions, pin_memory=PIN_MEMORY
         )
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids,
@@ -292,6 +319,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
+
+    def is_empty(self):
+        return (
+            not self.finished_sending
+            and not self.finished_recving
+            and not self.ec_connector_worker_meta
+        )
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -360,6 +395,32 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_ec_conn_output_only(
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return an otherwise-empty output carrying `ec_connector_output`."""
+        return ModelRunnerOutput.with_ec_conn_output(
+            EMPTY_MODEL_RUNNER_OUTPUT, ec_connector_output
+        )
+
+    @staticmethod
+    def with_ec_conn_output(
+        output: "ModelRunnerOutput",
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return `output` carrying `ec_connector_output`.
+
+        The shared empty output is copied rather than written to, so callers
+        must use the return value.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
         return output
 
 

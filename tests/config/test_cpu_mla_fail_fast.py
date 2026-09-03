@@ -87,7 +87,10 @@ def test_cpu_mla_deepseek_dimensions_accepted(vllm_config, mla_use_patch):
     """
     _set_dims(vllm_config, kv_lora_rank=512, qk_rope_head_dim=64, v_head_dim=512)
 
-    with patch("vllm.platforms.current_platform.device_type", "cpu"):
+    with (
+        patch("torch.cpu._is_amx_tile_supported", return_value=False),
+        patch("vllm.platforms.current_platform.device_type", "cpu"),
+    ):
         # Must not raise; chunked prefill / prefix caching are forced off.
         CpuPlatform.check_and_update_config(vllm_config)
     assert vllm_config.scheduler_config.enable_chunked_prefill is False
@@ -97,6 +100,7 @@ def test_cpu_mla_deepseek_dimensions_accepted(vllm_config, mla_use_patch):
 def test_cpu_mla_unsupported_dimensions_fail_fast(vllm_config, mla_use_patch):
     """Tiny-variant layout (160/64) is rejected with a clear error."""
     with (
+        patch("torch.cpu._is_amx_tile_supported", return_value=False),
         patch("vllm.platforms.current_platform.device_type", "cpu"),
         pytest.raises(ValueError, match="head_dim=160, v_head_dim=64"),
     ):
@@ -108,6 +112,7 @@ def test_cpu_mla_missing_dimensions_fail_fast(vllm_config, mla_use_patch):
     _set_dims(vllm_config, qk_rope_head_dim=None)
 
     with (
+        patch("torch.cpu._is_amx_tile_supported", return_value=False),
         patch("vllm.platforms.current_platform.device_type", "cpu"),
         pytest.raises(ValueError, match="head_dim=None"),
     ):

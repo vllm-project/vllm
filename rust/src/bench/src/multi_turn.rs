@@ -23,6 +23,7 @@ use crate::output::console::print_multi_turn_results;
 use crate::output::json::{
     append_result, build_multi_turn_result_json, compute_result_filename, save_result,
 };
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
 
 /// Output from a single turn within a conversation.
 #[derive(Debug, Clone)]
@@ -74,7 +75,13 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         (m.clone(), config.model_name.clone())
     } else {
         tracing::info!(base_url = %config.base_url, "fetching first model from server");
-        let (name, id) = get_first_model(&config.base_url, &client, &config.extra_headers).await?;
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
         tracing::info!(
             model_name = name,
             model_id = id,
@@ -89,7 +96,11 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
         let t =
             crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
@@ -263,7 +274,7 @@ pub async fn run_multi_turn_benchmark(config: &BenchConfig) -> Result<serde_json
         };
 
         tracing::info!("starting initial single-prompt test run");
-        let test_output = crate::ready_checker::wait_for_endpoint(
+        let test_output = wait_for_endpoint(
             config.backend,
             &client,
             &test_input,
@@ -746,39 +757,6 @@ async fn run_conversation(
         total_duration_ms,
         all_success,
     }
-}
-
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
 }
 
 #[cfg(test)]

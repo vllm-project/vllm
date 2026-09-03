@@ -548,6 +548,10 @@ class RocmPlatform(Platform):
             import vllm._rocm_C  # noqa: F401
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def is_pin_memory_available(cls) -> bool:
         if in_wsl():
             version = _get_wsl_kernel_version()
@@ -896,23 +900,17 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
-        if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
-                logger.warning_once(
-                    "Decode context parallel (DCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
             # prefill context parallel do not support full cudagraphs
-            elif parallel_config.prefill_context_parallel_size > 1:
-                logger.warning_once(
-                    "Prefill context parallel (PCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            logger.warning_once(
+                "Prefill context parallel (PCP) is enabled, which is "
+                "incompatible with full CUDA graphs. "
+                "Overriding cudagraph_mode to PIECEWISE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"

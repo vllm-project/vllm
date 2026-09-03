@@ -8,7 +8,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import CacheDType
-from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
@@ -17,8 +16,6 @@ from vllm.v1.attention.backends.registry import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
-
-logger = init_logger(__name__)
 
 
 class AttentionSelectorConfig(NamedTuple):
@@ -38,6 +35,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_kv_connector: bool = False
     use_pcp: bool = False
     use_adaptive_verification: bool = False
+    use_dcp: bool = False
 
     def __repr__(self):
         return (
@@ -56,7 +54,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_batch_invariant={self.use_batch_invariant}, "
             f"use_kv_connector={self.use_kv_connector}, "
             f"use_adaptive_verification={self.use_adaptive_verification}, "
-            f"use_pcp={self.use_pcp})"
+            f"use_pcp={self.use_pcp}, "
+            f"use_dcp={self.use_dcp})"
         )
 
 
@@ -168,6 +167,7 @@ def get_attn_backend(
         use_kv_connector=use_kv_connector,
         use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
         use_adaptive_verification=use_adaptive_verification,
+        use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
@@ -182,6 +182,8 @@ def get_attn_backend(
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
+    # The KV cache layout is resolved across all of the model's backends at once
+    # in get_kv_cache_spec(); a single selection cannot see its peers.
     return _cached_get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
@@ -207,19 +209,6 @@ def _cached_get_attn_backend(
             f"Invalid attention backend for {current_platform.device_name}"
         )
     backend = resolve_obj_by_qualname(attention_cls)
-
-    # Adjust kv cache layout if the selected backend requires a specific one
-    required_layout = backend.get_required_kv_cache_layout()
-    if required_layout is not None:
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-        set_kv_cache_layout(required_layout)
-        logger.info_once(
-            "Using %s KV cache layout for %s backend.",
-            required_layout,
-            backend.get_name(),
-        )
-
     return backend
 
 

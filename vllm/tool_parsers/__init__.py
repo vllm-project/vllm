@@ -94,6 +94,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hy_v3_tool_parser",
         "HYV3ToolParser",
     ),
+    "hy_v4": (
+        "hy_v4_tool_parser",
+        "HYV4ToolParser",
+    ),
     "internlm": (
         "internlm2_tool_parser",
         "Internlm2ToolParser",
@@ -153,6 +157,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",

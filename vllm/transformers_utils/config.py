@@ -52,6 +52,21 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+_ST_POOLING_MODULE_TYPES = {
+    "sentence_transformers.models.Pooling",
+    "sentence_transformers.sentence_transformer.modules.pooling.Pooling",
+}
+_ST_NORMALIZE_MODULE_TYPES = {
+    "sentence_transformers.models.Normalize",
+    "sentence_transformers.base.modules.normalize.Normalize",
+    "sentence_transformers.sentence_transformer.modules.normalize.Normalize",
+}
+_DENSE_MODULE_TYPES = {
+    "sentence_transformers.models.Dense",
+    "sentence_transformers.base.modules.dense.Dense",
+    "pylate.models.Dense.Dense",
+}
+
 if Version(version("transformers")) < Version("5.0.0"):
     raise ImportError(
         "Support for Transformers v4 is deprecated and was removed in vLLM v0.24.0. "
@@ -71,10 +86,8 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
-    arctic="ArcticConfig",
     axk1="AXK1Config",
     bagel="BagelConfig",
-    umm="CheersConfig",
     chatglm="ChatGLMConfig",
     modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
@@ -89,19 +102,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v4="DeepseekV4Config",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
-    flex_olmo="FlexOlmoConfig",
-    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
     hyperclovax="HyperCLOVAXConfig",
-    hyperclovax_vlm="HCXVisionConfig",
-    hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
+    hy_v4="HYV4Config",
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
+    muse_glimmer="MuseGlimmerConfig",
+    muse_glimmer_text="MuseGlimmerTextConfig",
+    muse_glimmer_vision="MuseGlimmerVisionConfig",
+    muse_glimmer_assistant="MuseGlimmerAssistantConfig",
     kimi_k3="KimiK3Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
@@ -126,6 +140,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen4_exp="Qwen4ExpConfig",
+    qwen4_exp_text="Qwen4ExpTextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
     qwen3_5_moe="Qwen3_5MoeConfig",
@@ -669,8 +685,14 @@ def maybe_override_with_speculators(
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
     )
+    speculators_method = speculative_config["method"]
 
-    # Set the draft model to the speculators model
+    # Apply user --speculative-config overrides (e.g. attention_backend).
+    if isinstance(vllm_speculative_config, dict):
+        speculative_config.update(vllm_speculative_config)
+
+    # Lock fields dictated by the speculators format
+    speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
@@ -845,11 +867,7 @@ def get_pooling_config(
     logger.info("Found sentence-transformers modules configuration.")
 
     pooling = next(
-        (
-            item
-            for item in modules_dict
-            if item["type"] == "sentence_transformers.models.Pooling"
-        ),
+        (item for item in modules_dict if item["type"] in _ST_POOLING_MODULE_TYPES),
         None,
     )
     normalize = bool(
@@ -857,7 +875,7 @@ def get_pooling_config(
             (
                 item
                 for item in modules_dict
-                if item["type"] == "sentence_transformers.models.Normalize"
+                if item["type"] in _ST_NORMALIZE_MODULE_TYPES
             ),
             False,
         )
@@ -873,14 +891,28 @@ def get_pooling_config(
 
         config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
-            if val is True:
-                pooling_type = parse_pooling_type(key)
-                if pooling_type in SEQ_POOLING_TYPES:
-                    config["seq_pooling_type"] = pooling_type
-                elif pooling_type in TOK_POOLING_TYPES:
-                    config["tok_pooling_type"] = pooling_type
-                else:
-                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_name = val
+            elif val is True:
+                pooling_name = key
+            else:
+                continue
+
+            pooling_type = parse_pooling_type(pooling_name)
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
+            else:
+                logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        if not {"seq_pooling_type", "tok_pooling_type"} & config.keys():
+            logger.warning(
+                "Unable to determine Sentence Transformers pooling type from %s; "
+                "unless configured explicitly, vLLM will fall back to the model "
+                "architecture default.",
+                pooling_file_name,
+            )
 
         return config
 
@@ -1108,7 +1140,9 @@ def try_get_safetensors_metadata(
 
     try:
         return with_retry(
-            get_safetensors_metadata_partial, "Error retrieving safetensors"
+            get_safetensors_metadata_partial,
+            "Error retrieving safetensors",
+            fatal_errors=(huggingface_hub.errors.NotASafetensorsRepoError,),
         )
     except Exception:
         return None
@@ -1142,10 +1176,6 @@ def try_get_dense_modules(
         if isinstance(modules, dict):
             modules = modules.get("modules", [])
 
-        _DENSE_MODULE_TYPES = {
-            "sentence_transformers.models.Dense",
-            "pylate.models.Dense.Dense",
-        }
         dense_modules = [m for m in modules if m.get("type") in _DENSE_MODULE_TYPES]
         if not dense_modules:
             return None
@@ -1212,6 +1242,24 @@ def get_safetensors_params_metadata(
         )
         return {}
     return _read_safetensors_metadata_in_dir(Path(local_dir))
+
+
+@cache
+def checkpoint_has_lm_head(model: str, *, revision: str | None = None) -> bool | None:
+    """Whether the checkpoint contains an `lm_head` tensor of its own.
+
+    Args:
+        model: Name or path of the model repository.
+        revision: The specific model version to use.
+
+    Returns:
+        `None` if the checkpoint contents could not be determined, for example
+        because it is not stored as safetensors.
+    """
+    metadata = get_safetensors_params_metadata(model, revision=revision)
+    if not metadata:
+        return None
+    return any(name.endswith("lm_head.weight") for name in metadata)
 
 
 def _download_mistral_config_file(model, revision) -> dict:

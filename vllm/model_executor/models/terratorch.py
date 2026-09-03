@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import attn_type
@@ -280,13 +281,15 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        model_output = self.inference_runner.forward(**kwargs)
+        # terratorch's forward has internal GPU syncs.
+        with gpu_sync_allowed():
+            model_output = self.inference_runner.forward(**kwargs)
         return model_output.output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_list = []
         model_buffers = dict(self.named_buffers())
-        loaded_buffers = []
+        loaded_buffers: list[str] = []
         for key, value in weights:
             if isinstance(value, (dict, OrderedDict)):
                 if key == "state_dict":

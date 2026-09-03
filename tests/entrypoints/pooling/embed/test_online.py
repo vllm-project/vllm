@@ -91,6 +91,17 @@ def hf_model(hf_runner):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_negative_token_ids(client: openai.AsyncOpenAI, model_name: str):
+    # A negative token id is out of vocabulary just like an over-large one, but
+    # is not caught by the upper-bound check. Unlike the OpenAI completion
+    # schema, the pooling schema does not constrain token ids to be
+    # non-negative, so the request reaches the shared engine-level validation.
+    with pytest.raises(openai.BadRequestError, match=".*out of vocabulary.*"):
+        await client.embeddings.create(model=model_name, input=[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
@@ -281,6 +292,37 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
         assert (
             "truncate_prompt_tokens value is greater than max_model_len. "
             "Please request a smaller truncation size." in response.message
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_padding(client: openai.AsyncOpenAI, model_name: str):
+    input_texts = ["Hello"]
+
+    async def prompt_tokens(**extra_body):
+        response = await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body=extra_body,
+        )
+        embeddings = EmbeddingResponse.model_validate(response.model_dump(mode="json"))
+        assert len(embeddings.data) == 1
+        return embeddings.usage.prompt_tokens
+
+    unpadded = await prompt_tokens()
+    padded = await prompt_tokens(padding="max_length")
+
+    # Models trained with a fixed sequence length and no attention mask need
+    # this; without it their embeddings are not comparable.
+    assert padded > unpadded
+    assert await prompt_tokens(padding="do_not_pad") == unpadded
+
+    with pytest.raises(openai.BadRequestError):
+        await client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+            extra_body={"padding": "longest"},
         )
 
 

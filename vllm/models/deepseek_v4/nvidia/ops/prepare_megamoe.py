@@ -17,6 +17,7 @@ def _prepare_megamoe_inputs_kernel(
     hidden_states,
     x_fp8,
     x_sf,
+    shared_x_sf,
     topk_ids,
     topk_weights,
     is_padding,
@@ -28,6 +29,8 @@ def _prepare_megamoe_inputs_kernel(
     x_stride_k: tl.constexpr,
     x_sf_stride_m: tl.constexpr,
     x_sf_stride_k: tl.constexpr,
+    shared_x_sf_stride_m: tl.constexpr,
+    shared_x_sf_stride_k: tl.constexpr,
     topk_ids_stride_m: tl.constexpr,
     topk_ids_stride_k: tl.constexpr,
     topk_weights_stride_m: tl.constexpr,
@@ -42,6 +45,7 @@ def _prepare_megamoe_inputs_kernel(
     BLOCK_K: tl.constexpr,
     GROUP_K: tl.constexpr,
     BLOCK_TOPK: tl.constexpr,
+    SHARED_BLOCK_M: tl.constexpr,
 ) -> None:
     token_id = tl.program_id(0)
     k_block_id = tl.program_id(1)
@@ -83,6 +87,25 @@ def _prepare_megamoe_inputs_kernel(
         x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
         packed_scale,
     )
+
+    # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
+    # in an MN-major layout whose row permutation depends on the MegaMoE
+    # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
+    # is already resident, avoiding another kernel and temporary tensor.
+    if shared_x_sf is not None:
+        m_block_id = token_id // SHARED_BLOCK_M
+        m_in_block = token_id % SHARED_BLOCK_M
+        aligned_block_m: tl.constexpr = triton.cdiv(SHARED_BLOCK_M, 128) * 128
+        transposed_m = (
+            (m_in_block // 128) * 128 + (m_in_block % 32) * 4 + (m_in_block % 128) // 32
+        )
+        shared_row = m_block_id * aligned_block_m + transposed_m
+        tl.store(
+            shared_x_sf
+            + shared_row * shared_x_sf_stride_m
+            + k_block_id * shared_x_sf_stride_k,
+            packed_scale,
+        )
 
     if k_block_id == 0:
         topk_offsets = tl.arange(0, BLOCK_TOPK)
@@ -131,6 +154,8 @@ def prepare_megamoe_inputs(
     topk_idx_out: torch.Tensor,
     topk_weights_out: torch.Tensor,
     is_padding: torch.Tensor | None = None,
+    shared_x_sf: torch.Tensor | None = None,
+    shared_block_m: int | None = None,
 ) -> None:
     num_tokens, hidden_size = hidden_states.shape
     if num_tokens == 0:
@@ -146,6 +171,28 @@ def prepare_megamoe_inputs(
             "DeepSeek V4 MegaMoE input staging requires topk_weights and "
             "topk_ids to have the same shape."
         )
+    if (shared_x_sf is None) != (shared_block_m is None):
+        raise ValueError(
+            "DeepSeek V4 MegaMoE shared input staging requires both "
+            "shared_x_sf and shared_block_m."
+        )
+    if shared_x_sf is not None:
+        assert shared_block_m is not None
+        if shared_block_m <= 0:
+            raise ValueError("MegaMoE shared_block_m must be positive.")
+        expected_sf_k = hidden_size // 128
+        if shared_x_sf.ndim != 2 or shared_x_sf.shape[1] != expected_sf_k:
+            raise ValueError(
+                "MegaMoE shared_x_sf must have shape "
+                f"(*, {expected_sf_k}), got {tuple(shared_x_sf.shape)}."
+            )
+        aligned_block_m = triton.cdiv(shared_block_m, 128) * 128
+        required_rows = triton.cdiv(num_tokens, shared_block_m) * aligned_block_m
+        if shared_x_sf.shape[0] < required_rows:
+            raise ValueError(
+                "MegaMoE shared_x_sf has insufficient rows: requires "
+                f"{required_rows}, got {shared_x_sf.shape[0]}."
+            )
 
     block_k = 128
     grid = (num_tokens, triton.cdiv(hidden_size, block_k))
@@ -155,6 +202,7 @@ def prepare_megamoe_inputs(
         hidden_states,
         x_fp8,
         x_sf,
+        shared_x_sf,
         topk_ids,
         topk_weights,
         is_padding,
@@ -166,6 +214,8 @@ def prepare_megamoe_inputs(
         x_fp8.stride(1),
         x_sf.stride(0),
         x_sf.stride(1),
+        shared_x_sf.stride(0) if shared_x_sf is not None else 0,
+        shared_x_sf.stride(1) if shared_x_sf is not None else 0,
         topk_ids.stride(0),
         topk_ids.stride(1),
         topk_weights.stride(0),
@@ -180,5 +230,6 @@ def prepare_megamoe_inputs(
         BLOCK_K=block_k,
         GROUP_K=32,
         BLOCK_TOPK=block_topk,
+        SHARED_BLOCK_M=shared_block_m or 1,
         num_warps=4,
     )
