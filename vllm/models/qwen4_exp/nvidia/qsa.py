@@ -396,12 +396,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.kv_cache,
             main_metadata.slot_mapping,
         )
-        # The kernel derives each row's loop bound in-kernel from the
-        # side-cache metadata; nothing pairs with the persistent
-        # topk_indices_buffer across steps. On MTP skip_topk steps the
-        # metadata describes the current step while the indices are frozen
-        # from step 0 — safe because positions and seq lens only advance, so
-        # the derived bound stays a superset of the frozen rows' extent.
         compressed_metadata = cast(
             QSAForwardMetadata,
             metadata[self.indexer.compressed_key_cache.prefix],

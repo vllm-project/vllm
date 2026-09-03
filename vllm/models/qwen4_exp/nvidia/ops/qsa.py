@@ -79,9 +79,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     accumulator = tl.zeros((BLOCK_M, HEAD_DIM), dtype=tl.float32)
     softmax_scale_log2: tl.constexpr = (HEAD_DIM**-0.5) * 1.4426950408889634
 
-    # compute bounds
-    position = tl.load(logical_positions_ptr + row)
-    seq_len = tl.load(seq_lens_ptr + safe_request)
+    # compute bounds (use int32)
+    position = tl.load(logical_positions_ptr + row).to(tl.int32)
+    seq_len = tl.load(seq_lens_ptr + safe_request).to(tl.int32)
     visible = tl.minimum((position + 1) // COMPRESS_RATIO, seq_len // COMPRESS_RATIO)
     valid_count = (
         tl.minimum(visible, BLOCK_TOPK) * COMPRESS_RATIO
