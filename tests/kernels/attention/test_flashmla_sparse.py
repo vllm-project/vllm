@@ -4,6 +4,16 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize("major,minor", [(8, 0), (8, 6), (8, 9), (9, 0), (10, 0)])
+def test_deepseek_v4_sparse_mla_supports_cuda_architectures(major: int, minor: int):
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    from vllm.platforms.interface import DeviceCapability
+
+    assert DeepseekV4SparseMLABackend.supports_compute_capability(
+        DeviceCapability(major, minor)
+    )
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
@@ -24,6 +34,7 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
         (2, capacity_width), dtype=torch.int32, device=device
     )
     prefill_buffer = torch.empty_like(global_decode_buffer)
+    decode_lens_buffer = torch.empty(2, dtype=torch.int32, device=device)
     kwargs = dict(
         positions=torch.tensor([255, 511, 383, 639], device=device),
         compress_ratio=128,
@@ -33,9 +44,9 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
         ),
         block_table=torch.tensor([[3], [5]], dtype=torch.int32, device=device),
         block_size=capacity_width,
-        slot_mapping=torch.arange(4, dtype=torch.int64, device=device),
+        slot_mapping=torch.tensor([0, -1, 2, 3], dtype=torch.int64, device=device),
         global_decode_buffer=global_decode_buffer,
-        decode_lens_buffer=torch.empty(2, dtype=torch.int32, device=device),
+        decode_lens_buffer=decode_lens_buffer,
         prefill_buffer=prefill_buffer,
     )
     captured_decode, _, captured_prefill = sparse_mla.build_c128a_topk_metadata(
@@ -70,10 +81,11 @@ def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
 
     assert captured_rows.cpu().tolist() == [
         [1536, 1537, -1, -1],
-        [2560, 2561, 2562, 2563],
+        [-1, -1, -1, -1],
         [0, 1, 2, -1],
         [0, 1, 2, 3],
     ]
+    assert decode_lens_buffer.cpu().tolist() == [2, 0]
     assert torch.all(global_decode_buffer[:, 128:] == -99)
     assert torch.all(prefill_buffer[:, 128:] == -99)
 
