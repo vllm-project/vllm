@@ -133,6 +133,16 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
                 shape=(1, compile_key.kv_size),
                 strides=(compile_key.kv_in_stride, 1),
             ),
+            qr_out=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.q_size),
+                strides=(compile_key.q_out_stride, 1),
+            ),
+            kv_out=TritonWarmupTensor(
+                torch.bfloat16,
+                shape=(1, compile_key.kv_size),
+                strides=(compile_key.kv_out_stride, 1),
+            ),
             q_weight=TritonWarmupTensor(
                 torch.float32,
                 shape=(compile_key.q_size,),
@@ -149,53 +159,53 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
         self,
         qr: torch.Tensor,
         kv: torch.Tensor,
+        qr_out: torch.Tensor,
+        kv_out: torch.Tensor,
         q_weight: torch.Tensor,
         kv_weight: torch.Tensor,
         eps: float,
     ) -> LaunchSpec:
-        assert qr.ndim == 2 and kv.ndim == 2
-        assert qr.shape[0] == kv.shape[0], (
-            f"token dim mismatch: qr={qr.shape}, kv={kv.shape}"
-        )
-        assert qr.stride(-1) == 1 and kv.stride(-1) == 1
-        assert q_weight.is_contiguous() and kv_weight.is_contiguous()
-
         q_size = qr.shape[1]
         kv_size = kv.shape[1]
-        num_tokens = qr.shape[0]
-        qr_out = torch.empty_like(qr)
-        kv_out = torch.empty_like(kv)
-        if num_tokens == 0:
-            return None, {}, (qr_out, kv_out)
-
-        compile_key = self.dispatch(
-            q_size=q_size,
-            kv_size=kv_size,
+        return (qr.shape[0], 2), dict(
             q_in_stride=qr.stride(0),
             q_out_stride=qr_out.stride(0),
             kv_in_stride=kv.stride(0),
             kv_out_stride=kv_out.stride(0),
-            eps=eps,
+            Q_SIZE=q_size,
+            KV_SIZE=kv_size,
+            BLOCK_SIZE=next_power_of_2(max(q_size, kv_size)),
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
-        return (
-            (num_tokens, 2),
-            dict(
-                q_ptr=qr,
-                q_out_ptr=qr_out,
-                q_in_stride=compile_key.q_in_stride,
-                q_out_stride=compile_key.q_out_stride,
-                kv_out_ptr=kv_out,
-                kv_in_stride=compile_key.kv_in_stride,
-                kv_out_stride=compile_key.kv_out_stride,
-                eps=compile_key.eps,
-                Q_SIZE=compile_key.q_size,
-                KV_SIZE=compile_key.kv_size,
-                BLOCK_SIZE=compile_key.block_size,
-                launch_pdl=compile_key.launch_pdl,
-            ),
-            (qr_out, kv_out),
+
+
+def fused_q_kv_rmsnorm(
+    qr: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert qr.ndim == 2 and kv.ndim == 2
+    assert qr.shape[0] == kv.shape[0], (
+        f"token dim mismatch: qr={qr.shape}, kv={kv.shape}"
+    )
+    assert qr.stride(-1) == 1 and kv.stride(-1) == 1
+    assert q_weight.is_contiguous() and kv_weight.is_contiguous()
+
+    qr_out = torch.empty(qr.shape, dtype=qr.dtype, device=qr.device)
+    kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+    if qr.shape[0] > 0:
+        _FUSED_Q_KV_RMSNORM_KERNEL(
+            qr,
+            kv,
+            qr_out,
+            kv_out,
+            q_weight,
+            kv_weight,
+            eps,
         )
+    return qr_out, kv_out
 
 
 _FUSED_Q_KV_RMSNORM_KERNEL = FusedQKVRMSNormKernel()

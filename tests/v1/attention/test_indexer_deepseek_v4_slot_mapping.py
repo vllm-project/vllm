@@ -47,20 +47,11 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=None, index_kpool=32)
-        ),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_kpool=32)),
     )
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
-
-    assert keys == [
-        CompressedSlotMappingKernel.CompileKey(
-            compress_ratio=32,
-            triton_block_size=CompressedSlotMappingKernel.TRITON_BLOCK_SIZE,
-            block_size=2,
-        )
-    ]
+    assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
 
 
 def test_index_conversion_warmup_uses_physical_block_stride():
@@ -80,8 +71,6 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         config,
         block_stride_rows=4096,
     )
-
-    assert keys
     assert {key.block_stride_rows for key in keys} == {4096}
 
 

@@ -121,6 +121,10 @@ def _use_pdl() -> bool:
 class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
     # Dot-prod: keyed on (M, K, bs), because M and K are Constexpr.
     # Split-K: keyed on (split_k, num_stages), fully shape-dynamic.
+    def __init__(self, *, prefetch_pdl_weights: bool = False) -> None:
+        self.prefetch_pdl_weights = prefetch_pdl_weights
+        super().__init__()
+
     @dataclass(frozen=True, slots=True)
     class CompileKey:
         backend: Literal["dotprod", "splitk"]
@@ -129,6 +133,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         bs: int = 0
         split_k: int = 0
         num_stages: int = 0
+        prefetch_pdl_weights: bool = False
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -150,6 +155,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             k=compile_key.k,
             bs=compile_key.bs,
             use_pdl=_use_pdl(),
+            prefetch_pdl_weights=compile_key.prefetch_pdl_weights,
         )
 
     def dispatch(  # type: ignore[override]
@@ -168,6 +174,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
             bs=bs if is_dotprod else 0,
             split_k=0 if is_dotprod else splitk_config[0],
             num_stages=0 if is_dotprod else splitk_config[1],
+            prefetch_pdl_weights=(self.prefetch_pdl_weights if is_dotprod else False),
         )
 
     def get_warmup_keys(
@@ -309,4 +316,18 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return output
 
 
+def ll_bf16_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+    output_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    kernel = (
+        _LL_BF16_GEMM_C1_PDL_KERNEL
+        if hidden_states.shape[0] == 1
+        else _LL_BF16_GEMM_KERNEL
+    )
+    return kernel(hidden_states, router_weight, output_dtype)
+
+
 _LL_BF16_GEMM_KERNEL = LLBf16Gemm()
+_LL_BF16_GEMM_C1_PDL_KERNEL = LLBf16Gemm(prefetch_pdl_weights=True)

@@ -251,7 +251,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 dict(
                     HAS_PREFILL_WORKSPACE=False,
                     COUNT_VALID=True,
-                    COMPACT_TO_FRONT=False,
+                    COMPACT_TO_FRONT=True,
                     DCP_SIZE=1,
                     DCP_RANK=0,
                     DCP_INTERLEAVE=1,
@@ -259,7 +259,7 @@ class ConvertReqIndexToGlobalIndexKernel(
                 dict(
                     HAS_PREFILL_WORKSPACE=True,
                     COUNT_VALID=True,
-                    COMPACT_TO_FRONT=False,
+                    COMPACT_TO_FRONT=True,
                     DCP_SIZE=1,
                     DCP_RANK=0,
                     DCP_INTERLEAVE=1,
@@ -458,7 +458,14 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    # When return_valid_counts, the kernel scatters valid entries to a
+    # contiguous prefix [0, valid_count) and leaves the tail unwritten, so
+    # pre-fill -1 there. flash_mla_sparse_fwd then bounds attention to
+    # [:topk_length] == exactly the valid set (no dropped tokens).
+    if return_valid_counts:
+        out = torch.full_like(token_indices_c, -1)
+    else:
+        out = torch.empty_like(token_indices_c)
 
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
@@ -491,7 +498,7 @@ def triton_convert_req_index_to_global_index(
         NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
         HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
         COUNT_VALID=return_valid_counts,
-        COMPACT_TO_FRONT=False,
+        COMPACT_TO_FRONT=return_valid_counts,
         # DCP disabled (no-op de-interleave)
         DCP_SIZE=1,
         DCP_RANK=0,
@@ -512,6 +519,7 @@ def triton_filter_and_convert_dcp_index(
     dcp_rank: int,
     cp_kv_cache_interleave_size: int = 1,
     BLOCK_SIZE: int = 64,
+    BLOCK_STRIDE_ROWS: int | None = None,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,
     return_valid_counts: bool = False,
@@ -548,6 +556,7 @@ def triton_filter_and_convert_dcp_index(
             block_table,
             token_indices,
             BLOCK_SIZE=BLOCK_SIZE,
+            BLOCK_STRIDE_ROWS=BLOCK_STRIDE_ROWS,
             NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
             BLOCK_N=BLOCK_N,
             return_valid_counts=return_valid_counts,
@@ -589,7 +598,9 @@ def triton_filter_and_convert_dcp_index(
         None,
         max_num_blocks_per_req=max_num_blocks_per_req,
         BLOCK_SIZE=BLOCK_SIZE,
-        BLOCK_STRIDE_ROWS=BLOCK_SIZE,  # dense caches on the DCP path
+        BLOCK_STRIDE_ROWS=(
+            BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE
+        ),
         BLOCK_N=BLOCK_N,
         NUM_TOPK_TOKENS=NUM_TOPK_TOKENS,
         HAS_PREFILL_WORKSPACE=False,

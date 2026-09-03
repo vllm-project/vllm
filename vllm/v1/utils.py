@@ -389,7 +389,12 @@ class RustFrontendProcessManager:
         args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
-        logger.info("Launching Rust frontend: %s", " ".join(cmd))
+        # The subprocess needs the real values, but the log must not carry
+        # credentials such as api_key or hf_token.
+        from vllm.entrypoints.serve.utils.api_utils import redact_sensitive_args
+
+        redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
+        logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
 
         # Create a process wrapper with a sentinel fd for monitoring

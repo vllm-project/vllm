@@ -6,10 +6,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, wraps
-from math import prod
 from typing import Any, ClassVar, Generic, TypeVar, cast
-
-import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
@@ -18,8 +15,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 )
 
 CompileKeyT = TypeVar("CompileKeyT")
-TritonWarmupInputs = dict[str, Any] | tuple[tuple[Any, ...], dict[str, Any]]
-LaunchSpec = tuple[Any | None, dict[str, Any]] | tuple[Any | None, dict[str, Any], Any]
+LaunchSpec = tuple[tuple[int, ...], dict[str, Any]]
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -71,10 +67,6 @@ class TritonWarmupTensor:
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
 
-    @property
-    def ndim(self) -> int:
-        return len(self.shape)
-
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
@@ -93,66 +85,6 @@ class TritonWarmupTensor:
             result = self.strides
         return result if dim is None else result[dim]
 
-    def size(self, dim: int | None = None) -> int | tuple[int, ...]:
-        return self.shape if dim is None else self.shape[dim]
-
-    def numel(self) -> int:
-        return prod(self.shape)
-
-    def element_size(self) -> int:
-        return self.dtype.itemsize
-
-    def is_contiguous(self) -> bool:
-        if self.strides is None or self.numel() == 0:
-            return True
-
-        expected_stride = 1
-        for size, stride in zip(
-            reversed(self.shape), reversed(self.strides), strict=True
-        ):
-            if size > 1 and stride != expected_stride:
-                return False
-            expected_stride *= size
-        return True
-
-    def reshape(self, *shape: int) -> "TritonWarmupTensor":
-        return TritonWarmupTensor(self.dtype, self.aligned, tuple(shape))
-
-    def new_empty(
-        self,
-        shape: tuple[int, ...],
-        *,
-        dtype: Any | None = None,
-    ) -> "TritonWarmupTensor":
-        return TritonWarmupTensor(dtype or self.dtype, self.aligned, shape)
-
-    def int(self) -> "TritonWarmupTensor":
-        return TritonWarmupTensor(
-            torch.int32,
-            self.aligned,
-            self.shape,
-            self.strides,
-        )
-
-    @classmethod
-    def __torch_function__(
-        cls,
-        func: Callable[..., Any],
-        types: tuple[type, ...],
-        args: tuple[Any, ...] = (),
-        kwargs: dict[str, Any] | None = None,
-    ) -> Any:
-        if func is torch.empty_like:
-            tensor = args[0]
-            options = kwargs or {}
-            return cls(
-                options.get("dtype", tensor.dtype),
-                tensor.aligned,
-                tensor.shape,
-                tensor.strides,
-            )
-        return NotImplemented
-
 
 class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     """Triton owner whose runtime launch specification is reused for warmup."""
@@ -161,7 +93,7 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     _warming = False
 
     @abstractmethod
-    def warmup_inputs(self, compile_key: CompileKeyT) -> TritonWarmupInputs:
+    def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
         """Return runtime-shaped inputs that reproduce one compile key."""
         raise NotImplementedError
 
@@ -169,11 +101,7 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         inputs = self.warmup_inputs(compile_key)
         self._warming = True
         try:
-            call = cast(Callable[..., Any], self)
-            if isinstance(inputs, tuple):
-                call(*inputs[0], **inputs[1])
-            else:
-                call(**inputs)
+            cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
 
@@ -183,47 +111,33 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     def launch(
         self,
-        grid: Any,
+        grid: tuple[int, ...],
         inputs: Mapping[str, Any],
-        variadic_inputs: tuple[Any, ...] = (),
         /,
         **kwargs: Any,
     ) -> Any:
-        forwarded: dict[str, Any] = {}
+        runtime_launcher = kwargs.pop("_runtime_launcher", None)
+        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         for name, value in inputs.items():
             target = name if name in self._kernel_param_names else f"{name}_ptr"
             if target in self._kernel_param_names and target not in kwargs:
-                forwarded[target] = value
-        remaining_names = [
-            name
-            for name in self.kernel.arg_names
-            if name not in kwargs and name not in forwarded
-        ]
-        if len(variadic_inputs) > len(remaining_names):
-            raise TypeError("Too many positional Triton kernel arguments")
-        forwarded.update(zip(remaining_names, variadic_inputs, strict=False))
-        runtime_launcher = kwargs.pop("_runtime_launcher", None)
-        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
+                kwargs[target] = value
         if self._warming:
             warmup = getattr(self.kernel, "warmup", None)
             assert warmup is not None
-            kwargs.update(forwarded)
             return warmup(grid=(1,), **kwargs)
         if runtime_launcher is not None:
-            kwargs.update(forwarded)
-            # Some launch contexts cache this positional runtime prefix.
             regular_args = [
                 kwargs.pop(name)
                 for name in self.kernel.arg_names[:runtime_launcher_arg_count]
             ]
             return runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
-        kwargs.update(forwarded)
         return self.kernel[grid](**kwargs)
 
 
 def kernel_launcher(
     call_fn: Callable[..., LaunchSpec],
-) -> Callable[..., Any]:
+) -> Callable[..., None]:
     """Launch a Triton kernel from a declarative ``__call__`` specification."""
     signature = inspect.signature(call_fn)
 
@@ -232,23 +146,14 @@ def kernel_launcher(
         self: VllmTritonJitKernel[Any],
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
-        launch_spec = call_fn(self, *args, **kwargs)
-        grid, launch_kwargs = launch_spec[:2]
+    ) -> None:
+        grid, launch_kwargs = call_fn(self, *args, **kwargs)
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
-        inputs: dict[str, Any] = {}
-        variadic_inputs: tuple[Any, ...] = ()
-        for name, value in bound.arguments.items():
-            if name == "self":
-                continue
-            if signature.parameters[name].kind is inspect.Parameter.VAR_POSITIONAL:
-                variadic_inputs = value
-            else:
-                inputs[name] = value
-        if grid is not None:
-            self.launch(grid, inputs, variadic_inputs, **launch_kwargs)
-        return launch_spec[2] if len(launch_spec) == 3 else None
+        inputs = {
+            name: value for name, value in bound.arguments.items() if name != "self"
+        }
+        self.launch(grid, inputs, **launch_kwargs)
 
     return wrapper
 

@@ -188,20 +188,13 @@ if current_platform.is_cuda_alike():
             numel: int,
             num_active_experts: int,
         ) -> LaunchSpec:
-            compile_key = self.dispatch(
-                has_num_unpadded=num_unpadded_tokens is not None,
-                num_logical_experts=num_logical_experts,
-                map_slots=map_slots,
-                out_size=out_size,
-                num_active_experts=num_active_experts,
-            )
-            grid = (triton.cdiv(numel, compile_key.block_size),)
+            grid = (triton.cdiv(numel, self.BLOCK_SIZE),)
             return grid, dict(
                 logical_to_physical_ptr=logical_to_physical_map,
                 out_ids_ptr=out,
                 out_ptr=expert_load_view,
-                HAS_NUM_UNPADDED=compile_key.has_num_unpadded,
-                BLOCK_SIZE=compile_key.block_size,
+                HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
+                BLOCK_SIZE=self.BLOCK_SIZE,
             )
 
     _EPLB_MAP_AND_RECORD_KERNEL = EplbMapAndRecordKernel()

@@ -74,7 +74,7 @@ Use independent ranges or alternatives for cartesian products, `zip_inputs(...)`
 
 The base contract uses `compile(compile_key)` internally to mean "make this specialization available". Depending on the backend, that may compile from source, call a compile-only API, load an already-built artifact, or compile on cache miss. Contributors only implement this hook when their backend helper does not provide it.
 
-For Triton, implement `warmup_inputs(...)`. `@kernel_launcher` binds those inputs to `__call__(...)`, whose body returns the runtime grid and derived launch arguments as a `LaunchSpec`. The shared helper then routes that specification to the normal kernel launch or to `kernel.warmup(...)` during startup. A third item may preserve an existing runtime return value; use `grid=None` when an empty input intentionally skips the launch.
+For Triton, implement `warmup_inputs(...)`. `@kernel_launcher` binds those inputs to `__call__(...)`, whose body returns the runtime grid and derived launch arguments as a `LaunchSpec`. The shared helper then routes that specification to the normal kernel launch or to `kernel.warmup(...)` during startup.
 
 Materialization should not launch a real inference workload or allocate real tensors. `TritonWarmupTensor(..., strides=None)` represents compact row-major storage; provide explicit representative strides for padded, transposed, or otherwise strided runtime inputs.
 
@@ -266,7 +266,7 @@ def dispatch(
     )
 ```
 
-Unmatched dispatch arguments become compile-key fields and warmup inputs. Inputs used only by `_when` are filtered rather than forwarded. Keep transformed inputs named and explicit. The unpacking must use the dispatch method's own `**kwargs` parameter directly and exactly once; arbitrary mappings, repeated unpacking, and helper-call `**kwargs` are rejected. The fully explicit form remains supported and is often clearer for non-trivial mappings.
+Unmatched dispatch arguments become compile-key fields and warmup inputs. Keep transformed inputs named and explicit. The unpacking must use the dispatch method's own `**kwargs` parameter directly and exactly once; arbitrary mappings, repeated unpacking, and helper-call `**kwargs` are rejected. The fully explicit form remains supported and is often clearer for non-trivial mappings.
 
 #### Unsupported Syntax
 

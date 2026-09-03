@@ -269,8 +269,6 @@ class PrepareMegaMoeInputsKernel(
         shared_block_m: int | None = None,
     ) -> LaunchSpec:
         num_tokens, hidden_size = hidden_states.shape
-        if num_tokens == 0:
-            return None, {}, None
         if hidden_size % 128 != 0:
             raise ValueError(
                 "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
