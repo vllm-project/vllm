@@ -872,8 +872,7 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_positions=query_positions,
         seq_lens=sequence_lengths,
         compress_ratio=indexer_compress_ratio,
-        max_query_len=16,
-        max_decode_query_len=1,
+        is_prefill=True,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,

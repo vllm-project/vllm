@@ -417,13 +417,20 @@ def _compress_qsa_groups_kernel(
     )
 
 
-def _splitk_config(base_programs: int, long_query: bool) -> tuple[int, int, int]:
+def _splitk_config(base_programs: int, is_prefill: bool) -> tuple[int, int, int]:
     """Return (BLOCK_N, target_splits, num_warps) for the split-K kernel.
 
-    Tuned on GB300 for the Qwen3.8-Flash-Next TP1, TP2, and TP4 shapes
+    Tuned on GB300 for the Qwen3.8-Flash-Next TP1, TP2, and TP4 shapes.
+    Past the decode table (bp > 2048) the prefill profile uses narrow
+    no-split tiles: prefill/mixed batches have causally ragged per-row work
+    (each row's valid extent ramps with its position), while decode/verify
+    batches are uniform-extent (every row at full budget) and keep the wide
+    entry. Measured: no single config serves both distributions within ~3%.
+    is_prefill is capture-stable: at FULL-graph capture max_query_len is the
+    uniform decode/verify length by construction, identical at replay.
     """
     if base_programs > 2048:
-        return (32, 1, 1) if long_query else (64, 1, 2)
+        return (32, 1, 1) if is_prefill else (64, 1, 2)
     if base_programs <= 24:
         return 32, 64, 4
     if base_programs <= 64:
@@ -447,11 +454,13 @@ def qsa_sparse_paged_attention(
     logical_positions: torch.Tensor,
     seq_lens: torch.Tensor,
     compress_ratio: int,
-    max_query_len: int,
-    max_decode_query_len: int,
+    is_prefill: bool,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches."""
+    """Run sparse GQA directly over paged BF16 K/V caches.
+
+    is_prefill only steers the top of the config table; see _splitk_config.
+    """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
     if logical_indices.ndim != 2 or logical_indices.shape[0] != q.shape[0]:
@@ -497,9 +506,7 @@ def qsa_sparse_paged_attention(
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
     base_programs = q.shape[0] * k_cache.shape[2]
-    block_n, target_splits, partial_warps = _splitk_config(
-        base_programs, max_query_len > max_decode_query_len
-    )
+    block_n, target_splits, partial_warps = _splitk_config(base_programs, is_prefill)
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
@@ -604,9 +611,9 @@ def warmup_qsa_sparse_paged_attention(
 
     # Every config the dispatch can pick for this group size.
     profiles = {
-        _splitk_config(base_programs, long_query)
+        _splitk_config(base_programs, is_prefill)
         for base_programs in range(1, 8193)
-        for long_query in (False, True)
+        for is_prefill in (False, True)
     }
 
     # Scalars constant per deployment get their real values; the batch-varying
