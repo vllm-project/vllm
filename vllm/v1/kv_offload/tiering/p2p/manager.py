@@ -68,7 +68,7 @@ def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     Set on decoder requests to name the remote prefiller they pull from;
     carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
     val = kv_params.get("remote_prefiller")
     return val if isinstance(val, dict) else None
@@ -78,12 +78,15 @@ def _remote_decoder_params(kv_params: dict | None) -> dict | None:
     """Return the ``remote_decoder`` sub-dict, or None if absent.
 
     Set on prefiller requests to name the remote decoder they serve;
-    carries kv_request_id.
+    carries kv_request_id. A present but non-dict value is treated as an
+    empty dict so submit_store fails closed instead of storing locally.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
-    val = kv_params.get("remote_decoder")
-    return val if isinstance(val, dict) else None
+    if "remote_decoder" not in kv_params:
+        return None
+    val = kv_params["remote_decoder"]
+    return val if isinstance(val, dict) else {}
 
 
 def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
@@ -92,7 +95,7 @@ def _remote_kv_source_params(kv_params: dict | None) -> dict | None:
     Set on symmetric-P2P consumer requests to name the remote source they
     pull from; carries kv_request_id, remote_host, remote_port.
     """
-    if not kv_params:
+    if not isinstance(kv_params, dict):
         return None
     val = kv_params.get("remote_kv_source")
     return val if isinstance(val, dict) else None
