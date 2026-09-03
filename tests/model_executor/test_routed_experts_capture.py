@@ -459,7 +459,10 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             mode=CompilationMode.NONE,
             pass_config=SimpleNamespace(enable_sp=False),
         ),
-        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False),
+        cache_config=SimpleNamespace(
+            kv_sharing_fast_prefill=False,
+            mamba_cache_mode="none",
+        ),
         ec_transfer_config=None,
     )
 
