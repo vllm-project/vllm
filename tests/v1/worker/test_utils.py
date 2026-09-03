@@ -47,6 +47,10 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._metrics_calls = 0
+    worker._metrics_event = MagicMock()
+    worker._metrics_pending = False
+    worker.leader_runtimes = []
     return worker
 
 
@@ -1030,7 +1034,7 @@ def test_hisparse_runtime_takes_eager_host_mirror_from_config(
         row_width=8,
         kv_dtype=torch.float32,
         device="cpu",
-        index_group=SimpleNamespace(followers=[]),
+        index_group=SimpleNamespace(followers=[], stats_row_bytes=0),
     )
 
     assert runtime.eager_host_mirror is eager_host_mirror
