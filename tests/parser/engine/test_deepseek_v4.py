@@ -4,6 +4,8 @@
 
 import json
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
@@ -184,6 +186,43 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=False))
         assert result["n"] == "42"
         assert isinstance(result["n"], str)
+
+
+class TestOptionalStringAttribute:
+    """The model sometimes omits `string="..."` on a parameter.
+
+    Dropping the parameter in that case produces a tool call with no
+    arguments, which an agent reads as a failed call and retries -- the
+    shape behind the runaway tool-call loops seen in production. Parse the
+    value instead, the same way `string="false"` is parsed.
+    """
+
+    _DSML = "｜DSML｜"
+
+    def _bare(self, name: str, value: str) -> str:
+        return (
+            f'<{self._DSML}parameter name="{name}">{value}'
+            f"</{self._DSML}parameter>"
+        )
+
+    def test_missing_attribute_keeps_string_value(self):
+        result = json.loads(_dsml_arg_converter(self._bare("name", "alpha"), False))
+        assert result == {"name": "alpha"}
+
+    def test_missing_attribute_parses_json_value(self):
+        result = json.loads(_dsml_arg_converter(self._bare("count", "7"), False))
+        assert result == {"count": 7}
+
+    def test_missing_attribute_alongside_annotated_one(self):
+        raw = self._bare("a", "x") + _param("b", "true", "y")
+        assert json.loads(_dsml_arg_converter(raw, False)) == {"a": "x", "b": "y"}
+
+    def test_annotated_parameters_unchanged(self):
+        raw = _param("city", "true", "杭州") + _param("count", "false", "42")
+        assert json.loads(_dsml_arg_converter(raw, False)) == {
+            "city": "杭州",
+            "count": 42,
+        }
 
 
 class TestImplicitParameterClose:

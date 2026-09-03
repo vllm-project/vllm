@@ -51,14 +51,19 @@ DSML_PARAM_START = f"<{_DSML}parameter"
 DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 
 _ESCAPED_DSML = re.escape(_DSML)
+# `string` tells us whether the value is a literal or JSON. The model does
+# not always emit it -- when it doesn't, the parameter used to be dropped and
+# the tool call arrived with no arguments at all, which reads to an agent as a
+# failed call and sends it round the loop again. Treat a missing attribute the
+# same as `string="false"`: try JSON, fall back to the literal text.
 _PARAM_RE = re.compile(
-    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
+    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     rf"(.*?)"
     rf"(?:</{_ESCAPED_DSML}parameter>|(?=<{_ESCAPED_DSML}parameter\s+name=))",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
-    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
+    rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"(?:\s+string="([^"]*)")?\s*>'
     rf"(.*)$",
     re.DOTALL,
 )
