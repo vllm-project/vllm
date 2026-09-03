@@ -628,3 +628,61 @@ def test_aiter_fp4_gemm_skinny_shapes(M, N, K):
         pass_rate=pass_rate,
         max_violation_factor=GEMM_MAX_VIOLATION_FACTOR,
     )
+
+
+@pytest.mark.parametrize(
+    ("shape", "supported"),
+    [
+        ((2560, 80), True),  # shared_expert gate/up_proj (in=2560 -> sn=80)
+        ((1280, 80), True),  # gate/up_proj under TP=2 (out sharded)
+        ((2560, 8), True),  # minimal aligned columns
+        ((32, 8), True),  # minimal aligned rows and columns
+        ((2560, 20), False),  # shared_expert down_proj (in=640 -> sn=20)
+        ((2560, 10), False),  # down_proj under TP=2 (in 640->320 -> sn=10)
+        ((30, 8), False),  # rows not a multiple of 32
+    ],
+)
+def test_asm_fp4_scale_swizzle_supported_shape_rules(shape, supported):
+    """The ASM swizzle needs rows % 32 == 0 and columns % 8 == 0."""
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        _asm_fp4_scale_swizzle_supported,
+    )
+
+    weight_scale = torch.empty(shape, dtype=torch.uint8, device="cpu")
+    assert _asm_fp4_scale_swizzle_supported(weight_scale) is supported
+
+
+def test_asm_fp4_scale_swizzle_rejects_non_2d():
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        _asm_fp4_scale_swizzle_supported,
+    )
+
+    assert not _asm_fp4_scale_swizzle_supported(
+        torch.empty(2560, dtype=torch.uint8, device="cpu")
+    )
+    assert not _asm_fp4_scale_swizzle_supported(
+        torch.empty(80, 2, 16, dtype=torch.uint8, device="cpu")
+    )
+
+
+def test_aiter_mxfp4_process_weights_falls_back_to_triton_for_misaligned_scale():
+    """A misaligned weight_scale must disable ASM and take the Triton path."""
+    from torch.nn.parameter import Parameter
+
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import AiterMxfp4LinearKernel
+
+    kernel = object.__new__(AiterMxfp4LinearKernel)
+    kernel.use_asm_gemm = True
+    kernel.out_dtype = torch.bfloat16
+
+    layer = torch.nn.Module()
+    layer.weight_scale = Parameter(
+        torch.zeros(2560, 10, dtype=torch.uint8, device="cpu"), requires_grad=False
+    )
+
+    kernel.process_weights_after_loading(layer)
+
+    assert kernel.use_asm_gemm is False
+    # Triton path stores the transposed, contiguous scale.
+    assert tuple(layer.weight_scale.shape) == (10, 2560)
+    assert layer.weight_scale.is_contiguous()
