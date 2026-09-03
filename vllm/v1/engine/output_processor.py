@@ -296,7 +296,7 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        if self.stream_interval > 1:
+        if pooling_output is None and self.stream_interval > 1:
             assert self.detokenizer is not None
 
             # Send output request only when

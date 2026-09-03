@@ -6,6 +6,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
@@ -23,6 +24,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -1411,6 +1413,50 @@ async def test_cumulative_output_collector_n():
     third = [k for k in result.outputs if k.index == 2]
     assert len(third) == 1
     assert third[0].text == "c"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("stream_interval", [1, 2, 10])
+@pytest.mark.parametrize("abort", [False, True])
+def test_pooling_output_ignores_token_stream_interval(stream_interval, abort):
+    """Pooling completion and cancellation must not require a detokenizer."""
+    processor = OutputProcessor(None, log_stats=False, stream_interval=stream_interval)
+    params = PoolingParams(task="embed")
+    request = EngineCoreRequest(
+        request_id="pooling",
+        external_req_id="pooling",
+        prompt_token_ids=[1, 2],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=params,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+    queue = RequestOutputCollector(params.output_kind, request.request_id)
+    processor.add_request(request, None, queue=queue)
+    embedding = torch.tensor([0.1, 0.2])
+
+    if abort:
+        processor.abort_requests([request.request_id], internal=True)
+    else:
+        processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request.request_id,
+                    [],
+                    pooling_output=embedding,
+                    finish_reason=FinishReason.STOP,
+                )
+            ]
+        )
+
+    result = queue.get_nowait()
+    assert result is not None and result.finished
+    if not abort:
+        torch.testing.assert_close(result.outputs.data, embedding)
+    assert not processor.has_unfinished_requests()
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])
