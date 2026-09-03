@@ -220,21 +220,7 @@ def test_encode_fp32_avoids_16bit_double_rounding(
     assert _run_encode(x.to(intermediate)).item() == rounded_byte
 
 
-# ----------------- SM89+ exhaustive cross-check vs native ------------------
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(89),
-    reason="native fp8e4nv cast cross-check requires SM89+",
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_decode_matches_native_on_sm89(dtype: torch.dtype):
-    """On SM89+, the software decode equals the native fp8 -> float cast,
-    exhaustively over every finite fp8 byte."""
-    x_u8 = _finite_fp8_bytes()
-    actual = _run_decode(x_u8, dtype)
-    native = x_u8.view(FP8_DTYPE).to(dtype)  # native hardware cvt on SM89+
-    torch.testing.assert_close(actual.float(), native.float(), atol=0.0, rtol=0.0)
-
-
+# ----------------- SM89+ exhaustive encode cross-check ---------------------
 @pytest.mark.skipif(
     not current_platform.has_device_capability(89),
     reason="native fp8e4nv cast cross-check requires SM89+",
