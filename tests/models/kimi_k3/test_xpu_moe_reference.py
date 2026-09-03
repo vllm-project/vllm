@@ -71,9 +71,7 @@ def test_xpu_kimi_moe_matches_independent_stage_reference() -> None:
         torch.manual_seed(31)
         for parameter in moe.parameters():
             parameter.data.uniform_(-0.05, 0.05)
-        hidden_states = (
-            torch.randn(4, 64, dtype=torch.bfloat16, device=device) * 0.1
-        )
+        hidden_states = torch.randn(4, 64, dtype=torch.bfloat16, device=device) * 0.1
 
         reference = kimi_moe_reference(
             hidden_states.cpu(),
@@ -135,9 +133,7 @@ def test_xpu_kimi_moe_matches_independent_stage_reference() -> None:
     actual_weights = actual["topk_weights"].gather(1, actual_order)
     reference_weights = reference.topk_weights.gather(1, reference_order)
     torch.testing.assert_close(actual_ids, reference_ids)
-    torch.testing.assert_close(
-        actual_weights, reference_weights, rtol=5e-3, atol=2e-4
-    )
+    torch.testing.assert_close(actual_weights, reference_weights, rtol=5e-3, atol=2e-4)
     torch.testing.assert_close(
         actual["routed_input"].float(),
         reference.routed_input.float(),

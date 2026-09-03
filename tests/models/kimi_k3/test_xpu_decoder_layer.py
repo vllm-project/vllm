@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import MethodType, SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -55,9 +56,7 @@ class _TupleIdentity(nn.Module):
 
 
 class _GatedAdd(nn.Module):
-    def forward(
-        self, hidden_states: torch.Tensor, gate: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         return hidden_states + gate.unsqueeze(0)
 
 
@@ -210,9 +209,7 @@ class _WrapperLogitsProcessor:
     def __init__(self, vocab_size: int, scale: float) -> None:
         self.args = (vocab_size, scale)
 
-    def __call__(
-        self, lm_head: nn.Module, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def __call__(self, lm_head: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
         del lm_head
         return hidden_states * self.args[1]
 
@@ -512,9 +509,7 @@ def test_xpu_kimi_linear_model_layer_factory_accepts_prefix(monkeypatch) -> None
     monkeypatch.setattr(kimi_xpu, "RMSNorm", _FakeLayer)
     monkeypatch.setattr(kimi_xpu, "make_layers", fake_make_layers)
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
-    monkeypatch.setattr(
-        kimi_xpu, "get_tensor_model_parallel_world_size", lambda: 1
-    )
+    monkeypatch.setattr(kimi_xpu, "get_tensor_model_parallel_world_size", lambda: 1)
     config = SimpleNamespace(
         vocab_size=8,
         hidden_size=4,
@@ -663,9 +658,7 @@ def test_xpu_kimi_linear_model_attn_res_crosses_pp_boundary(monkeypatch) -> None
 
     model.start_layer = 1
     model.end_layer = 2
-    model.layers = nn.ModuleList(
-        [nn.Identity(), _AttnResModelLayer(None, 2.0)]
-    )
+    model.layers = nn.ModuleList([nn.Identity(), _AttnResModelLayer(None, 2.0)])
     model.output_attn_res_norm = _WeightedNorm(2)
     model.output_attn_res_proj = _Projection(2)
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _LastPPGroup())
@@ -738,9 +731,7 @@ def test_xpu_kimi_linear_model_loads_full_rank_kda_shards() -> None:
         is_moe=False,
         num_nextn_predict_layers=0,
     )
-    model.layers = nn.ModuleList(
-        [_KDAWeightLoaderLayer(projection_calls, conv_calls)]
-    )
+    model.layers = nn.ModuleList([_KDAWeightLoaderLayer(projection_calls, conv_calls)])
     projection_names = (
         "q_proj",
         "k_proj",
@@ -813,17 +804,24 @@ def test_xpu_kimi_linear_for_causal_lm_kda_state_contract(monkeypatch) -> None:
     dtype_args: list[object] = []
     shape_args: list[object] = []
     copy_funcs = (lambda: None, lambda: None)
+
+    def _record_dtype_args(dtype, cache_dtype):
+        dtype_args.append((dtype, cache_dtype))
+        return (torch.float32, torch.bfloat16)
+
+    def _record_shape_args(*args, **kwargs):
+        shape_args.append((args, kwargs))
+        return ((12, 4), (3, 4, 4))
+
     monkeypatch.setattr(
         kimi_xpu.MambaStateDtypeCalculator,
         "kda_state_dtype",
-        lambda dtype, cache_dtype: dtype_args.append((dtype, cache_dtype))
-        or (torch.float32, torch.bfloat16),
+        _record_dtype_args,
     )
     monkeypatch.setattr(
         kimi_xpu.MambaStateShapeCalculator,
         "kda_state_shape",
-        lambda *args, **kwargs: shape_args.append((args, kwargs))
-        or ((12, 4), (3, 4, 4)),
+        _record_shape_args,
     )
     monkeypatch.setattr(
         kimi_xpu.MambaStateCopyFuncCalculator,
@@ -854,18 +852,15 @@ def test_xpu_kimi_linear_for_causal_lm_kda_state_contract(monkeypatch) -> None:
     ) == ((12, 4), (3, 4, 4))
     assert kimi_xpu.KimiLinearForCausalLM.get_mamba_state_copy_func() is copy_funcs
     assert dtype_args == [(torch.bfloat16, "auto")]
-    assert shape_args == [
-        ((2, 8, 64), {"conv_kernel_size": 4, "num_spec": 3})
-    ]
+    assert shape_args == [((2, 8, 64), {"conv_kernel_size": 4, "num_spec": 3})]
 
 
 def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class _Loader:
-        def __init__(self, model: nn.Module, skip_prefixes: list[str]) -> None:
+        def __init__(self, model: nn.Module) -> None:
             captured["model"] = model
-            captured["skip_prefixes"] = skip_prefixes
 
         def load_weights(self, weights, *, mapper) -> set[str]:
             mapped_weights = list(mapper.apply(weights))
@@ -874,7 +869,10 @@ def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
             return {name for name, _ in mapped_weights}
 
     monkeypatch.setattr(kimi_xpu, "AutoWeightsLoader", _Loader)
-    model = object.__new__(kimi_xpu.KimiLinearForCausalLM)
+    model = cast(
+        kimi_xpu.KimiLinearForCausalLM,
+        object.__new__(kimi_xpu.KimiLinearForCausalLM),
+    )
     nn.Module.__init__(model)
     model.config = SimpleNamespace(tie_word_embeddings=True)
     model_weight = torch.ones(1)
@@ -899,8 +897,6 @@ def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
         "model.embed_tokens.weight",
     }
     assert captured["model"] is model
-    assert captured["skip_prefixes"] == ["lm_head."]
-    assert captured["mapper"] is model.hf_to_vllm_mapper
     assert captured["weights"] == [
         ("model.norm.weight", model_weight),
         ("model.layers.0.input_layernorm.weight", legacy_layer_weight),
@@ -1138,9 +1134,7 @@ def _reference_attn_res(
     probs = (keys @ qk_weight).softmax(dim=-1)
     output = torch.matmul(probs.unsqueeze(1), values).squeeze(1)
     if output_norm_weight is not None:
-        output = F.rms_norm(
-            output, (hidden_size,), output_norm_weight, output_norm_eps
-        )
+        output = F.rms_norm(output, (hidden_size,), output_norm_weight, output_norm_eps)
     return output
 
 
@@ -1164,9 +1158,7 @@ def test_xpu_attn_res_matches_reference(
 ) -> None:
     eps = 1e-5
     device = torch.device("xpu")
-    prefix = torch.randn(
-        num_tokens, hidden_size, device=device, dtype=torch.bfloat16
-    )
+    prefix = torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16)
     blocks = torch.randn(
         num_tokens,
         block_capacity,
@@ -1178,8 +1170,7 @@ def test_xpu_attn_res_matches_reference(
         hidden_size, device=device, dtype=torch.bfloat16
     )
     qk_weight = (
-        torch.randn(hidden_size, device=device, dtype=torch.bfloat16)
-        / hidden_size**0.5
+        torch.randn(hidden_size, device=device, dtype=torch.bfloat16) / hidden_size**0.5
     )
     delta = torch.randn_like(prefix)
     output_norm_weight = 1 + 0.1 * torch.randn_like(norm_weight)

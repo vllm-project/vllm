@@ -81,9 +81,7 @@ def kimi_moe_reference(
                 activated,
                 w2_weight[expert_idx].float(),
             )
-    routed_combined = (
-        routed_slots * topk_weights.unsqueeze(-1)
-    ).sum(dim=1)
+    routed_combined = (routed_slots * topk_weights.unsqueeze(-1)).sum(dim=1)
     routed_normalized = F.rms_norm(
         routed_combined,
         (routed_combined.shape[-1],),

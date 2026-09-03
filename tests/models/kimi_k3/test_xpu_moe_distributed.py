@@ -46,8 +46,8 @@ def _distributed_worker(
     port: int,
     result_queue: SimpleQueue,
 ) -> None:
-    tensor_parallel_size, data_parallel_size, enable_expert_parallel = (
-        _parallel_sizes(mode)
+    tensor_parallel_size, data_parallel_size, enable_expert_parallel = _parallel_sizes(
+        mode
     )
     os.environ.update(
         MASTER_ADDR="127.0.0.1",
@@ -98,8 +98,7 @@ def _distributed_worker(
             w13_weight.data[:, :routed_intermediate_size].fill_(0.02)
             w13_weight.data[
                 :,
-                w13_partition_size : w13_partition_size
-                + routed_intermediate_size,
+                w13_partition_size : w13_partition_size + routed_intermediate_size,
             ].fill_(0.02)
             w2_weight = routed_experts.w2_weight
             w2_weight.data.zero_()
@@ -132,9 +131,7 @@ def _distributed_worker(
             if enable_expert_parallel:
                 local_num_experts = 32 // world_size
                 local_start = rank * local_num_experts
-                expected_map = torch.full(
-                    (32,), -1, dtype=torch.int32, device=device
-                )
+                expected_map = torch.full((32,), -1, dtype=torch.int32, device=device)
                 expected_map[local_start : local_start + local_num_experts] = (
                     torch.arange(local_num_experts, dtype=torch.int32, device=device)
                 )
@@ -144,9 +141,7 @@ def _distributed_worker(
                 assert expert_map is None
 
             torch.manual_seed(41)
-            hidden_states = torch.randn(
-                4, 64, dtype=torch.bfloat16, device=device
-            )
+            hidden_states = torch.randn(4, 64, dtype=torch.bfloat16, device=device)
             torch.distributed.broadcast(hidden_states, src=0)
             router_logits, _ = moe.gate(hidden_states)
             _, topk_ids = moe.experts.router.select_experts(
@@ -197,9 +192,7 @@ def _run_parallel_mode(mode: str) -> torch.Tensor:
     ("mode", "required_devices"),
     [("tp2", 2), ("ep2", 2), ("tp2_ep4", 4)],
 )
-def test_xpu_kimi_moe_distributed_matches_tp1(
-    mode: str, required_devices: int
-) -> None:
+def test_xpu_kimi_moe_distributed_matches_tp1(mode: str, required_devices: int) -> None:
     if torch.xpu.device_count() < required_devices:
         pytest.skip(f"{mode} requires {required_devices} XPU devices")
 

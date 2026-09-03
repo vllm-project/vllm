@@ -120,6 +120,4 @@ class KimiLinearDeltaAttention(XPUKimiGatedDeltaNetAttention):
         if self.use_full_rank_gate:
             raise ValueError("XPU Kimi-Linear KDA requires a low-rank gate")
         if self.gate_lower_bound is not None:
-            raise ValueError(
-                "XPU Kimi-Linear KDA requires an unbounded softplus gate"
-            )
+            raise ValueError("XPU Kimi-Linear KDA requires an unbounded softplus gate")
