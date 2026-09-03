@@ -5,7 +5,8 @@
 This is a self-contained MLA layer that owns the full attention path:
 
     hidden_states
-      -> fused pre-attention ops (fused_qkv_a_proj / norms / q_b_proj)
+      -> fused pre-attention ops (fused_qkv_a_proj / norms / q_b_proj;
+         with an output gate the rows use fused_qkv_a_g_proj instead)
       -> explicit prefill / decode split
            prefill: fused key-concat + cache-insert kernel -> run_prefill_new_tokens
                     (+ chunked-context merge, whose per-chunk gather -> kv_b_proj
@@ -23,7 +24,8 @@ KV cache, and absorbs ``kv_b_proj`` into ``W_UK_T`` / ``W_UV`` -- mirroring the
 ``DeepseekV4Attention`` structure.
 
 K3 specifics: optional rotary embedding (disabled for the target model's NoPE
-layers, enabled for DSpark) and an optional sigmoid output gate (``g_proj``).
+layers, enabled for DSpark) and an optional sigmoid output gate (``g_proj``,
+merged into ``fused_qkv_a_g_proj`` when the q-LoRA front-end is present).
 
 Out of scope (extension points, not wired here): prefill context parallelism
 (PCP), sparse/indexer MLA, and the ROCm/aiter fp8/fp4 BMM fast paths.
@@ -33,6 +35,7 @@ import math
 from typing import TYPE_CHECKING, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -60,9 +63,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    KimiK3MergedQKVGateLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -71,6 +76,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
@@ -102,15 +108,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Below this many tokens, overlap the g_proj GEMM on the aux stream with the
-# attention front-end (the GEMM is small and launch-bound, so the overlap
-# hides it); at or above it, run the gate on the main stream.
+# Below this conservative threshold, overlap the gate projection with attention
+# on the auxiliary stream.
 _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
 def _gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-    """Apply the sigmoid output gate to a precomputed ``g_proj`` projection."""
+    """Apply the sigmoid output gate to a precomputed gate projection."""
     return attn_out * gate.sigmoid()
 
 
@@ -144,6 +149,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
+        self.use_output_gate = use_output_gate
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
         # Latent "head" seen by the attention kernel / KV cache.
         self.head_size = kv_lora_rank + qk_rope_head_dim
@@ -192,22 +198,52 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         self.num_local_heads = num_heads // tp_size
 
         # ---- Pre-attention projections (fusable front-end) ----
-        # Two query variants: a low-rank q-LoRA path (Kimi-K3) fused with the
-        # kv-down proj, or an uncompressed q path (Kimi-Linear, ``q_lora_rank``
-        # None) with a standalone ``q_proj`` and separate ``kv_a_proj_with_mqa``.
+        # Exactly one query layout is constructed below. Kimi-K3 uses q-LoRA;
+        # Kimi-Linear uses independent full-rank Q and KV projections.
+        self.fused_qkv_a_proj: MergedColumnParallelLinear | None = None
+        self.fused_qkv_a_g_proj: KimiK3MergedQKVGateLinear | None = None
+        self.q_proj: ColumnParallelLinear | None = None
+        self.kv_a_proj_with_mqa: ReplicatedLinear | None = None
+        self.g_proj: ColumnParallelLinear | None = None
+        self.aux_stream: torch.cuda.Stream | None = None
+        self._gate_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
+
+        # Kimi-K3: low-rank Q and KV projections share one input projection.
         if self.q_lora_rank is not None:
-            # Fused q-down + kv-down projection. Replicated (disable_tp) because
-            # the low-rank latents are shared across TP ranks; TP splitting
-            # happens at q_b_proj / kv_b_proj. Checkpoint weights ``q_a_proj``
-            # and ``kv_a_proj_with_mqa`` map onto shards 0 and 1 respectively.
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                self.hidden_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
-            )
+            # The latent Q and KV shards are replicated across TP ranks. Their
+            # TP splitting happens in q_b_proj and kv_b_proj instead.
+            if use_output_gate:
+                # The output gate is shard 2 of the same input projection.
+                self.fused_qkv_a_g_proj = KimiK3MergedQKVGateLinear(
+                    hidden_size=self.hidden_size,
+                    q_lora_rank=self.q_lora_rank,
+                    kv_lora_rank=self.kv_lora_rank,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    total_num_heads=num_heads,
+                    v_head_dim=self.v_head_dim,
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.fused_qkv_a_g_proj",
+                )
+                # Only supports unquantized weights for sliced side-stream path
+                # for now.
+                if aux_stream is not None and isinstance(
+                    self.fused_qkv_a_g_proj.quant_method, UnquantizedLinearMethod
+                ):
+                    self.aux_stream = aux_stream
+                    self._gate_events = (torch.cuda.Event(), torch.cuda.Event())
+            else:
+                self.fused_qkv_a_proj = MergedColumnParallelLinear(
+                    self.hidden_size,
+                    [
+                        self.q_lora_rank,
+                        self.kv_lora_rank + self.qk_rope_head_dim,
+                    ],
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.fused_qkv_a_proj",
+                    disable_tp=True,
+                )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
                 self.q_lora_rank,
@@ -216,9 +252,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_b_proj",
             )
+
+        # Kimi-Linear: Q and KV use independent full-rank input projections.
         else:
-            # Uncompressed query: full-rank q_proj (TP-split over heads) plus a
-            # replicated kv-down projection (shared latent across TP ranks).
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.qk_head_dim,
@@ -233,6 +269,16 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 quant_config=quant_config,
                 prefix=f"{prefix}.kv_a_proj_with_mqa",
             )
+            if use_output_gate:
+                # Keep the gate standalone for the non-LoRA layout.
+                self.g_proj = ColumnParallelLinear(
+                    self.hidden_size,
+                    self.num_heads * self.v_head_dim,
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.g_proj",
+                )
+
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
@@ -242,28 +288,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             prefix=f"{prefix}.kv_b_proj",
         )
 
-        # ---- Post-attention projections ----
-        self.use_output_gate = use_output_gate
-        self.g_proj = (
-            ColumnParallelLinear(
-                self.hidden_size,
-                self.num_heads * self.v_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
-            if use_output_gate
-            else None
-        )
-        # Aux stream (created at the model level, DeepseekV4 convention) for
-        # overlapping the g_proj GEMM with the attention front-end. None on
-        # ROCm/non-cuda -> maybe_execute_in_parallel falls back to sequential.
-        self.aux_stream = aux_stream
-        self._gate_events = (
-            [torch.cuda.Event(), torch.cuda.Event()]
-            if self.g_proj is not None and current_platform.is_cuda_alike()
-            else None
-        )
+        # ---- Post-attention projection ----
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
@@ -483,76 +508,124 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
-    def _forward_attn(
+    def _unquantized_gemm(
+        self, hidden_states: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        out = try_low_latency_gemm(hidden_states, weight)
+        return out if out is not None else F.linear(hidden_states, weight)
+
+    def _apply_q_lora_attention(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        qkv_lora: torch.Tensor,
     ) -> torch.Tensor:
-        """Attention front-end: fused qkv-a proj -> norms -> q_b -> attention.
-
-        Returns the pre-gate attention output ``[num_tokens,
-        num_local_heads * v_head_dim]``. On a profile/dummy run
-        it returns a zeroed buffer.
-        """
-        if self.q_lora_rank is not None:
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_c, k_pe = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-            q_c, kv_c_normed = fused_q_kv_rmsnorm(
-                q_c,
-                kv_c,
-                self.q_a_layernorm.weight.data,
-                self.kv_a_layernorm.weight.data,
-                self.rms_norm_eps,
-            )
-            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-        else:
-            # Uncompressed query: project directly (no q-LoRA, no q norm) and
-            # normalize only the kv latent.
-            q = self.q_proj(hidden_states)[0].view(
-                -1, self.num_local_heads, self.qk_head_dim
-            )
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            kv_c, k_pe = kv_lora.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-            kv_c_normed = self.kv_a_layernorm(kv_c)
-        k_pe = k_pe.unsqueeze(1)
+        """Expand q-LoRA output and run attention."""
+        q_lora_rank = self.q_lora_rank
+        assert q_lora_rank is not None
+        q_c, kv_c, k_pe = qkv_lora.split(
+            [q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        q_c, kv_c_normed = fused_q_kv_rmsnorm(
+            q_c,
+            kv_c,
+            self.q_a_layernorm.weight.data,
+            self.kv_a_layernorm.weight.data,
+            self.rms_norm_eps,
+        )
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
 
         attn_out = torch.empty(
             (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        self._attention(positions, q, kv_c_normed, k_pe, attn_out)
+        self._attention(positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out)
         return attn_out
+
+    def _forward_q_lora(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the q-LoRA path, including gate overlap when eligible."""
+        q_lora_rank = self.q_lora_rank
+        assert q_lora_rank is not None
+        qkv_a_rows = q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
+
+        # run g_proj in aux_stream
+        if (
+            self._gate_events is not None
+            and hidden_states.shape[0] < _GATE_MULTI_STREAM_TOKEN_THRESHOLD
+        ):
+            fused_qkv_a_g_proj = self.fused_qkv_a_g_proj
+            assert fused_qkv_a_g_proj is not None
+            qkv_a_weight = fused_qkv_a_g_proj.weight[:qkv_a_rows]
+            gate_weight = fused_qkv_a_g_proj.weight[qkv_a_rows:]
+
+            start_event, end_event = self._gate_events
+            return maybe_execute_in_parallel(
+                lambda: self._apply_q_lora_attention(
+                    positions,
+                    hidden_states,
+                    self._unquantized_gemm(hidden_states, qkv_a_weight),
+                ),
+                lambda: self._unquantized_gemm(hidden_states, gate_weight),
+                start_event,
+                end_event,
+                self.aux_stream,
+            )
+
+        # run g_proj together with qkv_a
+        if self.use_output_gate:
+            qkv_a_proj = self.fused_qkv_a_g_proj
+            assert qkv_a_proj is not None
+            qkv_lora, gate = qkv_a_proj(hidden_states)[0].split(
+                [qkv_a_rows, self.num_local_heads * self.v_head_dim], dim=-1
+            )
+        else:
+            qkv_a_proj = self.fused_qkv_a_proj
+            assert qkv_a_proj is not None
+            qkv_lora = qkv_a_proj(hidden_states)[0]
+            gate = None
+
+        attn_out = self._apply_q_lora_attention(positions, hidden_states, qkv_lora)
+        return attn_out, gate
+
+    def _forward_full_rank_q(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the full-rank Q path with an optional sequential gate."""
+        q_proj = self.q_proj
+        kv_a_proj_with_mqa = self.kv_a_proj_with_mqa
+        assert q_proj is not None
+        assert kv_a_proj_with_mqa is not None
+
+        q = q_proj(hidden_states)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        kv_lora = kv_a_proj_with_mqa(hidden_states)[0]
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        attn_out = torch.empty(
+            (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        self._attention(positions, q, kv_c_normed, k_pe.unsqueeze(1), attn_out)
+
+        gate = self.g_proj(hidden_states)[0] if self.g_proj is not None else None
+        return attn_out, gate
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # Both branches produce (attn_out, gate); they differ only in whether
-        # the g_proj GEMM is overlapped on the aux stream.
-        g_proj = self.g_proj
-        events = self._gate_events
-        if (
-            g_proj is not None
-            and events is not None
-            and self.aux_stream is not None
-            and hidden_states.shape[0] < _GATE_MULTI_STREAM_TOKEN_THRESHOLD
-        ):
-            attn_out, gate = maybe_execute_in_parallel(
-                lambda: self._forward_attn(positions, hidden_states),
-                lambda: g_proj(hidden_states)[0],
-                events[0],
-                events[1],
-                self.aux_stream,
-            )
+        if self.q_lora_rank is None:
+            attn_out, gate = self._forward_full_rank_q(positions, hidden_states)
         else:
-            attn_out = self._forward_attn(positions, hidden_states)
-            gate = g_proj(hidden_states)[0] if g_proj is not None else None
+            attn_out, gate = self._forward_q_lora(positions, hidden_states)
 
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
