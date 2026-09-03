@@ -99,13 +99,13 @@ OpenSSL cipher list.
 
 ```bash
 # Combined PEM (cert + key in one file):
-vllm \
+vllm-rs \
   render Qwen/Qwen3-32B \
   --host 127.0.0.1 --max-model-len 32768 \
   --ssl-certfile /path/to/combined.pem
 
 # Separate cert and key files:
-vllm \
+vllm-rs \
   render Qwen/Qwen3-32B \
   --host 127.0.0.1 --max-model-len 32768 \
   --ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem
