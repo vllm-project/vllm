@@ -121,7 +121,7 @@ RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && MAX_JOBS=16 python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
 
 
@@ -373,7 +373,6 @@ RUN mkdir -p /staging/lib \
     && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
     && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
     && ls -l /staging/lib
-
 
 # rocprofiler-sdk 1.3.2 fixes torch 2.12 profiler on ROCm 7.2.3
 FROM base AS build_rocprofiler_sdk
