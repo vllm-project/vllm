@@ -19,6 +19,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
+- [FLy Verification (Lossy)](fly.md)
 - [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
 ## Method Selection at a Glance
@@ -91,9 +92,9 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
 | `synthetic_acceptance_rates` | `list[float]` | `None` | Per-position unconditional acceptance rates for `synthetic` rejection sampling. Each entry in `[0, 1]`; length must equal `num_speculative_tokens`; must be non-increasing. |
 | `synthetic_acceptance_length` | `float` | `None` | Target mean acceptance length for `synthetic`; in `[1, num_speculative_tokens + 1]`. Mutually exclusive with `synthetic_acceptance_rates`. |
-| `fly_window_size` | `integer >= 1` | `6` | Number of subsequent native acceptance decisions checked by FLy. Must be smaller than `num_speculative_tokens`. |
-| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-3 entropy required for FLy to retain a native rejection. |
-| `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) is not yet supported when this option is enabled. |
+| `fly_window_size` | `integer >= 1` | `min(6, num_speculative_tokens - 1)` | Number of subsequent native acceptance decisions checked by FLy. FLy requires at least two speculative tokens, and the window must be smaller than `num_speculative_tokens`. |
+| `fly_entropy_threshold` | `float >= 0` | `0.3` | Minimum target top-k entropy required for FLy to defer a native rejection. |
+| `use_heterogeneous_vocab` | `boolean` | `false` | Allow draft and target models with different vocabularies. Builds a token-level intersection at initialisation and constrains draft logits to shared tokens only. Only compatible with `method=draft_model`. Probabilistic draft sampling (`draft_sample_method='probabilistic'`) and `use_local_argmax_reduction` are not supported when this option is enabled. |
 
 !!! note
     Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
@@ -192,10 +193,6 @@ vllm serve <target-model> \
 
 ## Lossless guarantees of Speculative Decoding
 
-!!! warning
-    These guarantees apply to the standard rejection sampler. FLy deliberately
-    relaxes verification and is not distribution preserving.
-
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of
 speculative decoding, breaking down the guarantees into three key areas:
 
@@ -203,6 +200,10 @@ speculative decoding, breaking down the guarantees into three key areas:
    \- Speculative decoding sampling is theoretically lossless up to the precision limits of hardware numerics. Floating-point errors might
    cause slight variations in output distributions, as discussed
    in [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/pdf/2302.01318)
+
+    !!! warning
+        These guarantees apply to the standard rejection sampler. FLy
+        deliberately relaxes verification and is not distribution preserving.
 
 2. **Algorithmic Losslessness**
    \- vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key validation tests include:
