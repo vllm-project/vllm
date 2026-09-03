@@ -144,7 +144,7 @@ class CPUOffloadingManager(OffloadingManager):
     def get_load_source(
         self, key: OffloadKey, req_context: ReqContext
     ) -> CacheHitSource:
-        return CacheHitSource.CPU
+        return CacheHitSource.HOST
 
     @override
     def prepare_load(

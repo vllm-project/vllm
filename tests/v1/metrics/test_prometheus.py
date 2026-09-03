@@ -29,7 +29,7 @@ def test_cached_prompt_tokens_are_exposed_by_physical_source():
         iteration_stats.prompt_token_stats.cached_tokens = 7
         iteration_stats.prompt_token_stats.cached_tokens_by_source = {
             "device": 3,
-            "cpu": 4,
+            "host": 4,
         }
 
         logger.record(None, iteration_stats)
@@ -43,7 +43,7 @@ def test_cached_prompt_tokens_are_exposed_by_physical_source():
                     samples[sample.labels["source"]] = sample.value
         assert samples == {
             "device": 3,
-            "cpu": 4,
+            "host": 4,
             "disk": 0,
             "p2p": 0,
             "external": 0,

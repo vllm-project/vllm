@@ -230,7 +230,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._req_state: dict[str, RequestState] = {}
 
         # Per-request origin retained while a secondary-tier promotion lands
-        # in the CPU primary tier. This is separate from _req_state because
+        # in the host-memory primary tier. This is separate from _req_state because
         # lookup() is also a valid standalone manager operation in which
         # on_new_request() has not established lifecycle state.
         self._request_load_sources: dict[str, dict[OffloadKey, CacheHitSource]] = {}
