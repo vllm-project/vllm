@@ -81,6 +81,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    reconcile_nvfp4_moe_w13_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
     QuantKey,
@@ -1017,15 +1020,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_input_scale.data.fill_(1.0)
             layer.w2_input_scale.data.fill_(1.0)
 
-        # Use a single gscale for w13.
-        if self.moe.is_act_and_mul and not torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ):
-            logger.warning_once(
-                "w1_weight_scale_2 must match w3_weight_scale_2. "
-                "Accuracy may be affected."
+        w13_weight_scale = layer.w13_weight_scale
+        if self.moe.is_act_and_mul and self.nvfp4_backend != NvFp4MoeBackend.HUMMING:
+            w13_weight_scale, w13_weight_scale_2 = reconcile_nvfp4_moe_w13_scales(
+                w13_weight_scale,
+                layer.w13_weight_scale_2,
             )
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
+        else:
+            w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
 
         (
             w13,
@@ -1040,7 +1042,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             nvfp4_backend=self.nvfp4_backend,
             layer=layer,
             w13=layer.w13_weight,
-            w13_scale=layer.w13_weight_scale,
+            w13_scale=w13_weight_scale,
             w13_scale_2=w13_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             w2=layer.w2_weight,
