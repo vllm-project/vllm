@@ -169,7 +169,9 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/metrics
     # Integration test for streaming correctness (requires special branch).
-    - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
+    # GIT_TERMINAL_PROMPT=0 makes a transient git credential prompt fail fast
+    # instead of hanging the job until the timeout.
+    - GIT_TERMINAL_PROMPT=0 pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
