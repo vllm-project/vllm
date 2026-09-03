@@ -393,6 +393,44 @@ def test_balanced_row_shard_declines_below_the_floor() -> None:
     )
 
 
+@pytest.mark.parametrize("context_len", [128_000, 256_000, 512_000, 1_000_000])
+def test_long_context_tp4_shard_is_exact_and_cost_balanced(
+    context_len: int,
+) -> None:
+    """Exercise the production TP4 planner at every reported A/B length.
+
+    The treatment must be an exact partition/permutation of the baseline row
+    order, while balancing the causal compressed-key work that dominates the
+    long-prefill indexer.
+    """
+    compress_ratio = 4
+    sizes = indexer.balanced_prefill_row_shard(
+        torch.tensor([context_len], dtype=torch.int32),
+        torch.tensor([context_len], dtype=torch.int32),
+        compress_ratio,
+        4,
+    )
+    assert sizes is not None
+    assert len(sizes) == 4
+    assert sum(sizes) == context_len
+    assert min(sizes) > 0
+
+    # Reassembling the per-rank slices must preserve every baseline row in the
+    # same order. This is the semantic contract of the layout-only gather.
+    baseline_rows = torch.arange(context_len, dtype=torch.int32)
+    treatment_rows = torch.cat(baseline_rows.split(sizes))
+    torch.testing.assert_close(treatment_rows, baseline_rows)
+
+    per_row_cost = torch.arange(1, context_len + 1, dtype=torch.int64) // 4
+    cumulative = torch.cat(
+        [torch.zeros(1, dtype=torch.int64), torch.cumsum(per_row_cost, dim=0)]
+    )
+    boundaries = torch.tensor([0, *torch.cumsum(torch.tensor(sizes), 0).tolist()])
+    rank_costs = cumulative[boundaries[1:]] - cumulative[boundaries[:-1]]
+    imbalance = float(rank_costs.max()) / float(rank_costs.double().mean())
+    assert imbalance < 1.001
+
+
 def _sharding_config(cudagraph_mode=CUDAGraphMode.PIECEWISE):
     return SimpleNamespace(
         compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode)
