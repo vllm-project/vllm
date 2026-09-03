@@ -106,7 +106,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _ = self._get_weight_params(layer)
         w_ch_s = layer.weight_chan_scale
 
         x_2d = x.reshape(-1, x.shape[-1])

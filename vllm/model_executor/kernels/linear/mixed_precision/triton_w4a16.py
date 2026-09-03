@@ -433,7 +433,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         c = self.config
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
