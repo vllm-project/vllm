@@ -30,6 +30,10 @@ class PendingRecv:
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
+    # Draft tokens proposed by the last rank's speculator for this step,
+    # broadcast separately after propose() runs. None when spec decoding
+    # is disabled (max_sample_len == 1).
+    draft_tokens: torch.Tensor | None = None  # [num_reqs, num_spec]
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -137,6 +141,7 @@ class PPHandler:
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
+            broadcast_drafts=slot.draft_tokens,
         )
 
     def receive(self, input_batch: InputBatch) -> bool:
@@ -167,6 +172,20 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
+            draft_tokens = None
+            if self.max_sample_len > 1:
+                # The sender enqueues this send in broadcast_drafts() after
+                # propose(); NCCL stream order keeps the recvs matched.
+                draft_tokens = torch.empty(
+                    num_reqs,
+                    self.max_sample_len - 1,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                torch.distributed.broadcast(
+                    draft_tokens, src=self.last_rank, group=self.broadcast_group
+                )
+                draft_tokens.record_stream(self.main_stream)
             event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
             # Must record_stream since these were allocated on broadcast stream but
@@ -182,6 +201,7 @@ class PPHandler:
             input_batch.idx_mapping_np,
             need_sampled_mask,
             gen_at_receive_np,
+            draft_tokens,
         )
         return bool(need_sampled_mask.all())
 
@@ -209,6 +229,17 @@ class PPHandler:
 
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            if sampled_token_ids.shape[1] != self.max_sample_len:
+                # The plain sampler emits [num_reqs, 1] on steps without
+                # drafts while the rejection sampler emits the full
+                # [num_reqs, max_sample_len]; the receiver always expects the
+                # latter. Pad — consumers read at most num_sampled per row.
+                assert sampled_token_ids.shape[1] == 1
+                padded = sampled_token_ids.new_zeros(
+                    sampled_token_ids.shape[0], self.max_sample_len
+                )
+                padded[:, :1] = sampled_token_ids
+                sampled_token_ids = padded
             torch.distributed.broadcast(
                 sampled_token_ids.contiguous(),
                 src=self.last_rank,
@@ -222,3 +253,34 @@ class PPHandler:
             )
             for tensor in (sampled_token_ids, num_sampled, num_rejected):
                 tensor.record_stream(self.broadcast_stream)
+
+    def broadcast_drafts(
+        self, draft_token_table: torch.Tensor, input_batch: InputBatch
+    ) -> None:
+        """Broadcast the speculator's freshly proposed draft tokens.
+
+        Runs after propose() on the last rank; the send is stream-ordered
+        after broadcast()'s sends, matching receive()'s enqueue order. The
+        payload is gathered from the runner's draft table (just updated from
+        propose()'s output) into a fresh compact tensor: the speculator
+        overwrites its own persistent buffer on the next step, possibly
+        before this async send completes.
+        """
+        assert self.is_last_rank
+        if self.disabled or self.max_sample_len == 1:
+            return
+        if compute_need_sampled_mask(input_batch) is None:
+            return
+        assert draft_token_table.dtype == torch.int64
+        assert draft_token_table.shape[1] == self.max_sample_len - 1
+
+        # Gather on the main stream so the payload is ordered after this
+        # step's table update and before any later one.
+        drafts = draft_token_table[input_batch.idx_mapping]
+        assert drafts.shape[0] == input_batch.num_reqs
+        with torch.cuda.stream(self.broadcast_stream):
+            self.broadcast_stream.wait_stream(self.main_stream)
+            torch.distributed.broadcast(
+                drafts, src=self.last_rank, group=self.broadcast_group
+            )
+            drafts.record_stream(self.broadcast_stream)

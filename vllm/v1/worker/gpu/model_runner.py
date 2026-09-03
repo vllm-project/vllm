@@ -1063,6 +1063,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         on pointer alignment).
         """
         assert self.pp_handler is not None
+        num_spec = self.pp_handler.max_sample_len - 1
+        broadcast_drafts = (
+            torch.zeros((1, num_spec), dtype=torch.int64, device=self.device)
+            if num_spec > 0
+            else None
+        )
         post_update(
             torch.full((1,), -1, dtype=torch.int64, device=self.device),
             self.req_states.num_computed_tokens.gpu,
@@ -1078,6 +1084,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             None,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
+            broadcast_drafts,
+            self.req_states.draft_tokens if broadcast_drafts is not None else None,
         )
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
@@ -1554,6 +1562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        broadcast_drafts: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
         if self.is_last_pp_rank:
@@ -1572,6 +1581,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
+            broadcast_drafts,
+            self.req_states.draft_tokens if broadcast_drafts is not None else None,
         )
 
         self.model_state.postprocess_state(
@@ -2046,6 +2057,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
             if draft_tokens is not None:
                 self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+                if self.pp_handler is not None:
+                    # Earlier stages never run the speculator; ship the
+                    # drafts so their next verification step embeds the real
+                    # draft tokens instead of stale buffer contents.
+                    self.pp_handler.broadcast_drafts(
+                        self.req_states.draft_tokens, input_batch
+                    )
             if draft_tokens is not None and self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
