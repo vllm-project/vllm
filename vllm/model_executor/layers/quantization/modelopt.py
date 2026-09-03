@@ -1905,6 +1905,19 @@ class KNvfp4Static(QuantKeyScheme):
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
+        # Sanity-check: weight_scale must be non-zero after loading. All-zeros
+        # means the FP4 weights were never actually loaded (e.g. the
+        # checkpoint stores this layer as BF16 and the weight loader silently
+        # skipped it).
+        if layer.weight_scale.count_nonzero() == 0:
+            raise RuntimeError(
+                f"NVFP4 weight_scale for layer "
+                f"{getattr(layer, 'name', repr(layer))!r} is all-zeros after "
+                "weight loading — the FP4 weights were never loaded. "
+                "The checkpoint likely stores this layer as BF16 (not FP4). "
+                "Fix: pass quant_config=None when constructing this layer, or "
+                "add it to the quantization ignore list."
+            )
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
