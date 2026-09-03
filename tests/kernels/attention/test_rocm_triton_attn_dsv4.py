@@ -81,10 +81,12 @@ def _ref_sparse_prefill_ragged(
     rows: list[list[int]],
     scale: float,
     attn_sink: torch.Tensor | None,
+    value_dim: int | None = None,
 ) -> torch.Tensor:
     q_f32 = q.float()
     kv_f32 = kv.float()
-    out = torch.empty_like(q_f32)
+    value_dim = q.shape[-1] if value_dim is None else value_dim
+    out = q_f32.new_empty((*q.shape[:-1], value_dim))
 
     for query_idx in range(q.shape[0]):
         row_indices = rows[query_idx]
@@ -100,7 +102,7 @@ def _ref_sparse_prefill_ragged(
                 else:
                     probs = torch.softmax(scores, dim=0)
                 out[query_idx, head_idx] = torch.sum(
-                    probs[:, None] * selected_kv, dim=0
+                    probs[:, None] * selected_kv[:, :value_dim], dim=0
                 )
             else:
                 out[query_idx, head_idx] = 0
@@ -440,6 +442,50 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
         q, kv, [[0, 2], [1, 3, 4], []], scale, attn_sink
     )
 
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_kernel_hyv4_shape() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _rocm_sparse_attn_prefill_ragged_triton,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(2)
+    nope_head_dim = 512
+    rope_head_dim = 64
+    head_dim = nope_head_dim + rope_head_dim
+    value_dim = 512
+    q = torch.randn(3, 3, head_dim, dtype=torch.bfloat16, device=device) * 0.125
+    kv = torch.randn(5, head_dim, dtype=torch.bfloat16, device=device) * 0.125
+    indices = torch.tensor([0, 2, 1, 3, 4], dtype=torch.int32, device=device)
+    indptr = torch.tensor([0, 2, 5, 5], dtype=torch.int32, device=device)
+    attn_sink = torch.tensor([-0.25, 0.0, 0.25], dtype=torch.float32, device=device)
+    scale = head_dim**-0.5
+
+    actual = _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+        value_dim=value_dim,
+        allow_hyv4=True,
+    )
+    expected = _ref_sparse_prefill_ragged(
+        q,
+        kv,
+        [[0, 2], [1, 3, 4], []],
+        scale,
+        attn_sink,
+        value_dim=value_dim,
+    )
+
+    assert actual.shape == (3, 3, value_dim)
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 

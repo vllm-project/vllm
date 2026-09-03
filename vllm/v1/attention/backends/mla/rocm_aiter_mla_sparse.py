@@ -50,6 +50,7 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    BLOCK_STRIDE_ROWS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     # strides (in elements)
     bt_stride0,
@@ -91,9 +92,10 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
+    # Invalid entries must remain -1. Mapping them to slot zero silently turns
+    # padding or stale top-k entries into repeated reads of the first KV token.
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block), -1, base * BLOCK_STRIDE_ROWS + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
@@ -109,6 +111,7 @@ def triton_convert_req_index_to_global_index(
     cu_seqlens: torch.Tensor,  # int32 [num_tokens + 1]
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
     BLOCK_SIZE: int = 64,
+    BLOCK_STRIDE_ROWS: int | None = None,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
 ):
@@ -125,6 +128,8 @@ def triton_convert_req_index_to_global_index(
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    if BLOCK_STRIDE_ROWS is None:
+        BLOCK_STRIDE_ROWS = BLOCK_SIZE
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
@@ -155,6 +160,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS,
         BLOCK_N,
         # strides
         bt_stride0,
@@ -781,6 +787,10 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=(
+                kv_c_and_k_pe_cache.stride(0)
+                // int(np.prod(kv_c_and_k_pe_cache.shape[2:]))
+            ),
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
