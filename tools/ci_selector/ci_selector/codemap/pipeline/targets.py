@@ -39,6 +39,8 @@ IF_THEN_RE = re.compile(
     r"^if\s+.*?;\s*then\s+(?P<then>.*?)(?:;\s*else\s+(?P<else>.*?))?;\s*fi\s*;?\s*$"
 )
 OPERATORS = {"&&", "||", ";"}
+# A `case` arm label.
+CASE_ARM_RE = re.compile(r"^[\w*?|\[\]-]+\)$")
 
 
 @dataclass
@@ -188,7 +190,7 @@ class CommandParser:
             args = tokens[1:] if cmd in ("bash", "sh") else tokens
             self._parse_script_invocation(args, raw)
             return
-        if cmd in BENIGN_CMDS or "=" in cmd:
+        if cmd in BENIGN_CMDS or "=" in cmd or _is_case_scaffolding(cmd):
             self.out.benign.append(raw)
             return
         self.out.unparsable.append(raw)
@@ -455,6 +457,13 @@ def _split_segments(tokens: list[str]) -> list[list[str]]:
         elif not skipping:
             segments[-1].append(tok)
     return [s for s in segments if s]
+
+
+def _is_case_scaffolding(cmd: str) -> bool:
+    """Shell `case` control flow. Only the scaffolding reaches here; each
+    arm's body is its own line and parses normally. Matched by shape, not
+    listed, so a new arm does not reopen the drift."""
+    return cmd in ("case", "esac", ";;") or bool(CASE_ARM_RE.match(cmd))
 
 
 def _strip_env_prefix(tokens: list[str]) -> list[str]:

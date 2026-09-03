@@ -171,9 +171,11 @@ def test_the_real_tree_climbs_to_the_nearest_mirror(state):
 
 
 def test_a_file_with_no_mirror_declines_on_the_real_tree(state):
-    """`vllm/platforms` is in the cycle and has no `tests/platforms`
-    counterpart at HEAD, so it declines and lets graph reach answer rather than
-    routing somewhere merely plausible."""
-    assert "vllm/platforms/interface.py" in state.full.import_cycle().reach_blind
-    tests, _ = colocation.implicated_tests(state, "vllm/platforms/interface.py")
+    """`vllm/device_allocator` is in the cycle and has no
+    `tests/device_allocator` counterpart at HEAD, so it declines and lets graph
+    reach answer rather than routing somewhere merely plausible."""
+    path = "vllm/device_allocator/cumem.py"
+    assert path in state.full.import_cycle().reach_blind
+    assert "tests/device_allocator/" not in state.test_index().dirs
+    tests, _ = colocation.implicated_tests(state, path)
     assert tests == frozenset()

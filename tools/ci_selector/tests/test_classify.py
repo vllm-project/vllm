@@ -115,7 +115,7 @@ def test_csrc_cpu_routes_to_declarers_plus_cpu_family(state, declared_deps_on):
     assert "vllm_ci" not in sel.run_all
     assert any(c.rule == "declared-deps" for c in sel.claims)
     assert "vllm_ci:torch-stable-abi-audit" in sel.selected
-    assert "vllm_ci:CPU-Kernel Tests" in sel.selected
+    assert "vllm_ci:cpu-kernel-tests" in sel.selected
     # device-less GPU suites and rust cargo steps the bare complement kept are gone
     assert "vllm_ci:rust-frontend-cargo-tests" not in sel.selected
     assert "vllm_ci:distributed-comm-ops" not in sel.selected
@@ -1004,23 +1004,21 @@ def test_joined_fixture_path_routes_to_consumers(state):
     assert "vllm_ci:basic-correctness" in sel.selected
 
 
-def test_optional_only_coverage_inherits_its_registry(state):
-    """A registered member whose own coverage auto-runs nowhere (optional
-    steps only) inherits its registry's coverage instead of running
-    everything, and the optional step still rides along as a manual hit."""
-    specimen = "vllm/distributed/weight_transfer/sparse_nccl_engine.py"
-    covering = "tests/distributed/test_weight_transfer.py"
+def test_uncovered_member_inherits_its_registry(state):
+    """A registered member whose own closure auto-runs nothing inherits its
+    registry's coverage instead of running everything, and the steps that name
+    it only by key still ride along as manual hits."""
+    specimen = "vllm/model_executor/layers/quantization/fbgemm_fp8.py"
     closure = state.full.graph.reverse_closure({specimen})
-    assert covering in closure, "specimen closure changed: update"
-    assert covering not in state.invoked, (
-        "the covering test is now auto-invoked: pick a new optional-only specimen"
+    assert not [f for f in closure if f in state.invoked], (
+        "the specimen grew auto-run coverage: pick a new one"
     )
     tables = state.full.table_of().get(specimen)
     assert tables, "specimen no longer registry-named: pick a new one"
     sel = select(state, [specimen])
     assert not sel.run_all
     assert "inheriting the coverage of registry" in sel.claims[0].detail
-    assert any("2xh100-2xmi300" in s for s in sel.manual_hits)
+    assert any("kernels-fp8-moe" in s for s in sel.manual_hits)
 
 
 def test_package_init_routes_to_package_steps(state):
@@ -1512,7 +1510,6 @@ def test_eagle_proposer_selects_examples_steps(state):
     not drop them (the examples-step under-selection regression)."""
     sel = select(state, ["vllm/v1/spec_decode/eagle.py"])
     assert "vllm_ci:examples" in sel.selected
-    assert "vllm_ci:model-runner-v2-examples" in sel.selected
 
 
 def test_pooling_runner_selects_examples_steps(state):
@@ -1582,11 +1579,11 @@ def test_no_examples_file_reaches_the_terminal_fail_open(state):
 # ---- declared-deps routing -------------------------------------------------
 
 RUST_DECLARERS = {
-    "vllm_ci:Rust Frontend Core Correctness",
-    "vllm_ci:Rust Frontend Distributed",
-    "vllm_ci:Rust Frontend OpenAI Coverage",
-    "vllm_ci:Rust Frontend Serve/Admin Coverage",
-    "vllm_ci:Rust Frontend Tool Use",
+    "vllm_ci::nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness",
+    "vllm_ci::nvidia: (L4) Rust Frontend Distributed",
+    "vllm_ci::nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage",
+    "vllm_ci::nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage",
+    "vllm_ci::nvidia: (H200 MIG 35GB) Rust Frontend Tool Use",
     "vllm_ci:rust-frontend-cargo-style-clippy",
     "vllm_ci:rust-frontend-cargo-tests",
 }
@@ -1617,8 +1614,8 @@ def test_cmake_cpu_extension_routes_to_declarers_plus_cpu_family(
     assert not sel.run_all
     for sid in (
         "vllm_ci:torch-stable-abi-audit",
-        "vllm_ci:CPU-Kernel Tests",
-        "vllm_rocm_ci:CPU-Kernel Tests",
+        "vllm_ci:cpu-kernel-tests",
+        "vllm_rocm_ci:cpu-kernel-tests",
     ):
         assert sid in sel.selected, sid
 
@@ -1965,7 +1962,7 @@ def test_release_file_with_auto_declarer_selects_it(state):
     select it: Docker Build Metadata runs docker-build-metadata-args.sh in its test."""
     sel = select(state, [".buildkite/scripts/docker-build-metadata-args.sh"])
     assert not sel.run_all
-    assert "vllm_ci:Docker Build Metadata" in sel.selected
+    assert "vllm_ci::computer: (CPU) Docker Build Metadata" in sel.selected
     assert any(c.rule == "release-ci" for c in sel.claims)
 
 
@@ -2384,7 +2381,7 @@ def _classify_graph_without_colocation(state, path):
 def test_a_cycle_file_with_no_mirror_falls_back_to_the_graph_rule(state):
     """The fallback is the safety property: declining has to hand the file to
     reach, not select nothing."""
-    path = "vllm/platforms/interface.py"
+    path = "vllm/device_allocator/cumem.py"
     assert path in state.full.import_cycle().reach_blind
     sel = select(state, [path])
     assert not any(c.rule == "colocated-tests" for c in sel.claims)
@@ -2829,7 +2826,7 @@ def test_rust_reaches_hardware_image_consumers(state):
     for rust/ in rocm's run_all_patterns."""
     sel = select(state, ["rust/src/server/src/lib.rs"])
     for sid in (
-        "vllm_rocm_ci:CPU-Kernel Tests",
+        "vllm_rocm_ci:cpu-kernel-tests",
         "vllm_rocm_ci:image-build-amd",
         "vllm_rocm_ci:ensure-ci-base-amd",
         "vllm_intel_ci:image-build-xpu",

@@ -98,7 +98,7 @@ def test_mistral_tightened_but_keeps_parser_coverage(state):
     selected = set(sel.selected)
     assert len(selected) < 120, len(selected)  # was 252 (near-run-all)
     for step in (
-        "vllm_ci:Rust Frontend Tool Use",
+        "vllm_ci::nvidia: (H200 MIG 35GB) Rust Frontend Tool Use",
         "vllm_ci:entrypoints-integration-api-server-generate",
         "vllm_ci:async-engine-inputs-utils-worker-config-cpu",
         "vllm_ci:language-models-tests-standard",

@@ -113,6 +113,43 @@ def test_module_level_constant_reads_like_a_literal(full):
     assert not [s for s in full.graph.dynamic_sites if s.file == loader]
 
 
+def test_function_local_constant_reads_like_a_literal(full):
+    """Scope does not change how readable a name is: one bound in a function
+    and imported a line later is the module-level case."""
+    site = "tests/kernels/test_mhc_tilelang_jit.py"
+    assert not [s for s in full.graph.dynamic_sites if s.file == site]
+    edges = full.graph.imports.get(site, set())
+    assert "vllm/model_executor/kernels/mhc/tilelang_kernels.py" in edges
+
+
+def test_a_name_meaning_two_things_is_not_folded():
+    """The floor under the widening. A name two scopes bind differently is
+    dropped rather than guessed, or we invent an edge."""
+    import ast
+
+    from ci_selector.codemap.graph.imports import _module_string_consts
+
+    consts = _module_string_consts(
+        ast.parse(
+            "SAME = 'vllm.a'\n"
+            "def one():\n"
+            "    SAME = 'vllm.a'\n"
+            "    LOCAL = 'vllm.b'\n"
+            "def two():\n"
+            "    SPLIT = 'vllm.c'\n"
+            "def three():\n"
+            "    SPLIT = 'vllm.d'\n"
+            "def four(SHADOWED):\n"
+            "    pass\n"
+            "SHADOWED = 'vllm.e'\n"
+        )
+    )
+    assert consts["LOCAL"] == "vllm.b"
+    assert consts["SAME"] == "vllm.a"
+    assert "SPLIT" not in consts
+    assert "SHADOWED" not in consts
+
+
 def test_unresolvable_path_inside_our_own_packages_is_still_a_site(vllm_repo, tmp_path):
     """A constant naming something outside vllm/tests/benchmarks proves the
     import leaves the repo. One naming a path INSIDE them that resolves to

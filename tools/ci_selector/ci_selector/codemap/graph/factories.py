@@ -56,6 +56,8 @@ class FactoryParse:
     class_table_entries: dict[str, str] = field(default_factory=dict)
     # lazy-table file -> entries parsed out of it
     lazy_table_counts: dict[str, int] = field(default_factory=dict)
+    # package -> names read out of its Literal
+    backend_literal_counts: dict[str, int] = field(default_factory=dict)
     # unified parser-engine module stem -> vllm/parser/<stem>.py
     parser_engine_entries: dict[str, str] = field(default_factory=dict)
     # target file -> the table files that name it, so a member with no coverage
@@ -465,6 +467,76 @@ def add_lazy_export_table_edges(
             parse.edges_added += 1
 
 
+def _backend_literal_names(tree: ast.Module) -> list[str]:
+    """String members of a module-level `Literal` alias. All-string only: a
+    member we cannot read is a sibling we would miss."""
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            or isinstance(node, ast.AnnAssign)
+            and node.value is not None
+        ):
+            value = node.value
+        else:
+            continue
+        if not isinstance(value, ast.Subscript):
+            continue
+        base = value.value
+        name = base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+        if name != "Literal":
+            continue
+        members = (
+            value.slice.elts if isinstance(value.slice, ast.Tuple) else [value.slice]
+        )
+        if not members or not all(
+            isinstance(m, ast.Constant) and isinstance(m.value, str) for m in members
+        ):
+            continue
+        return [m.value for m in members]
+    return []
+
+
+def add_relative_literal_edges(
+    repo: Path, index: ModuleIndex, graph: ImportGraph, parse: FactoryParse
+) -> None:
+    """A package that dispatches `import_module(f".{x}", __name__)` over a
+    `Literal` naming its own submodules. The Literal is the table, so the set
+    is derived rather than listed here."""
+    for file in sorted(index.file_to_module):
+        if not file.endswith("/__init__.py") or not file.startswith("vllm/"):
+            continue
+        try:
+            text = (repo / file).read_text()
+        except (UnicodeDecodeError, OSError):
+            _record_parse_error(graph, file)
+            continue
+        if "Literal[" not in text or "import_module" not in text:
+            continue
+        try:
+            tree = ast.parse(text, filename=file)
+        except SyntaxError:
+            _record_parse_error(graph, file)
+            continue
+        if not _imports_relative_to_self(tree):
+            continue
+        names = _backend_literal_names(tree)
+        if not names:
+            continue
+        package = index.file_to_module.get(file, "")
+        targets = [t for t in (_lazy_target(index, n, package) for n in names) if t]
+        # Every member must land, or we bless a file we only half-read.
+        if len(targets) != len(names):
+            continue
+        graph.table_files.add(file)
+        parse.backend_literal_counts[file] = len(names)
+        for target in targets:
+            if target != file:
+                parse.table_of.setdefault(target, set()).add(file)
+                graph.add_edge(file, target)
+                parse.edges_added += 1
+
+
 def add_pkgutil_edges(
     repo: Path, index: ModuleIndex, graph: ImportGraph, parse: FactoryParse
 ) -> None:
@@ -554,5 +626,6 @@ def add_factory_edges(
     add_qualname_enum_edges(repo, index, graph, parse)
     add_module_attr_edges(repo, index, graph, parse)
     add_lazy_export_table_edges(repo, index, graph, parse)
+    add_relative_literal_edges(repo, index, graph, parse)
     add_pkgutil_edges(repo, index, graph, parse)
     return parse

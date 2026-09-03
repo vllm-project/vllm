@@ -11,12 +11,20 @@ from __future__ import annotations
 
 import regex as re
 
-# Shortest prefix Buildkite truncates a context to; no two steps share one.
+# Shortest prefix Buildkite truncates a context to. Steps can share one; a
+# drift guard bounds how many do.
 TRUNC_MIN = 44
 
 
 def _slug(label: str, plus_word: bool) -> str:
-    s = label.lower().replace("+", " plus " if plus_word else " ")
+    """Two spellings. Buildkite's job slug writes `+`, `/` and `.` as words;
+    ci-infra's key collapses them to a dash."""
+    s = label.lower()
+    if plus_word:
+        for char, word in (("+", " plus "), ("/", " slash "), (".", " dot ")):
+            s = s.replace(char, word)
+    else:
+        s = s.replace("+", " ")
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return re.sub(r"-n$", "", s)
 
@@ -28,10 +36,12 @@ def amd_label(label: str, device: str | None) -> str:
 
 def step_slug_candidates(step) -> list[str]:
     """Every status-context spelling a step can take: its key, the label slug
-    with '+' spelled out or dropped, and for a mirror both label eras.
+    with '+' spelled out or dropped, and for a mirror whichever label the
+    generator would have used.
 
-    The generator now uses a mirror's own yaml label verbatim; it used to wrap
-    the parent's. We replay revisions from either side, so both are emitted.
+    A mirror is published under its own yaml label, or the parent wrap if it
+    declares none. Emitting both invents a spelling naming two vendors at once,
+    which nothing posts. Older revisions replay through the wrap.
 
     Each spelling is slugged whole, not assembled from slugged parts: `_slug`
     strips a trailing `-n`, which swallowed the `%N` of a sharded mirror.
@@ -41,11 +51,12 @@ def step_slug_candidates(step) -> list[str]:
         if step.mirror_label:
             for pw in (True, False):
                 out.append(_slug(step.mirror_label, pw))
-        base_label = step.label.rsplit(" (", 1)[0]
-        for pw in (True, False):
-            out.append(_slug(amd_label(base_label, None), pw))
-            if step.device:
-                out.append(_slug(amd_label(base_label, step.device), pw))
+        else:
+            base_label = step.label.rsplit(" (", 1)[0]
+            for pw in (True, False):
+                out.append(_slug(amd_label(base_label, None), pw))
+                if step.device:
+                    out.append(_slug(amd_label(base_label, step.device), pw))
     else:
         if step.key:
             out.append(step.key)

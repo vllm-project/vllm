@@ -132,7 +132,15 @@ def test_rust_reference_leg_over_match_floor(state):
     assert cargo <= leg
     steps_by_id = {s.step_id: s for p in state.pipelines for s in p.steps}
     gate = state.keys.steps_naming_raw(set(RUST_GATE_ENV_VARS))
-    stray = {s for s in leg - cargo - gate if not steps_by_id[s].always_runs}
+    # These declare docker/Dockerfile, which runs build_rust.sh, so a rust
+    # change really does reach them. Named, so a different stray still shows.
+    via_dockerfile = {
+        "vllm_ci::computer: (CPU) Docker Build Metadata",
+        "vllm_ci::computer: (CPU) Docker Build Metadata (amd):amd",
+    }
+    stray = {
+        s for s in leg - cargo - gate - via_dockerfile if not steps_by_id[s].always_runs
+    }
     assert not stray, f"rust reference leg over-matches: {sorted(stray)}"
 
 

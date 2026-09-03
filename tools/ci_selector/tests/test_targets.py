@@ -42,7 +42,7 @@ def test_unparsable_empty_at_head(mapped):
         "it wraps another command (like `uv run pytest`): add it to UNWRAP_CMDS "
         "in ci_selector/handwritten.py",
         "it is a genuinely new way of invoking tests: teach "
-        "ci_selector/codemap/pipeline/testmap.py to read it",
+        "ci_selector/codemap/pipeline/targets.py to read it",
     )
 
 

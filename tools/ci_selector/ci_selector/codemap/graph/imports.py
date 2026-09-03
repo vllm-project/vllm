@@ -185,27 +185,168 @@ def _parse_file(repo: Path, file: str, index: ModuleIndex, graph: ImportGraph) -
         return
     module = index.file_to_module.get(file, "")
     consts = _module_string_consts(tree)
-    _FileVisitor(repo, file, module, index, graph, consts).visit(tree)
+    consts |= _private_param_consts(tree, consts)
+    options = _parametrize_options(tree)
+    _FileVisitor(repo, file, module, index, graph, consts, options).visit(tree)
 
 
 def _module_string_consts(tree: ast.Module) -> dict[str, str]:
-    """Module-level `NAME = "literal"` bindings. An import handed one of these
-    is as readable as one handed the literal."""
-    out: dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target, value = node.targets[0], node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            target, value = node.target, node.value
-        else:
-            continue
+    """`NAME = "literal"` bindings, at any scope. Only names that are
+    unambiguous file-wide: every write is the same string and nothing else
+    binds them. A name meaning two things is not readable, and picking one
+    would invent an edge."""
+    string_writes: dict[str, list[str]] = {}
+    write_count: dict[str, int] = {}
+    other_bindings: set[str] = set()
+
+    def note_string(target: ast.expr, value: ast.expr) -> None:
         if (
             isinstance(target, ast.Name)
             and isinstance(value, ast.Constant)
             and isinstance(value.value, str)
         ):
-            out[target.id] = value.value
+            string_writes.setdefault(target.id, []).append(value.value)
+
+    for node in ast.walk(tree):
+        # Every rebinding, any scope.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            write_count[node.id] = write_count.get(node.id, 0) + 1
+        # Bindings that never produce a Store-context Name.
+        elif isinstance(node, ast.arg):
+            other_bindings.add(node.arg)
+        elif isinstance(node, ast.alias):
+            other_bindings.add((node.asname or node.name).split(".", 1)[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other_bindings.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other_bindings.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other_bindings.add(node.name)
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                note_string(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            note_string(node.target, node.value)
+
+    out: dict[str, str] = {}
+    for name, values in string_writes.items():
+        if name in other_bindings or len(values) != write_count.get(name, 0):
+            continue
+        if len(set(values)) == 1:
+            out[name] = values[0]
     return out
+
+
+def _parametrize_options(tree: ast.Module) -> dict[str, set[str]]:
+    """Parameter name -> every string `pytest.mark.parametrize` binds to it.
+    Plural, so it cannot go in `consts`. The decorator lists every value, so
+    the set is complete; a name any row leaves unreadable is dropped whole."""
+    options: dict[str, set[str]] = {}
+    unreadable: set[str] = set()
+
+    def rows_of(argvalues: ast.expr) -> list[ast.expr] | None:
+        if isinstance(argvalues, (ast.List, ast.Tuple)):
+            return list(argvalues.elts)
+        return None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            if (
+                not isinstance(deco, ast.Call)
+                or not isinstance(deco.func, ast.Attribute)
+                or deco.func.attr != "parametrize"
+                or len(deco.args) < 2
+            ):
+                continue
+            argnames, argvalues = deco.args[0], deco.args[1]
+            if isinstance(argnames, ast.Constant) and isinstance(argnames.value, str):
+                names = [n.strip() for n in argnames.value.split(",")]
+            elif isinstance(argnames, (ast.Tuple, ast.List)) and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str)
+                for e in argnames.elts
+            ):
+                names = [e.value for e in argnames.elts]
+            else:
+                continue
+            rows = rows_of(argvalues)
+            if rows is None:
+                unreadable.update(names)
+                continue
+            for row in rows:
+                # pytest.param(...) wraps a row.
+                if isinstance(row, ast.Call) and isinstance(row.func, ast.Attribute):
+                    cells: list[ast.expr] = list(row.args)
+                elif len(names) == 1:
+                    cells = [row]
+                elif isinstance(row, (ast.Tuple, ast.List)):
+                    cells = list(row.elts)
+                else:
+                    unreadable.update(names)
+                    continue
+                if len(cells) != len(names):
+                    unreadable.update(names)
+                    continue
+                for pname, cell in zip(names, cells):
+                    if isinstance(cell, ast.Constant) and isinstance(cell.value, str):
+                        options.setdefault(pname, set()).add(cell.value)
+                    else:
+                        unreadable.add(pname)
+
+    return {n: v for n, v in options.items() if n not in unreadable}
+
+
+def _private_param_consts(tree: ast.Module, consts: dict[str, str]) -> dict[str, str]:
+    """Parameters of a module-private helper that every call in the file
+    passes the same string for. The underscore bounds the search to this file,
+    so these call sites are all of them. Dropped if any call is unreadable, the
+    calls disagree, or the name already means something else."""
+    params: dict[str, list[str]] = {}
+    unreadable: set[str] = set()
+    functions: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and node.name.startswith("_"):
+            args = node.args
+            if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
+                continue
+            functions[node.name] = [a.arg for a in args.args]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        names = functions.get(node.func.id)
+        if names is None:
+            continue
+        seen: set[str] = set()
+        for name, value in zip(names, node.args):
+            seen.add(name)
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                params.setdefault(name, []).append(value.value)
+            else:
+                unreadable.add(name)
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                unreadable.update(names)
+                continue
+            seen.add(keyword.arg)
+            if isinstance(keyword.value, ast.Constant) and isinstance(
+                keyword.value.value, str
+            ):
+                params.setdefault(keyword.arg, []).append(keyword.value.value)
+            else:
+                unreadable.add(keyword.arg)
+        # A parameter left to its default is a value this scan never saw.
+        unreadable.update(n for n in names if n not in seen)
+
+    return {
+        name: values[0]
+        for name, values in params.items()
+        if name not in unreadable and name not in consts and len(set(values)) == 1
+    }
 
 
 class _FileVisitor(ast.NodeVisitor):
@@ -218,12 +359,13 @@ class _FileVisitor(ast.NodeVisitor):
     usually the real dispatch.
     """
 
-    def __init__(self, repo, file, module, index, graph, consts=None):
+    def __init__(self, repo, file, module, index, graph, consts=None, options=None):
         self.repo = repo
         self.file = file
         self.index = index
         self.graph = graph
         self.consts = consts or {}
+        self.options = options or {}
         self.package = _package_of(module, file)
         self.bare_dir = _bare_import_dir(repo, file)
         self.func_depth = 0
@@ -301,7 +443,9 @@ class _FileVisitor(ast.NodeVisitor):
                         )
 
     def visit_Call(self, node: ast.Call) -> None:
-        _resolve_call(node, self.index, self.graph, self.file, self.consts)
+        _resolve_call(
+            node, self.index, self.graph, self.file, self.consts, self.options
+        )
         if isinstance(node.func, ast.Attribute) and (
             node.func.attr.startswith("get_") or node.func.attr == "import_kernels"
         ):
@@ -515,6 +659,7 @@ def _resolve_call(
     graph: ImportGraph,
     file: str,
     consts: dict[str, str],
+    options: dict[str, set[str]] | None = None,
 ) -> None:
     func = node.func
     name = None
@@ -529,7 +674,14 @@ def _resolve_call(
         return
     target_name = _module_string(node.args[0], consts)
     if target_name is None:
-        graph.dynamic_sites.append(DynamicSite(file, node.lineno, name))
+        arg = node.args[0]
+        choices = (options or {}).get(arg.id, ()) if isinstance(arg, ast.Name) else ()
+        if not choices:
+            graph.dynamic_sites.append(DynamicSite(file, node.lineno, name))
+            return
+        # The decorator lists every value, so all of them is the whole dispatch.
+        for choice in sorted(choices):
+            _link_module(choice, index, graph, file, node.lineno, name, False)
         return
     _link_module(
         target_name,
@@ -563,12 +715,30 @@ def _resolve_lazy_loader(
 
 
 def _module_string(arg: ast.expr, consts: dict[str, str]) -> str | None:
-    """The module an import names, when we can read it: a literal, or a name
-    bound to one at module level."""
+    """The module an import names, when we can read it: a literal, a name bound
+    to one, or an f-string whose every hole is one of those."""
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return arg.value
     if isinstance(arg, ast.Name):
         return consts.get(arg.id)
+    if isinstance(arg, ast.JoinedStr):
+        parts: list[str] = []
+        for piece in arg.values:
+            if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                parts.append(piece.value)
+                continue
+            # A conversion or format spec rewrites the value.
+            if (
+                not isinstance(piece, ast.FormattedValue)
+                or piece.conversion not in (-1, None)
+                or piece.format_spec is not None
+            ):
+                return None
+            filled = _module_string(piece.value, consts)
+            if filled is None:
+                return None
+            parts.append(filled)
+        return "".join(parts)
     return None
 
 

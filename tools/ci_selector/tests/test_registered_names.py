@@ -23,15 +23,18 @@ def test_parser_key_flag_contexts_pinned(state):
     """Premise on the raw searchable text (the flag context still exists),
     assertion on the matcher output."""
     k = state.keys
-    sid = "vllm_ci:MRCR Eval Small Models"
+    sid = "vllm_ci::nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
     assert "--reasoning-parser qwen3" in k.searchable[sid], (
         "MRCR eval no longer pins qwen3 by flag: update specimen"
     )
     assert "qwen3" in k.step_keys[sid]
 
-    sid = "vllm_ci:moe-refactor-integration-test-b200-temporary"
-    assert "deepseek_v4" in k.searchable[sid], "specimen moved"
-    assert "deepseek_v4" in k.step_keys[sid]
+    # A second flag, so the two specimens cover both rather than one twice.
+    sid = "vllm_ci:lm-eval-spec-decode-4xb200"
+    assert "--tool-call-parser kimi_k3" in k.searchable[sid], (
+        "spec-decode eval no longer pins kimi_k3 by flag: update specimen"
+    )
+    assert "kimi_k3" in k.step_keys[sid]
 
 
 @pytest.mark.drift

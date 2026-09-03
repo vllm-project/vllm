@@ -372,7 +372,7 @@ def test_image_input_union_is_scoped_to_the_files_own_family(state):
     from ci_selector.codemap.classify import select
 
     sel = select(state, ["csrc/cpu/cpu_attn.cpp"])
-    assert "vllm_ci:CPU-Kernel Tests" in sel.selected, "cpu family lost its route"
+    assert "vllm_ci:cpu-kernel-tests" in sel.selected, "cpu family lost its route"
     assert "vllm_ci:distributed-comm-ops" not in sel.selected, (
         "a device=None GPU suite leaked in through the image union"
     )

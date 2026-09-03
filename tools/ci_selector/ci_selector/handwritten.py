@@ -41,6 +41,8 @@ FAMILY_DEVICE_PREFIXES: dict[str, tuple[str, ...]] = {
     "tpu": ("tpu",),
 }
 FAMILY_DEVICE_EXACT: dict[str, frozenset[str]] = {
+    # Exact, not a prefix: "l4" would also match filename tokens.
+    "cuda": frozenset({"l4"}),
     "cpu": frozenset({"intel_cpu", "arm_cpu", "amd_cpu"}),
     "xpu": frozenset({"intel_gpu"}),
     "hpu": frozenset({"intel_hpu"}),
@@ -126,8 +128,8 @@ DYNAMIC_IMPORT_FILES = (
     "vllm/config/compilation.py",  # config qualname fields
     "vllm/config/ec_manager_config.py",
     "vllm/config/scheduler.py",
-    "vllm/entrypoints/openai/api_server.py",  # --middleware qualname
-    "vllm/entrypoints/openai/engine/protocol.py",  # logits proc qualname
+    "vllm/entrypoints/serve/middleware/register.py",  # --middleware qualname
+    "vllm/entrypoints/generate/base/protocol.py",  # logits proc qualname
     "vllm/compilation/backends.py",  # inductor pass / backend qualnames
     "vllm/compilation/decorators.py",
     "vllm/plugins/io_processors/__init__.py",  # entry-point groups
@@ -148,6 +150,7 @@ DYNAMIC_IMPORT_FILES = (
     "vllm/tool_parsers/rust_tool_parser.py",
     "vllm/utils/deep_gemm.py",
     "vllm/utils/flashinfer.py",  # external lib submodules
+    "vllm/utils/b12x.py",
     "vllm/v1/attention/ops/rocm_aiter_mla_sparse.py",  # find_spec picks
     "tests/transformers_utils/test_processor.py",  # trust_remote_code
     "tests/utils.py",  # test-local qualname helper
@@ -167,6 +170,7 @@ DYNAMIC_IMPORT_FILES = (
 BENIGN_CMDS = {
     "export",
     "set",
+    "unset",
     "echo",
     "cd",
     "mkdir",
@@ -176,10 +180,12 @@ BENIGN_CMDS = {
     "ln",
     "chmod",
     "cat",
+    "sed",
     "ls",
     "which",
     "env",
     "true",
+    "test",
     "sleep",
     "nproc",
     "free",
@@ -343,6 +349,9 @@ KNOWN_STEP_FIELDS = {
     # Buildkite built-in, absent from the generator's Step model, so it is
     # dropped before reaching a command. Governs ordering after a failure.
     "allow_dependency_failure",
+    # Buildkite built-in, also absent from the generator's Step model, so it
+    # never reaches the emitted step.
+    "if",
     # In the generator's Step model but unused by vLLM's yaml, which sets the
     # group at file level. Both are display or plugin wiring; listed so the
     # first step to use one is not forced for it.

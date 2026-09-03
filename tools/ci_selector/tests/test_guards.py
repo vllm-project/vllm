@@ -349,7 +349,8 @@ def test_preflight_clean_at_head(state):
     named = {
         s for p in state.pipelines for s, t in p.targets.items() if t.container_tests
     }
-    assert named == {"vllm_ci:Ascend NPU Test", "vllm_rocm_ci:Ascend NPU Test"}, named
+    # Keyed, not labelled: these steps declare explicit keys.
+    assert named == {"vllm_ci:ascend-npu-test", "vllm_rocm_ci:ascend-npu-test"}, named
 
 
 def test_soft_fail_step_is_escalated_like_any_other():

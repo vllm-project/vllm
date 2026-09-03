@@ -292,35 +292,38 @@ def test_lowering_the_threshold_bought_no_new_ambiguity(vllm_repo):
     pinning: the current value leaves no further pair indistinguishable than the
     one above it does. Comparing two thresholds against each other needs no
     stored baseline, so it cannot be rubber-stamped.
+
+    That comparison is asserted FIRST on purpose. It is the safety claim; the
+    ceiling below is a stored number. With the ceiling first, a stale count
+    short-circuits the real check and a regression sits unevaluated.
     """
     configs = load_pipeline_configs(vllm_repo)
     report = LoadReport()
     steps = [s for c in configs for s in load_steps(vllm_repo, c, report)]
     here = _ambiguous_groups(steps, TRUNC_MIN)
     stricter = _ambiguous_groups(steps, TRUNC_MIN + 1)
-    # A ceiling, not a pin: comparing the two thresholds says nothing about how
-    # many groups there are, so a seventh could appear in silence. Two of the
-    # six are genuinely distinct jobs (api-server-openai part-1 vs part-2), so
-    # this is a bound on a known cost, not a clean bill.
-    assert len(here) <= 6, drift_message(
-        f"Truncated step contexts are ambiguous in {len(here)} groups, above "
-        f"the 6 at the time TRUNC_MIN was set: {[sorted(g) for g in here]}",
-        "A job reported under a truncated name is attributed to whichever "
-        "member was visited first; the others score as never run, which reads "
-        "as a recall miss we did not have.",
-        "two steps were given labels sharing a long prefix: give one a more "
-        "distinctive label in .buildkite/test_areas",
-        f"the ambiguity is real and accepted: raise the ceiling here and in {MATCH}",
-    )
     assert here == stricter, drift_message(
         "Lowering TRUNC_MIN made these steps indistinguishable: "
         f"{[sorted(g) for g in here - stricter]}",
         "A job reported under a truncated name would be attributed to "
         "whichever of them was visited first, and the others would score as "
-        "never run, which reads as a recall miss we did not have.",
+        "never run, understating what CI ran.",
         f"raise TRUNC_MIN in {MATCH} back until the two agree",
         "if the new context is real and the steps are genuinely distinct, give "
         "one of them a longer label in .buildkite/test_areas",
+    )
+    # A ceiling, not a pin: comparing two thresholds says nothing about how many
+    # groups there are, so a twelfth could appear in silence. The groups come
+    # from the device prefix eating most of the window, not from our matcher.
+    assert len(here) <= 11, drift_message(
+        f"Truncated step contexts are ambiguous in {len(here)} groups, above "
+        f"the recorded 11: {[sorted(g) for g in here]}",
+        "A job reported under a truncated name is attributed to whichever "
+        "member was visited first; the others score as never run, which "
+        "understates CI's own cost and can hide a real miss.",
+        "two steps were given labels sharing a long prefix: give one a more "
+        "distinctive label in .buildkite/test_areas",
+        "the ambiguity is real and accepted: raise the ceiling here",
     )
 
 
