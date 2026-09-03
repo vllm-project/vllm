@@ -674,6 +674,11 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w.dst_num_blocks = {}
     w.tp_mappings = {}
     w.transfer_topo = None
+    w._remote_pp_size = {}
+    w.src_xfer_handles_by_remote = {}
+    w.src_blocks_data_by_remote = {}
+    w.src_xfer_handles_by_shard_tp_ratio = {}
+    w._shard_desc_layouts = {}
     w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
     w.writes = []
     w._xfer_blocks_for_req = lambda req_id, meta: w.writes.append(req_id)
@@ -1146,7 +1151,7 @@ class TestPushWriterMlaReplication:
         # The tp-mapping collapses MLA to a single source rank (correct for
         # the pull/read direction); the push path must fan it back out.
         w.tp_mappings = {
-            engine_id: TPMapping(
+            (engine_id, 0): TPMapping(
                 source_ranks_per_group=((0,),),
                 all_source_ranks=(0,),
                 rank_to_attention_slot={0: 0},
@@ -1154,7 +1159,7 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w.dst_xfer_side_handles = {engine_id: {(0, r): 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
@@ -1226,7 +1231,7 @@ class TestPushWriterMlaReplication:
         w.transfer_topo.tp_ratio.return_value = -2
         w.transfer_topo.handshake_target_ranks.return_value = (0, 1)
         w.tp_mappings = {
-            engine_id: TPMapping(
+            (engine_id, 0): TPMapping(
                 source_ranks_per_group=((0,), (0,), (0, 1), (0, 1)),
                 all_source_ranks=(0, 1),
                 rank_to_attention_slot={0: 0, 1: 0},
@@ -1234,7 +1239,7 @@ class TestPushWriterMlaReplication:
             )
         }
         w._logical_to_kernel_block_ids = lambda block_ids, ratio: block_ids
-        w.dst_xfer_side_handles = {engine_id: {0: 1000, 1: 1001}}
+        w.dst_xfer_side_handles = {engine_id: {(0, 0): 1000, (0, 1): 1001}}
         w.src_xfer_handles_by_tp_ratio = {(-2, 16): [2000, 2001]}
 
         writes = []
@@ -1306,7 +1311,7 @@ class TestPushPrefixCaching:
         w.transfer_topo.tp_ratio.return_value = 1
         w.transfer_topo.block_size_ratio.return_value = 1
         w.tp_mappings = {
-            engine_id: TPMapping(
+            (engine_id, 0): TPMapping(
                 source_ranks_per_group=((0,),),
                 all_source_ranks=(0,),
                 rank_to_attention_slot={0: 0},
@@ -1314,7 +1319,7 @@ class TestPushPrefixCaching:
             )
         }
         w.dst_num_blocks = {engine_id: 10_000, w.engine_id: 10_000}
-        w.dst_xfer_side_handles = {engine_id: {0: 5000}}
+        w.dst_xfer_side_handles = {engine_id: {(0, 0): 5000}}
         w.src_xfer_handles_by_block_size = {16: 2000}
 
         # Stub only the NIXL WRITE; kernel expansion, prefix-cache trim, desc
