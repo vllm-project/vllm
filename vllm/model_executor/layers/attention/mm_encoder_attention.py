@@ -259,10 +259,7 @@ class MMEncoderAttention(CustomOp):
         sequence_lengths = add_padding_to_seqlens(
             sequence_lengths, len(sequence_lengths), 0
         )
-        sequence_lengths = torch.from_numpy(sequence_lengths).to(
-            device, non_blocking=True
-        )
-        return sequence_lengths
+        return async_tensor_h2d(sequence_lengths, device=device)
 
     @classmethod
     def maybe_recompute_cu_seqlens(
