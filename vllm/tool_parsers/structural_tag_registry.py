@@ -49,6 +49,7 @@ StructuralTagBuilder: TypeAlias = Callable[
         list[BuiltinToolParam],
         SimplifiedToolChoice,
         bool,
+        str,
     ],
     StructuralTag,
 ]
@@ -70,7 +71,7 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "deepseek_v4",
     }
 )
-VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "kimi_k3"})
+VLLM_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset({"hermes", "hy_v4", "kimi_k3"})
 SUPPORTED_STRUCTURAL_TAG_MODELS = (
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 )
@@ -78,7 +79,9 @@ SUPPORTED_STRUCTURAL_TAG_MODELS = (
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 
 
-def register_vllm_structural_tag(model: str):
+def register_vllm_structural_tag(
+    model: str,
+) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
     """Register a vLLM-owned structural tag builder."""
 
     def decorator(func: StructuralTagBuilder) -> StructuralTagBuilder:
@@ -104,6 +107,7 @@ def get_model_structural_tag(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
     tool_choice: ToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag | None:
     """Build a structural tag with xgrammar's builtin model templates."""
 
@@ -126,11 +130,18 @@ def get_model_structural_tag(
             builtin_tools,
             simplified_tool_choice,
             reasoning,
+            token_suffix,
         )
 
     if model not in XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS:
         supported = sorted(SUPPORTED_STRUCTURAL_TAG_MODELS)
         raise ValueError(f"Unknown format type: {model}, supported types: {supported}")
+
+    if token_suffix:
+        raise ValueError(
+            f"Structural tag model {model!r} is an xgrammar builtin with fixed "
+            f"tokens and cannot apply token_suffix={token_suffix!r}"
+        )
 
     return get_xgrammar_model_structural_tag(
         model=model,
@@ -244,8 +255,9 @@ def get_hermes_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_trigger = "<tool_call>"
 
@@ -293,8 +305,9 @@ def get_minimax_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     tool_call_begin = "<minimax:tool_call>\n"
     tool_call_end = "</minimax:tool_call>"
@@ -589,8 +602,9 @@ def get_kimi_k3_structural_tag(
     builtin_tools: list[BuiltinToolParam],
     tool_choice: SimplifiedToolChoice,
     reasoning: bool,
+    token_suffix: str = "",
 ) -> StructuralTag:
-    del builtin_tools, reasoning
+    del builtin_tools, reasoning, token_suffix
 
     trailer = OptionalFormat(content=ConstStringFormat(value=_K3_MESSAGE_CLOSE))
 
@@ -611,3 +625,142 @@ def get_kimi_k3_structural_tag(
     return StructuralTag(
         format=SequenceFormat(elements=[*_k3_response_prefix(), tools_part, trailer])
     )
+
+
+# ---------------------------------------------------------------------------
+# HYV4 (<tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tokens)
+# ---------------------------------------------------------------------------
+# HYV4 assistant output after the reasoning gate (``</think:SUF>``):
+#   <tool_calls:SUF>
+#     <tool_call:SUF>NAME
+#       <arg_key:SUF>K</arg_key:SUF><arg_value:SUF>V</arg_value:SUF>
+#     </tool_call:SUF>
+#   </tool_calls:SUF>
+# Adjacent <tool_call> blocks have no separator, and argument values are emitted
+# verbatim (no surrounding quotes), so the value body cannot be described by
+# JSONSchemaFormat. Only the skeleton (tool names, argument keys, tag order) is
+# constrained; each <arg_value> body stays free text.
+
+
+def _hy_v4_argument_keys(parameters: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Split a tool's argument keys into ``(required, optional)``.
+
+    Both lists keep declaration order. Required keys missing from
+    ``properties`` are still treated as required.
+    """
+    properties = parameters.get("properties") or {}
+    required = parameters.get("required") or []
+    required_set = set(required)
+    required_keys = [k for k in properties if k in required_set]
+    required_keys += [k for k in required if k not in properties]
+    optional_keys = [k for k in properties if k not in required_set]
+    return required_keys, optional_keys
+
+
+@register_vllm_structural_tag("hy_v4")
+def get_hy_v4_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+    token_suffix: str = "",
+) -> StructuralTag:
+    """Build HYV4 <tool_calls>/<tool_call>/<arg_key>/<arg_value> structural tags.
+
+    Args:
+        tools: Normalized function tools the model may call.
+        builtin_tools: Unused; HYV4 has no builtin tools.
+        tool_choice: Simplified tool choice.
+        reasoning: Whether the grammar also covers the reasoning phase.
+        token_suffix: Per-checkpoint structural-token suffix including the
+            leading colon (e.g. ``":6124c78e"``), or ``""`` when the checkpoint
+            uses unsuffixed tokens. The HYV4 tool parser reads it off the
+            tokenizer vocab and passes it to ``get_model_structural_tag``.
+    """
+    del builtin_tools
+
+    think_end = f"</think{token_suffix}>"
+    tool_calls_begin = f"<tool_calls{token_suffix}>"
+    tool_calls_end = f"</tool_calls{token_suffix}>"
+    tool_call_begin = f"<tool_call{token_suffix}>"
+    tool_call_end = f"</tool_call{token_suffix}>"
+    arg_key_begin = f"<arg_key{token_suffix}>"
+    arg_key_end = f"</arg_key{token_suffix}>"
+    arg_value_begin = f"<arg_value{token_suffix}>"
+    arg_value_end = f"</arg_value{token_suffix}>"
+
+    def arg_pair(key: str) -> SequenceFormat:
+        return SequenceFormat(
+            elements=[
+                ConstStringFormat(value=arg_key_begin),
+                ConstStringFormat(value=key),
+                ConstStringFormat(value=arg_key_end),
+                ConstStringFormat(value=arg_value_begin),
+                AnyTextFormat(),
+                ConstStringFormat(value=arg_value_end),
+            ]
+        )
+
+    def single_tool_call(tool: FunctionToolParam) -> TagFormat:
+        function = tool.function
+        parameters = (
+            function.parameters if isinstance(function.parameters, dict) else {}
+        )
+        required_keys, optional_keys = _hy_v4_argument_keys(parameters)
+        elements: list[Any] = [arg_pair(k) for k in required_keys]
+        if optional_keys:
+            # Optional keys may appear in any order, or not at all.
+            optional_pairs = [arg_pair(k) for k in optional_keys]
+            elements.append(
+                StarFormat(
+                    content=optional_pairs[0]
+                    if len(optional_pairs) == 1
+                    else OrFormat(elements=optional_pairs)
+                )
+            )
+        content: Any = (
+            SequenceFormat(elements=elements) if elements else AnyTextFormat()
+        )
+        return TagFormat(
+            begin=tool_call_begin + function.name,
+            content=content,
+            end=tool_call_end,
+        )
+
+    tags = [single_tool_call(tool) for tool in tools]
+
+    if tool_choice == "auto":
+        block = TagFormat(
+            begin=tool_calls_begin,
+            content=TagsWithSeparatorFormat(
+                tags=tags,
+                separator="",
+                at_least_one=True,
+            ),
+            end=tool_calls_end,
+        )
+        suffix_tag: Any = TriggeredTagsFormat(triggers=[tool_calls_begin], tags=[block])
+    else:
+        # HYV4 places tool_call blocks back-to-back with no separator. "forced"
+        # has already been filtered down to the single named tool and must emit
+        # exactly one block.
+        suffix_tag = SequenceFormat(
+            elements=[
+                ConstStringFormat(value=tool_calls_begin),
+                TagsWithSeparatorFormat(
+                    tags=tags,
+                    separator="",
+                    at_least_one=True,
+                    stop_after_first=tool_choice == "forced",
+                ),
+                ConstStringFormat(value=tool_calls_end),
+            ]
+        )
+
+    if not reasoning:
+        return StructuralTag(format=suffix_tag)
+
+    # The reasoning phase is constrained too, so the tag must explicitly skip
+    # the ``<think>...</think:SUF>`` prefix.
+    prefix_tag = TagFormat(begin="", content=AnyTextFormat(), end=think_end)
+    return StructuralTag(format=SequenceFormat(elements=[prefix_tag, suffix_tag]))
