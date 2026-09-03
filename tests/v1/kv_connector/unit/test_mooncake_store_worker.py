@@ -4503,28 +4503,33 @@ def test_blob_block_hashes_empty():
     assert list(view) == []
 
 
-def test_zero_unloaded_tails_zeroes_only_never_written_pages():
+def test_zero_unloaded_tails_zeroes_only_never_written_slots():
     """An async Store load fills ``token_len`` tokens of its last logical block;
-    the scheduler skips zeroing for the whole block, so the kernel pages after
-    the loaded prefix keep their previous owner's bytes. Once the load lands the
-    worker must zero exactly those pages in every attention layer and leave the
-    loaded pages, other blocks and Mamba groups untouched."""
+    the scheduler skips zeroing for the whole block, so everything after the
+    loaded prefix keeps its previous owner's bytes. Once the load lands the
+    worker must zero exactly that remainder in every attention layer -- the
+    untouched kernel pages and the stale slots of the partially written page
+    (hits need not be page aligned: ``prefix_match_unit`` only has to divide the
+    block) -- and leave loaded slots, other blocks and Mamba groups alone."""
     from vllm.v1.kv_cache_interface import MambaSpec
 
     w = worker.MooncakeStoreWorker.__new__(worker.MooncakeStoreWorker)
     w.num_blocks = 4
     pages_per_block = 8  # 512-token logical blocks, 64-token kernel pages
     attn = FullAttentionSpec(
-        block_size=512, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+        block_size=512, num_kv_heads=2, head_size=8, dtype=torch.bfloat16
     )
     mamba = MambaSpec(block_size=512, shapes=((4,),), dtypes=(torch.float32,))
     w._kv_cache_groups = [
         SimpleNamespace(kv_cache_spec=mamba, layer_names=["m0"]),
         SimpleNamespace(kv_cache_spec=attn, layer_names=["a0", "a1"]),
     ]
+    # Standardized [B, H, N, C] view and a raw MLA-style [B, N, C] view.
     raw = [
-        torch.full((w.num_blocks * pages_per_block, 64, 8), 7.0, dtype=torch.bfloat16)
-        for _ in range(2)
+        torch.full(
+            (w.num_blocks * pages_per_block, 2, 64, 8), 7.0, dtype=torch.bfloat16
+        ),
+        torch.full((w.num_blocks * pages_per_block, 64, 8), 7.0, dtype=torch.bfloat16),
     ]
     mamba_cache = torch.full((w.num_blocks, 4), 7.0)
     w._load_tail_caches = {}
@@ -4534,7 +4539,8 @@ def test_zero_unloaded_tails_zeroes_only_never_written_pages():
     w._track_load_tail_cache("m0", mamba_cache, groups)
     assert set(w._load_tail_caches) == {1}
     w._pending_load_tails = {
-        # 200 tokens into block 2: pages 0..3 hold data, pages 4..7 are stale.
+        # 200 tokens into block 2: pages 0..2 full, page 3 holds 8 valid slots,
+        # pages 4..7 untouched.
         "partial": (([1], [2]), 200),
         # One full block plus 64 tokens: block 3 full, block 0 keeps page 0 only.
         "spans": (([1], [3, 0]), 512 + 64),
@@ -4548,7 +4554,10 @@ def test_zero_unloaded_tails_zeroes_only_never_written_pages():
 
     for cache in raw:
         g = cache.unflatten(0, (w.num_blocks, pages_per_block))
-        assert (g[2, :4] == 7).all() and (g[2, 4:] == 0).all()
+        assert (g[2, :3] == 7).all()
+        assert (g[2, 3].narrow(-2, 0, 8) == 7).all()
+        assert (g[2, 3].narrow(-2, 8, 56) == 0).all()
+        assert (g[2, 4:] == 0).all()
         assert (g[0, :1] == 7).all() and (g[0, 1:] == 0).all()
         assert (g[3] == 7).all() and (g[1] == 7).all()
     assert (mamba_cache == 7).all()

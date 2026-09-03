@@ -2070,6 +2070,13 @@ class MooncakeStoreWorker:
         if pages_per_block <= 1:
             # Block == kernel page: loads are block granular, nothing to zero.
             return
+        block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+        # Runner views are standardized [B, H, N, C] (or [B, N, C] for a raw
+        # MLA latent cache): the token axis is second to last either way.
+        assert cache.ndim >= 3 and cache.shape[-2] == block_size // pages_per_block, (
+            f"{layer_name}: cache shape {tuple(cache.shape)} does not expose "
+            f"{block_size // pages_per_block} tokens per kernel page"
+        )
         ratio, caches = self._load_tail_caches.setdefault(g_idx, (pages_per_block, []))
         assert ratio == pages_per_block, (
             f"group {g_idx}: inconsistent kernel pages per block "
@@ -2090,8 +2097,9 @@ class MooncakeStoreWorker:
         state read back as bf16 latents -> NaN/Inf), and attention decode
         kernels read the whole page holding the current position. Runs on
         the caller's stream after the load completed, so it races neither
-        the transfer nor the next forward. A page the load partially wrote
-        (``token_len`` not page aligned) is left untouched.
+        the transfer nor the next forward. Within the page holding the last
+        loaded token, only the slots after it are zeroed, along the token axis
+        of the standardized ``[B, H, N, C]`` view (layout agnostic).
         """
         for req_id in finished_req_ids:
             self._pending_load_tails.pop(req_id, None)
@@ -2108,12 +2116,17 @@ class MooncakeStoreWorker:
                 if g_idx >= len(block_ids) or last_block >= len(block_ids[g_idx]):
                     continue
                 tokens_in_last = token_len - last_block * block_size
-                first_unwritten = cdiv(tokens_in_last, block_size // pages_per_block)
-                if first_unwritten >= pages_per_block:
-                    continue
+                page_tokens = block_size // pages_per_block
+                last_page, valid_in_page = divmod(tokens_in_last - 1, page_tokens)
+                valid_in_page += 1
                 block_id = block_ids[g_idx][last_block]
                 for cache in caches:
-                    cache[block_id, first_unwritten:].zero_()
+                    if last_page + 1 < pages_per_block:
+                        cache[block_id, last_page + 1 :].zero_()
+                    if valid_in_page < page_tokens:
+                        cache[block_id, last_page].narrow(
+                            -2, valid_in_page, page_tokens - valid_in_page
+                        ).zero_()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         block_ids: set[int] = set()
