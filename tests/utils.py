@@ -147,6 +147,28 @@ ROCM_ENGINE_KWARGS: dict = (
 _TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
     "tilelang", "3rdparty", "tvm", "python"
 )
+_SENSITIVE_CLI_ARG_NARGS = {"--api-key": "+", "--hf-token": "?"}
+
+
+def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
+    redacted_args = list(args)
+    index = 0
+    while index < len(args):
+        name, separator, _ = args[index].partition("=")
+        nargs = _SENSITIVE_CLI_ARG_NARGS.get(name.replace("_", "-"))
+        if nargs is None:
+            index += 1
+            continue
+        if separator:
+            redacted_args[index] = f"{name}=***"
+        index += 1
+        if not separator or nargs == "+":
+            while index < len(args) and not args[index].startswith("-"):
+                redacted_args[index] = "***"
+                index += 1
+                if nargs == "?":
+                    break
+    return redacted_args
 
 
 def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
@@ -784,8 +806,8 @@ class RemoteOpenAIServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(f"Launching RemoteOpenAIServer with: {' '.join(redacted_serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -812,7 +834,10 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
-        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(
+            f"Launching RemoteLaunchRenderServer with: {' '.join(redacted_serve_cmd)}"
+        )
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
