@@ -244,6 +244,50 @@ def test_decode_bench_connector_fills_each_hma_group():
     assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
 
 
+def test_decode_bench_connector_zero_fills_circular_buffer_groups():
+    """Circular buffers are zeroed to preserve packed non-floating metadata."""
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["circular_layer"],
+                CircularBufferSpec(
+                    block_size=2,
+                    num_kv_heads=1,
+                    head_size=16,
+                    head_size_v=0,
+                    dtype=torch.bfloat16,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    circular_cache = torch.ones(num_gpu_blocks, 16, dtype=torch.bfloat16)
+    connector.register_kv_caches({"circular_layer": circular_cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([5],), 1)})
+    )
+
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    expected_circular = torch.ones_like(circular_cache)
+    expected_circular[5] = 0
+    assert torch.equal(circular_cache, expected_circular)
+
+
 def test_decode_bench_connector_selects_external_blocks_per_group():
     """External fills follow the local prefix using each group's block size."""
     vllm_config = create_vllm_config(
