@@ -120,6 +120,17 @@ class SpecDecodeBaseProposer:
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
+        # PARD-2 is trained and evaluated with the draft seeing the full
+        # sequence, i.e. token 0 paired with a zero target feature. The
+        # EAGLE-style shift above drops that row; for drafts whose attention
+        # sink is bound to the first token this costs a large amount of
+        # acceptance. Prepend it back as an "anchor" row, which costs one
+        # extra draft row per request.
+        self.pard2_anchor = self.method == "pard2"
+        if self.pard2_anchor:
+            self.net_num_new_slots_per_request += 1
+            self.needs_extra_input_slots = True
+
         # When True, all draft steps reuse the same position as the
         # first step instead of advancing by one each iteration.
         # Used by draft models with Q-only attention that share KV
@@ -225,6 +236,7 @@ class SpecDecodeBaseProposer:
 
         self.is_rejected_token_mask: torch.Tensor | None = None
         self.is_masked_token_mask: torch.Tensor | None = None
+        self.is_anchor_token_mask: torch.Tensor | None = None
         if self.needs_extra_input_slots:
             # For draft models and parallel drafting, we need to keep track of
             # which tokens are rejected to update the slot mapping with padding slots.
@@ -237,6 +249,12 @@ class SpecDecodeBaseProposer:
             self.is_masked_token_mask = torch.zeros(
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
+            if self.pard2_anchor:
+                # Marks the PARD-2 anchor row (token 0) of each prefilling
+                # request; those rows are fed a zero target feature.
+                self.is_anchor_token_mask = torch.zeros(
+                    (self.max_num_tokens,), dtype=torch.bool, device=device
+                )
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.inputs_embeds_size),
@@ -683,7 +701,9 @@ class SpecDecodeBaseProposer:
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
         # (i.e., not the first proposal).
-        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+        if (
+            self.num_speculative_tokens > 1 or self.needs_extra_input_slots
+        ) and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
@@ -910,6 +930,19 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
+            if self.pard2_anchor:
+                # A request gets the anchor row only when it starts at
+                # position 0, i.e. this is its prefill. Decode requests
+                # already have the anchor in their draft KV cache.
+                anchor_flags = (target_positions[query_start_loc[:-1]] == 0).to(
+                    torch.int32
+                )
+                anchor_mask_buf = self.is_anchor_token_mask
+            else:
+                # Unused when ANCHOR is False; pass valid pointers anyway.
+                anchor_flags = self.arange[:batch_size]
+                anchor_mask_buf = self.is_rejected_token_mask
+
             copy_and_expand_eagle_inputs_kernel[grid](
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
@@ -932,11 +965,21 @@ class SpecDecodeBaseProposer:
                 total_input_tokens=total_num_input_tokens,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
+                anchor_flags_ptr=anchor_flags,
+                out_is_anchor_mask_ptr=anchor_mask_buf,
+                net_new_slots_per_request=self.net_num_new_slots_per_request,
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
+                ANCHOR=self.pard2_anchor,
             )
             if self.pass_hidden_states_to_model:
                 n = total_num_output_tokens
                 self.hidden_states[out_hidden_state_mapping] = target_hidden_states
+                if self.pard2_anchor:
+                    # The anchor row is fed a zero feature, matching how the
+                    # reference implementation pads position 0.
+                    self.hidden_states[:n].masked_fill_(
+                        self.is_anchor_token_mask[:n].unsqueeze(1), 0
+                    )
                 # Use torch.where to avoid DtoH sync from boolean indexing
                 mask = self.is_masked_token_mask[:n]
                 if self.method == "pard2":
@@ -981,6 +1024,15 @@ class SpecDecodeBaseProposer:
                 arange=self.arange,
                 new_slot_mapping=new_slot_mapping,
             )
+            if self.pard2_anchor:
+                # Requests that were not given an anchor row this step still
+                # have the anchor entry in their draft KV cache from prefill,
+                # so their key length is one larger than the query layout
+                # suggests. Their extra row is a junk (rejected) row.
+                new_cad.seq_lens += 1 - anchor_flags
+                new_cad.max_seq_len += 1
+                new_cad._seq_lens_cpu = None
+                new_cad._num_computed_tokens_cpu = None
 
             return total_num_output_tokens, token_indices_to_sample, new_cad
 
