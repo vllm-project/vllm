@@ -625,6 +625,378 @@ _FUSED_NUM_WARPS = 4
 _FUSED_NUM_STAGES = 1
 
 
+# ---------------------------------------------------------------------------
+# SPLIT-K decode variant (phase-d, 2026-09-03): flash-decoding for the fused
+# gather-dequant-attend kernel.
+#
+# At decode (T=1, H=8/rank) the fused kernel's grid (T, cdiv(H,16)) collapses
+# to (1,1): ONE CTA walks all cdiv(topk, BLOCK_N)=64 candidate tiles serially
+# on one SM while 169 idle (measured 220us/call standalone; ~4.5ms/stage/token
+# in production = 26 layer-calls). This variant adds a third grid axis: each of
+# S splits owns a contiguous tile range and runs the SAME online-softmax body,
+# writing a partial (m, l, acc) triple; a tiny combine kernel then merges the S
+# partials with the standard log-sum-exp merge INTO THE SAME max_score/denom/
+# acc buffers the host wrapper already consumes (finalize acc/denom unchanged).
+#
+# Also implements the valid_len loop clamp the original comment promised: each
+# split clamps its tile range to ceil(valid_len/BLOCK_N), so splits entirely
+# past the valid candidates store an empty partial (m=-inf, l=0, acc=0) and
+# exit -- short contexts get faster automatically.
+#
+# Merge math (identical to the in-kernel block recurrence, applied across
+# splits; empty partials carry zero weight since exp(-inf - m) = 0):
+#   m = max_s(m_s);  l = sum_s l_s*exp(m_s-m);  acc = sum_s acc_s*exp(m_s-m)
+# ---------------------------------------------------------------------------
+@triton.jit
+def _fused_gather_dequant_attn_splitk_kernel(
+    q_ptr,
+    cache_ptr,
+    indices_ptr,
+    lens_ptr,
+    m_part_ptr,  # f32 [T, HB_CNT*HEAD_BLOCK, S]   (written, no init needed)
+    l_part_ptr,  # f32 [T, HB_CNT*HEAD_BLOCK, S]
+    acc_part_ptr,  # f32 [T, HB_CNT*HEAD_BLOCK, S, 512]
+    stride_q_t,
+    stride_q_h: tl.constexpr,
+    stride_q_d: tl.constexpr,
+    stride_cache_s,
+    stride_idx_t,
+    stride_idx_k: tl.constexpr,
+    stride_mp_t,
+    stride_mp_h: tl.constexpr,
+    stride_mp_s: tl.constexpr,
+    stride_ap_t,
+    stride_ap_h: tl.constexpr,
+    stride_ap_s: tl.constexpr,
+    stride_ap_d: tl.constexpr,
+    total_slots,
+    num_heads: tl.constexpr,
+    nope_dim: tl.constexpr,
+    rope_dim: tl.constexpr,
+    quant_tile: tl.constexpr,
+    scale_byte_off: tl.constexpr,
+    rope_byte_off: tl.constexpr,
+    num_candidates,
+    tiles_per_split: tl.constexpr,
+    scale: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_NOPE: tl.constexpr,
+    BLOCK_ROPE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_block_idx = tl.program_id(1)
+    split_idx = tl.program_id(2)
+    head_offsets = head_block_idx * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    head_mask = head_offsets < num_heads
+    nope_off = tl.arange(0, BLOCK_NOPE)
+    rope_off = tl.arange(0, BLOCK_ROPE)
+    nope_dmask = nope_off < nope_dim
+    rope_dmask = rope_off < rope_dim
+    scale_tile = nope_off // quant_tile
+
+    q_nope = tl.load(
+        q_ptr
+        + token_idx * stride_q_t
+        + head_offsets[:, None] * stride_q_h
+        + nope_off[None, :] * stride_q_d,
+        mask=head_mask[:, None] & nope_dmask[None, :],
+        other=0.0,
+    ).to(tl.bfloat16)
+    q_rope = tl.load(
+        q_ptr
+        + token_idx * stride_q_t
+        + head_offsets[:, None] * stride_q_h
+        + (nope_dim + rope_off[None, :]) * stride_q_d,
+        mask=head_mask[:, None] & rope_dmask[None, :],
+        other=0.0,
+    ).to(tl.bfloat16)
+
+    running_max = tl.full((HEAD_BLOCK,), -float("inf"), tl.float32)
+    running_denom = tl.zeros((HEAD_BLOCK,), tl.float32)
+    running_acc = tl.zeros((HEAD_BLOCK, BLOCK_NOPE), tl.float32)
+
+    valid_len = tl.load(lens_ptr + token_idx)
+    # this split's tile range, clamped to BOTH num_candidates and valid_len
+    # (the clamp the original kernel's comment promised but never implemented)
+    n_lo = split_idx * tiles_per_split * BLOCK_N
+    n_valid_hi = tl.minimum(num_candidates, valid_len)
+    n_hi = tl.minimum(n_lo + tiles_per_split * BLOCK_N, n_valid_hi)
+
+    cand_base = tl.arange(0, BLOCK_N)
+    for n0 in range(n_lo, n_hi, BLOCK_N):
+        cand = n0 + cand_base
+        cand_in_range = cand < num_candidates
+        slot = tl.load(
+            indices_ptr + token_idx * stride_idx_t + cand * stride_idx_k,
+            mask=cand_in_range,
+            other=-1,
+        )
+        cand_valid = (slot >= 0) & (slot < total_slots) & (cand < valid_len)
+        base = cache_ptr + slot.to(tl.int64)[:, None] * stride_cache_s
+
+        nmask = cand_valid[:, None] & nope_dmask[None, :]
+        fp8_bytes = tl.load(base + nope_off[None, :], mask=nmask, other=0)
+        fp8_vals = fp8_bytes.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        scale_byte = scale_byte_off + scale_tile[None, :] * 4
+        b0 = tl.load(base + scale_byte + 0, mask=nmask, other=0).to(tl.int32)
+        b1 = tl.load(base + scale_byte + 1, mask=nmask, other=0).to(tl.int32)
+        b2 = tl.load(base + scale_byte + 2, mask=nmask, other=0).to(tl.int32)
+        b3 = tl.load(base + scale_byte + 3, mask=nmask, other=0).to(tl.int32)
+        scale_bits = (
+            (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24)
+        )
+        scale_f32 = scale_bits.to(tl.float32, bitcast=True)
+        kv_nope = tl.where(nmask, fp8_vals * scale_f32, 0.0).to(tl.bfloat16)
+
+        rmask = cand_valid[:, None] & rope_dmask[None, :]
+        rope_ptr = (base + rope_byte_off).to(tl.pointer_type(tl.bfloat16))
+        kv_rope = tl.load(rope_ptr + rope_off[None, :], mask=rmask, other=0.0)
+        kv_rope = tl.where(rmask, kv_rope, 0.0).to(tl.bfloat16)
+
+        scores = (
+            tl.dot(q_nope, tl.trans(kv_nope)) + tl.dot(q_rope, tl.trans(kv_rope))
+        ).to(tl.float32) * scale
+        scores = tl.where(cand_valid[None, :], scores, -float("inf"))
+
+        tile_max = tl.max(scores, axis=1)
+        next_max = tl.maximum(running_max, tile_max)
+        safe_next = tl.where(next_max == -float("inf"), 0.0, next_max)
+        previous_weight = tl.exp(running_max - safe_next)
+        previous_weight = tl.where(running_max == -float("inf"), 0.0, previous_weight)
+        p = tl.exp(scores - safe_next[:, None])
+        p = tl.where(cand_valid[None, :], p, 0.0)
+        tile_denom = tl.sum(p, axis=1)
+        running_acc = running_acc * previous_weight[:, None] + tl.dot(
+            p.to(tl.bfloat16), kv_nope
+        ).to(tl.float32)
+        running_denom = running_denom * previous_weight + tile_denom
+        running_max = next_max
+
+    # every (token, head_block, split) CTA stores its partial -- empty splits
+    # store (m=-inf, l=0, acc=0), so the combine needs no buffer pre-init.
+    part_base = (
+        token_idx * stride_mp_t + head_offsets * stride_mp_h + split_idx * stride_mp_s
+    )
+    tl.store(m_part_ptr + part_base, running_max, mask=head_mask)
+    tl.store(l_part_ptr + part_base, running_denom, mask=head_mask)
+    tl.store(
+        acc_part_ptr
+        + token_idx * stride_ap_t
+        + head_offsets[:, None] * stride_ap_h
+        + split_idx * stride_ap_s
+        + nope_off[None, :] * stride_ap_d,
+        running_acc,
+        mask=head_mask[:, None] & nope_dmask[None, :],
+    )
+
+
+@triton.jit
+def _splitk_combine_kernel(
+    m_part_ptr,
+    l_part_ptr,
+    acc_part_ptr,
+    max_score_ptr,
+    denom_ptr,
+    acc_ptr,  # the wrapper's existing state buffers
+    stride_mp_t,
+    stride_mp_h: tl.constexpr,
+    stride_mp_s: tl.constexpr,
+    stride_ap_t,
+    stride_ap_h: tl.constexpr,
+    stride_ap_s: tl.constexpr,
+    stride_ap_d: tl.constexpr,
+    stride_state_t,
+    stride_state_h: tl.constexpr,
+    stride_acc_t,
+    stride_acc_h: tl.constexpr,
+    stride_acc_d: tl.constexpr,
+    num_splits,
+    num_heads: tl.constexpr,
+    nope_dim: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    BLOCK_D: tl.constexpr,  # D-slice width: grid axis 2 parallelizes the 512-dim
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_block_idx = tl.program_id(1)
+    d_block_idx = tl.program_id(2)
+    head_offsets = head_block_idx * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    head_mask = head_offsets < num_heads
+    nope_off = d_block_idx * BLOCK_D + tl.arange(0, BLOCK_D)
+    nope_dmask = nope_off < nope_dim
+
+    running_max = tl.full((HEAD_BLOCK,), -float("inf"), tl.float32)
+    running_denom = tl.zeros((HEAD_BLOCK,), tl.float32)
+    running_acc = tl.zeros((HEAD_BLOCK, BLOCK_D), tl.float32)
+
+    for s_i in range(0, num_splits):
+        part_base = (
+            token_idx * stride_mp_t + head_offsets * stride_mp_h + s_i * stride_mp_s
+        )
+        m_i = tl.load(m_part_ptr + part_base, mask=head_mask, other=-float("inf"))
+        l_i = tl.load(l_part_ptr + part_base, mask=head_mask, other=0.0)
+        acc_i = tl.load(
+            acc_part_ptr
+            + token_idx * stride_ap_t
+            + head_offsets[:, None] * stride_ap_h
+            + s_i * stride_ap_s
+            + nope_off[None, :] * stride_ap_d,
+            mask=head_mask[:, None] & nope_dmask[None, :],
+            other=0.0,
+        )
+        next_max = tl.maximum(running_max, m_i)
+        safe_next = tl.where(next_max == -float("inf"), 0.0, next_max)
+        w_prev = tl.exp(running_max - safe_next)
+        w_prev = tl.where(running_max == -float("inf"), 0.0, w_prev)
+        w_i = tl.exp(m_i - safe_next)
+        w_i = tl.where(m_i == -float("inf"), 0.0, w_i)
+        running_acc = running_acc * w_prev[:, None] + acc_i * w_i[:, None]
+        running_denom = running_denom * w_prev + l_i * w_i
+        running_max = next_max
+
+    # m/l are D-independent: store once, from D-slice 0 (every slice computes
+    # the same merge over the same m_i/l_i — redundant but free).
+    if d_block_idx == 0:
+        state_base = token_idx * stride_state_t
+        tl.store(
+            max_score_ptr + state_base + head_offsets * stride_state_h,
+            running_max,
+            mask=head_mask,
+        )
+        tl.store(
+            denom_ptr + state_base + head_offsets * stride_state_h,
+            running_denom,
+            mask=head_mask,
+        )
+    tl.store(
+        acc_ptr
+        + token_idx * stride_acc_t
+        + head_offsets[:, None] * stride_acc_h
+        + nope_off[None, :] * stride_acc_d,
+        running_acc,
+        mask=head_mask[:, None] & nope_dmask[None, :],
+    )
+
+
+def _splitk_splits() -> int:
+    """S from VLLM_SPARSE_MLA_SPLITK (0/unset = disabled). Read per call so the
+    harness can toggle it; the getenv cost is ~1us, noise at these scales."""
+    try:
+        return int(os.getenv("VLLM_SPARSE_MLA_SPLITK", "0"))
+    except ValueError:
+        return 0
+
+
+_SPLITK_BUF_CACHE: dict = {}
+
+
+def _fused_gather_dequant_attend_splitk(
+    q,
+    cache_flat,
+    indices,
+    lens,
+    scale,
+    max_score,
+    denom,
+    acc,
+    num_splits: int,
+    *,
+    block_n: int = _FUSED_BLOCK_N,
+    num_warps: int = _FUSED_NUM_WARPS,
+    num_stages: int = _FUSED_NUM_STAGES,
+) -> None:
+    """Split-K launch: S partial CTAs per (token, head-block) + a combine pass.
+    Writes the SAME (max_score, denom, acc) state contract as the fused path."""
+    T, H, D = q.shape
+    K = indices.shape[1]
+    total_slots = cache_flat.shape[0]
+    head_block = _FUSED_HEAD_BLOCK if H >= 16 else max(next_power_of_2(max(H, 1)), 16)
+    hb_cnt = triton.cdiv(H, head_block)
+    tiles = triton.cdiv(K, block_n)
+    num_splits = max(1, min(num_splits, tiles))
+    tiles_per_split = triton.cdiv(tiles, num_splits)
+    # partials sized on the PADDED head grid (hb_cnt*head_block) so out-of-range
+    # heads have a slot to (mask-)address; combine masks them out identically.
+    Hp = hb_cnt * head_block
+    key = (T, Hp, num_splits, q.device.index)
+    bufs = _SPLITK_BUF_CACHE.get(key)
+    if bufs is None:
+        bufs = (
+            torch.empty((T, Hp, num_splits), dtype=torch.float32, device=q.device),
+            torch.empty((T, Hp, num_splits), dtype=torch.float32, device=q.device),
+            torch.empty((T, Hp, num_splits, _DV), dtype=torch.float32, device=q.device),
+        )
+        _SPLITK_BUF_CACHE[key] = bufs
+    m_part, l_part, acc_part = bufs
+
+    grid = (T, hb_cnt, num_splits)
+    _fused_gather_dequant_attn_splitk_kernel[grid](
+        q,
+        cache_flat,
+        indices,
+        lens,
+        m_part,
+        l_part,
+        acc_part,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        cache_flat.stride(0),
+        indices.stride(0),
+        indices.stride(1),
+        m_part.stride(0),
+        m_part.stride(1),
+        m_part.stride(2),
+        acc_part.stride(0),
+        acc_part.stride(1),
+        acc_part.stride(2),
+        acc_part.stride(3),
+        total_slots,
+        H,
+        _FP8DS_NOPE_DIM,
+        _FP8DS_ROPE_DIM,
+        _FP8DS_QUANT_TILE,
+        _FP8DS_NOPE_DIM,
+        _FP8DS_NOPE_DIM + 4 * _FP8DS_NUM_SCALES,
+        K,
+        tiles_per_split,
+        scale,
+        HEAD_BLOCK=head_block,
+        BLOCK_N=block_n,
+        BLOCK_NOPE=next_power_of_2(_FP8DS_NOPE_DIM),
+        BLOCK_ROPE=next_power_of_2(_FP8DS_ROPE_DIM),
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    COMBINE_BLOCK_D = 128
+    _splitk_combine_kernel[(T, hb_cnt, triton.cdiv(_FP8DS_NOPE_DIM, COMBINE_BLOCK_D))](
+        m_part,
+        l_part,
+        acc_part,
+        max_score,
+        denom,
+        acc,
+        m_part.stride(0),
+        m_part.stride(1),
+        m_part.stride(2),
+        acc_part.stride(0),
+        acc_part.stride(1),
+        acc_part.stride(2),
+        acc_part.stride(3),
+        max_score.stride(0),
+        max_score.stride(1),
+        acc.stride(0),
+        acc.stride(1),
+        acc.stride(2),
+        num_splits,
+        H,
+        _FP8DS_NOPE_DIM,
+        HEAD_BLOCK=head_block,
+        BLOCK_D=COMBINE_BLOCK_D,
+        num_warps=4,
+    )
+
+
 def _fused_gather_dequant_attend(
     q: torch.Tensor,  # [T, H, D] bf16
     cache_flat: torch.Tensor,  # [total_slots, 656] uint8
@@ -657,6 +1029,25 @@ def _fused_gather_dequant_attend(
     assert max_score.shape == (T, H) and denom.shape == (T, H)
     assert acc.shape[:2] == (T, H)
     assert acc.shape[2] >= _DV
+    _sk = _splitk_splits()
+    if _sk > 1 and T * triton.cdiv(H, _FUSED_HEAD_BLOCK) < 8:
+        # decode-ish shapes only: the plain grid already fills the GPU at
+        # prefill (T large), where split-K would just add combine overhead.
+        return _fused_gather_dequant_attend_splitk(
+            q,
+            cache_flat,
+            indices,
+            lens,
+            scale,
+            max_score,
+            denom,
+            acc,
+            _sk,
+            block_n=block_n,
+            num_warps=num_warps,
+            num_stages=num_stages,
+        )
+
     if head_block is None:
         # tl.dot needs the M dim >= 16; pad small head counts up to 16.
         head_block = _FUSED_HEAD_BLOCK if H >= 16 else next_power_of_2(max(H, 1))
