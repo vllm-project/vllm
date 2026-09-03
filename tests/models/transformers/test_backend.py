@@ -479,11 +479,11 @@ def replace_vocab_embeddings(model, **config_kwargs):
     stub.config = PretrainedConfig(
         vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
-    ids = Base._vocab_embedding_ids(stub)
+    embeddings = Base._vocab_embeddings(stub)
 
     replaced = []
     for name, module in list(model.named_modules()):
-        if id(module) in ids:
+        if module in embeddings:
             replaced.append(replace(module))
             attrsetter(name)(model, replaced[-1])
     return replaced
