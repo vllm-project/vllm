@@ -790,9 +790,12 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if self.use_v2_model_runner:
-            # A workspace resize after capture frees what the graphs point at.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+        if self.use_v2_model_runner:  # noqa: SIM102
+            if self.vllm_config.kernel_config.enable_jit_warmup:
+                # A workspace resize after capture frees what the graphs point at.
+                warmup_kernels(
+                    self.model_runner, self.execute_model, self.sample_tokens
+                )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
