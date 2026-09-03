@@ -91,7 +91,10 @@ def get_mem_info_wrapper(
             f"device must be int, str, torch.device, or None, got {type(device)}"
         )
 
-    return torch.xpu.mem_get_info(device)
+    # Call the underlying C++ implementation
+    free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
+
+    return free, total
 
 
 torch.accelerator.get_memory_info = get_mem_info_wrapper
