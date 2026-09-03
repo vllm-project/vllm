@@ -3,7 +3,7 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``KpoolTailSpec`` / ``KpoolTailManager``: exactly one block
+``pos % kpool`` (``CircularBufferSpec`` / ``CircularBufferManager``: exactly one block
 allocated per request, never grown, so only column 0 of its block table is
 ever written; the rest stays zero-initialized).
 
@@ -30,7 +30,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
-from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
+from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 KPOOL = 4
@@ -38,13 +38,12 @@ KPOOL = 4
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
-    spec = KpoolTailSpec(
+    spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
@@ -57,7 +56,7 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
 
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
-    request's single KpoolTailManager block, the remaining columns are never
+    request's single CircularBufferManager block, the remaining columns are never
     written and stay zero."""
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)

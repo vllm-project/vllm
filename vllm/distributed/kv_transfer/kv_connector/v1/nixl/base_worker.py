@@ -74,7 +74,6 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
@@ -416,11 +415,16 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+            # A ring without a PLE table (e.g. GLM-5.3-Flash's kpool tail) is
+            # allowed; Qwen CSA-linear carries exactly one single-layer PLE owner.
+            if len(ple_groups) > 1 or (
+                ple_groups and len(ple_groups[0][1].layer_names) != 1
+            ):
                 raise ValueError(
-                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                    "CSA-linear NIXL requires at most one single-layer PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0]
+            if ple_groups:
+                self._ple_group_index = ple_groups[0][0]
 
         if self._has_mamba:
             assert self._is_hma_required
@@ -1251,7 +1255,7 @@ class NixlBaseConnectorWorker:
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
 
-            if isinstance(layer_spec, KpoolTailSpec):
+            if isinstance(layer_spec, CircularBufferSpec):
                 compressed_owner = compressed_region_owners.get(cache.data_ptr())
                 if compressed_owner is not None:
                     owner_storage = compressed_owner.untyped_storage()

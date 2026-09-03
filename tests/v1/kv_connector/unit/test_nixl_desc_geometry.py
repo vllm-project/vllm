@@ -228,7 +228,7 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
         NixlConnectorWorker,
     )
     from vllm.v1.kv_cache_interface import (
-        KpoolTailSpec,
+        CircularBufferSpec,
         KVCacheConfig,
         KVCacheGroupSpec,
         KVCacheLayout,
@@ -254,14 +254,13 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
         tokens_per_state=tokens_per_state,
     )
     indexer_page_size = indexer_spec.page_size_bytes
-    tail_spec = KpoolTailSpec(
+    tail_spec = CircularBufferSpec(
         block_size=tokens_per_state,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
         page_size_padded=indexer_page_size,
-        sliding_window=tokens_per_state,
     )
 
     allocation_size = num_logical_blocks * indexer_page_size

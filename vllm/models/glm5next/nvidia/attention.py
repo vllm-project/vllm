@@ -34,7 +34,7 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -163,8 +163,8 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     ``index_kpool`` slots per request, overwritten in place by ``pos % kpool``
     as decode/spec-decode advances. Prefill seeds it (instead of discarding the
     tail raw K+gate); the connector transfers it across PD; decode reads it to
-    compress the boundary pool correctly. ``KpoolTailSpec`` /
-    ``KpoolTailManager`` provide the no-prune, 1-block/req allocation that lets
+    compress the boundary pool correctly. ``CircularBufferSpec`` /
+    ``CircularBufferManager`` provide the no-prune, 1-block/req allocation that lets
     the in-progress pool survive across steps and across transfer.
 
     Stores raw bf16 K (``head_dim``) as the "K" half of each block and the
@@ -190,13 +190,12 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
-        return KpoolTailSpec(
+        return CircularBufferSpec(
             block_size=self._index_kpool,
             num_kv_heads=2,
             head_size=self.head_dim,
             head_size_v=0,
             dtype=torch.bfloat16,
-            sliding_window=self._index_kpool,
         )
 
     def get_attn_backend(self):
@@ -288,7 +287,7 @@ class Indexer(nn.Module):
         # Paged tail cache (in-progress pool's raw K + gate score). Written by
         # prefill (seeds the boundary pool) and decode (per-step stash); read by
         # the decode kernel to compress the boundary pool. Transferred across PD
-        # so the decode side sees the prefill tail. See KpoolTailSpec/Manager.
+        # so the decode side sees the prefill tail. See CircularBufferSpec/Manager.
         self.tail_cache = Glm5NextTailCache(
             head_dim=self.head_dim,
             dtype=torch.bfloat16,

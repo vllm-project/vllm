@@ -22,9 +22,9 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -1175,12 +1175,12 @@ def _get_kv_cache_groups_glm5_next(
     tail_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, KpoolTailSpec)
+        if isinstance(spec, CircularBufferSpec)
     }
     attn_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if not isinstance(spec, (MambaSpec, KpoolTailSpec))
+        if not isinstance(spec, (MambaSpec, CircularBufferSpec))
     }
     if not mamba_specs or not all(
         type(spec) is MLAAttentionSpec for spec in attn_specs.values()
@@ -1274,7 +1274,7 @@ def _glm5_next_tensor_layout(
         inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
         if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
             attn_group = group
-        elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
+        elif all(isinstance(spec, CircularBufferSpec) for spec in inner.values()):
             tail_group = group
     if attn_group is None or not mamba_groups:
         return None
@@ -1311,7 +1311,7 @@ def _glm5_next_tensor_layout(
             UniformTypeKVCacheSpecs, tail_group.kv_cache_spec
         ).kv_cache_specs
         tail_pages = {
-            cast(KpoolTailSpec, spec).unpadded_page_size_bytes
+            cast(CircularBufferSpec, spec).unpadded_page_size_bytes
             for spec in tail_inner.values()
         }
         if len(tail_pages) != 1 or len(tail_names) != len(idx_names):
