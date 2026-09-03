@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import pytest
 import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
 
 from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
-from ...utils import check_logprobs_close
+from ...utils import TokensTextLogprobsPromptLogprobs, check_logprobs_close
 
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
@@ -29,6 +32,43 @@ AITER_MODEL_LIST = [
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
 ]
+
+
+def score_forced_continuations(
+    vllm_model,
+    prompt_token_ids: list[int],
+    continuations: list[list[int]],
+) -> list[list[float]]:
+    """
+    Teacher-forced per-token logprobs of each continuation, conditioned on
+    `prompt_token_ids`.
+
+    Returns one list per continuation, of the same length, holding the
+    logprob of each continuation token given everything before it. Summing
+    a list gives the joint logprob of that continuation; its last element
+    is the conditional logprob of the final token.
+
+    Every continuation is scored as its own sequence, so a token is
+    reachable no matter how low it ranks. All are submitted as one batch.
+    """
+    seqs = [list(prompt_token_ids) + list(c) for c in continuations]
+    outputs = vllm_model.generate_greedy_logprobs(
+        seqs, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
+    )
+
+    results: list[list[float]] = []
+    for continuation, output in zip(continuations, outputs):
+        output = cast(TokensTextLogprobsPromptLogprobs, output)
+        token_datas = cast(list[dict[int, Logprob] | None], output[3])
+        # The trailing prompt positions are the forced continuation.
+        tail = token_datas[len(token_datas) - len(continuation) :]
+        logprobs: list[float] = []
+        for token_id, token_data in zip(continuation, tail):
+            assert token_data is not None
+            logprobs.append(token_data[token_id].logprob)
+        results.append(logprobs)
+
+    return results
 
 
 # @maybe_test_rocm_aiter
@@ -227,21 +267,23 @@ def test_models(
             hf_rows = hf_full_logprobs[prompt_idx]
             hf_ids = list(hf_outputs[prompt_idx][0])
 
-            # vLLM is still resident, so score HF's sequence directly.
+            # vLLM is still resident, so score HF's token directly. The two
+            # sequences share every token before the divergence, so a single
+            # teacher-forced pass over HF's prefix yields the conditional
+            # logprob of HF's token under vLLM at that position.
             prompt_ids = list(
                 vllm_model.llm.get_tokenizer()(example_prompts[prompt_idx])["input_ids"]
             )
-            (hf_seq_in_vllm,) = vllm_model.score_forced_continuations(
-                prompt_ids, [hf_ids[: hf_idx + 1]]
+            (hf_seq_in_vllm,) = score_forced_continuations(
+                vllm_model, prompt_ids, [hf_ids[: hf_idx + 1]]
             )
+            hf_tok_in_vllm = hf_seq_in_vllm[-1]
 
-            # HF is unloaded, but the sequences share every token before the
-            # divergence, so only the final term differs from HF's own rows.
-            vllm_seq_in_hf = [
-                hf_rows[pos, hf_ids[pos]].item() for pos in range(hf_idx)
-            ] + [hf_rows[hf_idx, vllm_token_id].item()]
+            # HF is unloaded, but its recorded row at the divergence is
+            # conditioned on that same shared prefix.
+            vllm_tok_in_hf = hf_rows[hf_idx, vllm_token_id].item()
 
-            return sum(hf_seq_in_vllm), sum(vllm_seq_in_hf)
+            return hf_tok_in_vllm, vllm_tok_in_hf
 
         # Called here rather than after the block so that vLLM is still alive
         # to score a divergence.
@@ -251,9 +293,13 @@ def test_models(
             name_0="hf",
             name_1="vllm",
             cross_scorer=cross_score,
-            # Largest per-token gap, in nats, still counted as a tie. Measured
-            # on tiny-mixtral: ties span 0.000009..0.004810, failure 0.018413.
-            cross_logprob_tol=0.025,
+            # Largest gap, in nats, between the two cross-scored conditional
+            # logprobs still counted as a tie. bf16 logprobs at this magnitude
+            # are quantized to 1/64 = 0.015625 nats, so this is a 3-ULP bound
+            # with headroom for the fp32 residual on top of the exact multiple.
+            # Measured on tiny-mixtral: every genuine tie sits at <= 1 ULP
+            # (max 0.015778), the disjoint-top-k case at 3 ULP (0.047497).
+            cross_logprob_tol=0.05,
         )
 
     if prompt_embeds is not None:

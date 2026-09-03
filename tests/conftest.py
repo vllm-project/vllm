@@ -1271,42 +1271,6 @@ class VllmRunner:
             **kwargs,
         )
 
-    def score_forced_continuations(
-        self,
-        prompt_token_ids: list[int],
-        continuations: list[list[int]],
-    ) -> list[list[float]]:
-        """
-        Teacher-forced per-token logprobs of each continuation, conditioned on
-        `prompt_token_ids`.
-
-        Returns one list per continuation, of the same length, holding the
-        logprob of each continuation token given everything before it. Summing
-        a list gives the joint logprob of that continuation; its last element
-        is the conditional logprob of the final token.
-
-        Every continuation is scored as its own sequence, so a token is
-        reachable no matter how low it ranks. All are submitted as one batch.
-        """
-        seqs = [list(prompt_token_ids) + list(c) for c in continuations]
-        outputs = self.generate_greedy_logprobs(
-            seqs, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
-        )
-
-        results: list[list[float]] = []
-        for continuation, output in zip(continuations, outputs):
-            output = cast(TokensTextLogprobsPromptLogprobs, output)
-            token_datas = cast(list[dict[int, Logprob] | None], output[3])
-            # The trailing prompt positions are the forced continuation.
-            tail = token_datas[len(token_datas) - len(continuation) :]
-            logprobs: list[float] = []
-            for token_id, token_data in zip(continuation, tail):
-                assert token_data is not None
-                logprobs.append(token_data[token_id].logprob)
-            results.append(logprobs)
-
-        return results
-
     def generate_prompt_perplexity(
         self, prompts: list[str], mask: Optional[list[str]] = None
     ) -> list[float]:
