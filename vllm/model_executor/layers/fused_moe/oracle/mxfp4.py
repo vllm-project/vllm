@@ -768,6 +768,19 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
             # which would inflate weights and OOM.
             intermediate_size = round_up(intermediate_size, 128)
             hidden_size = round_up(hidden_size, 128)
+        elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            # Same situation as the K3 carve-out above, for the W4A4 backend. The generic
+            # 256 round-up turns a 384/partition intermediate (moe_intermediate 3072 at TP8)
+            # into 512, which allocates 33% oversized expert weights AND makes aiter's tuned
+            # config key inter_dim=512 -- a value that matches nothing, while aiter ships 16
+            # validated rows for exactly (gfx950, cu_num=256, model_dim=6144, inter_dim=384,
+            # expert=129, topk=5, fp4x2/fp4x2, per_1x32). 384 = 3 x 128 tiles cleanly in both
+            # FlyDSL stages (stage-1 tile_n 128, stage-2 tile_k 128).
+            # hidden_size deliberately stays on 256: gfx950 stage-1 mxfp4 kernels are generated
+            # with tile_ks=[256] only and stage-1 K is model_dim, so relaxing hidden to 128
+            # could leave some models with no legal stage-1 tile.
+            intermediate_size = round_up(intermediate_size, 128)
+            hidden_size = round_up(hidden_size, 256)
         else:
             intermediate_size = round_up(intermediate_size, 256)
             hidden_size = round_up(hidden_size, 256)
