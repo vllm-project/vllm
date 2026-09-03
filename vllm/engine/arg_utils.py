@@ -2995,6 +2995,12 @@ class EngineArgs:
                 "or produce incorrect outputs.",
             )
         elif (
+            model_config.runner_type == "generate"
+            and self.enable_chunked_prefill
+            and not default_chunked_prefill
+        ):
+            raise ValueError("This model does not support chunked prefill.")
+        elif (
             model_config.runner_type == "pooling"
             and self.enable_chunked_prefill
             and not default_chunked_prefill
@@ -3012,6 +3018,12 @@ class EngineArgs:
                 "%s prefix caching by default",
                 "Enabling" if default_prefix_caching else "Disabling",
             )
+        elif (
+            model_config.runner_type == "generate"
+            and self.enable_prefix_caching
+            and not default_prefix_caching
+        ):
+            raise ValueError("This model does not support prefix caching.")
         elif (
             model_config.runner_type == "pooling"
             and self.enable_prefix_caching

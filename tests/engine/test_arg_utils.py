@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from types import SimpleNamespace
 from typing import Annotated, Literal
 
 import pytest
@@ -29,6 +30,7 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -652,6 +654,35 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
+
+
+def test_non_causal_generation_model_defaults():
+    vllm_config = EngineArgs(model="sapientinc/HRM-Text-1B").create_engine_config(
+        UsageContext.OPENAI_API_SERVER
+    )
+
+    assert vllm_config.scheduler_config.enable_chunked_prefill is False
+    assert vllm_config.cache_config.enable_prefix_caching is False
+    assert (
+        vllm_config.scheduler_config.max_num_batched_tokens
+        >= vllm_config.model_config.max_model_len
+    )
+
+
+@pytest.mark.parametrize(
+    "option",
+    ["enable_chunked_prefill", "enable_prefix_caching"],
+)
+def test_non_causal_generation_model_rejects_unsupported_option(option):
+    model_config = SimpleNamespace(
+        is_chunked_prefill_supported=False,
+        is_prefix_caching_supported=False,
+        runner_type="generate",
+    )
+    engine_args = EngineArgs(**{option: True})
+
+    with pytest.raises(ValueError, match="does not support"):
+        engine_args._set_default_chunked_prefill_and_prefix_caching_args(model_config)
 
 
 @pytest.mark.parametrize(

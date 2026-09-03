@@ -21,7 +21,7 @@ its weight loader auto-splits the fused tensor along the output dim by
 """
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
 from torch import nn
@@ -459,6 +459,11 @@ class HrmTextForCausalLM(nn.Module):
 
     Reference: src/transformers/models/hrm_text/modeling_hrm_text.py
     """
+
+    # HRM uses bidirectional attention during prefill. Chunking the prompt or
+    # reusing cached prefix blocks would therefore produce incorrect outputs.
+    supports_chunked_prefill: ClassVar[bool] = False
+    supports_prefix_caching: ClassVar[bool] = False
 
     # On-disk weight key remap: HF stores attention weights as
     # `attn.{gqkv_proj,o_proj}.weight`; our model uses `self_attn.*`

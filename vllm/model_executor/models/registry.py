@@ -869,6 +869,8 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supports_chunked_prefill: bool
+    supports_prefix_caching: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
@@ -899,6 +901,8 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supports_chunked_prefill=getattr(model, "supports_chunked_prefill", True),
+            supports_prefix_caching=getattr(model, "supports_prefix_caching", True),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
