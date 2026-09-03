@@ -1305,6 +1305,13 @@ def get_default_config(
     dtype: str | None,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
+    """Return default Triton kernel tile configuration for fused MoE.
+
+    Selects BLOCK_SIZE_M/N/K, GROUP_SIZE_M, num_warps, and num_stages
+    based on batch size (M), expert count (E), data type, and optional
+    block-quantization shape. Fine-grained MoEs (E >= 128) use smaller
+    M tiles to reduce padding overhead.
+    """
     if envs.VLLM_BATCH_INVARIANT:
         return {
             "BLOCK_SIZE_M": 64,
