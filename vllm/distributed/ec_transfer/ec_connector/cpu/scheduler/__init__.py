@@ -98,6 +98,7 @@ class ECCPUScheduler:
         self._dtype: torch.dtype | None = None
         self._hidden_dim: int = 0
         self._element_size: int = 0
+        self._ack_timeout_s: float = 0.0
         if self._nixl_enabled:
             self._setup_nixl(vllm_config)
 
@@ -130,6 +131,12 @@ class ECCPUScheduler:
         self._dtype = vllm_config.model_config.dtype
         self._hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
         self._element_size = torch.empty(0, dtype=self._dtype).element_size()
+        # How long a consumer waits for an XferAck. The producer answers from
+        # its scheduler step, so its reply latency scales with the encoder's
+        # batch size: a deployment whose steps run longer must raise this.
+        self._ack_timeout_s = float(
+            self._ec_config.get_from_extra_config("consumer_ack_timeout_s", 2.0)
+        )
         self._compat_hash = compute_ec_compatibility_hash(
             vllm_version=VLLM_VERSION,
             model=str(vllm_config.model_config.model),
@@ -292,7 +299,7 @@ class ECCPUScheduler:
                 data=self._data,
                 compat_hash=self._compat_hash,
             )
-        deadline = time.monotonic() + 2.0  # CONSUMER_XFER_ACK_TIMEOUT_S
+        deadline = time.monotonic() + self._ack_timeout_s
         try:
             self._sessions[addr].start_xfer(mm_hash, indices, deadline)
         except Exception:
@@ -472,6 +479,17 @@ class ECCPUScheduler:
             mm_hash = feature.identifier
             entry = self._cache.get(mm_hash)
             if entry is None:
+                # Never saved, or evicted since. Publishing placeholder
+                # metadata without an address invites an orchestrator to
+                # rewrite the media into a reference to an encoding no
+                # consumer can fetch, leaving the decoder nothing to embed.
+                # Publish neither, so the media stays on the request.
+                items[mm_hash]["metadata"] = {}
+                logger.debug(
+                    "EC producer: mm_hash=%s absent at request_finished; "
+                    "announcing no metadata so the media is not rewritten away",
+                    mm_hash,
+                )
                 continue
             # Announce even if the save's GPU->mmap copy hasn't been
             # confirmed complete yet: a not-ready entry can't be evicted, so

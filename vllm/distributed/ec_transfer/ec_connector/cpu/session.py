@@ -60,7 +60,6 @@ logger = init_logger(__name__)
 PRODUCER_PIN_LEASE_S = 30.0
 _CONSUMER_READ_TIMEOUT_S = 20.0
 _CONSUMER_QUARANTINE_TIMEOUT_S = 60.0
-_CONSUMER_ACK_TIMEOUT_S = 2.0
 
 
 # ── XferState ─────────────────────────────────────────────────────────────────
