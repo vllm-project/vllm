@@ -90,6 +90,8 @@ steps:
 
 - label: ":nvidia: (L4) PyTorch Compilation Passes"
   key: pytorch-compilation-passes-unit-tests
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 45
   source_file_dependencies:
     - vllm/__init__.py
@@ -164,6 +166,8 @@ steps:
 # those SM90 cases skip while the architecture-compatible cases still run.
 - label: ":nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility"
   key: pytorch-fullgraph-cudagraph-l4-compatibility
+  device: l4
+  num_devices: 1
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/__init__.py

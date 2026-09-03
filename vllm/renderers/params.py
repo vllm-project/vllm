@@ -24,6 +24,18 @@ logger = init_logger(__name__)
 
 _S = TypeVar("_S", list[int], "torch.Tensor")
 
+# Prompt keys whose entry i describes token i of the prompt, so they must be
+# reduced with the same slice as the prompt tokens themselves. Anything added
+# here is truncated by `TokenizeParams.apply_post_tokenization`.
+# `_assistant_tokens_mask` is renderer-internal: `HfRenderer.render_messages`
+# stashes it on the prompt so `_process_tokens` can move it onto the engine
+# input.
+_PARALLEL_TO_PROMPT_TOKENS = (
+    "prompt_token_offsets",
+    "prompt_is_token_ids",
+    "_assistant_tokens_mask",
+)
+
 
 def merge_kwargs(
     defaults: dict[str, Any] | None,
@@ -369,6 +381,31 @@ class TokenizeParams:
 
         return text
 
+    def _get_text_truncation_offset(
+        self, tokenizer: TokenizerLike | None, text: str
+    ) -> int:
+        """Return the number of source characters removed from the left.
+
+        ``_text_len_check`` pre-truncates long text before tokenization when
+        an explicit truncation side is requested. Fast-tokenizer offsets are
+        then relative to that shortened string, so callers need this prefix
+        length to map them back to the original prompt.
+        """
+        max_input_tokens = self.max_input_tokens
+        if (
+            max_input_tokens is None
+            or tokenizer is None
+            or self.truncate_prompt_tokens is None
+            or self.truncation_side != "left"
+        ):
+            return 0
+
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if max_input_chars <= 0:
+            return 0
+
+        return max(len(text) - max_input_chars, 0)
+
     def _text_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply lowercase to prompt text if necessary."""
         return text.lower() if self.do_lower_case else text
@@ -420,8 +457,8 @@ class TokenizeParams:
         """The slice truncation applies to a sequence of `length` tokens.
 
         `None` means no truncation. Anything parallel to the prompt tokens
-        (see `prompt_token_offsets`) must be reduced with this same slice to
-        stay aligned with them.
+        must be reduced with this same slice to stay aligned with them; list
+        such keys in `_PARALLEL_TO_PROMPT_TOKENS`.
         """
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
@@ -511,10 +548,13 @@ class TokenizeParams:
                 tokenizer,
                 prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
-        offsets = cast(TokensPrompt, prompt).get("prompt_token_offsets")
-        if offsets is not None:
-            truncation = self._truncation_slice(tokenizer, len(offsets))
+        prompt_dict = cast(dict, prompt)
+        for key in _PARALLEL_TO_PROMPT_TOKENS:
+            parallel = prompt_dict.get(key)
+            if parallel is None:
+                continue
+            truncation = self._truncation_slice(tokenizer, len(parallel))
             if truncation is not None:
-                prompt["prompt_token_offsets"] = offsets[truncation]  # type: ignore[typeddict-unknown-key]
+                prompt_dict[key] = parallel[truncation]
 
         return prompt
