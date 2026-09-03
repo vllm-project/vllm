@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import ClassVar
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    KpoolTailSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -32,6 +34,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1210,6 +1214,10 @@ class CircularBufferManager(FullAttentionManager):
         return 0
 
 
+class KpoolTailManager(CircularBufferManager):
+    """One-block circular scratch manager for ``KpoolTailSpec``."""
+
+
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
@@ -2084,6 +2092,11 @@ def register_all_kvcache_specs(vllm_config):
         SlidingWindowMLASpec,
         SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        KpoolTailSpec,
+        KpoolTailManager,
+        uniform_type_base_spec=KpoolTailSpec,
     )
 
     KVCacheSpecRegistry.register(
