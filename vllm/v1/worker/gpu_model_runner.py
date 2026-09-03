@@ -1160,6 +1160,7 @@ class GPUModelRunner(
             kernel_block_sizes=self._kernel_block_sizes,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
