@@ -2432,6 +2432,60 @@ def test_finished_eager_store_caches_fa_partial_tail_for_hybrid_hit() -> None:
     assert is_async is True
 
 
+def test_finished_eager_store_does_not_duplicate_completed_partial_tail() -> None:
+    """Decode can fill the boundary block; the scan then already covers it."""
+    hash_block_size = BLOCK_SIZE
+    mamba_block_size = BLOCK_SIZE
+    attention_block_size = 4 * BLOCK_SIZE
+    dcp_world_size = 2
+    scheduler_block_size = attention_block_size * dcp_world_size
+    prompt_tokens = 5 * hash_block_size
+    fix = _make_hybrid_attention_mamba_scheduler(
+        num_cpu_blocks=32,
+        num_gpu_blocks=32,
+        attention_block_size=attention_block_size,
+        block_size=mamba_block_size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        dcp_world_size=dcp_world_size,
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    assert prompt_tokens % sched.fa_block_size != 0
+
+    producer = _make_cp_request(num_blocks=5, virtual_block_size=hash_block_size)
+    attention_blocks = gpu_pool.get_new_blocks(1)
+    gpu_pool.cache_partial_block(
+        request=producer,
+        block=attention_blocks[0],
+        num_tokens=prompt_tokens,
+        kv_cache_group_id=0,
+        block_size=scheduler_block_size,
+    )
+    mamba_blocks = gpu_pool.get_new_blocks(5)
+    gpu_pool.cache_full_blocks(
+        request=producer,
+        blocks=mamba_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=5,
+        kv_cache_group_id=1,
+        block_size=mamba_block_size,
+    )
+    producer_blocks = KVCacheBlocks(blocks=(attention_blocks, mamba_blocks))
+    sched.update_state_after_alloc(producer, producer_blocks, num_external_tokens=0)
+
+    # Decode carries the request past the physical attention block boundary, so
+    # the positional scan now considers the same block the partial tail names.
+    producer.num_computed_tokens = sched.fa_block_size
+    sched.request_finished_all_groups(producer, producer_blocks.get_block_ids())
+    finish_meta = sched.build_connector_meta(make_scheduler_output({}))
+
+    stored = finish_meta.store_gpu_blocks
+    assert attention_blocks[0].block_id in stored
+    assert len(stored) == len(set(stored))
+    assert len(finish_meta.store_cpu_blocks) == len(stored)
+
+
 def test_external_lookup_rejects_misaligned_local_prefix(caplog_vllm) -> None:
     scheduler_block_size = 4 * BLOCK_SIZE
     fix = _make_hybrid_attention_mamba_scheduler(block_size=scheduler_block_size)

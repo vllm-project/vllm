@@ -1149,6 +1149,21 @@ class SimpleCPUOffloadScheduler:
         if state is None or gpu_pool is None:
             return
         gpu_ids, _, block_meta = self._select_eager_blocks_to_store(state, block_ids)
+        partial_tail = self._find_fa_partial_tail_source(request, block_ids)
+        if (
+            partial_tail is not None
+            # Decode tokens can fill the boundary block, in which case the
+            # positional scan above already selected it. Appending again would
+            # allocate two CPU blocks for one GPU block.
+            and partial_tail not in gpu_ids
+            and len(gpu_ids) < self.cpu_block_pool.get_num_free_blocks()
+        ):
+            gpu_ids.append(partial_tail)
+            if block_meta is not None:
+                # The block's own hashes are registered at completion, so no
+                # capture is needed here; emit the event without a payload, as
+                # the size-mismatch fallback above already does.
+                block_meta.append({})
         if not gpu_ids:
             return
         cpu_blocks = self.cpu_block_pool.get_new_blocks(len(gpu_ids))
@@ -1157,6 +1172,59 @@ class SimpleCPUOffloadScheduler:
         )
         self._in_flight_store_gpu_blocks.update(gpu_ids)
         gpu_pool.touch([gpu_pool.blocks[bid] for bid in gpu_ids])
+
+    def _find_fa_partial_tail_source(
+        self, request: "Request", block_ids: tuple[list[int], ...]
+    ) -> int | None:
+        """Locate the full-attention prompt-tail block for a fine-grained hit.
+
+        Mirrors ``FullAttentionManager._cache_partial_tail_block``: only the
+        final prompt hash boundary is eligible, and boundaries that land on a
+        physical block edge are already covered by the positional scan.
+
+        Attention block tables are append-only, so the block is located
+        positionally, as the mooncake store and offloading connector also do;
+        no new core hand-off is required. The boundary key is registered at
+        completion along with the block's other hashes, so nothing has to be
+        captured here.
+        """
+        if not self.cpu_coordinator.enable_partial_hash_hits:
+            return None
+        assert self._gpu_block_pool is not None
+        boundary_tokens = (
+            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+        )
+        if boundary_tokens == 0 or boundary_tokens > request.num_computed_tokens:
+            return None
+        if boundary_tokens % self.fa_block_size == 0:
+            return None
+        block_idx = boundary_tokens // self.fa_block_size
+        fa_block_ids = block_ids[self.fa_gidx]
+        if block_idx >= len(fa_block_ids):
+            return None
+        gpu_block_id = fa_block_ids[block_idx]
+        gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
+        if gpu_block.is_null or gpu_block_id in self._in_flight_store_gpu_blocks:
+            return None
+        hash_idx = boundary_tokens // self.hash_block_size - 1
+        if hash_idx >= len(request.block_hashes):
+            return None
+        block_hash = make_block_hash_with_group_id(
+            request.block_hashes[hash_idx], self.fa_gidx
+        )
+        # Only worth copying when the boundary key is actually registered on
+        # the source block; completion replays the block's own hashes.
+        if (
+            gpu_block.block_hash != block_hash
+            and block_hash
+            not in self._gpu_block_pool.cached_block_hashes_by_block.get(
+                gpu_block_id, ()
+            )
+        ):
+            return None
+        if self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash):
+            return None
+        return gpu_block_id
 
     def _free_pending_cpu_hit(
         self, pending: tuple[tuple[list["KVCacheBlock"], ...], int, int]
