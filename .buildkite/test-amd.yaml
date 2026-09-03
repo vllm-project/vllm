@@ -128,7 +128,7 @@ steps:
   - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -2473,7 +2473,10 @@ steps:
   - vllm/model_executor/layers/quantization
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
   - tests/quantization
+  - tests/rocm/test_moe_weight_replay.py
   commands:
 
   # temporary install here since we need nightly, will move to requirements/test.in
@@ -2486,6 +2489,7 @@ steps:
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+  - pytest -v -s rocm/test_moe_weight_replay.py
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
