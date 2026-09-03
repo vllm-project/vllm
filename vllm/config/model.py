@@ -2456,7 +2456,12 @@ def _get_and_verify_max_len(
             # loading HF config
             rope_type = rp["rope_type"]
 
-            if rope_type not in ("su", "longrope", "llama3"):
+            if rope_type not in (
+                "su",
+                "longrope",
+                "llama3",
+                "telechat3-yarn",
+            ):
                 # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
                 # NOTE: This assumes all layer types have the same scaling factor.
                 scaling_factor = rp.get("factor", scaling_factor)
