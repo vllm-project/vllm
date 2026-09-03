@@ -188,6 +188,8 @@ def test_external_lb_server_info(server_manager):
     servers = server_manager.servers
     api_server_count = server_manager.api_server_count
 
+    _assert_expert_parallel_config(servers)
+
     for i, (server, _) in enumerate(servers):
         print(f"Testing {i=}")
 
@@ -217,8 +219,6 @@ async def test_external_lb_single_completion(
     servers: list[tuple[RemoteOpenAIServer, list[str]]],
     model_name: str,
 ) -> None:
-    _assert_expert_parallel_config(servers)
-
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
             model=model_name, prompt="Hello, my name is", max_tokens=10, temperature=1.0
