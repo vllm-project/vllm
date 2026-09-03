@@ -430,9 +430,22 @@ class MooncakeStoreScheduler:
         )
         for req_meta in save_metas:
             block_ids = block_state.block_ids.get(req_meta.req_id)
-            assert block_ids is not None, (
-                f"Missing current block table for store request {req_meta.req_id}"
-            )
+            if block_ids is None:
+                # The request is outside this step's snapshot, e.g. it was
+                # rescheduled after a KV load failure or is still waiting on
+                # an async load while a pending spec produces a save. Drop
+                # the save instead of crashing EngineCore, and roll the
+                # tracker back so a later step re-attempts the chunk.
+                logger.warning(
+                    "Missing current block table for store request %s; "
+                    "skipping its save this step",
+                    req_meta.req_id,
+                )
+                tracker = self._request_trackers.get(req_meta.req_id)
+                if tracker is not None:
+                    tracker.num_saved_tokens = req_meta.token_ids_start
+                meta.requests.remove(req_meta)
+                continue
             req_meta.block_ids = block_ids
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:

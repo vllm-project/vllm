@@ -476,6 +476,38 @@ def test_pending_load_does_not_co_queue_save():
     assert tracker.num_saved_tokens == 0
 
 
+def test_pending_save_outside_block_snapshot_is_dropped():
+    # Regression test for
+    # https://github.com/vllm-project/vllm/issues/54870: a request parked on
+    # a pending load whose spec cannot load (e.g. after a KV load failure
+    # recovery) still produces a save meta while sitting outside the step's
+    # kv_connector_block_state snapshot. The save must be dropped instead of
+    # crashing EngineCore, and the tracker must roll back so a later step
+    # re-attempts the chunk.
+    scheduler = _make_bare_scheduler()
+    _make_pending_load_unfinished_request(
+        scheduler,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=False,
+    )
+    output = _make_pending_load_scheduler_output()
+    output.kv_connector_block_state = KVConnectorBlockState(
+        block_ids={},
+        boundary_state_offloads={},
+    )
+
+    meta = scheduler.build_connector_meta(output)
+
+    assert meta.requests == []
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.num_saved_tokens == 0
+
+
 def _make_resumed_unfinished_request(
     scheduler: MooncakeStoreScheduler,
     *,
