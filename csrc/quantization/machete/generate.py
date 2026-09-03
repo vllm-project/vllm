@@ -48,11 +48,16 @@ torch::stable::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   [[maybe_unused]] auto K = args.A.size(1);
     
   if (!args.maybe_schedule) {
+    {%- if impl_config.heuristic|length == 1 and impl_config.heuristic[0][0] is none %}
+    {%- set default_schedule = impl_config.heuristic[0][1] %}
+        return impl_{{type_sig}}_sch_{{ gen_sch_sig(default_schedule) }}(args);
+    {%- else %}
     {%- for cond, s in impl_config.heuristic %}
     {%if cond is not none%}if ({{cond}})
     {%- else %}else
     {%- endif %}
         return impl_{{type_sig}}_sch_{{ gen_sch_sig(s) }}(args);{% endfor %}
+    {%- endif %}
   }
 
   {%- for s in impl_config.schedules %}
@@ -600,7 +605,30 @@ def generate():
         )
     ]
 
-    # TODO: Support W4A8 when ready
+    qqq_schedule = ScheduleConfig(
+        tile_shape_mn=(128, 16),
+        cluster_shape_mnk=(1, 1, 1),
+        **sch_common_params,
+    )
+    qqq_kernel_type = TypeConfig(
+        a=DataType.s8,
+        b=VLLMDataType.u4b8,
+        b_group_scale=DataType.f16,
+        b_group_zeropoint=DataType.void,
+        b_channel_scale=DataType.f32,
+        a_token_scale=DataType.f32,
+        out=DataType.f16,
+        accumulator=DataType.s32,
+    )
+    impl_configs.append(
+        ImplConfig(
+            qqq_kernel_type,
+            schedules=[qqq_schedule],
+            heuristic=[(None, qqq_schedule)],
+        )
+    )
+
+    # TODO: Support additional W4A8 configurations when ready.
     # # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
     # # TODO (LucasWilkinson): Further tuning required
     # qqq_tile_heuristic_config = {
