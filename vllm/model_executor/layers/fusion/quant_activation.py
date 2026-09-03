@@ -33,6 +33,7 @@ class QuantizedActivation:
     orig_dtype: torch.dtype
     orig_shape: torch.Size
     quant_key: QuantKey
+    layout: str | None = None
 
 
 def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
@@ -50,16 +51,19 @@ def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
     key = kernel.input_quant_key()
     if key is not None:
         layer.input_quant_key = key
+        get_layout = getattr(kernel, "input_quant_layout", None)
+        layer.input_quant_layout = get_layout() if callable(get_layout) else None
 
 
 def as_quantized_activation(
-    x: "torch.Tensor | QuantizedActivation", expected_key: QuantKey | None
+    x: "torch.Tensor | QuantizedActivation", expected_key: QuantKey | None,
+    expected_layout: str | None = None
 ) -> "QuantizedActivation | None":
     """Validate and narrow a pre-quantized activation for a consumer kernel.
 
-    Returns the QuantizedActivation when x is one whose key matches the
-    kernel's declared expected_key, and None when x is a plain tensor (the
-    caller quantizes in-kernel). Raises on a key mismatch so a wrongly routed
+    Returns the QuantizedActivation when x is one whose key and layout matches the
+    kernel's declared expected_key and expected_layout, and None when x is a plain tensor (the
+    caller quantizes in-kernel). Raises on a mismatch so a wrongly routed
     activation fails loudly instead of being silently re-quantized.
     """
     if not isinstance(x, QuantizedActivation):
@@ -67,5 +71,9 @@ def as_quantized_activation(
     assert x.quant_key == expected_key, (
         f"QuantizedActivation key {x.quant_key} != consumer kernel "
         f"input_quant_key {expected_key}"
+    )
+    assert x.layout == expected_layout, (
+        f"QuantizedActivation layout {x.layout!r} != consumer kernel "
+        f"input_quant_layout {expected_layout!r}"
     )
     return x
