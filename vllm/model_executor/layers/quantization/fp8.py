@@ -604,7 +604,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
@@ -616,7 +616,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            torch.zeros(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
