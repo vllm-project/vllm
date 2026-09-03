@@ -18,6 +18,7 @@ from vllm.compilation.breakable_cudagraph import (
 )
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
@@ -105,6 +106,15 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+    )
+
+
+def has_compiled_submodule(model: nn.Module) -> bool:
+    """Whether any submodule is an active @support_torch_compile module."""
+    return any(
+        isinstance(m, TorchCompileWithNoGuardsWrapper)
+        and not getattr(m, "do_not_compile", True)
+        for m in model.modules()
     )
 
 
@@ -510,6 +520,16 @@ class ModelCudaGraphManager(CudaGraphManager):
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
 
+        if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
+            self.use_breakable_cg or has_compiled_submodule(model)
+        ):
+            raise RuntimeError(
+                f"{type(model).__name__}: piecewise CUDA graphs "
+                f"(cudagraph_mode={self.cudagraph_mode.name}) unavailable, "
+                "model is not torch-compiled and breakable CUDA graph is off. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
+            )
+
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
             warmup: bool,
@@ -864,6 +884,14 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
+    # Invalidate the align-mode Mamba group metadata cached from the
+    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
+    # place Mamba layers into a different group layout, so it must be
+    # re-derived from the real config.
+    if hasattr(runner.model_state, "_mamba_group_ids"):
+        runner.model_state._mamba_group_ids = []
+    if hasattr(runner.model_state, "_mamba_spec"):
+        runner.model_state._mamba_spec = None
     if hasattr(runner, "kv_caches"):
         runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):

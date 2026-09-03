@@ -5,7 +5,7 @@ from argparse import Namespace
 
 import pytest
 
-from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
