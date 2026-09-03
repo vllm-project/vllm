@@ -241,3 +241,30 @@ def test_regular_decode_restores_previous_spec_state():
     ]
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.tolist() == [3]
+
+
+def test_mixed_batch_restores_non_spec_state():
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(seq_lens=[65, 20], query_lens=[1, 3])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([3, 2], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([-1, 2], dtype=torch.int32),
+    )
+
+    assert meta.non_spec_state_indices_tensor is not None
+    assert meta.non_spec_state_indices_tensor.tolist() == [
+        common.block_table_tensor[0, 0].item()
+    ]
+    assert meta.spec_decode_src_indices is not None
+    assert meta.spec_decode_src_indices.tolist() == [
+        common.block_table_tensor[0, 2].item()
+    ]
+    assert meta.non_spec_num_accepted is not None
+    assert meta.non_spec_num_accepted.tolist() == [3]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [2]

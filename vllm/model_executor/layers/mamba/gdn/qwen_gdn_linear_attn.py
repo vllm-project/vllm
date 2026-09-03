@@ -1372,7 +1372,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             conv_num_accepted = (
-                num_accepted_tokens if spec_decode_src_indices is not None else None
+                attn_metadata.non_spec_num_accepted
+                if attn_metadata.non_spec_num_accepted is not None
+                else num_accepted_tokens
             )
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"

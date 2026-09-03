@@ -69,6 +69,7 @@ class GDNAttentionMetadata:
     # When set, conv/ssm state must be copied from these blocks to the
     # blocks in non_spec_state_indices_tensor before the decode kernel.
     spec_decode_src_indices: torch.Tensor | None = None
+    non_spec_num_accepted: torch.Tensor | None = None
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -252,6 +253,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
         spec_decode_src_indices = None
+        non_spec_num_accepted = None
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(m, decode_threshold=1)
@@ -389,6 +391,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
+
+                assert num_accepted_tokens is not None
+                non_spec_num_accepted = num_accepted_tokens[non_spec_sequence_masks_cpu]
+                if (
+                    self.use_spec_decode
+                    and non_spec_num_accepted.numel() > 0
+                    and (non_spec_num_accepted > 1).any()
+                ):
+                    non_spec_block_rows = block_table_tensor[
+                        non_spec_sequence_masks_cpu
+                    ]
+                    source_columns = (non_spec_num_accepted - 1).clamp(min=0)
+                    spec_decode_src_indices = non_spec_block_rows[
+                        torch.arange(
+                            non_spec_block_rows.size(0),
+                            device=block_table_tensor.device,
+                        ),
+                        source_columns,
+                    ]
+                    non_spec_num_accepted = non_spec_num_accepted.clamp(min=1)
+                else:
+                    non_spec_num_accepted = None
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
@@ -545,6 +569,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
             spec_decode_src_indices=spec_decode_src_indices,
+            non_spec_num_accepted=non_spec_num_accepted,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
