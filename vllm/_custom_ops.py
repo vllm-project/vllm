@@ -3419,31 +3419,6 @@ class CPUQuantMethod(IntEnum):
     MXFP4 = 4
 
 
-if hasattr(torch.ops._C, "fused_experts_cpu"):
-
-    @register_fake("_C::fused_experts_cpu")
-    def fused_experts_cpu_fake(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        inplace: bool,
-        moe_comp_method: CPUQuantMethod,
-        w1_scale: torch.Tensor | None,
-        w2_scale: torch.Tensor | None,
-        w1_zero: torch.Tensor | None,
-        w2_zero: torch.Tensor | None,
-        block_size: list[int] | None,
-        w1_bias: torch.Tensor | None,
-        w2_bias: torch.Tensor | None,
-        alpha: float | None,
-        limit: float | None,
-        is_vnni: bool,
-    ) -> torch.Tensor:
-        return torch.empty_like(hidden_states)
-
-
 if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
 
     @register_fake("_C::dynamic_4bit_int_moe")
@@ -3463,12 +3438,12 @@ if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
 
 
 def fused_experts_cpu(
+    out: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool,
     moe_comp_method: CPUQuantMethod,
     w1_scale: torch.Tensor | None,
     w2_scale: torch.Tensor | None,
@@ -3480,14 +3455,14 @@ def fused_experts_cpu(
     alpha: float | None = None,
     limit: float | None = None,
     is_vnni: bool = True,
-) -> torch.Tensor:
-    return torch.ops._C.fused_experts_cpu(
+) -> None:
+    torch.ops._C.fused_experts_cpu(
+        out,
         hidden_states,
         w1,
         w2,
         topk_weights,
         topk_ids,
-        inplace,
         moe_comp_method,
         w1_scale,
         w2_scale,
@@ -4121,6 +4096,393 @@ def amx_mla_concat_and_cache(
     torch.ops._C.concat_and_cache_mla_cpu(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
 
+if hasattr(torch.ops._C, "hc_pre_fused_cpu"):
+
+    @register_fake("_C::hc_pre_fused_cpu")
+    def hc_pre_fused_cpu_fake(
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        hc_mult: int,
+        sinkhorn_iters: int,
+        rms_eps: float,
+        hc_eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        t, _, d = x.shape
+        y = x.new_empty((t, d))
+        post = x.new_empty((t, hc_mult), dtype=torch.float32)
+        comb = x.new_empty((t, hc_mult, hc_mult), dtype=torch.float32)
+        return y, post, comb
+
+
+def hc_pre_fused_cpu(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_mult: int,
+    sinkhorn_iters: int,
+    rms_eps: float,
+    hc_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.hc_pre_fused_cpu(
+        x, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, rms_eps, hc_eps
+    )
+
+
+if hasattr(torch.ops._C, "hc_post_fused_cpu"):
+
+    @register_fake("_C::hc_post_fused_cpu")
+    def hc_post_fused_cpu_fake(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> torch.Tensor:
+        t, d = x.shape
+        hc = residual.size(1)
+        return x.new_empty((t, hc, d))
+
+
+def hc_post_fused_cpu(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.hc_post_fused_cpu(x, residual, post, comb)
+
+
+if hasattr(torch.ops._C, "hc_head_fused_cpu"):
+
+    @register_fake("_C::hc_head_fused_cpu")
+    def hc_head_fused_cpu_fake(
+        x: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        hc_eps: float,
+        norm_eps: float,
+    ) -> torch.Tensor:
+        t, _, d = x.shape
+        return x.new_empty((t, d))
+
+
+def hc_head_fused_cpu(
+    x: torch.Tensor,
+    hc_fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    hc_eps: float,
+    norm_eps: float,
+) -> torch.Tensor:
+    return torch.ops._C.hc_head_fused_cpu(x, hc_fn, hc_scale, hc_base, hc_eps, norm_eps)
+
+
+if hasattr(torch.ops._C, "fused_qnorm_rope_kv_insert_cpu"):
+
+    @register_fake("_C::fused_qnorm_rope_kv_insert_cpu")
+    def fused_qnorm_rope_kv_insert_cpu_fake(
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        swa_kv_cache_2d: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        q_head_padded: int,
+        eps: float,
+        cache_block_size: int,
+    ) -> torch.Tensor:
+        num_tokens_full, _, head_dim = q.shape
+        return q.new_empty((num_tokens_full, q_head_padded, head_dim))
+
+
+def fused_qnorm_rope_kv_insert_cpu(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    positions: torch.Tensor,
+    swa_kv_cache_2d: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    q_head_padded: int,
+    eps: float,
+    cache_block_size: int,
+) -> torch.Tensor:
+    return torch.ops._C.fused_qnorm_rope_kv_insert_cpu(
+        q,
+        kv,
+        positions,
+        swa_kv_cache_2d,
+        slot_mapping,
+        cos_sin_cache,
+        q_head_padded,
+        eps,
+        cache_block_size,
+    )
+
+
+def flash_mla_with_kvcache_cpu(
+    out: torch.Tensor,
+    q: torch.Tensor,
+    window_cache_2d: torch.Tensor,
+    window_slots: torch.Tensor,
+    window_block_size: int,
+    compressed_cache_2d: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    compressed_block_size: int,
+    attn_sink: torch.Tensor,
+    scale: float,
+) -> None:
+    torch.ops._C.flash_mla_with_kvcache_cpu(
+        out,
+        q,
+        window_cache_2d,
+        window_slots,
+        window_block_size,
+        compressed_cache_2d,
+        compressed_slots,
+        compressed_block_size,
+        attn_sink,
+        scale,
+    )
+
+
+def save_partial_states_cpu(
+    kv: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    state_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    torch.ops._C.save_partial_states_cpu(
+        kv, score, ape, positions, state_cache, slot_mapping
+    )
+
+
+def compress_norm_rope_store_cpu(
+    state_cache: torch.Tensor,
+    gather_slots: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    kv_cache_2d: torch.Tensor,
+    kv_cache_block_size: int,
+    compress_ratio: int,
+) -> None:
+    torch.ops._C.compress_norm_rope_store_cpu(
+        state_cache,
+        gather_slots,
+        positions,
+        kv_slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        kv_cache_2d,
+        kv_cache_block_size,
+        compress_ratio,
+    )
+
+
+def compress_norm_rope_store_indexer_cpu(
+    state_cache: torch.Tensor,
+    gather_slots: torch.Tensor,
+    positions: torch.Tensor,
+    kv_slot_mapping: torch.Tensor,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    cos_sin_cache: torch.Tensor,
+    kv_cache_2d: torch.Tensor,
+    kv_cache_block_size: int,
+    compress_ratio: int,
+) -> None:
+    torch.ops._C.compress_norm_rope_store_indexer_cpu(
+        state_cache,
+        gather_slots,
+        positions,
+        kv_slot_mapping,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        kv_cache_2d,
+        kv_cache_block_size,
+        compress_ratio,
+    )
+
+
+if hasattr(torch.ops._C, "fp8_paged_mqa_logits_cpu"):
+
+    @register_fake("_C::fp8_paged_mqa_logits_cpu")
+    def fp8_paged_mqa_logits_cpu_fake(
+        q_fp8: torch.Tensor,
+        kvcache_fp8: torch.Tensor,
+        weight: torch.Tensor,
+        seq_lens: torch.Tensor,
+        page_table: torch.Tensor,
+        block_size: int,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        batch_size = q_fp8.size(0)
+        return q_fp8.new_empty((batch_size, max_seq_len), dtype=torch.float32)
+
+
+def fp8_paged_mqa_logits_cpu(
+    q_fp8: torch.Tensor,
+    kvcache_fp8: torch.Tensor,
+    weight: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    block_size: int,
+    max_seq_len: int,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_paged_mqa_logits_cpu(
+        q_fp8, kvcache_fp8, weight, seq_lens, page_table, block_size, max_seq_len
+    )
+
+
+def topk_transform_512_cpu(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_tables: torch.Tensor,
+    out_page_indices: torch.Tensor,
+    page_size: int,
+    out_raw_indices: torch.Tensor | None = None,
+) -> None:
+    torch.ops._C.topk_transform_512_cpu(
+        scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices
+    )
+
+
+def fused_indexer_q_rope_quant_cpu(
+    positions: torch.Tensor,
+    index_q: torch.Tensor,
+    index_q_cos_sin_cache: torch.Tensor,
+    index_q_fp8: torch.Tensor,
+    index_weights: torch.Tensor,
+    index_weights_softmax_scale: float,
+    index_weights_head_scale: float,
+    index_weights_out: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_indexer_q_rope_quant_cpu(
+        positions,
+        index_q,
+        index_q_cos_sin_cache,
+        index_q_fp8,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        index_weights_out,
+    )
+
+
+if hasattr(torch.ops._C, "biased_topk_cpu"):
+
+    @register_fake("_C::biased_topk_cpu")
+    def biased_topk_cpu_fake(
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+        scoring_func: str,
+        num_fused_shared_experts: int,
+        routed_scaling_factor: float | None,
+        apply_routed_scaling_factor_on_output: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = hidden_states.size(0)
+        topk_weights = hidden_states.new_empty((num_tokens, topk), dtype=torch.float32)
+        topk_ids = hidden_states.new_empty((num_tokens, topk), dtype=torch.int32)
+        return topk_weights, topk_ids
+
+
+def biased_topk_cpu(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    scoring_func: str,
+    num_fused_shared_experts: int,
+    routed_scaling_factor: float | None,
+    apply_routed_scaling_factor_on_output: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.biased_topk_cpu(
+        hidden_states,
+        gating_output,
+        correction_bias,
+        topk,
+        renormalize,
+        scoring_func,
+        num_fused_shared_experts,
+        routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
+    )
+
+
+if hasattr(torch.ops._C, "hash_topk_cpu"):
+
+    @register_fake("_C::hash_topk_cpu")
+    def hash_topk_cpu_fake(
+        gating_output: torch.Tensor,
+        tid2eid: torch.Tensor,
+        topk: int,
+        scoring_func: str,
+        num_fused_shared_experts: int,
+        num_experts: int,
+        routed_scaling_factor: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = gating_output.size(0)
+        topk_weights = gating_output.new_empty((num_tokens, topk), dtype=torch.float32)
+        topk_ids = gating_output.new_empty((num_tokens, topk), dtype=torch.int32)
+        return topk_weights, topk_ids
+
+
+def hash_topk_cpu(
+    gating_output: torch.Tensor,
+    tid2eid: torch.Tensor,
+    topk: int,
+    scoring_func: str,
+    num_fused_shared_experts: int,
+    num_experts: int,
+    routed_scaling_factor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.hash_topk_cpu(
+        gating_output,
+        tid2eid,
+        topk,
+        scoring_func,
+        num_fused_shared_experts,
+        num_experts,
+        routed_scaling_factor,
+    )
+
+
+if hasattr(torch.ops._C, "inverse_gptj_rope_o_proj_cpu"):
+
+    @register_fake("_C::inverse_gptj_rope_o_proj_cpu")
+    def inverse_gptj_rope_o_proj_cpu_fake(
+        o: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        rope_dim: int,
+    ) -> torch.Tensor:
+        return o.new_empty(o.shape, dtype=torch.float32)
+
+
+def inverse_gptj_rope_o_proj_cpu(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    return torch.ops._C.inverse_gptj_rope_o_proj_cpu(
+        o, positions, cos_sin_cache, rope_dim
+    )
+
+
 def cpu_gemm_wna16(
     input: torch.Tensor,
     q_weight: torch.Tensor,
@@ -4171,6 +4533,7 @@ def cpu_prepack_moe_weight_int8(
 
 
 def cpu_fused_moe(
+    out: torch.Tensor,
     input: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -4181,10 +4544,9 @@ def cpu_fused_moe(
     act: str,
     isa: str,
     skip_weighted: bool = False,
-) -> torch.Tensor:
-    output = torch.empty_like(input)
+) -> None:
     torch.ops._C.cpu_fused_moe(
-        output,
+        out,
         input,
         w13,
         w2,
@@ -4196,10 +4558,10 @@ def cpu_fused_moe(
         act,
         isa,
     )
-    return output
 
 
 def cpu_fused_moe_int8(
+    out: torch.Tensor,
     input: torch.Tensor,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -4212,10 +4574,9 @@ def cpu_fused_moe_int8(
     act: str,
     isa: str,
     skip_weighted: bool = False,
-) -> torch.Tensor:
-    output = torch.empty_like(input)
+) -> None:
     torch.ops._C.cpu_fused_moe_int8(
-        output,
+        out,
         input,
         w13,
         w2,
@@ -4229,7 +4590,6 @@ def cpu_fused_moe_int8(
         act,
         isa,
     )
-    return output
 
 
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):

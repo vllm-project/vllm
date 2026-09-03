@@ -348,6 +348,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
@@ -366,6 +367,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         ]
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
+    if current_platform.is_cpu():
+        return [Mxfp4MoeBackend.CPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -621,17 +624,6 @@ def select_mxfp4_moe_backend(
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
             Mxfp4MoeBackend.XPU,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
-    if current_platform.is_cpu():
-        backend = Mxfp4MoeBackend.CPU
-        logger.info_once(_make_log_backend(backend))
-        return _return_or_raise(
-            Mxfp4MoeBackend.CPU,
             config,
             kMxfp4Static,
             None,
@@ -1807,11 +1799,36 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias=w2_bias,
             _cache_permute_indices=_cache_permute_indices,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_mxfp4_moe_layer_for_cpu,
+        )
+
+        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
+            prepare_mxfp4_moe_layer_for_cpu(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            )
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            packed_w13,
+            packed_w2,
+            packed_w13_scale,
+            packed_w2_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, or "
-            "emulation backend."
+            "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, "
+            "CPU, or emulation backend."
         )
 
 

@@ -871,13 +871,13 @@ static inline void check_moe_scales(
 // topk_ids: [M, topk] (int32_t)
 //
 
-at::Tensor fused_experts_cpu(
+void fused_experts_cpu(
+    at::Tensor& out,
     at::Tensor& hidden_states,
     at::Tensor& w1,
     at::Tensor& w2,
     at::Tensor& topk_weights,
     at::Tensor& topk_ids,
-    bool inplace,
     int64_t moe_comp_method,
     const std::optional<at::Tensor>& w1_scale,
     const std::optional<at::Tensor>& w2_scale,
@@ -943,7 +943,7 @@ at::Tensor fused_experts_cpu(
   // check scales
   check_moe_scales(moe_comp_method, w1_scale, w2_scale, block_size);
 
-  at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
+  at::Tensor& out_hidden_states = out;
 
   // NB: worst case is each expert holds a block with remainder of 1
   //   1. sorted_ids : [M * topk + E * (BLOCK_M - 1)]
@@ -1214,7 +1214,6 @@ at::Tensor fused_experts_cpu(
           with_bias);
     }
   });
-  return out_hidden_states;
 }
 
 // shared expert kernel

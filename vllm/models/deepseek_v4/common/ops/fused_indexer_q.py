@@ -452,6 +452,19 @@ def fused_indexer_q_rope_quant(
             index_q_fp8,
             index_weights_out,
         )
+    elif current_platform.is_cpu():
+        from vllm._custom_ops import fused_indexer_q_rope_quant_cpu
+
+        fused_indexer_q_rope_quant_cpu(
+            positions.contiguous(),
+            index_q.to(torch.float32),
+            index_q_cos_sin_cache.to(torch.float32).contiguous(),
+            index_q_fp8,
+            index_weights.to(torch.float32),
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_weights_out,
+        )
     else:
         _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
             positions,
