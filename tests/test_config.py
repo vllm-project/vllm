@@ -2609,6 +2609,7 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
 
 # --- StructuredOutputsConfig tests ---
 
+
 def test_structured_outputs_config_max_whitespace_cnt_default():
     """Test that max_whitespace_cnt defaults to 2."""
     from vllm.config import StructuredOutputsConfig
@@ -2643,4 +2644,6 @@ def test_structured_outputs_config_disable_any_whitespace_backends():
         StructuredOutputsConfig(disable_any_whitespace=True, backend="outlines")
 
     with pytest.raises(ValueError, match="disable_any_whitespace is only supported"):
-        StructuredOutputsConfig(disable_any_whitespace=True, backend="lm-format-enforcer")
+        StructuredOutputsConfig(
+            disable_any_whitespace=True, backend="lm-format-enforcer"
+        )

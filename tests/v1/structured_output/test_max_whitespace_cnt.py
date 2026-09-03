@@ -7,7 +7,12 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from vllm.config import ModelConfig, SchedulerConfig, StructuredOutputsConfig, VllmConfig
+from vllm.config import (
+    ModelConfig,
+    SchedulerConfig,
+    StructuredOutputsConfig,
+    VllmConfig,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -51,9 +56,7 @@ class TestMaxWhitespaceCnt:
         )
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
-    def test_max_whitespace_cnt_default(
-        self, mock_xgr, mock_vllm_config
-    ):
+    def test_max_whitespace_cnt_default(self, mock_xgr, mock_vllm_config):
         """Verify default max_whitespace_cnt=2 is passed to compile_json_schema."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
@@ -72,9 +75,7 @@ class TestMaxWhitespaceCnt:
         assert kwargs.get("any_whitespace") is True
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
-    def test_max_whitespace_cnt_one(
-        self, mock_xgr, mock_vllm_config
-    ):
+    def test_max_whitespace_cnt_one(self, mock_xgr, mock_vllm_config):
         """Verify max_whitespace_cnt=1 is passed correctly."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
@@ -91,9 +92,7 @@ class TestMaxWhitespaceCnt:
         assert call.call_args.kwargs.get("max_whitespace_cnt") == 1
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
-    def test_max_whitespace_cnt_none(
-        self, mock_xgr, mock_vllm_config
-    ):
+    def test_max_whitespace_cnt_none(self, mock_xgr, mock_vllm_config):
         """Verify max_whitespace_cnt=None (unbounded) is passed correctly."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
@@ -110,9 +109,7 @@ class TestMaxWhitespaceCnt:
         assert call.call_args.kwargs.get("max_whitespace_cnt") is None
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
-    def test_max_whitespace_cnt_json_object(
-        self, mock_xgr, mock_vllm_config
-    ):
+    def test_max_whitespace_cnt_json_object(self, mock_xgr, mock_vllm_config):
         """Verify max_whitespace_cnt is passed for JSON object (no schema) case."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
@@ -129,9 +126,7 @@ class TestMaxWhitespaceCnt:
         assert call.call_args.kwargs.get("max_whitespace_cnt") == 2
 
     @patch("vllm.v1.structured_output.backend_xgrammar.xgr")
-    def test_disable_any_whitespace_overrides(
-        self, mock_xgr, mock_vllm_config
-    ):
+    def test_disable_any_whitespace_overrides(self, mock_xgr, mock_vllm_config):
         """Verify disable_any_whitespace=True is syntactic sugar for
         any_whitespace=False + max_whitespace_cnt=0."""
         mock_compiled = Mock()
@@ -172,7 +167,7 @@ class TestXgrammarFSMWhitespace:
         from xgrammar import TokenizerInfo, VocabType
 
         return TokenizerInfo(
-            encoded_vocab=['{', '}', ':', '"', ' ', 'a', '1', '\n', '\t'],
+            encoded_vocab=["{", "}", ":", '"', " ", "a", "1", "\n", "\t"],
             vocab_type=VocabType.RAW,
             vocab_size=9,
             stop_token_ids=[],
@@ -181,7 +176,7 @@ class TestXgrammarFSMWhitespace:
 
     def _advance_to_value(self, matcher) -> None:
         """Advance FSM to the JSON value position (after the colon)."""
-        for ch in ['{', '"', 'a', '"', ':']:
+        for ch in ["{", '"', "a", '"', ":"]:
             assert matcher.accept_string(ch), f"Failed to accept {repr(ch)}"
 
     def test_fsm_limits_whitespace_with_max_cnt_2(self, tokenizer_info):
@@ -219,7 +214,7 @@ class TestXgrammarFSMWhitespace:
 
         # All 5 spaces accepted (unbounded)
         for i in range(5):
-            assert matcher.accept_string(" "), f"Space #{i+1} should be accepted"
+            assert matcher.accept_string(" "), f"Space #{i + 1} should be accepted"
 
     def test_fsm_single_whitespace_limit(self, tokenizer_info):
         """With max_whitespace_cnt=1, FSM rejects 2nd+ consecutive space."""
@@ -275,11 +270,11 @@ class TestXgrammarFSMWhitespace:
         matcher = GrammarMatcher(compiled)
 
         # Advance to string value position: {"a":"
-        for ch in ['{', '"', 'a', '"', ':', '"']:
+        for ch in ["{", '"', "a", '"', ":", '"']:
             assert matcher.accept_string(ch), f"Failed to accept {repr(ch)}"
 
         # Inside string value: unlimited spaces should be allowed
         for i in range(5):
             assert matcher.accept_string(" "), (
-                f"Space #{i+1} inside string value should be accepted"
+                f"Space #{i + 1} inside string value should be accepted"
             )
