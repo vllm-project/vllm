@@ -5,6 +5,8 @@ from typing import Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
+    ORIGIN_NEW,
+    ORIGIN_REUSED,
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
@@ -338,6 +340,7 @@ class BlockPool:
                     block_size=block_size,
                     kv_cache_group_id=kv_cache_group_id,
                     extra_keys_list=extra_keys_list,
+                    origin=ORIGIN_NEW,
                 )
             )
 
@@ -351,12 +354,14 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         extra_keys_list: list[tuple[Any, ...] | None],
+        origin: str,
     ) -> BlockStored:
         """Build a ``BlockStored`` KV event for ``request``.
 
         Shared by ``cache_full_blocks`` (newly cached blocks) and
         ``emit_cached_block_events`` (prefix-cache-reused blocks) so both emit
-        identical event shapes for downstream consumers.
+        identical event shapes for downstream consumers, with ``origin``
+        distinguishing them.
         """
         return BlockStored(
             block_hashes=block_hashes,
@@ -368,6 +373,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            origin=origin,
         )
 
     def emit_cached_block_events(
@@ -439,6 +445,7 @@ class BlockPool:
                 block_size=block_size,
                 kv_cache_group_id=kv_cache_group_id,
                 extra_keys_list=extra_keys_list,
+                origin=ORIGIN_REUSED,
             )
         )
 
@@ -539,6 +546,7 @@ class BlockPool:
                     else None,
                     extra_keys=[extra_keys],
                     group_idx=kv_cache_group_id,
+                    origin=ORIGIN_NEW,
                 )
             )
         return block_hash_with_group_id
