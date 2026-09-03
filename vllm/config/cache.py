@@ -3,6 +3,7 @@
 
 from collections.abc import Callable
 from dataclasses import field
+from functools import cache
 from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -13,8 +14,27 @@ from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     kv_cache_uses_per_token_head_scales,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 logger = init_logger(__name__)
+
+_LAYOUT_COMPAT_ALIASES = {
+    "NHD": "LBNHC",
+    "HND": "LBHNC",
+}
+
+
+@cache
+def _layout_from_name(layout_name: str) -> KVCacheLayout:
+    layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
+    try:
+        return KVCacheLayout[layout_name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown KV cache layout {layout_name!r}. "
+            f"Valid layouts: {[m.name for m in KVCacheLayout]}"
+        ) from None
+
 
 CacheDType = Literal[
     "auto",
@@ -25,6 +45,7 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "nvfp4_ds_mla",
     "turboquant_k8v4",
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
@@ -65,6 +86,17 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
+    kv_cache_layout: str | None = field(default=None, init=False)
+    """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
+
+    ``None`` means the layout has not been resolved yet. The engine core
+    resolves it once (``resolve_kv_cache_layout``) before memory profiling, and
+    every worker process adopts the resolved name — via the
+    ``set_kv_cache_layout`` RPC, or ``KVCacheConfig.kv_cache_layout`` for
+    workers spawned after resolution — before the KV cache is allocated. Once
+    set the value is final and read with ``get_resolved_kv_cache_layout``,
+    which raises on ``None``. Tests and standalone tools may pre-set a value,
+    which resolution then honors as-is."""
     prefix_match_unit: int | None = Field(default=None, gt=0)
     """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
@@ -164,15 +196,16 @@ class CacheConfig:
       caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
-    speculative decoding does not use B. Default 16."""
+    """ReplaySSM logical history length B for Mamba2. Triton uses B physical
+    rows and FlashInfer uses B+1. Kimi-K3 speculative decode does not use B.
+    Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend; standard (non-speculative) decode only. In align mode flushes
-    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
-    but this is not required."""
+    or FlashInfer mamba backend; standard (non-speculative) decode only. In align
+    mode flushes are most efficient when mamba_block_size is a multiple of
+    replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
@@ -309,3 +342,12 @@ class CacheConfig:
                 str(cache_dtype),
             )
         return cache_dtype
+
+    def get_resolved_kv_cache_layout(self) -> KVCacheLayout:
+        if self.kv_cache_layout is None:
+            raise ValueError(
+                "KV cache layout has not been resolved yet; it is resolved once "
+                "by the engine core (resolve_kv_cache_layout) unless explicitly "
+                "set by the user."
+            )
+        return _layout_from_name(self.kv_cache_layout)

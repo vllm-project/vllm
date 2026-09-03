@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -393,45 +394,38 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
 
 
 class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        # Text-only input not supported in composite processor
-        if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(
-                prompt, add_special_tokens=False
-            )
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        if not mm_data:
+            return processed_data
 
-        processed_outputs = super()._call_hf_processor(
-            prompt,
-            mm_data,
-            mm_kwargs,
-        )
-
+        images = mm_data.get("images", [])
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
         parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         num_patches = [
             self.info.get_num_patches(
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             for size in image_sizes
         ]
-        processed_outputs["num_patches"] = torch.tensor(num_patches)
+        processed_data["num_patches"] = torch.tensor(num_patches)
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -455,7 +449,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptReplacement]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.image_token
+        image_token_id = hf_processor.image_token_id
+        tokenizer = self.info.get_tokenizer()
 
         def get_image_replacement_lfm2vl(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -470,15 +465,18 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 processor=hf_processor,
                 mm_kwargs=hf_processor_mm_kwargs,
             )
-            return PromptUpdateDetails.select_text(
-                image_repl,
-                embed_text=image_token,
+            image_repl_ids = cached_encode(
+                tokenizer, image_repl, add_special_tokens=False
+            )
+            return PromptUpdateDetails.select_token_id(
+                image_repl_ids,
+                image_token_id,
             )
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=get_image_replacement_lfm2vl,
             )
         ]
@@ -614,6 +612,7 @@ class Lfm2VLForConditionalGeneration(
     SupportsPP,
     IsHybrid,
 ):
+    supports_tower_connector_lora = True
     merge_by_field_config = True
 
     hf_to_vllm_mapper = WeightsMapper(

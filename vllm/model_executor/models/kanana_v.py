@@ -33,10 +33,12 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_vl import Qwen2VisionTransformer
@@ -322,10 +324,7 @@ class CustomQwen2VLVE(Qwen2VisionTransformer):
             grid_thw_np[:, 0],
         ).cumsum(axis=0, dtype=np.int32)
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(
-            self.device,
-            non_blocking=True,
-        )
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=self.device)
 
         # Shape to (S, B, D) with batch dimension 1 as expected by the blocks.
         x = x.unsqueeze(1)
@@ -461,17 +460,21 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     def media_token_id(self) -> int:
         return self.info.get_hf_config().text_config.eos_token_id + 1
 
-    def _call_hf_processor(
+    def _apply_hf_processor_main(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Run the underlying HF processor on text and image data."""
-        # Text-only input is handled as a special case here.
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
         if not mm_data or not mm_data.get("images", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(passthrough_data))
+
+        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         # Images
         image_inputs = mm_data.get("images", [])
@@ -493,7 +496,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
 
         tokenizer = self.info.get_tokenizer()
         media_token = tokenizer.convert_ids_to_tokens([self.media_token_id])[0]
-        prompt_replaced = prompt.replace("<image>", media_token)
+        prompt_replaced = prompt_text.replace("<image>", media_token)
         input_ids = tokenizer.encode(prompt_replaced)
         input_ids = torch.tensor(input_ids)
 
@@ -527,7 +530,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             image_token_thw=torch.tensor(image_meta["image_token_thw"]),
             pixel_sizes=torch.tensor(pixel_sizes),
         )
-        return BatchFeature(combined_outputs, tensor_type="pt")
+        processed_data = BatchFeature(combined_outputs, tensor_type="pt")
+        processed_data.update(passthrough_data)
+        return processed_data
 
     def _get_prompt_updates(
         self,
@@ -535,6 +540,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
+
         def get_replacement(idx: int) -> Sequence[int]:
             out_item = out_mm_kwargs["image"][idx]
             image_token_thw = out_item["image_token_thw"].data
@@ -546,7 +553,7 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement,
             ),
         ]
