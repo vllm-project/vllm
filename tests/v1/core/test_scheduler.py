@@ -1781,6 +1781,22 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def test_spec_decode_padding_resumed_request_without_running_requests():
+    """Pad a synchronously resumed request even without local running work."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=False),
+    )
+    (resumed,) = create_requests(num_requests=1, num_tokens=33, max_tokens=16)
+
+    scheduler.add_request(resumed)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[resumed.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[resumed.request_id] == [-1] * num_spec
+
+
 def test_spec_decode_padding_skipped_for_diffusion():
     """Diffusion spec tokens are the fixed-size denoising canvas, not
     rejectable drafts: a first-decode-step request must keep its 1-token span
