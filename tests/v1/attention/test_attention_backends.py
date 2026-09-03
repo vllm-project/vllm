@@ -972,6 +972,31 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets():
+    """Padded speculative decode keeps its actual packed query width."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = False
+    qo_indptr = torch.tensor([0, 3, 3], dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=2,
+        num_decode_tokens=3,
+    )
+
+    assert q_len == 3
+    assert q_lens is None
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 3]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend

@@ -1065,9 +1065,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return 1, None, None
 
         if not self.use_xqa:
-            if num_decode_tokens % num_decodes != 0:
-                return 1, None, None
-            return num_decode_tokens // num_decodes, None, None
+            if num_decode_tokens % num_decodes == 0:
+                return num_decode_tokens // num_decodes, None, None
+
+            # CUDA-graph padding can leave zero-length requests after a
+            # uniform speculative decode batch (for example, [3, 0]). Keep
+            # the packed query and describe it through the trtllm-gen varlen
+            # API instead of incorrectly treating every request as q_len=1.
+            decode_q_lens = (
+                qo_indptr_cpu[1 : num_decodes + 1]
+                - qo_indptr_cpu[:num_decodes]
+            )
+            max_q_len = int(decode_q_lens.max().item())
+            if max_q_len > 1:
+                return max_q_len, qo_indptr[: num_decodes + 1], None
+            return 1, None, None
 
         decode_q_lens = qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
         nonzero = decode_q_lens[decode_q_lens > 0]
