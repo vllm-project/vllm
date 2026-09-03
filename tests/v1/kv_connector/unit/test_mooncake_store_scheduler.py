@@ -994,11 +994,12 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
         [(1, 9, 12)],
     )
 
-    # The exact source is pinned immediately, so the request can be freed
+    # The exact source and the other groups' blocks the tail put reads are
+    # pinned immediately, so the request can be freed (finish or preemption)
     # before the next connector metadata build.
     assert delay_free is False
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
-    assert scheduler._gpu_block_pool.blocks[3].ref_cnt == 0
+    assert scheduler._gpu_block_pool.blocks[3].ref_cnt == 1
 
     out = SimpleNamespace(
         finished_req_ids={"req-0"},
@@ -1023,12 +1024,13 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
     assert req_meta.boundary_state_offloads == [(1, 9, 12)]
-    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9]
+    assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9, 3]
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
     assert scheduler._finished_partial_tail_metas == {}
 
     scheduler.update_connector_output(_make_worker_output({req_meta.store_job_id: 1}))
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 0
+    assert scheduler._gpu_block_pool.blocks[3].ref_cnt == 0
 
 
 def test_decode_boundary_state_offload_dropped_unclaimed():

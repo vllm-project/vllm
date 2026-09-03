@@ -48,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    MambaSpec,
     RSWASpec,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
@@ -3288,6 +3289,7 @@ def _make_bare_worker(
     worker.num_recv_threads = 1
     worker.recv_request_queue = queue.Queue()
     worker.finished_store_req = set()
+    worker._issued_store_metadata = None
     worker.tp_size = 1
     worker.store_tp_size = None
     worker.num_kv_head = 1
@@ -4499,3 +4501,79 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def test_pinned_handoff_job_runs_after_request_ledger_retired():
+    """A preemption retires the request's ledger in the same step its boundary
+    hand-off job is issued; the job owns pinned blocks and no resume offset, so
+    it must still upload and then report completion so the pins are released."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+    # The positional save path that follows the hand-off consults the specs.
+    thread.coord.kv_cache_groups = [
+        SimpleNamespace(
+            kv_cache_spec=FullAttentionSpec(
+                block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+            )
+        ),
+        SimpleNamespace(
+            kv_cache_spec=MambaSpec(
+                block_size=16,
+                shapes=(1, 1),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            )
+        ),
+    ]
+    req = _make_partial_tail_req([0, 2, 3])
+    req.store_job_id = 5
+    thread.add_request(req)
+    thread.delete_finished_stored_request(req.req_id)
+    assert not thread.is_live_store_job(req)
+
+    thread._handle_request(req)
+
+    assert store.batch_put_from_multi_buffers.called
+    assert thread.take_completed_saves() == {5: 1}
+
+    # A normal (positional) save of a retired request is still skipped.
+    store.reset_mock()
+    normal = _make_store_req("req-b", [b"b0", b"b1", b"b2", b"b3"])
+    normal.store_job_id = 6
+    thread.add_request(normal)
+    thread.delete_finished_stored_request("req-b")
+    thread._handle_request(normal)
+    assert not store.batch_put_from_multi_buffers.called
+    assert thread.take_completed_saves() == {6: 1}
+
+
+def test_get_finished_issues_store_jobs_when_no_forward_ran(monkeypatch):
+    """A step without a forward skips wait_for_save; get_finished must still
+    issue the step's store jobs (pinned hand-offs read blocks written by
+    earlier steps), exactly once per metadata."""
+    worker = _make_bare_worker()
+    worker.kv_send_thread = MagicMock()
+    worker.load_async = False
+    worker._zero_load_tail = False
+    monkeypatch.setattr(mooncake_store_worker.torch.cuda, "Event", MagicMock)
+    meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    req = _make_partial_tail_req([0, 2, 3])
+    req.store_job_id = 5
+    meta.add_request(req)
+
+    worker.get_finished(set(), meta)
+    worker.kv_send_thread.add_request.assert_called_once_with(req)
+
+    # The same metadata is not issued twice (wait_for_save after get_finished
+    # or the other way round).
+    worker.wait_for_save(meta)
+    worker.kv_send_thread.add_request.assert_called_once()
+
+    other = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
+    other.add_request(req)
+    worker.wait_for_save(other)
+    assert worker.kv_send_thread.add_request.call_count == 2
+    worker.get_finished(set(), other)
+    assert worker.kv_send_thread.add_request.call_count == 2

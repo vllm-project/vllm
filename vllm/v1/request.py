@@ -180,6 +180,12 @@ class Request:
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
+        # Prefix length filled by a KV connector load (local prefix-cache hits
+        # included); reset on preemption. A Mamba "align" boundary inside it
+        # is not re-registered as a local partial-tail entry: the state came
+        # from the store and the request must be able to continue without
+        # a CoW block.
+        self.num_externally_loaded_tokens = 0
         self.cache_salt: str | None = cache_salt
 
         # Multi-modal related
