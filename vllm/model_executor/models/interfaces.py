@@ -443,7 +443,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
         """
-        ...
+        del modality, mm_kwargs
+        num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+        num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
+        return (
+            num_encoder_tokens,
+            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
+        )
 
     def _embed_text_input_ids(
         self,
