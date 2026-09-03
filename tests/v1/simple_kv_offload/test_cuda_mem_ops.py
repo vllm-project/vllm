@@ -27,11 +27,11 @@ def test_pin_tensor_splits_large_driver_registration(monkeypatch):
 
     addresses = pin_tensor(tensor, max_chunk_bytes=2 * page)
 
-    assert addresses == [0x100000, 0x102000, 0x104000]
+    assert addresses == [0x100000, 0x100000 + 2 * page, 0x100000 + 4 * page]
     assert cudart.cudaHostRegister.call_args_list == [
         call(0x100000, 2 * page, 0),
-        call(0x102000, 2 * page, 0),
-        call(0x104000, page, 0),
+        call(0x100000 + 2 * page, 2 * page, 0),
+        call(0x100000 + 4 * page, page, 0),
     ]
 
 
