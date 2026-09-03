@@ -487,17 +487,19 @@ def bmm_kernel(
 
 
 @triton.jit
-def _log_softmax_kernel(
+def _softmax_kernel(
     input_ptr,
     output_ptr,
     input_row_stride,
     output_row_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
+    LOG: tl.constexpr,
 ):
     """
-    Compute log_softmax along the last dimension of a 2D tensor.
-    Each block handles one row of the input tensor.
+    Compute softmax (log_softmax if LOG) along the last dimension of a 2D
+    tensor. Each block handles one row of the input tensor, so the reduction
+    order within a row does not depend on the number of rows.
     """
     # Get the row index for this block
     row_idx = tl.program_id(0).to(tl.int64)
@@ -534,7 +536,7 @@ def _log_softmax_kernel(
     # Compute log(sum_exp)
     log_sum_exp = tl.log(sum_exp)
 
-    # Step 3: Compute final log_softmax values: x - max_val - log_sum_exp
+    # Step 3: Compute the final values
     for col_offset in range(0, n_cols, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
@@ -542,29 +544,25 @@ def _log_softmax_kernel(
         # Load values
         vals = tl.load(row_start_ptr + col_idx, mask=mask)
 
-        # Compute log_softmax
-        output = vals - max_val - log_sum_exp
+        if LOG:
+            output = vals - max_val - log_sum_exp
+        else:
+            output = tl.exp(vals - max_val) / sum_exp
 
         # Store results
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
-def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    """
-    Compute log_softmax using Triton kernel.
+def _row_softmax(input: torch.Tensor, dim: int, log: bool) -> torch.Tensor:
+    if input.numel() == 0:
+        return torch.empty_like(input)
 
-    Args:
-        input: Input tensor
-        dim: Dimension along which to compute log_softmax
-             (only -1 or last dim supported)
-
-    Returns:
-        Tensor with log_softmax applied along the specified dimension
-    """
-    if dim != -1 and dim != input.ndim - 1:
-        raise ValueError(
-            "This implementation only supports log_softmax along the last dimension"
-        )
+    last_dim = input.ndim - 1
+    if dim < 0:
+        dim += input.ndim
+    if dim != last_dim:
+        output = _row_softmax(input.movedim(dim, last_dim), last_dim, log)
+        return output.movedim(last_dim, dim).contiguous()
 
     # Flatten all dimensions except the last one
     original_shape = input.shape
@@ -581,16 +579,45 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     # Launch kernel with one block per row
     grid = (n_rows,)
-    _log_softmax_kernel[grid](
+    _softmax_kernel[grid](
         input_2d,
         output,
         input_2d.stride(0),
         output.stride(0),
         n_cols,
         BLOCK_SIZE=BLOCK_SIZE,
+        LOG=log,
     )
     # Reshape output back to original shape
     return output.reshape(original_shape)
+
+
+def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    Compute log_softmax using Triton kernel.
+
+    Args:
+        input: Input tensor
+        dim: Dimension along which to compute log_softmax
+
+    Returns:
+        Tensor with log_softmax applied along the specified dimension
+    """
+    return _row_softmax(input, dim, log=True)
+
+
+def softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    """
+    Compute softmax using Triton kernel.
+
+    Args:
+        input: Input tensor
+        dim: Dimension along which to compute softmax
+
+    Returns:
+        Tensor with softmax applied along the specified dimension
+    """
+    return _row_softmax(input, dim, log=False)
 
 
 @triton.jit
@@ -887,14 +914,10 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
     return log_softmax(input, dim=dim)
 
 
-def softmax_batch_invariant(input, dim, dtype=None):
-    # Compute softmax in a deterministic way
-    # First subtract max for numerical stability (standard practice)
-    input_max = torch.amax(input, dim=dim, keepdim=True)
-    input = input - input_max
-    exp_x = torch.exp(input)
-    sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
-    return exp_x / sum_exp_x
+def softmax_batch_invariant(input, dim, half_to_float):
+    if half_to_float:
+        return softmax(input.float(), dim=dim)
+    return softmax(input, dim=dim)
 
 
 def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
@@ -1114,7 +1137,6 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl(
             "aten::_log_softmax", _log_softmax_batch_invariant, key
         )
-        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
         # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
