@@ -857,11 +857,6 @@ def test_qsa_sparse_paged_attention_correctness(
     assert logical_indices.shape == (num_rows, selection_width)
     scale = q.shape[-1] ** -0.5
 
-    # The loop always runs to each row's valid extent, derived in-kernel from
-    # the same positions and sequence lengths the metadata builder consumed.
-    # Request 0 saturates the selection budget (bound is exact at saturation);
-    # request 1's short context puts the bound on a small tile boundary, so an
-    # off-by-one there fails loudly.
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
         k_cache,
