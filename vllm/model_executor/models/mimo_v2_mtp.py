@@ -43,10 +43,15 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsPP,
     _require_is_multimodal,
 )
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
-from .utils import _merge_multimodal_embeddings, maybe_prefix
+from .utils import (
+    _merge_multimodal_embeddings,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer
@@ -215,7 +220,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         return self.logits_processor(lm_head, hidden_states)
 
 
-class MiMoV2MTP(nn.Module):
+class MiMoV2MTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -227,11 +232,16 @@ class MiMoV2MTP(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
