@@ -24,6 +24,21 @@ steps:
   # Temporary hack filter to exclude ngram spec decoding based tests.
   - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
 
+- label: ":nvidia: (H100) ReplaySSM E2E"
+  device: h100
+  num_devices: 2
+  key: replayssm-e2e
+  timeout_in_minutes: 90
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - tests/v1/e2e/test_replayssm_decode.py
+    - vllm/model_executor/layers/mamba/
+    - vllm/v1/attention/backends/mamba_attn.py
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/
+  commands:
+    - pytest -v -s v1/e2e/test_replayssm_decode.py
+
 - label: ":nvidia: (H200 MIG 35GB) Model Runner V2 Examples"
   device: h200_35gb
   key: model-runner-v2-examples
