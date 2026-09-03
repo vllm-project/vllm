@@ -7,8 +7,8 @@ from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import HOST_REGISTER_CHUNK_SIZE_BYTES
 from vllm.utils.math_utils import round_up
-from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.async_host_buffer import AsyncHostBuffer
 from vllm.v1.kv_offload.base import (
@@ -28,10 +28,6 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
-
-# cudaHostRegister serializes other CUDA API calls. Keep each registration
-# short and yield between them so inference can continue during initialization.
-_ASYNC_HOST_REGISTER_CHUNK_SIZE_BYTES = 256 * MiB_bytes
 
 
 def _all_workers_barrier() -> None:
@@ -253,7 +249,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             region.populate(self.cpu_page_size_per_worker)
             if PIN_MEMORY:
                 region.pin(
-                    chunk_size_bytes=_ASYNC_HOST_REGISTER_CHUNK_SIZE_BYTES,
+                    chunk_size_bytes=HOST_REGISTER_CHUNK_SIZE_BYTES,
                 )
         except BaseException:
             region.cleanup()
