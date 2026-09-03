@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -29,6 +30,13 @@ class MLAModules:
     topk_indices_buffer: torch.Tensor | None
     indexer_rotary_emb: torch.nn.Module | None = None
     g_proj: torch.nn.Module | None = None
+    # Optional fused q/kv-a RMSNorm. When set, replaces the two separate
+    # q_a_layernorm / kv_a_layernorm launches on the q-LoRA path with a single
+    # call: ``(q_c_normed, kv_c_normed) = q_kv_norm(q_c, kv_c)``. Backends
+    # without a fused kernel leave this None and keep the separate norms.
+    q_kv_norm: (
+        Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None
+    ) = None
 
 
 # --8<-- [start:multi_head_latent_attention]
@@ -92,6 +100,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
         self.g_proj = mla_modules.g_proj
+        self.q_kv_norm = mla_modules.q_kv_norm
 
         # Whether to skip top-k token selection computation in this layer.
         # When True, the indexer will not be called, and the layer will reuse
@@ -172,7 +181,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q_c)
+            if self.q_kv_norm is None:
+                q_c = self.q_a_layernorm(q_c)
+            # else: q_c is normed together with kv_c below (fused path).
             q_proj_layer = self.q_b_proj
             q_proj_input = q_c
         else:
@@ -187,7 +198,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q_proj_input = hidden_states
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        if self.q_kv_norm is not None and q_c is not None:
+            # Fuse the q-a and kv-a RMSNorms into one kernel. Rebind q_c to the
+            # normed tensor so both the q projection (q_proj_input aliases q_c)
+            # and any later indexer use see the normalized value, matching the
+            # separate-norm path exactly.
+            q_c, kv_c_normed = self.q_kv_norm(q_c, kv_c)
+            q_proj_input = q_c
+        else:
+            kv_c_normed = self.kv_a_layernorm(kv_c)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
