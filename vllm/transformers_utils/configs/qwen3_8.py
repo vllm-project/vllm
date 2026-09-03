@@ -16,10 +16,10 @@
 # limitations under the License.
 """Qwen3.8 model configuration"""
 
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 
-class Qwen3_8TextConfig(PretrainedConfig):
+class Qwen3_8TextConfig(PreTrainedConfig):
     model_type = "qwen3_8_text"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -114,7 +114,7 @@ class Qwen3_8TextConfig(PretrainedConfig):
         self.tie_word_embeddings = tie_word_embeddings
 
 
-class Qwen3_8Config(PretrainedConfig):
+class Qwen3_8Config(PreTrainedConfig):
     model_type = "qwen3_8"
     sub_configs = {
         "text_config": Qwen3_8TextConfig,
