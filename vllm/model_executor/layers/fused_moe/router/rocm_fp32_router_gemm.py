@@ -45,9 +45,7 @@ def _rocm_fp32_router_gemm_kernel(
             mask=offsets_m[:, None] < M,
             other=0.0,
         ).to(tl.float32)
-        router_weight = tl.load(router_weight_ptr + pid_n * K + offsets_k_block).to(
-            tl.float32
-        )
+        router_weight = tl.load(router_weight_ptr + pid_n * K + offsets_k_block)
         partials += hidden_states * router_weight[None, :]
 
     accumulator = tl.sum(partials, axis=1)
