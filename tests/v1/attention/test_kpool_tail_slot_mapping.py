@@ -276,26 +276,27 @@ class TailRingMirror:
     completing at pos reads ring slots (pool_start + s) % kpool and uses the
     current token's own K/score for the last member."""
 
-    def __init__(self, num_blocks, kpool=KPOOL):
+    def __init__(self, num_blocks, kpool=KPOOL, ring=None):
         self.kpool = kpool
-        self.k = torch.full((num_blocks, kpool, 3), float("nan"))
-        self.s = torch.full((num_blocks, kpool, 3), float("nan"))
+        self.ring = ring or kpool
+        self.k = torch.full((num_blocks, self.ring, 3), float("nan"))
+        self.s = torch.full((num_blocks, self.ring, 3), float("nan"))
 
     def stash(self, tail_slot, pos, k, s):
-        blk, off = tail_slot // self.kpool, pos % self.kpool
+        blk, off = tail_slot // self.ring, pos % self.ring
         self.k[blk, off] = k
         self.s[blk, off] = s
 
     seed = stash  # the seed kernel writes with the same addressing
 
     def complete(self, tail_slot, pos, k, s):
-        blk = tail_slot // self.kpool
+        blk = tail_slot // self.ring
         start = pos - (self.kpool - 1)
         kk = torch.stack(
-            [self.k[blk, (start + i) % self.kpool] for i in range(self.kpool)]
+            [self.k[blk, (start + i) % self.ring] for i in range(self.kpool)]
         )
         ss = torch.stack(
-            [self.s[blk, (start + i) % self.kpool] for i in range(self.kpool)]
+            [self.s[blk, (start + i) % self.ring] for i in range(self.kpool)]
         )
         kk[-1], ss[-1] = k, s  # is_current for the completing token
         w = torch.softmax(ss, dim=0)
@@ -366,3 +367,37 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
     # The circular mapping keeps the rings isolated under interleaving.
     torch.testing.assert_close(circular, ground_truth)
+
+
+@pytest.mark.parametrize("ring_pools", [1, 2])
+def test_rejected_completing_draft_needs_ring_slots(ring_pools):
+    """A speculative step stashes 1 + num_spec rows before acceptance. If the
+    pool-completing token is a rejected draft, the drafts behind it must not
+    have overwritten the pool's committed keys, or the redo compresses wrong
+    keys. One pool of ring fails this; two pools (the QSA rule) hold."""
+    ring_size = ring_pools * KPOOL
+    truth = TailRingMirror(num_blocks=2, ring=ring_size)
+    ring = TailRingMirror(num_blocks=2, ring=ring_size)
+    block = 1
+
+    def slot(pos):
+        return block * ring_size + pos % ring_size
+
+    for pos in range(4, 7):  # committed keys of the open pool [4, 5, 6, 7]
+        truth.stash(slot(pos), pos, *token_kv(0, pos))
+        ring.stash(slot(pos), pos, *token_kv(0, pos))
+    expected = truth.complete(slot(7), 7, *token_kv(0, 7))
+
+    # Spec step [7d, 8d, 9d, 10d]: 7d completes the pool with a wrong key and
+    # is later rejected; 8d, 9d, 10d are stashed behind it.
+    for pos in range(7, 11):
+        k, s = token_kv(9, pos)  # draft values
+        if pos % KPOOL == KPOOL - 1:
+            ring.complete(slot(pos), pos, k, s)
+        ring.stash(slot(pos), pos, k, s)
+    # Redo of position 7 with the accepted key.
+    redo = ring.complete(slot(7), 7, *token_kv(0, 7))
+    if ring_pools == 1:
+        assert not torch.allclose(redo, expected)
+    else:
+        torch.testing.assert_close(redo, expected)

@@ -364,38 +364,37 @@ def _kpool_tail_seed_kernel(
     KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     KPOOL: tl.constexpr,
+    RING: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """Copy token ``i``'s raw K + gate into its request's tail block.
+    """Copy token ``i``'s raw K + gate into its request's tail ring.
 
     Token ``i`` is among its request's last KPOOL tokens iff the token KPOOL
     ahead belongs to a different tail block (or is past the batch / padding,
-    slot < 0). ``tslot = block * KPOOL + pos % KPOOL``; the destination is
-    ``tail[block, {0:K, 1:score}, pos % KPOOL, :]``.
+    slot < 0). ``tslot = block * RING + pos % RING``; the destination is
+    ``tail[block, {0:K, 1:score}, pos % RING, :]``.
     """
     i = tl.program_id(0)
     t = tl.load(tslot_ptr + i).to(tl.int64)
     if t < 0:
         return
-    blk = t // KPOOL  # t >= 0 here, so trunc == floor
+    blk = t // RING  # t >= 0 here, so trunc == floor
     ahead = tl.load(tslot_ptr + i + KPOOL, mask=i + KPOOL < n_tokens, other=-1).to(
         tl.int64
     )
     # Match the torch semantics exactly: a negative ahead slot floors to a
     # block id that differs from every real block -> token is in the tail.
     # Only divide non-negative slots (Triton int div truncates, torch floors).
-    if ahead >= 0 and ahead // KPOOL == blk:
+    if ahead >= 0 and ahead // RING == blk:
         return
     offs = tl.arange(0, BLOCK_D)
     m = offs < HEAD_DIM
     block_base = blk * TAIL_BLOCK_ELEMS
-    base = block_base + (t % KPOOL) * HEAD_DIM
+    base = block_base + (t % RING) * HEAD_DIM
     k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
     s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
     tl.store(tail_ptr + base + offs, k, mask=m)
-    tl.store(
-        tail_ptr + block_base + KPOOL_HEAD + (t % KPOOL) * HEAD_DIM + offs, s, mask=m
-    )
+    tl.store(tail_ptr + base + KPOOL_HEAD + offs, s, mask=m)
 
 
 def kpool_seed_tail_cache(
@@ -422,6 +421,7 @@ def kpool_seed_tail_cache(
         KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,
         KPOOL=kpool,
+        RING=tail_kv_cache.shape[2],
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
 
@@ -449,6 +449,7 @@ def _kpool_decode_update_batched_kernel(
     PAGE_SIZE: tl.constexpr,
     BUF_NUMEL_PER_PAGE: tl.constexpr,
     POOL_SIZE: tl.constexpr,
+    RING: tl.constexpr,
     TAIL_BLOCK_ELEMS: tl.constexpr,
     KPOOL_HEAD: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -482,7 +483,7 @@ def _kpool_decode_update_batched_kernel(
         pos_valid = (cache_loc >= 0) & (pos >= 0)
 
         slot = safe_pos % POOL_SIZE
-        phys_slot = safe_pos % POOL_SIZE
+        phys_slot = safe_pos % RING  # RING >= POOL_SIZE; see Glm5NextTailCache
 
         # Derive the tail block from THIS token's tail_slot (the request's block
         # is constant across a pool, but a padded / invalid entry carries a
@@ -490,7 +491,7 @@ def _kpool_decode_update_batched_kernel(
         # token's base address). Clamp so an invalid entry can never form an
         # out-of-bounds base; the accesses below are gated on pos_valid anyway.
         tail_slot = tl.load(tail_slot_mapping_ptr + idx)
-        block = tl.maximum(tail_slot, 0).to(tl.int64) // POOL_SIZE
+        block = tl.maximum(tail_slot, 0).to(tl.int64) // RING
         block_base = block * TAIL_BLOCK_ELEMS
 
         # The tail-ring stash must run for EVERY real token, so it is gated on
@@ -518,7 +519,7 @@ def _kpool_decode_update_batched_kernel(
             max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
             for pool_slot in tl.static_range(0, POOL_SIZE):
                 is_current = pool_slot == slot
-                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                phys = (pool_logical_start + pool_slot) % RING
                 score_buf = tl.load(
                     tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                     mask=dim_mask,
@@ -536,7 +537,7 @@ def _kpool_decode_update_batched_kernel(
             denom = tl.full((BLOCK_D,), 0.0, tl.float32)
             for pool_slot in tl.static_range(0, POOL_SIZE):
                 is_current = pool_slot == slot
-                phys = (pool_logical_start + pool_slot) % POOL_SIZE
+                phys = (pool_logical_start + pool_slot) % RING
                 score_buf = tl.load(
                     tail_kv_ptr + block_base + KPOOL_HEAD + phys * HEAD_DIM + offs,
                     mask=dim_mask,
@@ -640,7 +641,8 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         return
     assert tail_kv_cache.ndim == 4
     assert tail_kv_cache.shape[1] == 2
-    assert tail_kv_cache.shape[2] == pool_size
+    ring = tail_kv_cache.shape[2]
+    assert ring >= pool_size and ring % pool_size == 0, (ring, pool_size)
     assert tail_kv_cache.shape[3] == head_dim
     assert tail_kv_cache.dtype == torch.bfloat16
     assert key.ndim == 3 and key.shape[2] == head_dim
@@ -689,6 +691,7 @@ def kpool_decode_update_and_maybe_write_cache_batched(
         PAGE_SIZE=page_size,
         BUF_NUMEL_PER_PAGE=buf.stride(0),
         POOL_SIZE=pool_size,
+        RING=ring,
         TAIL_BLOCK_ELEMS=tail_kv_cache.stride(0),
         KPOOL_HEAD=tail_kv_cache.stride(1),
         HEAD_DIM=head_dim,

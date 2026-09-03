@@ -34,6 +34,7 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -190,8 +191,12 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         # The two head slots form [K, gate score] in the generic
         # [block, head, state, content] cache view.
+        # The open pool's committed keys plus a speculative step's rows, in
+        # whole pools (QSA rule): a rejected draft must not overwrite them.
+        span = self._index_kpool + vllm_config.num_speculative_tokens
+        capacity = self._index_kpool * cdiv(span, self._index_kpool)
         return CircularBufferSpec(
-            block_size=self._index_kpool,
+            block_size=capacity,
             num_kv_heads=2,
             head_size=self.head_dim,
             head_size_v=0,
