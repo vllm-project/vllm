@@ -616,7 +616,6 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
       row_lru[i] = s_lru_out[i - remaining_evictable - total_misses];
     }
   }
-
 }
 
 // Shared-layer plan replay. Given a plan (hot_indices + miss_mask) already
@@ -772,47 +771,6 @@ __global__ void hisparse_invalidate_written_slots_kernel(
     if (row[offset] == written_slot) {
       row[offset] = -1;
     }
-  }
-}
-
-// One warp per (layer, item): scatter the current decode row from every hot
-// cache layer into its pinned host source. Layer metadata is immutable and
-// uploaded once at initialization, so the decode hot path needs one launch and
-// no pointer-table construction.
-__global__ void hisparse_backup_layers_kernel(
-    const char* __restrict__ hot_backing,
-    const int64_t* __restrict__ layer_offsets,
-    const uint64_t* __restrict__ src_indices_ptrs,
-    const uint64_t* __restrict__ host_cache_ptrs,
-    const int64_t* __restrict__ dst_slots, const int64_t row_bytes,
-    const int64_t row_value_bytes, const int64_t src_block_stride,
-    const int32_t src_block_size, const int64_t host_block_stride,
-    const int32_t host_block_size, const int32_t num_items,
-    const int32_t num_layers, const int64_t src_rows, const int64_t host_rows) {
-  const int NUM_WARPS = blockDim.x / kWarpSize;
-  const int lane_id = threadIdx.x % kWarpSize;
-  const int64_t warp_id =
-      static_cast<int64_t>(blockIdx.x) * NUM_WARPS + threadIdx.x / kWarpSize;
-  const int64_t total_warps = static_cast<int64_t>(gridDim.x) * NUM_WARPS;
-  const int64_t total_items = static_cast<int64_t>(num_layers) * num_items;
-
-  for (int64_t index = warp_id; index < total_items; index += total_warps) {
-    const int32_t layer = static_cast<int32_t>(index / num_items);
-    const int32_t item = static_cast<int32_t>(index % num_items);
-    const auto* src_indices = reinterpret_cast<const int64_t*>(
-        static_cast<uintptr_t>(src_indices_ptrs[layer]));
-    auto* host_cache =
-        reinterpret_cast<char*>(static_cast<uintptr_t>(host_cache_ptrs[layer]));
-    const int64_t src_index = src_indices[item];
-    const int64_t dst_slot = dst_slots[item];
-    if (src_index < 0 || src_index >= src_rows || dst_slot < 0 ||
-        dst_slot >= host_rows) {
-      continue;
-    }
-    const char* src_cache = hot_backing + layer_offsets[layer];
-    copy_cache_row_warp(lane_id, src_cache, src_index, src_block_size,
-                        src_block_stride, host_cache, dst_slot, host_block_size,
-                        host_block_stride, row_bytes, row_value_bytes);
   }
 }
 
@@ -1456,86 +1414,4 @@ void hisparse_backup(torch::stable::Tensor const& src_cache,
       dst_slots.const_data_ptr<int64_t>(), row_bytes, row_value_bytes,
       src_block_stride, src_block_size, host_layout.block_stride,
       host_layout.block_size, num_items, src_rows, host_rows);
-}
-
-void hisparse_backup_layers(torch::stable::Tensor const& hot_backing,
-                            torch::stable::Tensor const& layer_offsets,
-                            torch::stable::Tensor const& src_indices_ptrs,
-                            torch::stable::Tensor& host_anchor,
-                            torch::stable::Tensor const& host_cache_ptrs,
-                            torch::stable::Tensor const& dst_slots,
-                            int64_t num_items, int64_t src_block_stride,
-                            int64_t src_block_size, int64_t src_rows,
-                            int64_t row_value_bytes) {
-  STD_TORCH_CHECK(hot_backing.is_cuda(), "hot_backing must be on CUDA");
-  STD_TORCH_CHECK(hot_backing.is_contiguous(),
-                  "hot_backing must be contiguous");
-  STD_TORCH_CHECK(
-      host_anchor.device().is_cpu() && is_pinned_cpu_tensor(host_anchor),
-      "host_anchor must be pinned CPU memory");
-  STD_TORCH_CHECK(layer_offsets.is_cuda() && src_indices_ptrs.is_cuda() &&
-                      host_cache_ptrs.is_cuda() && dst_slots.is_cuda(),
-                  "backup metadata must be on CUDA");
-  STD_TORCH_CHECK(
-      layer_offsets.scalar_type() == torch::headeronly::ScalarType::Long &&
-          layer_offsets.is_contiguous(),
-      "layer_offsets must be contiguous int64");
-  STD_TORCH_CHECK(
-      src_indices_ptrs.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
-          host_cache_ptrs.scalar_type() ==
-              torch::headeronly::ScalarType::UInt64 &&
-          src_indices_ptrs.is_contiguous() && host_cache_ptrs.is_contiguous(),
-      "pointer tables must be contiguous uint64");
-  STD_TORCH_CHECK(
-      dst_slots.scalar_type() == torch::headeronly::ScalarType::Long &&
-          dst_slots.is_contiguous(),
-      "dst_slots must be contiguous int64");
-  STD_TORCH_CHECK(layer_offsets.dim() == 1 && src_indices_ptrs.dim() == 1 &&
-                      host_cache_ptrs.dim() == 1 &&
-                      layer_offsets.numel() == src_indices_ptrs.numel() &&
-                      layer_offsets.numel() == host_cache_ptrs.numel(),
-                  "layer metadata must have matching 1D shapes");
-  STD_TORCH_CHECK(num_items >= 0 && num_items <= dst_slots.numel(),
-                  "num_items exceeds dst_slots");
-  STD_TORCH_CHECK(src_block_size > 0 && src_block_size <= INT32_MAX &&
-                      src_block_stride > 0 && src_rows > 0,
-                  "invalid source-cache layout");
-
-  const int64_t row_bytes = host_anchor.size(-1) * host_anchor.element_size();
-  const auto host_layout =
-      check_cache_rows(host_anchor, "host_anchor", row_bytes);
-  const int64_t host_rows = host_layout.rows;
-  STD_TORCH_CHECK(row_value_bytes == 0 ||
-                      (row_value_bytes > 0 && row_value_bytes < row_bytes &&
-                       host_layout.block_size == src_block_size),
-                  "split rows require matching paged source/host block sizes");
-  STD_TORCH_CHECK(src_block_stride >= src_block_size * row_bytes &&
-                      src_rows % src_block_size == 0,
-                  "source-cache layout is inconsistent");
-  const auto num_layers = static_cast<int32_t>(layer_offsets.numel());
-  if (num_items == 0 || num_layers == 0) {
-    return;
-  }
-  STD_TORCH_CHECK(num_items <= INT32_MAX && num_layers <= INT32_MAX,
-                  "backup dimensions must fit int32");
-
-  constexpr int kBlockSize = 256;
-  constexpr int kNumWarps = kBlockSize / kWarpSize;
-  const int64_t total_items = num_items * num_layers;
-  const int64_t grid64 = (total_items + kNumWarps - 1) / kNumWarps;
-  STD_TORCH_CHECK(grid64 <= INT32_MAX, "backup grid exceeds CUDA limits");
-
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      hot_backing.get_device_index());
-  const cudaStream_t stream = get_current_cuda_stream();
-  hisparse_backup_layers_kernel<<<static_cast<int>(grid64), kBlockSize, 0,
-                                  stream>>>(
-      static_cast<const char*>(hot_backing.const_data_ptr()),
-      layer_offsets.const_data_ptr<int64_t>(),
-      static_cast<const uint64_t*>(src_indices_ptrs.const_data_ptr()),
-      static_cast<const uint64_t*>(host_cache_ptrs.const_data_ptr()),
-      dst_slots.const_data_ptr<int64_t>(), row_bytes, row_value_bytes,
-      src_block_stride, static_cast<int32_t>(src_block_size),
-      host_layout.block_stride, host_layout.block_size,
-      static_cast<int32_t>(num_items), num_layers, src_rows, host_rows);
 }
