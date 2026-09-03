@@ -155,6 +155,9 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
+        self.group_block_sizes = tuple(
+            manager.block_size for manager in self.single_type_managers
+        )
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
