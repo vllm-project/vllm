@@ -8,6 +8,7 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.config.ec_transfer import ECRole, ECTransferConfig
+from vllm.config.kv_transfer import KVRole, KVTransferConfig
 from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
@@ -375,3 +376,67 @@ def test_vllm_config_runs_the_mm_processor_device_check():
         pytest.raises(ValueError, match="also runs the language model"),
     ):
         VllmConfig._validate_mm_processor_device(vllm_config)
+
+
+def _consumer_mm_config(
+    *,
+    ec_role: ECRole | None = None,
+    kv_role: KVRole | None = None,
+    enable: bool = False,
+) -> MultiModalConfig:
+    """Resolve a VllmConfig for one disaggregated role and hand back its mm config."""
+    mm_config = MultiModalConfig(enable_mm_embeds=enable)
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+        if ec_role
+        else None
+    )
+    vllm_config.kv_transfer_config = (
+        KVTransferConfig(kv_connector="NixlConnector", kv_role=kv_role)
+        if kv_role
+        else None
+    )
+    VllmConfig._resolve_mm_embedding_inputs(vllm_config)
+    return mm_config
+
+
+@pytest.mark.parametrize(
+    "ec_role,kv_role",
+    [
+        ("ec_consumer", None),
+        ("ec_consumer", "kv_producer"),
+        (None, "kv_consumer"),
+    ],
+)
+def test_a_consumer_accepts_embedding_inputs_without_being_told(ec_role, kv_role):
+    """The two settings are one decision, so asking for both is a footgun.
+
+    A consumer is sent the media as an `*_embeds` reference. Allowing the
+    tensor to be omitted decides nothing if the frontend rejects the input
+    before that, so a deployment that set one and not the other failed every
+    multimodal request rather than some of them.
+    """
+    mm_config = _consumer_mm_config(ec_role=ec_role, kv_role=kv_role)
+    assert mm_config.allow_missing_mm_embeddings
+    assert mm_config.enable_mm_embeds
+
+
+@pytest.mark.parametrize(
+    "ec_role,kv_role",
+    [(None, None), ("ec_producer", None), (None, "kv_producer")],
+)
+def test_a_non_consumer_keeps_rejecting_embedding_inputs(ec_role, kv_role):
+    """Everywhere else a bare embedding input is a client error."""
+    mm_config = _consumer_mm_config(ec_role=ec_role, kv_role=kv_role)
+    assert not mm_config.allow_missing_mm_embeddings
+    assert not mm_config.enable_mm_embeds
+
+
+def test_an_explicit_opt_in_is_left_alone_off_the_consumer_path():
+    mm_config = _consumer_mm_config(ec_role="ec_producer", enable=True)
+    assert not mm_config.allow_missing_mm_embeddings
+    assert mm_config.enable_mm_embeds
