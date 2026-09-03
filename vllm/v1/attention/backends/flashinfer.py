@@ -523,9 +523,7 @@ class FlashInferBackend(AttentionBackend):
         if force_use_trtllm_attention() is False:
             return False
 
-        if current_platform.is_device_capability(
-            90
-        ) or current_platform.is_device_capability_family(120):
+        if current_platform.is_device_capability_family(120):
             return supports_trtllm_attention(is_prefill=False)
 
         if not current_platform.is_device_capability_family(100):
