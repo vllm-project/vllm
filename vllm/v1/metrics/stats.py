@@ -9,10 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.v1.cache_hit_source import (
-    CacheHitSource,
-    normalize_cache_hit_source,
-)
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -273,7 +270,7 @@ class PrefillStats:
         num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
         num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
         external_cached_token_sources: Ordered external token counts by the
-            cache tier that supplied them.
+            cache tier that supplied them, using canonical CacheHitSource values.
         num_cache_creation_tokens: Tokens computed and written to the prefix cache.
     """
 
@@ -308,17 +305,17 @@ class PrefillStats:
             for source, num_tokens in external_cached_token_sources:
                 assert source
                 assert num_tokens >= 0
+                canonical_source = CacheHitSource(source).value
                 if num_tokens == 0:
                     continue
-                normalized_source = normalize_cache_hit_source(source).value
-                if sources and sources[-1][0] == normalized_source:
+                if sources and sources[-1][0] == canonical_source:
                     previous_source, previous_tokens = sources[-1]
                     sources[-1] = (
                         previous_source,
                         previous_tokens + num_tokens,
                     )
                 else:
-                    sources.append((normalized_source, num_tokens))
+                    sources.append((canonical_source, num_tokens))
         assert sum(num_tokens for _, num_tokens in sources) == (
             num_external_cached_tokens
         )

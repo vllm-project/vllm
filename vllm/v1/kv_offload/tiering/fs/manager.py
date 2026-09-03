@@ -31,6 +31,7 @@ except ImportError:
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -106,6 +107,7 @@ class FileSystemTierManager(SecondaryTierManager):
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
+    cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.DISK
 
     def __init__(
         self,
