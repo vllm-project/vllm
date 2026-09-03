@@ -158,13 +158,27 @@ def create_whisper_attention_backend_with_block_pooling(
             fast_build: bool = False,
         ) -> AttentionMetadata:
             new_common_attn_metadata = copy.deepcopy(common_attn_metadata)
-            new_common_attn_metadata.query_start_loc *= block_pool_size
-            new_common_attn_metadata.query_start_loc_cpu *= block_pool_size
-            new_common_attn_metadata.seq_lens *= block_pool_size
-            if new_common_attn_metadata._seq_lens_cpu is not None:
-                new_common_attn_metadata._seq_lens_cpu *= block_pool_size
-            if new_common_attn_metadata._num_computed_tokens_cpu is not None:
-                new_common_attn_metadata._num_computed_tokens_cpu *= block_pool_size
+            # Scale out of place: the V1 CPU model runner points every
+            # `CpuGpuBuffer.gpu` at its `.cpu` tensor, so a device field and its
+            # `_cpu` counterpart can share storage (`deepcopy` preserves the
+            # sharing), and in-place scaling would apply `block_pool_size` twice.
+            new_common_attn_metadata.query_start_loc = (
+                common_attn_metadata.query_start_loc * block_pool_size
+            )
+            new_common_attn_metadata.query_start_loc_cpu = (
+                common_attn_metadata.query_start_loc_cpu * block_pool_size
+            )
+            new_common_attn_metadata.seq_lens = (
+                common_attn_metadata.seq_lens * block_pool_size
+            )
+            if common_attn_metadata._seq_lens_cpu is not None:
+                new_common_attn_metadata._seq_lens_cpu = (
+                    common_attn_metadata._seq_lens_cpu * block_pool_size
+                )
+            if common_attn_metadata._num_computed_tokens_cpu is not None:
+                new_common_attn_metadata._num_computed_tokens_cpu = (
+                    common_attn_metadata._num_computed_tokens_cpu * block_pool_size
+                )
             new_common_attn_metadata.num_actual_tokens *= block_pool_size
             new_common_attn_metadata.max_query_len *= block_pool_size
             new_common_attn_metadata.max_seq_len *= block_pool_size
