@@ -67,8 +67,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install lm_eval[api]>=0.4.12 &&
-      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py v1/test_request.py v1/test_outputs.py &&
@@ -188,8 +187,7 @@ steps:
   commands:
   - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install modelscope\<1.38 &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s test_regression.py'
 
 - label: Metrics, Tracing (2 GPUs)
@@ -224,8 +222,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pip install opentelemetry-sdk\>=1.26.0 opentelemetry-api\>=1.26.0 opentelemetry-exporter-otlp\>=1.26.0 opentelemetry-semantic-conventions-ai\>=0.4.1 &&
-    cd tests &&
+    'cd tests &&
     pytest -v -s v1/tracing'
 
 - label: Async Engine, Inputs, Utils, Worker
@@ -263,7 +260,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pip install av &&
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
