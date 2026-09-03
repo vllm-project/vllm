@@ -102,6 +102,17 @@ class ECCPUScheduler:
         # Requests needing a remote encoding that will not arrive. Drained by
         # get_unrecoverable_requests(); the scheduler aborts them.
         self._unrecoverable: set[str] = set()
+        # Announcing an encoding publishes an address a consumer will use on a
+        # later step, by which time the orchestrator has rewritten the media
+        # off the request. These hold the encoding across that window: FIFO
+        # eviction inside it leaves the consumer nothing to fall back on.
+        # mm_hash -> lease deadline of a pin already taken.
+        self._announce_pins: dict[str, float] = {}
+        # mm_hash -> lease deadline, for entries announced before their save
+        # landed. A not-ready entry is already non-evictable, so the pin is
+        # taken when the worker reports the save.
+        self._announce_pending: dict[str, float] = {}
+        self._announce_lease_s: float = 0.0
         self._peer_host: str | None = None
         self._peer_port: int | None = None
         # Model shape for size checks + compat hash; only set by
@@ -127,6 +138,7 @@ class ECCPUScheduler:
             compute_ec_compatibility_hash,
         )
         from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+            PRODUCER_PIN_LEASE_S,
             ProducerSession,
         )
         from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -145,8 +157,22 @@ class ECCPUScheduler:
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
+        # The default is the producer's own pin lease, the only value that
+        # cannot strand a grant: giving up earlier leaves the producer
+        # pinning blocks for a consumer that has already left.
         self._ack_timeout_s = float(
-            self._ec_config.get_from_extra_config("consumer_ack_timeout_s", 2.0)
+            self._ec_config.get_from_extra_config(
+                "consumer_ack_timeout_s", PRODUCER_PIN_LEASE_S
+            )
+        )
+        # How long a producer holds an announced encoding for a consumer that
+        # has not asked for it yet. It must cover the orchestrator's forward
+        # plus the consumer's queueing delay; the pin is released as soon as
+        # the read completes, so the steady-state cost is the work in flight.
+        self._announce_lease_s = float(
+            self._ec_config.get_from_extra_config(
+                "producer_announce_lease_s", PRODUCER_PIN_LEASE_S
+            )
         )
         self._compat_hash = compute_ec_compatibility_hash(
             vllm_version=VLLM_VERSION,
@@ -387,6 +413,55 @@ class ECCPUScheduler:
         )
         return True
 
+    def _hold_announced(self, mm_hash: str, entry: Any) -> None:
+        """Hold an announced encoding until its consumer has read it."""
+        import time
+
+        deadline = time.monotonic() + self._announce_lease_s
+        if mm_hash in self._announce_pins:
+            # Announced again by a later request: extend the hold rather than
+            # taking a second pin, so one release is enough.
+            self._announce_pins[mm_hash] = deadline
+            return
+        if mm_hash in self._announce_pending:
+            self._announce_pending[mm_hash] = deadline
+            return
+        if not entry.ready:
+            self._announce_pending[mm_hash] = deadline
+            return
+        self._cache.pin(mm_hash)
+        self._announce_pins[mm_hash] = deadline
+
+    def _release_announce_pins(self) -> None:
+        """Release holds whose read has landed, and sweep lapsed leases."""
+        import time
+
+        assert self._producer_session is not None
+        for mm_hash in self._producer_session.take_served():
+            if self._announce_pins.pop(mm_hash, None) is not None:
+                self._unpin_announced(mm_hash)
+            else:
+                self._announce_pending.pop(mm_hash, None)
+        now = time.monotonic()
+        for mm_hash, deadline in list(self._announce_pins.items()):
+            if now > deadline:
+                del self._announce_pins[mm_hash]
+                self._unpin_announced(mm_hash)
+                logger.debug(
+                    "EC producer: hold on mm_hash=%s lapsed; releasing", mm_hash
+                )
+        for mm_hash, deadline in list(self._announce_pending.items()):
+            if now > deadline:
+                del self._announce_pending[mm_hash]
+
+    def _unpin_announced(self, mm_hash: str) -> None:
+        # A pinned entry cannot be evicted or discarded, so it is normally
+        # still here; tolerate its absence rather than assert on a shutdown
+        # race.
+        if self._cache.get(mm_hash) is None:
+            return
+        self._cache.unpin(mm_hash)
+
     def _poll_step(self) -> None:
         import time
 
@@ -480,6 +555,7 @@ class ECCPUScheduler:
         if self._is_producer:
             if self._nixl_enabled and self._producer_session is not None:
                 self._producer_session.poll_step()
+                self._release_announce_pins()
             meta.saves = self._pending_saves
             self._pending_saves = {}
         if self._is_consumer:
@@ -512,6 +588,12 @@ class ECCPUScheduler:
                 )
             elif not entry.ready:
                 self._cache.mark_ready(mm_hash)
+                # It has just become evictable, so an announcement made while
+                # the save was in flight takes its pin now.
+                deadline = self._announce_pending.pop(mm_hash, None)
+                if deadline is not None:
+                    self._cache.pin(mm_hash)
+                    self._announce_pins[mm_hash] = deadline
                 logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
         for transfer_id in meta.completed_loads:
             pending = self._load_acks.get(transfer_id)
@@ -578,6 +660,7 @@ class ECCPUScheduler:
                 peer_port=self._peer_port,
                 size_bytes=size_bytes,
             )
+            self._hold_announced(mm_hash, entry)
         logger.debug(
             "EC producer: announcing NIXL-readable encodings req_id=%s items=%s",
             request.request_id,

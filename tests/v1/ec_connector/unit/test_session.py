@@ -456,7 +456,7 @@ def test_consumer_session_ack_timeout_goes_to_retryable():
 
     The producer answers XferReqs from its scheduler step, so the reply can
     lag a whole encoder forward pass. Tombstoning on that admits the request
-    with no embedding, which is fatal.
+    with no embedding, which is fatal once the media has been rewritten away.
     """
     s = _make_consumer_session()
     s.start_xfer("h1", [0, 1], deadline=time.monotonic() - 1)
