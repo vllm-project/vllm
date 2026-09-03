@@ -1236,6 +1236,12 @@ def test_fused_conv_correctness(
         dtype=torch.bfloat16,
         generator=rng,
     )
+    outer_residual = torch.randn(
+        inputs.shape,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=rng,
+    )
     null_state = conv_state[NULL_BLOCK_ID].clone()
     residual_kernel = residual.clone()
     residual_reference = residual.clone()
@@ -1243,6 +1249,7 @@ def test_fused_conv_correctness(
     module._short_conv_dilated_dispatch(
         inputs=inputs,
         residual=residual_kernel,
+        outer_residual=outer_residual,
         metadata=metadata,
         conv_state=conv_state,
         conv_weights=weights,
@@ -1256,6 +1263,7 @@ def test_fused_conv_correctness(
         conv_state_len=module.conv_state_len,
         dilation=module.short_conv_dilation,
     )
+    residual_reference = outer_residual + residual_reference
 
     torch.testing.assert_close(
         residual_kernel.float(), residual_reference.float(), atol=3e-2, rtol=3e-2
@@ -1264,7 +1272,8 @@ def test_fused_conv_correctness(
     assert torch.equal(conv_state[NULL_BLOCK_ID], null_state)
     if case.graph_padding:
         assert torch.equal(
-            residual_kernel[num_real_tokens:], residual[num_real_tokens:]
+            residual_kernel[num_real_tokens:],
+            (outer_residual + residual)[num_real_tokens:],
         )
 
 

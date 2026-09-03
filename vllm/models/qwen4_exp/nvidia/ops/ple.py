@@ -322,6 +322,7 @@ def _ple_conv_kernel(
     state_ptr,
     w_ptr,
     residual_ptr,
+    outer_residual_ptr,
     state_idx_ptr,
     qsl_ptr,
     num_acc_ptr,
@@ -441,11 +442,21 @@ def _ple_conv_kernel(
         mask=c_mask,
         other=0.0,
     )
+    # Preserve the original eager operation boundaries: short convolution is
+    # first accumulated into the BF16/FP16 PLE output, then the outer residual
+    # is added to that rounded value.
+    ple_output = (residual + conv_output).to(residual_ptr.dtype.element_ty)
+    outer_residual = tl.load(
+        outer_residual_ptr + output_t * C + c_offs,
+        mask=c_mask,
+        other=0.0,
+    )
+    ple_output = outer_residual + ple_output
     if launch_pdl:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         residual_ptr + output_t * C + c_offs,
-        residual + conv_output,
+        ple_output,
         mask=c_mask,
     )
 
@@ -562,6 +573,7 @@ def ple_conv(
     conv_state: torch.Tensor,
     conv_weights: torch.Tensor,
     state_indices: torch.Tensor,
+    outer_residual: torch.Tensor,
     *,
     mode: Literal["decode", "spec", "prefill"],
     dilation: int,
@@ -571,7 +583,7 @@ def ple_conv(
     spec_query_len: int = 1,
     token_indices: torch.Tensor | None = None,
 ) -> None:
-    """Add short-convolution output to ``residual`` and update its state."""
+    """Add short convolution and the outer residual; update state."""
     BLOCK_C = 512
     kernel_spec_query_len = spec_query_len if mode == "spec" else 1
     T, C = inputs.shape
@@ -620,6 +632,7 @@ def ple_conv(
         conv_state,
         conv_weights,
         residual,
+        outer_residual,
         state_indices,
         query_start_loc,
         num_accepted_tokens,

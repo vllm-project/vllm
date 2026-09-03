@@ -790,6 +790,7 @@ def test_qsa_sparse_paged_attention_correctness(
     q = torch.randn(
         num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
     )
+    output_gate = torch.randn_like(q)
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
@@ -857,6 +858,7 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_indices,
         block_table,
         token_to_req,
+        output_gate=output_gate,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
@@ -867,6 +869,7 @@ def test_qsa_sparse_paged_attention_correctness(
         token_to_req,
         scale,
     )
+    expected = expected * torch.sigmoid(output_gate)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
