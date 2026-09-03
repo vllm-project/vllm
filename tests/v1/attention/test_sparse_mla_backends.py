@@ -2912,6 +2912,7 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows():
 
 
 def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypatch):
+    """FP8 decode must use active dimensions when common metadata is padded."""
     device = torch.device("cpu")
     num_decodes = 2
     query_len = 3
@@ -2940,10 +2941,18 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
         hot=SimpleNamespace(attention_cache=torch.empty(1, device=device))
     )
     leader_cache = SimpleNamespace(
-        runtime=runtime, swap_in=MagicMock(side_effect=swap_in)
+        runtime=runtime,
+        source_block_table=torch.empty(
+            num_decodes, 1, dtype=torch.int32, device=device
+        ),
+        swap_in=MagicMock(side_effect=swap_in),
     )
     follower_cache = SimpleNamespace(
-        runtime=runtime, swap_in=MagicMock(side_effect=swap_in)
+        runtime=runtime,
+        source_block_table=torch.empty(
+            num_decodes, 1, dtype=torch.int32, device=device
+        ),
+        swap_in=MagicMock(side_effect=swap_in),
     )
     index_group = object.__new__(HiSparseMLAIndexGroup)
     index_group.caches = [leader_cache, follower_cache]
@@ -2963,9 +2972,9 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
     )
     impl._fp8_flash_mla_kernel = MethodType(run_kernel, impl)
     metadata = SimpleNamespace(
-        num_decodes=num_decodes,
+        num_decodes=num_tokens,
         num_decode_tokens=num_tokens,
-        decode_max_query_len=query_len,
+        decode_max_query_len=1,
         query_start_loc=torch.arange(
             0,
             num_tokens + 1,
@@ -2983,6 +2992,8 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
         topk,
         metadata,
         SimpleNamespace(),
+        num_decodes,
+        query_len,
     )
 
     assert steps == [0, 1, 2]
@@ -2997,9 +3008,42 @@ def test_hisparse_fp8_decode_resolves_steps_then_runs_batched_attention(monkeypa
         topk,
         metadata,
         return_valid_counts=False,
+        num_decodes=num_decodes,
+        decode_query_len=query_len,
     )
     assert steps == [0, 1, 2, 0, 1, 2]
     torch.testing.assert_close(follower_indices, topk + 10)
+
+
+def test_hisparse_single_token_decode_uses_canonical_request_rows():
+    """Zero-filled graph padding must not share request 0's residency state."""
+    num_decodes = 4
+    topk = torch.zeros((num_decodes, 2), dtype=torch.int32)
+    cache = SimpleNamespace(
+        source_block_table=torch.zeros((num_decodes, 1), dtype=torch.int32),
+        swap_in=MagicMock(return_value=topk),
+    )
+    index_group = object.__new__(HiSparseMLAIndexGroup)
+    index_group.caches = [cache]
+    index_group.physical_topk_indices = torch.empty_like(topk)
+    index_group.request_ids = torch.arange(num_decodes, dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        decode_max_query_len=1,
+        req_id_per_token=torch.zeros(num_decodes, dtype=torch.int32),
+        block_size=64,
+    )
+
+    index_group.convert_decode_logical_to_physical_topk(
+        0,
+        topk,
+        metadata,
+        return_valid_counts=False,
+    )
+
+    request_rows = cache.swap_in.call_args.args[0]
+    torch.testing.assert_close(request_rows, index_group.request_ids)
 
 
 def test_flashinfer_hisparse_decode_runs_batched_attention():
