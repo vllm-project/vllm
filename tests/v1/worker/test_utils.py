@@ -47,6 +47,10 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._metrics_calls = 0
+    worker._metrics_event = MagicMock()
+    worker._metrics_pending = False
+    worker.leader_runtimes = []
     return worker
 
 
