@@ -354,6 +354,8 @@ class DeepseekV32Model(torch.nn.Module):
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
+            if uses_mega_moe and name.endswith(".input_global_scale"):
+                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             # MTP / nextn layers are loaded by the MTP model, not here.
