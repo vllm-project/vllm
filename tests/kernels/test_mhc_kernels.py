@@ -12,6 +12,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
 )
 from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
+from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4Model
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
@@ -416,3 +417,40 @@ def test_deepseek_v4_mhc_broadcast_refit_refreshes_in_place(monkeypatch):
     assert layer.hc_attn_fn_broadcast is buffer
     expected = layer.hc_attn_fn.detach().view(-1, 2, 8).sum(dim=1)
     assert torch.equal(layer.hc_attn_fn_broadcast, expected)
+
+
+def test_dspark_forwards_2d_embeddings_to_broadcast_mhc(monkeypatch):
+    inputs_embeds = torch.randn(3, 8, dtype=torch.bfloat16)
+
+    class RecordingLayer:
+        def __call__(self, hidden_states, *args):
+            assert hidden_states is inputs_embeds
+            assert hidden_states.ndim == 2
+            return hidden_states, None, None, None
+
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark.mhc_post_tilelang",
+        lambda hidden_states, *args: hidden_states,
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark.hc_head_fused_kernel_tilelang",
+        lambda hidden_states, *args: hidden_states,
+    )
+    model = SimpleNamespace(
+        use_sequence_parallel=False,
+        layers=[RecordingLayer()],
+        hc_head_fn=None,
+        hc_head_scale=None,
+        hc_head_base=None,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+    )
+
+    output = DSparkDeepseekV4Model.forward(
+        model,
+        torch.arange(3),
+        torch.arange(3),
+        inputs_embeds,
+    )
+
+    assert output is inputs_embeds

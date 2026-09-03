@@ -495,18 +495,22 @@ def test_deepseek_v4_pwal_hook_finalizes_mega_moe_and_mhc_broadcast():
     assert calls == ["mega_moe", "mhc"]
 
 
-def test_deepseek_v4_drafter_pwal_hooks_finalize_mega_moe():
+def test_deepseek_v4_drafter_pwal_hooks_finalize_derived_weights():
     """MTP/DSpark drafters load as their own top-level models, so each needs
-    its own PWAL hook now that the megamoe forward no longer finalizes
-    weights lazily on first use."""
+    its own PWAL hook for derived MegaMoE and mHC broadcast weights."""
     calls = []
     mtp = SimpleNamespace(finalize_mega_moe_weights=lambda: calls.append("mtp"))
     DeepSeekV4MTP.process_weights_after_loading(mtp)
 
-    dspark = SimpleNamespace(_finalize_moe=lambda: calls.append("dspark"))
+    dspark = SimpleNamespace(
+        _finalize_moe=lambda: calls.append("dspark"),
+        model=SimpleNamespace(
+            finalize_mhc_broadcast_weights=lambda: calls.append("dspark_mhc")
+        ),
+    )
     DSparkDeepseekV4ForCausalLM.process_weights_after_loading(dspark)
 
-    assert calls == ["mtp", "dspark"]
+    assert calls == ["mtp", "dspark", "dspark_mhc"]
 
 
 @pytest.mark.skipif(
