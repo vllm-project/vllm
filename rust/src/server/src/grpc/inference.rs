@@ -55,10 +55,8 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
         .cloned();
 
     // Decode uses EC metadata only to prepare the prompt; EngineCore consumes KV.
-    if is_decode_kv_consumer {
-        if let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
-            args.remove("ec_transfer_params");
-        }
+    if is_decode_kv_consumer && let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
+        args.remove("ec_transfer_params");
     }
 
     let Some(ec_items) = ec_items else {
