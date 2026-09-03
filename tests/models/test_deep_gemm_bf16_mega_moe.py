@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.models.deepseek_v2 import (
+    _is_deep_gemm_mega_moe_requested,
+)
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepGemmMegaMoEExperts,
     make_deepseek_v4_expert_params_mapping,
@@ -24,6 +27,14 @@ class _FakeNvfp4QuantConfig:
     @staticmethod
     def get_name():
         return "compressed-tensors"
+
+
+def test_mega_moe_request_applies_to_mtp_model_config():
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe")
+    )
+
+    assert _is_deep_gemm_mega_moe_requested(vllm_config)
 
 
 def test_megamoe_mapping_uses_direct_expert_parameter_prefix():

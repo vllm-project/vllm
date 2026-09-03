@@ -287,6 +287,13 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+def _is_deep_gemm_mega_moe_requested(vllm_config: VllmConfig | None) -> bool:
+    return bool(
+        vllm_config is not None
+        and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    )
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -311,16 +318,12 @@ class DeepseekV2MoE(nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-        self.use_mega_moe = bool(
-            vllm_config is not None
-            and getattr(config, "model_type", None) == "glm_moe_dsa"
-            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        )
+        self.use_mega_moe = _is_deep_gemm_mega_moe_requested(vllm_config)
         if self.use_mega_moe and not current_platform.is_cuda():
-            raise NotImplementedError("GLM MegaMoE requires CUDA.")
+            raise NotImplementedError("DeepGEMM MegaMoE requires CUDA.")
         if self.use_mega_moe and not parallel_config.enable_expert_parallel:
             raise NotImplementedError(
-                "GLM MegaMoE requires expert parallel. Enable it with "
+                "DeepGEMM MegaMoE requires expert parallel. Enable it with "
                 "--enable-expert-parallel, or pick a different MoE backend."
             )
 
