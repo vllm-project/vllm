@@ -23,13 +23,15 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_8RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -65,7 +67,6 @@ from .qwen3_next import (
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
-    _is_shared_expert_fse_compatible,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -235,6 +236,11 @@ class Qwen3_8Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Qwen3NextSparseMoeBlock,
+            "mlp",
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -247,15 +253,13 @@ class Qwen3_8Model(Qwen3NextModel):
         self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        if "moe" in getattr(self.config, "model_type", ""):
-            weights = maybe_fuse_shared_experts(
-                weights,
-                enabled=rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-                and _is_shared_expert_fse_compatible(self.quant_config),
-                n_routed_experts=self.config.num_experts,
-                n_shared_experts=1,
-                ckpt_prefix="mlp.shared_expert",
-            )
+        weights = maybe_fuse_shared_experts(
+            weights,
+            enabled=self.is_fused_shared_expert_enabled,
+            n_routed_experts=getattr(self.config, "num_experts", 0),
+            n_shared_experts=1,
+            ckpt_prefix="mlp.shared_expert",
+        )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
