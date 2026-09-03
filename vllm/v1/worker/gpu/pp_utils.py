@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -71,8 +72,12 @@ class PPHandler:
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
         # with pp_size None placeholders so the first pp_size consumes are no-ops.
         # None means no postprocess is pending for that step (broadcast skipped).
+        # Only XPU can disable microbatching via VLLM_XPU_PP_MICROBATCH.
+        ring_depth = get_pp_group().world_size
+        if current_platform.is_xpu() and not envs.VLLM_XPU_PP_MICROBATCH:
+            ring_depth = 1
         self.queue: deque[PendingRecv | None] = (
-            deque() if self.is_last_rank else deque([None] * get_pp_group().world_size)
+            deque() if self.is_last_rank else deque([None] * ring_depth)
         )
 
         # Per req-index generation counter, incremented every time a request
