@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from collections.abc import Callable
 
 import torch
@@ -14,10 +15,18 @@ from vllm.model_executor.layers.fused_moe.config import (
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.platforms import current_platform
+
+
+@functools.cache
+def _skip_padding_enabled() -> bool:
+    return (
+        envs.VLLM_MOE_SKIP_PADDING and current_platform.supports_moe_padding_sentinel()
+    )
 
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
-    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+    if _skip_padding_enabled() and is_forward_context_available():
         is_padding = get_forward_context().is_padding
         return is_padding[:num_tokens] if is_padding is not None else None
     return None
