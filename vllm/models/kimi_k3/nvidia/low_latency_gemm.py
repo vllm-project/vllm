@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103.
+"""Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
 Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
 name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
@@ -12,7 +12,10 @@ The supported capabilities carry separate measured tables:
 :data:`KIMI_K3_PROJECTIONS` was tuned on B300 (SM103),
 :data:`KIMI_K3_PROJECTIONS_SM100` on B200 (SM100), and
 :data:`KIMI_K3_PROJECTIONS_SM90` on H200 (SM90). The per-(shape, M) winners
-genuinely differ between the parts, so the tables must not be merged.
+genuinely differ between the parts, so the tables must not be merged. SM107
+(Rubin) reuses the SM103 table: the plan was validated end-to-end on SM107
+hardware, but the per-M crossovers have not been re-measured there and may
+deserve their own table once retuned.
 """
 
 from __future__ import annotations
@@ -646,9 +649,14 @@ def _is_sm103() -> bool:
     return current_platform.is_device_capability((10, 3))
 
 
+def _is_sm107() -> bool:
+    return current_platform.is_device_capability((10, 7))
+
+
 def _low_latency_table() -> dict[tuple[int, int], ProjectionSpec] | None:
     """Measured dispatch table for the current device, or None if unsupported."""
-    if _is_sm103():
+    if _is_sm103() or _is_sm107():
+        # SM107 reuses the SM103 table; see the module docstring.
         return KIMI_K3_PROJECTIONS
     if current_platform.is_device_capability((10, 0)):
         return KIMI_K3_PROJECTIONS_SM100
@@ -663,7 +671,9 @@ def _is_packed_row_major(tensor: torch.Tensor) -> bool:
 
 def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
     return (
-        _is_packed_row_major(x)
+        x.dim() == 2
+        and x.stride(1) == 1
+        and (x.shape[0] == 1 or x.stride(0) % 8 == 0)
         and _is_packed_row_major(weight)
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -676,7 +686,8 @@ def _runtime_ok(x: torch.Tensor, weight: torch.Tensor) -> bool:
 
 def _residual_ok(x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor) -> bool:
     return (
-        residual.dim() == 2
+        _is_packed_row_major(x)
+        and residual.dim() == 2
         and residual.dtype == torch.bfloat16
         and residual.is_cuda
         and residual.device == x.device
@@ -693,6 +704,8 @@ def _run_plan(
         return None
     backend, config = entry
     if backend == "cute":
+        if x.shape[0] != 1 and not _is_packed_row_major(x):
+            return None
         if not shape_dynamic_skinny_gemm.is_available():
             return None
         return shape_dynamic_skinny_gemm(x, weight, config, None)
