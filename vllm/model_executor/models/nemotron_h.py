@@ -43,9 +43,9 @@ from vllm.model_executor.layers.fused_moe import (
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
-    Bf16ReLUSquaredStaticFp8Quant,
+    is_relu_squared_static_fp8_quant_config_supported,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -130,33 +130,24 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
-        # This producer matches the compiled-native ReLU2 and QuantFP8 pair,
-        # so retain either CUDA custom-op path when it is explicitly enabled.
-        self.relu2_fp8_quant = (
-            Bf16ReLUSquaredStaticFp8Quant()
-            if enable_relu2_fp8_quant
+        # Only replace the compiled-native ReLU2 and QuantFP8 pair; preserve
+        # either CUDA custom op when it is explicitly enabled.
+        self.use_relu2_fp8_quant = (
+            enable_relu2_fp8_quant
             and current_platform.is_cuda()
             and not self.act_fn.enabled()
             and not QuantFP8.enabled()
-            and Bf16ReLUSquaredStaticFp8Quant.is_supported_in_current_config()
+            and current_platform.has_device_capability(90)
+            and is_relu_squared_static_fp8_quant_config_supported()
             and get_tensor_model_parallel_world_size() == 1
             and getattr(self.down_proj, "input_quant_key", None) == kFp8StaticTensorSym
             and hasattr(self.down_proj, "input_scale")
-            else None
         )
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        if self.relu2_fp8_quant is not None and x.dtype == torch.bfloat16:
-            input_scale = self.down_proj.input_scale
-            x_q = self.relu2_fp8_quant(x, input_scale)
-            x = QuantizedActivation(
-                data=x_q,
-                scale=input_scale,
-                orig_dtype=x.dtype,
-                orig_shape=x.shape,
-                quant_key=kFp8StaticTensorSym,
-            )
+        if self.use_relu2_fp8_quant and x.dtype == torch.bfloat16:
+            x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         else:
             x = self.act_fn(x)
         x, _ = self.down_proj(x)

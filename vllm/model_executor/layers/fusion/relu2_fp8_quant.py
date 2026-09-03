@@ -5,16 +5,20 @@ import torch
 
 from vllm.config import get_cached_compilation_config
 from vllm.config.compilation import CompilationMode
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
+    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+_FP8_MIN, _FP8_MAX = get_fp8_min_max()
+
 
 @triton.jit
-def _bf16_relu2_static_fp8_quant_kernel(
+def _relu_squared_static_fp8_quant_kernel(
     x_ptr,
     scale_ptr,
     output_ptr,
@@ -38,64 +42,43 @@ def _bf16_relu2_static_fp8_quant_kernel(
     tl.store(output_ptr + offsets, quantized, mask=mask)
 
 
-@CustomOp.register("bf16_relu2_static_fp8_quant")
-class Bf16ReLUSquaredStaticFp8Quant(CustomOp):
-    """ReLU2 followed by static per-tensor FP8 quantization.
+def is_relu_squared_static_fp8_quant_config_supported() -> bool:
+    """Return whether compiled-Inductor execution is configured."""
+    config = get_cached_compilation_config()
+    return config.mode == CompilationMode.VLLM_COMPILE and config.backend == "inductor"
 
-    The intermediate is rounded to BF16 to match the O2 native ReLU2 and
-    static-quantization path exactly.
-    """
 
-    def __init__(self) -> None:
-        # Inductor can eliminate the otherwise unobservable BF16 round trip in
-        # forward_native. Force this implementation to preserve the unfused
-        # ReLU2-plus-quantization boundary exactly.
-        super().__init__(enforce_enable=True)
-        self.fp8_min, self.fp8_max = get_fp8_min_max()
+def relu_squared_static_fp8_quant(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """BF16 ReLU2 followed by static per-tensor FP8 quantization."""
+    assert x.dtype == torch.bfloat16
+    assert x.is_contiguous()
+    scale = linear.input_scale
+    assert scale.dtype == torch.float32
+    assert x.device == scale.device
+    assert scale.numel() == 1
 
-    @classmethod
-    def is_supported_in_current_config(cls) -> bool:
-        """Check the measured O2 dispatch and honor an explicit opt-out."""
-        config = get_cached_compilation_config()
-        return (
-            config.mode == CompilationMode.VLLM_COMPILE
-            and config.backend == "inductor"
-            and f"-{cls.name}" not in config.custom_ops
-        )
-
-    def forward_native(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        assert x.dtype == torch.bfloat16
-        assert scale.dtype == torch.float32
-        assert x.device == scale.device
-        assert scale.numel() == 1
-        x_fp32 = x.to(torch.float32)
-        relu = torch.clamp_min(x_fp32, 0.0)
-        activated = torch.square(relu).to(torch.bfloat16)
-        quantized = activated.to(torch.float32).mul(
-            scale.to(torch.float32).reciprocal()
-        )
-        return quantized.clamp(self.fp8_min, self.fp8_max).to(
-            current_platform.fp8_dtype()
-        )
-
-    def forward_cuda(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        assert x.dtype == torch.bfloat16
-        assert x.is_contiguous()
-        assert scale.dtype == torch.float32
-        assert x.device == scale.device
-        assert scale.numel() == 1
-        output = torch.empty_like(x, dtype=current_platform.fp8_dtype())
-        if x.numel() == 0:
-            return output
-        block_size = 2048
-        _bf16_relu2_static_fp8_quant_kernel[(triton.cdiv(x.numel(), block_size),)](
+    output = torch.empty_like(x, dtype=current_platform.fp8_dtype())
+    if x.numel() != 0:
+        block_size = min(triton.next_power_of_2(x.shape[-1]), 2048)
+        num_warps = min(max(block_size // 256, 1), 4)
+        grid = lambda meta: (triton.cdiv(x.numel(), meta["BLOCK_SIZE"]),)
+        _relu_squared_static_fp8_quant_kernel[grid](
             x,
             scale,
             output,
             x.numel(),
-            FP8_MIN=self.fp8_min,
-            FP8_MAX=self.fp8_max,
+            FP8_MIN=_FP8_MIN,
+            FP8_MAX=_FP8_MAX,
             BLOCK_SIZE=block_size,
-            num_warps=4,
+            num_warps=num_warps,
         )
-        return output
+
+    return QuantizedActivation(
+        data=output,
+        scale=scale,
+        orig_dtype=x.dtype,
+        orig_shape=x.shape,
+        quant_key=kFp8StaticTensorSym,
+    )

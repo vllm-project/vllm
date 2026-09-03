@@ -4,6 +4,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
+import torch
 
 
 def test_nemotron_h_lm_head_receives_quant_config():
@@ -37,20 +38,25 @@ def test_nemotron_h_lm_head_receives_quant_config():
 
 
 @pytest.mark.parametrize(
-    "relu2_enabled,quant_fp8_enabled,fusion_supported,input_key_state,expected_fusion",
+    "relu2_enabled,quant_fp8_enabled,sm90_supported,config_supported,tp_size,"
+    "input_key_state,expected_fusion",
     [
-        (False, False, True, "matching", True),
-        (True, False, True, "matching", False),
-        (False, True, True, "matching", False),
-        (False, False, False, "matching", False),
-        (False, False, True, "wrong", False),
-        (False, False, True, "missing", False),
+        (False, False, True, True, 1, "matching", True),
+        (True, False, True, True, 1, "matching", False),
+        (False, True, True, True, 1, "matching", False),
+        (False, False, False, True, 1, "matching", False),
+        (False, False, True, False, 1, "matching", False),
+        (False, False, True, True, 2, "matching", False),
+        (False, False, True, True, 1, "wrong", False),
+        (False, False, True, True, 1, "missing", False),
     ],
 )
-def test_relu2_fp8_fusion_follows_custom_op_dispatch(
+def test_relu2_fp8_fusion_follows_dispatch_constraints(
     relu2_enabled: bool,
     quant_fp8_enabled: bool,
-    fusion_supported: bool,
+    sm90_supported: bool,
+    config_supported: bool,
+    tp_size: int,
     input_key_state: str,
     expected_fusion: bool,
 ):
@@ -70,9 +76,7 @@ def test_relu2_fp8_fusion_follows_custom_op_dispatch(
         )
     else:
         del down_proj.input_quant_key
-    fusion = Mock()
-    fusion_op = Mock(return_value=fusion)
-    fusion_op.is_supported_in_current_config.return_value = fusion_supported
+    is_config_supported = Mock(return_value=config_supported)
 
     with (
         patch.multiple(
@@ -81,12 +85,17 @@ def test_relu2_fp8_fusion_follows_custom_op_dispatch(
             RowParallelLinear=Mock(return_value=down_proj),
             ReLUSquaredActivation=Mock(return_value=act_fn),
             QuantFP8=quant_fp8,
-            Bf16ReLUSquaredStaticFp8Quant=fusion_op,
-            get_tensor_model_parallel_world_size=Mock(return_value=1),
+            is_relu_squared_static_fp8_quant_config_supported=is_config_supported,
+            get_tensor_model_parallel_world_size=Mock(return_value=tp_size),
         ),
         patch(
             "vllm.model_executor.models.nemotron_h.current_platform.is_cuda",
             return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.models.nemotron_h.current_platform."
+            "has_device_capability",
+            return_value=sm90_supported,
         ),
     ):
         mlp = NemotronHMLP(
@@ -97,12 +106,43 @@ def test_relu2_fp8_fusion_follows_custom_op_dispatch(
         )
 
     act_fn.enabled.assert_called_once_with()
+    assert mlp.use_relu2_fp8_quant is expected_fusion
+
+
+@pytest.mark.parametrize(
+    "dtype,expected_fusion",
+    [(torch.bfloat16, True), (torch.float16, False)],
+)
+def test_relu2_fp8_fusion_uses_registry(dtype: torch.dtype, expected_fusion: bool):
+    from vllm.model_executor.models.nemotron_h import NemotronHMLP
+
+    projected = torch.empty((1, 1), dtype=dtype)
+    activated = Mock()
+    fused = Mock()
+    act_fn = Mock(return_value=activated)
+    down_proj = Mock(side_effect=lambda x: (x, None))
+
+    mlp = NemotronHMLP.__new__(NemotronHMLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.up_proj = Mock(return_value=(projected, None))
+    mlp.down_proj = down_proj
+    mlp.act_fn = act_fn
+    mlp.use_relu2_fp8_quant = True
+
+    with patch(
+        "vllm.model_executor.models.nemotron_h.maybe_fused_act_quant",
+        return_value=fused,
+    ) as maybe_fused:
+        result = mlp(Mock())
+
     if expected_fusion:
-        assert mlp.relu2_fp8_quant is fusion
-        fusion_op.assert_called_once_with()
+        maybe_fused.assert_called_once_with(act_fn, projected, down_proj)
+        act_fn.assert_not_called()
+        assert result is fused
     else:
-        assert mlp.relu2_fp8_quant is None
-        fusion_op.assert_not_called()
+        maybe_fused.assert_not_called()
+        act_fn.assert_called_once_with(projected)
+        assert result is activated
 
 
 @pytest.mark.parametrize("lora_enabled", [True, False])
