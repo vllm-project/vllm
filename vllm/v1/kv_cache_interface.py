@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
 from functools import cached_property
@@ -467,6 +467,17 @@ class FullAttentionSpec(AttentionSpec):
     cache layout itself.
     """
 
+    is_draft_kv_cache: bool = False
+    """
+    Whether the layer belongs to a speculative-decoding drafter (EAGLE/MTP)
+    whose attention spec is otherwise identical to the target's. Set by draft
+    attention layers at construction; the engine core uses it to keep drafter
+    layers in their own KV cache group and annotate that group with the
+    EAGLE/MTP volatile trailing-block semantics. Must be uniform within a
+    group (enforced by ``merge``), so a draft layer never silently shares a
+    group with identical-spec target layers.
+    """
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
@@ -504,6 +515,11 @@ class FullAttentionSpec(AttentionSpec):
             for spec in specs
             if spec.attention_chunk_size is not None
         )
+        draft_flags = {spec.is_draft_kv_cache for spec in specs}
+        assert len(draft_flags) == 1, (
+            "All attention layers in the same KV cache group must agree on "
+            "is_draft_kv_cache."
+        )
         assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         )
@@ -523,6 +539,7 @@ class FullAttentionSpec(AttentionSpec):
             # If any layer in the group is non-causal, treat the group as
             # non-causal so the engine core disables incompatible scheduling.
             non_causal=any(spec.non_causal for spec in specs),
+            is_draft_kv_cache=draft_flags.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -653,6 +670,7 @@ class RSWASpec(FullAttentionSpec):
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
+            is_draft_kv_cache=base.is_draft_kv_cache,
             rswa_window=rswa_windows.pop(),
         )
 
@@ -966,6 +984,11 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             for spec in specs
             if spec.attention_chunk_size is not None
         )
+        draft_flags = {spec.is_draft_kv_cache for spec in specs}
+        assert len(draft_flags) == 1, (
+            "All attention layers in the same KV cache group must agree on "
+            "is_draft_kv_cache."
+        )
         assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
         )
@@ -983,6 +1006,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
+            is_draft_kv_cache=draft_flags.pop(),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -1206,6 +1230,23 @@ class KVCacheGroupSpec:
     is_eagle_group: bool = False
     # Whether this group is part of the externally transferable KV state.
     enable_kv_transfer: bool = True
+    # Optional physical width retained for an intentionally padded group.
+    # When unset, the width is the exact sum of its layer pages.
+    physical_bytes_per_block: int | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class KVCachePoolSpec:
+    """A fixed-width physical block pool shared by one or more cache groups."""
+
+    group_ids: tuple[int, ...]
+    num_blocks: int
+    bytes_per_block: int
+    offset: int
+
+    @property
+    def size(self) -> int:
+        return self.num_blocks * self.bytes_per_block
 
 
 @dataclass
@@ -1226,10 +1267,48 @@ class KVCacheConfig:
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
+    kv_cache_pools: list[KVCachePoolSpec] | None = None
+    """Physical pools, or ``None`` for the legacy single shared pool."""
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
+
+    @property
+    def uses_multiple_pools(self) -> bool:
+        return self.kv_cache_pools is not None and len(self.kv_cache_pools) > 1
+
+    @cached_property
+    def group_to_pool(self) -> tuple[int, ...]:
+        if self.kv_cache_pools is None:
+            return (0,) * len(self.kv_cache_groups)
+        result = [-1] * len(self.kv_cache_groups)
+        for pool_id, pool in enumerate(self.kv_cache_pools):
+            for group_id in pool.group_ids:
+                assert result[group_id] == -1
+                result[group_id] = pool_id
+        assert all(pool_id >= 0 for pool_id in result)
+        return tuple(result)
+
+    def get_num_blocks(self, group_id: int) -> int:
+        if self.kv_cache_pools is None:
+            return self.num_blocks
+        return self.kv_cache_pools[self.group_to_pool[group_id]].num_blocks
+
+    def get_bytes_per_block(self, group_id: int) -> int:
+        if self.kv_cache_pools is None:
+            if not self.kv_cache_tensors:
+                return 0
+            return self.kv_cache_tensors[0].size // self.num_blocks
+        return self.kv_cache_pools[self.group_to_pool[group_id]].bytes_per_block
+
+    @property
+    def total_size(self) -> int:
+        if self.kv_cache_pools is not None:
+            return sum(pool.size for pool in self.kv_cache_pools)
+        if not self.kv_cache_tensors:
+            return 0
+        return self.kv_cache_tensors[0].size
 
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:

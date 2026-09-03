@@ -210,6 +210,7 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
     kv_cache_allocation_context: AbstractContextManager | None = None,
+    runner_kv_cache_group_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -235,6 +236,7 @@ def init_kv_cache(
         runner_kv_caches,
         num_attn_module,
         kv_cache_groups=kv_cache_config.kv_cache_groups,
+        runner_kv_cache_group_ids=runner_kv_cache_group_ids,
     )
     return kv_caches
 

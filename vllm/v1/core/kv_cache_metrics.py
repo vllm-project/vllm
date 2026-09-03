@@ -52,7 +52,9 @@ class KVCacheMetricsCollector:
         )
         self.sample_rate = sample_rate
 
-        self.block_metrics: dict[int, BlockMetricsState] = {}
+        # Preserve integer keys for the legacy pool while qualifying local IDs
+        # from additional pools to avoid collisions.
+        self.block_metrics: dict[int | tuple[int, int], BlockMetricsState] = {}
 
         self._eviction_events: list[KVCacheEvictionEvent] = []
 
@@ -61,15 +63,15 @@ class KVCacheMetricsCollector:
 
     def on_block_allocated(self, block: "KVCacheBlock") -> None:
         if self.should_sample_block():
-            self.block_metrics[block.block_id] = BlockMetricsState()
+            self.block_metrics[self._key(block)] = BlockMetricsState()
 
     def on_block_accessed(self, block: "KVCacheBlock") -> None:
-        metrics = self.block_metrics.get(block.block_id)
+        metrics = self.block_metrics.get(self._key(block))
         if metrics:
             metrics.record_access()
 
     def on_block_evicted(self, block: "KVCacheBlock") -> None:
-        metrics = self.block_metrics.pop(block.block_id, None)
+        metrics = self.block_metrics.pop(self._key(block), None)
         if not metrics:
             return
 
@@ -84,6 +86,10 @@ class KVCacheMetricsCollector:
                 reuse_gaps_seconds=reuse_gaps,
             )
         )
+
+    @staticmethod
+    def _key(block: "KVCacheBlock") -> int | tuple[int, int]:
+        return block.block_id if block.pool_id == 0 else (block.pool_id, block.block_id)
 
     def reset(self) -> None:
         """Clear all state on cache reset."""

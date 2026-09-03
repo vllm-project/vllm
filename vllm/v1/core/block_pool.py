@@ -166,14 +166,16 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        pool_id: int = 0,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+        self.pool_id = pool_id
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx, pool_id=pool_id) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -221,6 +223,10 @@ class BlockPool:
                 return None
             cached_blocks.append(block)
         return cached_blocks
+
+    def get_null_block(self, kv_cache_group_id: int) -> KVCacheBlock:
+        del kv_cache_group_id
+        return self.null_block
 
     def cache_full_blocks(
         self,
@@ -833,3 +839,90 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+class BlockPoolCollection:
+    """Aggregate operations over independent fixed-width block pools."""
+
+    def __init__(
+        self,
+        pools: Sequence[BlockPool],
+        group_to_pool: Sequence[int],
+        bytes_per_block: Sequence[int],
+    ) -> None:
+        assert pools and len(pools) == len(bytes_per_block)
+        self.pools = tuple(pools)
+        self.group_to_pool = tuple(group_to_pool)
+        self.bytes_per_block = tuple(bytes_per_block)
+        self.hash_block_size = pools[0].hash_block_size
+        assert all(pool.hash_block_size == self.hash_block_size for pool in pools)
+        self.num_gpu_blocks = sum(pool.num_gpu_blocks for pool in pools)
+
+    def get_cached_block(
+        self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+    ) -> list[KVCacheBlock] | None:
+        blocks: list[KVCacheBlock] = []
+        for group_id in kv_cache_group_ids:
+            pool = self.pools[self.group_to_pool[group_id]]
+            result = pool.get_cached_block(block_hash, [group_id])
+            if result is None:
+                return None
+            blocks.append(result[0])
+        return blocks
+
+    def get_null_block(self, kv_cache_group_id: int) -> KVCacheBlock:
+        return self.pools[self.group_to_pool[kv_cache_group_id]].null_block
+
+    def emit_cached_block_events(
+        self,
+        request: Request,
+        num_cached_blocks: int,
+        block_size: int,
+        kv_cache_group_id: int,
+    ) -> None:
+        pool = self.pools[self.group_to_pool[kv_cache_group_id]]
+        pool.emit_cached_block_events(
+            request, num_cached_blocks, block_size, kv_cache_group_id
+        )
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        blocks_by_pool: list[list[KVCacheBlock]] = [[] for _ in self.pools]
+        for block in ordered_blocks:
+            blocks_by_pool[block.pool_id].append(block)
+        for pool, blocks in zip(self.pools, blocks_by_pool):
+            pool.free_blocks(blocks)
+
+    def get_num_free_blocks(self) -> int:
+        return sum(pool.get_num_free_blocks() for pool in self.pools)
+
+    def get_usage(self) -> float:
+        usable_bytes = sum(
+            (pool.num_gpu_blocks - 1) * width
+            for pool, width in zip(self.pools, self.bytes_per_block)
+        )
+        if usable_bytes == 0:
+            return 0.0
+        free_bytes = sum(
+            pool.get_num_free_blocks() * width
+            for pool, width in zip(self.pools, self.bytes_per_block)
+        )
+        return 1.0 - free_bytes / usable_bytes
+
+    def reset_prefix_cache(self) -> bool:
+        if any(
+            pool.num_gpu_blocks - pool.get_num_free_blocks() != 1 for pool in self.pools
+        ):
+            logger.warning(
+                "Failed to reset prefix cache because blocks are not freed yet"
+            )
+            return False
+        return all(pool.reset_prefix_cache() for pool in self.pools)
+
+    def take_events(self) -> list[KVCacheEvent]:
+        return [event for pool in self.pools for event in pool.take_events()]
+
+    def evict_blocks(self, block_ids: set[int]) -> None:
+        del block_ids
+        raise RuntimeError(
+            "Ungrouped block-ID eviction is unsupported with multiple KV pools."
+        )

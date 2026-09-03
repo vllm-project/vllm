@@ -172,6 +172,10 @@ class KVCacheManager:
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
         self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        self.watermark_blocks_per_pool = tuple(
+            int(watermark * pool.num_gpu_blocks)
+            for pool in self.coordinator.block_pools
+        )
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -197,6 +201,27 @@ class KVCacheManager:
             The KV cache usage (between 0.0 and 1.0).
         """
         return self.block_pool.get_usage()
+
+    def _has_pool_capacity(
+        self,
+        required_blocks: int | tuple[int, ...],
+        watermark_blocks: tuple[int, ...],
+        reserved_blocks: int = 0,
+    ) -> bool:
+        if isinstance(required_blocks, int):
+            required_blocks = (required_blocks,)
+        if reserved_blocks and len(required_blocks) > 1:
+            raise RuntimeError(
+                "Connector block reservations are unsupported with multiple "
+                "KV cache pools."
+            )
+        free_blocks = self.coordinator.get_num_free_blocks()
+        return all(
+            required + watermark <= free - reserved_blocks
+            for required, watermark, free in zip(
+                required_blocks, watermark_blocks, free_blocks
+            )
+        )
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
@@ -448,6 +473,10 @@ class KVCacheManager:
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
+        request_was_tracked = any(
+            request.request_id in manager.req_to_blocks
+            for manager in self.coordinator.single_type_managers
+        )
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
@@ -459,14 +488,14 @@ class KVCacheManager:
             self.max_model_len,
         )
 
-        watermark_blocks = 0
+        watermark_blocks = (0,) * len(self.coordinator.block_pools)
         # The watermark is applied to waiting/preempted requests only, and only
         # when there's at least one request already scheduled.
         if has_scheduled_reqs and request.status in (
             RequestStatus.WAITING,
             RequestStatus.PREEMPTED,
         ):
-            watermark_blocks = self.watermark_blocks
+            watermark_blocks = self.watermark_blocks_per_pool
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
@@ -482,8 +511,9 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
-            required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            if not self._has_pool_capacity(num_blocks_to_allocate, watermark_blocks):
+                if not request_was_tracked:
+                    self.coordinator.discard_empty_request(request.request_id)
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -519,10 +549,12 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
-        required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
+        if not self._has_pool_capacity(
+            num_blocks_to_allocate, watermark_blocks, reserved_blocks
+        ):
             # Cannot allocate new blocks
+            if not request_was_tracked:
+                self.coordinator.discard_empty_request(request.request_id)
             return None
 
         if (
@@ -796,12 +828,14 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids(self) -> list[int]:
+    def take_new_block_ids(self) -> list[int] | tuple[list[int], ...]:
         """Drain and return new attention block IDs for zeroing."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            ids.extend(mgr.take_new_block_ids())
-        return ids
+        ids_by_group = tuple(
+            mgr.take_new_block_ids() for mgr in self.coordinator.single_type_managers
+        )
+        if self.kv_cache_config.uses_multiple_pools:
+            return ids_by_group
+        return [block_id for group_ids in ids_by_group for block_id in group_ids]
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int
@@ -835,17 +869,27 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
+        pending_copies: list[tuple[int, KVCacheBlock, KVCacheBlock]] = []
         for mgr in self.coordinator.single_type_managers:
-            pending_copies.extend(mgr.take_pending_cow_copies())
+            pending_copies.extend(
+                (mgr.kv_cache_group_id, source, destination)
+                for source, destination in mgr.take_pending_cow_copies()
+            )
         copies = [
             KVCacheBlockCopy(
                 src_block_id=source_block.block_id,
                 dst_block_id=cow_block.block_id,
+                group_id=(
+                    group_id if self.kv_cache_config.uses_multiple_pools else None
+                ),
             )
-            for source_block, cow_block in pending_copies
+            for group_id, source_block, cow_block in pending_copies
         ]
-        retained_blocks = [block for pair in pending_copies for block in pair]
+        retained_blocks = [
+            block
+            for _group_id, source, destination in pending_copies
+            for block in (source, destination)
+        ]
         return copies, retained_blocks
 
     def take_boundary_state_offloads(

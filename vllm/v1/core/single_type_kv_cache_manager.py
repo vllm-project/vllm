@@ -957,8 +957,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [block_pool.null_block] * max_num_blocks
-            for _ in range(len(kv_cache_group_ids))
+            [block_pool.get_null_block(group_id)] * max_num_blocks
+            for group_id in kv_cache_group_ids
         )
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
@@ -1300,8 +1300,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             local_attention_start_idx // kv_cache_spec.block_size
         )
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [block_pool.null_block] * local_attention_start_block_idx
-            for _ in range(len(kv_cache_group_ids))
+            [block_pool.get_null_block(group_id)] * local_attention_start_block_idx
+            for group_id in kv_cache_group_ids
         )
         for i in range(local_attention_start_block_idx, max_num_blocks):
             block_hash = block_hashes[i]
@@ -1443,8 +1443,12 @@ class MambaManager(SingleTypeKVCacheManager):
                     block_hash, kv_cache_group_ids
                 ):
                     block_idx = fine_idx // scale_factor
-                    for computed, cached in zip(computed_blocks, cached_block):
-                        computed.extend([block_pool.null_block] * block_idx)
+                    for group_id, computed, cached in zip(
+                        kv_cache_group_ids, computed_blocks, cached_block
+                    ):
+                        computed.extend(
+                            [block_pool.get_null_block(group_id)] * block_idx
+                        )
                         computed.append(cached)
                     hit_length = num_tokens
                     break
@@ -1464,12 +1468,14 @@ class MambaManager(SingleTypeKVCacheManager):
                     and (i + 1) * block_size % alignment_tokens != 0
                 ):
                     continue
-                for computed, cached in zip(computed_blocks, cached_block):
+                for group_id, computed, cached in zip(
+                    kv_cache_group_ids, computed_blocks, cached_block
+                ):
                     # the hit length logic later assumes:
                     #  hit_length = len(hit_blocks_other_attn[0])
                     #               * self.other_block_size
                     # so we insert dummy blocks at the beginning:
-                    computed.extend([block_pool.null_block] * i)
+                    computed.extend([block_pool.get_null_block(group_id)] * i)
                     computed.append(cached)
                 hit_length = (i + 1) * block_size
                 break  # we just need the last match - early stopping

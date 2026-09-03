@@ -673,6 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
+        self.kv_cache_group_ids: list[int] = []
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
@@ -683,6 +684,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kernel_block_sizes,
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
+                runner_kv_cache_group_ids=self.kv_cache_group_ids,
             )
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -1112,8 +1114,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.kv_cache_block_copies:
             copy_kv_cache_blocks_inplace(
                 self.kv_caches,
-                self.kv_cache_config.num_blocks,
+                (
+                    [
+                        self.kv_cache_config.get_num_blocks(group_id)
+                        for group_id in range(len(self.kv_cache_config.kv_cache_groups))
+                    ]
+                    if self.kv_cache_config.uses_multiple_pools
+                    else self.kv_cache_config.num_blocks
+                ),
                 scheduler_output.kv_cache_block_copies,
+                self.kv_cache_group_ids,
             )
 
     def gather_batch_req_state(
@@ -1646,7 +1656,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         input_batch,
                         self.block_tables,
                         context_len,
-                        self.kv_cache_config.num_blocks,
+                        (
+                            [
+                                self.kv_cache_config.get_num_blocks(group_id)
+                                for group_id in range(
+                                    len(self.kv_cache_config.kv_cache_groups)
+                                )
+                            ]
+                            if self.kv_cache_config.uses_multiple_pools
+                            else self.kv_cache_config.num_blocks
+                        ),
                         self.max_model_len,
                     )
             else:

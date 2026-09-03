@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, BlockPoolCollection
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -96,13 +96,35 @@ class KVCacheCoordinator(ABC):
         self.scheduler_block_size = scheduler_block_size
         self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
 
-        self.block_pool = BlockPool(
-            num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
+        if kv_cache_config.kv_cache_pools is None:
+            shared_pool = BlockPool(
+                num_gpu_blocks=kv_cache_config.num_blocks,
+                enable_caching=enable_caching,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
+            )
+            self.block_pools = (shared_pool,)
+            self.group_to_pool = (0,) * len(kv_cache_config.kv_cache_groups)
+            self.block_pool: BlockPool | BlockPoolCollection = shared_pool
+        else:
+            self.block_pools = tuple(
+                BlockPool(
+                    num_gpu_blocks=pool.num_blocks,
+                    enable_caching=enable_caching,
+                    hash_block_size=hash_block_size,
+                    enable_kv_cache_events=enable_kv_cache_events,
+                    metrics_collector=metrics_collector,
+                    pool_id=pool_id,
+                )
+                for pool_id, pool in enumerate(kv_cache_config.kv_cache_pools)
+            )
+            self.group_to_pool = kv_cache_config.group_to_pool
+            self.block_pool = BlockPoolCollection(
+                self.block_pools,
+                self.group_to_pool,
+                [pool.bytes_per_block for pool in kv_cache_config.kv_cache_pools],
+            )
 
         # KV cache group indices that get the EAGLE last-block drop.
         self.eagle_group_ids: set[int] = {
@@ -139,7 +161,7 @@ class KVCacheCoordinator(ABC):
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
-                block_pool=self.block_pool,
+                block_pool=self.block_pools[self.group_to_pool[i]],
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size_for_kv_cache_spec(
@@ -170,7 +192,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
-    ) -> int:
+    ) -> int | tuple[int, ...]:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -196,12 +218,12 @@ class KVCacheCoordinator(ABC):
         Returns:
             The number of blocks to allocate.
         """
-        num_blocks_to_allocate = 0
+        num_blocks_to_allocate = [0] * len(self.block_pools)
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                required = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_encoder_tokens,
                     [],
@@ -211,7 +233,7 @@ class KVCacheCoordinator(ABC):
                     apply_admission_cap=apply_admission_cap,
                 )
             else:
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                required = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
                     new_computed_blocks[i],
@@ -220,7 +242,28 @@ class KVCacheCoordinator(ABC):
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                 )
-        return num_blocks_to_allocate
+            num_blocks_to_allocate[self.group_to_pool[i]] += required
+        if len(num_blocks_to_allocate) == 1:
+            return num_blocks_to_allocate[0]
+        return tuple(num_blocks_to_allocate)
+
+    def get_num_free_blocks(self) -> tuple[int, ...]:
+        return tuple(pool.get_num_free_blocks() for pool in self.block_pools)
+
+    def discard_empty_request(self, request_id: str) -> None:
+        """Remove bookkeeping created by a rejected first allocation.
+
+        Some sparse managers use ``defaultdict`` access while pruning skipped
+        blocks.  A capacity rejection must not leave those empty entries behind.
+        """
+        for manager in self.single_type_managers:
+            blocks = manager.req_to_blocks.get(request_id)
+            if blocks is not None and not blocks:
+                manager.req_to_blocks.pop(request_id)
+            assert request_id not in manager.num_cached_block
+
+    def free_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
+        self.block_pool.free_blocks(blocks)
 
     def allocate_new_computed_blocks(
         self,
