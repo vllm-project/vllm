@@ -165,9 +165,9 @@ def test_model_tensor_schema(model_id: str):
         )
 
     if model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" and not (
-        current_platform.is_cuda()
+        current_platform.is_cuda() or current_platform.is_rocm()
     ):
-        pytest.skip("Deepseek V4 is only supported on CUDA")
+        pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
