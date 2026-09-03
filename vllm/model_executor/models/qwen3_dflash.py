@@ -75,26 +75,6 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
-def dflash_target_rope_is_neox_style(target_model: nn.Module) -> bool | None:
-    """The target's RoPE layout, from its first attention layer.
-
-    A DFlash head must rotate Q/K the way the target it was distilled against
-    does, and a mismatch is silent — acceptance collapses but nothing errors and
-    the output stays correct. Draft checkpoints do not carry this, so take it
-    from the target. None if the target uses no RoPE.
-    """
-    language_model = (
-        target_model.get_language_model()
-        if hasattr(target_model, "get_language_model")
-        else target_model
-    )
-    for module in language_model.modules():
-        style = getattr(module, "is_neox_style", None)
-        if isinstance(style, bool):
-            return style
-    return None
-
-
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     config = spec_config.draft_model_config.hf_config
@@ -316,11 +296,11 @@ class DFlashQwen3DecoderLayer(nn.Module):
         # non-causal) from the draft config.
         sliding_window, causal = _resolve_layer_attention(config, layer_idx)
 
-        # RoPE layout, copied off the target at load time by the draft loader
-        # (see `dflash_target_rope_is_neox_style`). Checkpoints do not carry it:
-        # a head distilled from an interleaved-RoPE target must rotate the way
-        # that target does, or every drafted Q/K is wrong and acceptance
-        # collapses with no error raised.
+        # RoPE layout. The rotation applies to the draft's own Q/K, so this is
+        # fixed by how the head was distilled, not by the target: a neox-trained
+        # head on an interleaved target still needs neox. A mismatch is silent --
+        # acceptance collapses and nothing errors -- so a checkpoint that was
+        # distilled the other way has to say so here.
         is_neox_style = getattr(config, "is_neox_style", True)
 
         self.self_attn = DFlashQwen3Attention(
@@ -412,10 +392,10 @@ class DFlashQwen3Model(nn.Module):
         drafter_config = getattr(self.config, "eagle_config", {})
         drafter_config.update(getattr(self.config, "dflash_config", {}))
 
-        if drafter_config is not None and "use_aux_hidden_state" in drafter_config:
-            self.use_aux_hidden_state = drafter_config["use_aux_hidden_state"]
-        else:
-            self.use_aux_hidden_state = True
+        self.use_aux_hidden_state = drafter_config.get(
+            "use_aux_hidden_state",
+            getattr(self.config, "use_aux_hidden_state", True),
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -430,7 +410,9 @@ class DFlashQwen3Model(nn.Module):
         # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
         # with a separate mask embedding tensor to use instead. When present, we load it
         # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
-        self.mask_token_id = drafter_config.get("mask_token_id")
+        self.mask_token_id = drafter_config.get(
+            "mask_token_id", getattr(self.config, "mask_token_id", None)
+        )
         self.mask_embedding = nn.Parameter(
             torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
             requires_grad=False,

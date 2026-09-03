@@ -40,6 +40,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -277,10 +278,12 @@ class Cohere2VisionMultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
+        image_token_id = hf_processor.image_token_id
         img_tokens_per_tile = int(hf_processor.patch_size**2)
         img_line_break_token = hf_processor.img_line_break_token
         boi_token = hf_processor.boi_token
         eoi_token = hf_processor.eoi_token
+        tokenizer = self.info.get_tokenizer()
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -295,12 +298,13 @@ class Cohere2VisionMultiModalProcessor(
             patch_tokens = image_token * img_tokens_per_tile + img_line_break_token
             repl = f"{boi_token}{patch_tokens * num_patches}{eoi_token}"
 
-            return PromptUpdateDetails.select_text(repl, image_token)
+            repl_ids = cached_encode(tokenizer, repl, add_special_tokens=False)
+            return PromptUpdateDetails.select_token_id(repl_ids, image_token_id)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=[image_token_id],
                 replacement=get_replacement,
             )
         ]

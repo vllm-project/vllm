@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -436,7 +437,13 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+
+        def get_image_token_ids(item_idx: int) -> list[int]:
+            return cached_encode(
+                tokenizer, image_tokens[item_idx], add_special_tokens=False
+            )
 
         def get_replacement_phi3v(item_idx: int):
             images = mm_items.get_items(
@@ -458,7 +465,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_tokens.__getitem__,
+                target=get_image_token_ids,
                 replacement=get_replacement_phi3v,
             )
         ]
@@ -475,8 +482,13 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
         if cached_update.modality == "image":
             hf_processor = self.info.get_hf_processor()
+            tokenizer = self.info.get_tokenizer()
             image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
-            new_update = new_update.with_target(image_tokens[new_item_idx])
+            new_update = new_update.with_target(
+                cached_encode(
+                    tokenizer, image_tokens[new_item_idx], add_special_tokens=False
+                )
+            )
 
         return new_update
 
@@ -523,7 +535,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
         # Keep the behavior in line with HF processor
         if len(mm_prompt_updates) and (
-            token_ids[:2] == tokenizer.encode("<s> <|image|>", add_special_tokens=False)
+            token_ids[:2]
+            == cached_encode(tokenizer, "<s> <|image|>", add_special_tokens=False)
         ):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {

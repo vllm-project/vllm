@@ -562,6 +562,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def request_finished(
         self,
         request: "Request",
@@ -733,6 +737,11 @@ class MooncakeConnectorScheduler:
             request.max_tokens = 1
             params["_p_side_truncated"] = True
 
+    def on_new_request(self, request: "Request") -> None:
+        params = request.kv_transfer_params
+        if params is not None and params.get("do_remote_decode") and self._has_mamba:
+            self._truncate_mamba_request_for_prefill(request)
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -771,9 +780,6 @@ class MooncakeConnectorScheduler:
             )
             if count > 0:
                 return count, True
-
-        if params.get("do_remote_decode") and self._has_mamba:
-            self._truncate_mamba_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -1776,11 +1782,24 @@ class MooncakeConnectorWorker:
                     block_len = region_cache.stride(0) * region_cache.element_size()
                     region_base_addresses.append(base_addr)
 
-                    kv_block_len = (
-                        layer_spec.page_size_bytes
-                        if isinstance(layer_spec, AttentionSpec) and block_is_contiguous
-                        else block_len
-                    )
+                    if isinstance(layer_spec, AttentionSpec) and block_is_contiguous:
+                        assert (
+                            layer_spec.page_size_bytes
+                            % self._physical_blocks_per_logical_kv_block
+                            == 0
+                        )
+                        kv_block_len = (
+                            layer_spec.page_size_bytes
+                            // self._physical_blocks_per_logical_kv_block
+                        )
+                    else:
+                        kv_block_len = block_len
+                    if kv_block_len > block_len:
+                        raise RuntimeError(
+                            "Mooncake transfer length exceeds physical block stride "
+                            f"for {layer_name}: kv_block_len={kv_block_len}, "
+                            f"block_len={block_len}."
+                        )
                     self.block_len_per_layer.append(block_len)
                     self.kv_block_len_per_layer.append(kv_block_len)
                     self.registered_layer_names.append(layer_name)
@@ -1788,7 +1807,6 @@ class MooncakeConnectorWorker:
                     self.registered_group_indices.append(
                         self._layer_group_indices[layer_name]
                     )
-
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
             if storage_addr not in seen_storage_ptrs:

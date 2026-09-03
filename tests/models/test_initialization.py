@@ -39,7 +39,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "InternVLChatModel",
     "InternLM2ForRewardModel",
     "TransformersMultiModalForCausalLM",
-    "PrithviGeoSpatialMAE",
+    "Terratorch",
     "UltravoxModel",
     "DeepSeekMTPModel",
     "XLMRobertaModel",
@@ -111,7 +111,7 @@ def can_initialize(
             "which is not configured in test environment"
         )
 
-    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+    if model_arch == "Terratorch":
         import importlib.util
 
         if importlib.util.find_spec("terratorch") is None:
@@ -131,6 +131,12 @@ def can_initialize(
                 f"for FLASHMLA_SPARSE backend. Current device has compute "
                 f"capability {capability.major}.{capability.minor}"
             )
+
+    if model_arch == "DeepseekV4ForConditionalGeneration":
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            pytest.skip("Deepseek V4 is only supported on CUDA")
 
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
