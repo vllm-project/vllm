@@ -2753,10 +2753,9 @@ class EngineArgs:
             and self.enable_prefix_caching
             and not default_prefix_caching
         ):
-            logger.warning_once(
-                "This model does not officially support prefix caching. "
-                "Enabling this manually may cause the engine to crash "
-                "or produce incorrect outputs.",
+            raise ValueError(
+                "Prefix caching is not supported for this pooling model. "
+                "Please disable prefix caching."
             )
 
         # Disable chunked prefill and prefix caching for:
