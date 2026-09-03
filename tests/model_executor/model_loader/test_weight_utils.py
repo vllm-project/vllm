@@ -29,6 +29,7 @@ def test_auto_prefetch_selection(
     available_ram_multiplier,
     should_prefetch,
 ):
+    """Auto-prefetch respects filesystem, RAM, and explicit lazy settings."""
     checkpoint = tmp_path / "model.safetensors"
     save_file({"weight": torch.ones(2)}, checkpoint)
 
