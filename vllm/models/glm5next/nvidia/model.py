@@ -650,6 +650,12 @@ class Glm5NextModel(nn.Module):
             "num_attention_heads must be divisible by world_size"
         )
 
+    def invalidate_kda_conv_weight_caches(self) -> None:
+        for layer in self.layers:
+            self_attn = getattr(layer, "self_attn", None)
+            if isinstance(self_attn, Glm5NextLinearAttention):
+                self_attn.invalidate_merged_conv_weight()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -704,6 +710,7 @@ class Glm5NextModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        self.invalidate_kda_conv_weight_caches()
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
@@ -951,6 +958,7 @@ class Glm5NextForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        self.model.invalidate_kda_conv_weight_caches()
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

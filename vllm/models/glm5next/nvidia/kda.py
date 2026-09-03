@@ -239,6 +239,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Lazily-built merged q|k|v conv weight (built on first forward, after
         # weights are loaded). See _forward.
         self._merged_conv_weight: torch.Tensor | None = None
+        self._merged_conv_weight_key: tuple[tuple[int, int], ...] | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -281,6 +282,33 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Process-global conv-state layout, resolved once here instead of on
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
+
+    def _get_merged_conv_weight(self) -> torch.Tensor:
+        source_weights = (
+            self.q_conv1d.weight,
+            self.k_conv1d.weight,
+            self.v_conv1d.weight,
+        )
+        cache_key = tuple(
+            (weight.data_ptr(), weight._version) for weight in source_weights
+        )
+        if (
+            self._merged_conv_weight is None
+            or self._merged_conv_weight_key != cache_key
+        ):
+
+            def _w(weight: torch.Tensor) -> torch.Tensor:
+                return weight.view(weight.size(0), weight.size(2))
+
+            self._merged_conv_weight = torch.cat(
+                [_w(weight) for weight in source_weights], dim=0
+            ).contiguous()
+            self._merged_conv_weight_key = cache_key
+        return self._merged_conv_weight
+
+    def invalidate_merged_conv_weight(self) -> None:
+        self._merged_conv_weight = None
+        self._merged_conv_weight_key = None
 
     def forward(
         self,
@@ -385,18 +413,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
         # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
-        conv_weights = self._merged_conv_weight
+        # cached while refreshing automatically when a source weight changes.
+        # conv_state is already stored as the merged q|k|v state, so it is used
+        # directly.
+        conv_weights = self._get_merged_conv_weight()
         conv_bias = self.q_conv1d.bias
 
         # Split projections / gating into spec (draft-verify) and non-spec token
