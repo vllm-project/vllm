@@ -151,7 +151,10 @@ def test_delegating_replay(parser_cls, sample, chunk_size):
         sample.tokens,
         chunk_size=chunk_size,
         finished_on_last=True,
-        tools=sample.tools,
+        # Samples without tool defs would otherwise default to
+        # tool_choice="none", which skips tool extraction. Dummy tools
+        # keep this replay on the auto path (tools enabled).
+        tools=sample.tools or DUMMY_TOOLS,
         prompt_token_ids=sample.prompt_token_ids,
     )
     output = collect_output(deltas)
