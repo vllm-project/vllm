@@ -203,14 +203,23 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
+        is_deepseek_v4 = (
+            model_config is not None
+            and getattr(model_config.hf_config, "model_type", None) == "deepseek_v4"
+        )
+
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
         # the default block size regardless of user preference to avoid a
         # runtime kernel dispatch failure. AMX MLA has no such constraint
         # (same AMX-available condition as get_attn_backend_cls), so it's
-        # excluded from this override.
-        cpu_mla_enabled = model_config is not None and getattr(
-            model_config, "use_mla", False
+        # excluded from this override. DeepSeek-V4's sparse MLA cache and
+        # compressor state cache have their own block-size requirements, so
+        # it's excluded from this whole cascade too.
+        cpu_mla_enabled = (
+            not is_deepseek_v4
+            and model_config is not None
+            and getattr(model_config, "use_mla", False)
         )
         amx_mla_enabled = (
             cpu_mla_enabled
@@ -219,6 +228,21 @@ class CpuPlatform(Platform):
             and vllm_config.attention_config.backend != AttentionBackendEnum.CPU_MLA
         )
         reference_cpu_mla_enabled = cpu_mla_enabled and not amx_mla_enabled
+        # DeepSeek-V4's CPU attention/indexer kernels
+        # (csrc/cpu/sgl-kernels/{flash_mla,store_cache,compressor,
+        # paged_mqa_logits,topk}.cpp) are AMX-kernel-backed and built on the
+        # same paged/position-indexed conventions as the GPU/XPU backends
+        # (block_table/slot_mapping addressing throughout, chunk metadata
+        # that already carries per-token causal offsets for partial/extend
+        # continuation) -- so they support chunked prefill and prefix
+        # caching the same way. `amx_mla_enabled` above deliberately
+        # excludes DeepSeek-V4 (it has its own block-size requirements,
+        # unrelated to chunked-prefill support), so it can't be reused here.
+        amx_mla_or_dsv4_enabled = amx_mla_enabled or (
+            is_deepseek_v4
+            and cls.get_cpu_architecture() == CpuArchEnum.X86
+            and torch.cpu._is_amx_tile_supported()
+        )
         if reference_cpu_mla_enabled:
             if cache_config.user_specified_block_size and cache_config.block_size != 16:
                 logger.warning(
@@ -439,7 +463,11 @@ class CpuPlatform(Platform):
             vllm_config.parallel_config.tensor_parallel_size
         )
 
-        if model_config is not None and model_config.use_mla and not amx_mla_enabled:
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and not amx_mla_or_dsv4_enabled
+        ):
             logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
