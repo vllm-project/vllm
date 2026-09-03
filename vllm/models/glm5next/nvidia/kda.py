@@ -412,7 +412,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
+        # three calls. The merged weight is q|k|v conv weights concatenated and
         # cached while refreshing automatically when a source weight changes.
         # conv_state is already stored as the merged q|k|v state, so it is used
         # directly.

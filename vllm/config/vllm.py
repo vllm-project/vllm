@@ -2617,6 +2617,9 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
 
+        if self.cache_config.mamba_cache_mode == "all":
+            unsupported.append("mamba cache mode 'all'")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
