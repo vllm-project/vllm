@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import logging
 import subprocess
 import sys
 import threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import numpy.typing as npt
@@ -39,6 +41,7 @@ from vllm.multimodal.video_decoders.pynvvideocodec import (
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
+from vllm.utils.import_utils import _PlaceholderModuleAttr
 
 from .utils import (
     create_edit_list_trimmed_video,
@@ -1470,3 +1473,63 @@ def test_glm46v_duration_estimation_from_fps():
     assert len(indices) > 0
     assert len(indices) % 2 == 0
     assert all(0 <= idx < 90 for idx in indices)
+
+
+@pytest.mark.parametrize(
+    ("exc", "warns"),
+    [
+        (
+            ModuleNotFoundError("No module named 'torchcodec'", name="torchcodec"),
+            False,
+        ),
+        (RuntimeError("Could not load libtorchcodec."), True),
+        (
+            OSError(
+                "Could not load this library: "
+                "/opt/venv/lib/python3.12/site-packages/torchcodec/"
+                "libtorchcodec_image.so"
+            ),
+            True,
+        ),
+    ],
+    ids=["absent", "no_system_ffmpeg", "unloadable_shared_object"],
+)
+def test_unusable_torchcodec_falls_back_to_placeholder(exc, warns, caplog):
+    """A torchcodec that fails to import must degrade to the placeholder.
+
+    An absent torchcodec raises ImportError, a missing system ffmpeg raises
+    RuntimeError, and an installed shared object that cannot be loaded raises
+    OSError from torch.ops.load_library. None of them may escape the guard, or
+    an unusable optional dependency takes down the video path that imports it.
+    """
+    import builtins
+    import importlib
+
+    module = importlib.import_module("vllm.multimodal.video_decoders.torchcodec")
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "torchcodec" or name.startswith("torchcodec."):
+            raise exc
+        return real_import(name, *args, **kwargs)
+
+    try:
+        with (
+            patch.object(builtins, "__import__", fake_import),
+            caplog.at_level(logging.WARNING),
+        ):
+            reloaded = importlib.reload(module)
+
+            # The guard swallowed the failure and bound the placeholder rather
+            # than letting the exception escape the import. Assert that here
+            # instead of calling the placeholder: its __getattr__ re-imports
+            # torchcodec for real, so the error a call raises depends on
+            # whether the host has a working torchcodec installed.
+            assert isinstance(reloaded.VideoDecoder, _PlaceholderModuleAttr)
+
+        # torchcodec is not built for every platform, so an absent one is
+        # normal and must stay quiet. An installed but unusable one is not.
+        logged = "failed to import" in caplog.text
+        assert logged is warns
+    finally:
+        importlib.reload(module)

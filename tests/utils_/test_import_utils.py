@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import builtins
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    check_torchcodec_available,
+    import_plugin,
+)
 
 
 def _raises_module_not_found():
@@ -135,3 +141,46 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+
+class TestCheckTorchcodecAvailable:
+    """Tests for check_torchcodec_available with an unusable torchcodec."""
+
+    _LIB_PATH = (
+        "/opt/venv/lib/python3.12/site-packages/torchcodec/libtorchcodec_image.so"
+    )
+
+    @staticmethod
+    def _import_raising(exc: Exception):
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "torchcodec":
+                raise exc
+            return real_import(name, *args, **kwargs)
+
+        return patch.object(builtins, "__import__", fake_import)
+
+    def test_load_library_oserror_is_reported_without_the_library_path(self):
+        """An installed torchcodec whose shared objects cannot be loaded raises
+        OSError from torch.ops.load_library, not RuntimeError. It must surface as
+        a RuntimeError that does not echo the host library path.
+        """
+        exc = OSError(f"Could not load this library: {self._LIB_PATH}")
+
+        with self._import_raising(exc), pytest.raises(RuntimeError) as exc_info:
+            check_torchcodec_available()
+
+        assert self._LIB_PATH not in str(exc_info.value)
+
+    def test_missing_ffmpeg_runtimeerror_is_still_trimmed(self):
+        """The existing RuntimeError path keeps its message trimming."""
+        marker = (
+            "The following exceptions were raised as we tried to load libtorchcodec:"
+        )
+        exc = RuntimeError(f"Could not load libtorchcodec.\n{marker}\n{self._LIB_PATH}")
+
+        with self._import_raising(exc), pytest.raises(RuntimeError) as exc_info:
+            check_torchcodec_available()
+
+        assert str(exc_info.value) == "Could not load libtorchcodec."

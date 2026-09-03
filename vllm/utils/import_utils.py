@@ -627,3 +627,12 @@ def check_torchcodec_available():
         if marker in message:
             raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
         raise e
+    except OSError:
+        # An installed torchcodec whose shared objects cannot be loaded fails in
+        # torch.ops.load_library, which raises OSError rather than RuntimeError.
+        # Its message embeds the full library path, so replace it.
+        raise RuntimeError(
+            "Failed to import torchcodec: it is installed but its native "
+            "libraries could not be loaded. Install the system ffmpeg "
+            "libraries, or uninstall torchcodec to use another video backend."
+        ) from None
