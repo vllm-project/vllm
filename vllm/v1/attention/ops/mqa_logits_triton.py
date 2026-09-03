@@ -80,8 +80,11 @@ def _fp8_paged_mqa_logits_kernel(
     stride_w_h,
     stride_bt_b,
     stride_bt_k,
+    stride_ctx_b,
+    stride_ctx_n,
     stride_l_t,
     stride_l_n,
+    per_token_context: tl.constexpr,
     next_n: tl.constexpr,
     num_heads: tl.constexpr,
     head_dim: tl.constexpr,
@@ -96,11 +99,15 @@ def _fp8_paged_mqa_logits_kernel(
     batch_id = token_id // next_n
     next_n_id = token_id % next_n
 
-    context_len = tl.load(context_lens_ptr + batch_id)
+    context_len = tl.load(
+        context_lens_ptr + batch_id * stride_ctx_b + next_n_id * stride_ctx_n
+    )
     if block_rk * block_size >= context_len:
         return
 
-    q_offset = context_len - next_n + next_n_id
+    q_offset = (
+        context_len - 1 if per_token_context else context_len - next_n + next_n_id
+    )
 
     # int64: unified-KV-pool layer views carry a large block stride (~1e6
     # elements), so int32 `block_idx * stride` wraps once a batch touches
@@ -174,7 +181,7 @@ def fp8_paged_mqa_logits_triton(
         q:             [B, next_n, H, D] fp8_e4m3fn
         kv_cache:      [num_blocks, block_size, 1, D+4] uint8 (FP8 + fp32 scale)
         weights:       [B*next_n, H] float32
-        context_lens:  [B] int32
+        context_lens:  [B] final lengths, or [B, next_n] per-token lengths
         block_tables:  [B, max_blocks] int32
         max_model_len: output width. Caller passes the active batch max so
             the logits buffer and grid stay tight.
@@ -184,6 +191,14 @@ def fp8_paged_mqa_logits_triton(
         logits:        [B*next_n, max_model_len] float32
     """
     B, next_n, num_heads, head_dim = q.shape
+    per_token_context = context_lens.ndim == 2
+    if per_token_context:
+        assert context_lens.shape[0] == B
+        assert context_lens.shape[1] >= next_n
+        stride_ctx_b, stride_ctx_n = context_lens.stride()[:2]
+    else:
+        assert context_lens.shape == (B,)
+        stride_ctx_b, stride_ctx_n = context_lens.stride(0), 0
     _, block_size, one, d_plus_4 = kv_cache.shape
     assert one == 1
     assert d_plus_4 == head_dim + 4
@@ -242,8 +257,11 @@ def fp8_paged_mqa_logits_triton(
         weights.stride(1),
         block_tables.stride(0),
         block_tables.stride(1),
+        stride_ctx_b,
+        stride_ctx_n,
         logits.stride(0),
         logits.stride(1),
+        per_token_context=per_token_context,
         next_n=next_n,
         num_heads=num_heads,
         head_dim=head_dim,
