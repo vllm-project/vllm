@@ -9,6 +9,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
+    zip_inputs,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -167,9 +168,15 @@ class DeepseekSparseSWAMetadata:
     decode_swa_width: int = 0
     # Paged-coordinate prefill SWA indices/lens (FP8 paged-direct prefill).
     prefill_swa_indices: torch.Tensor | None = (
-        None  # [num_prefill_tokens, 1, window_size]
+        None  # [num_prefill_tokens, 1, prefill_index_width]
     )
     prefill_swa_lens: torch.Tensor | None = None  # [num_prefill_tokens]
+    # In-image bidirectional visibility (vision variant): per-token counts of
+    # extra visible tokens to the left/right inside an image span. Indexed by
+    # absolute (decode-first) token position; only prefill rows are written.
+    # None when the model is text-only or the batch has no image spans.
+    prefill_left_visible: torch.Tensor | None = None
+    prefill_right_visible: torch.Tensor | None = None
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -416,6 +423,17 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
 
+        # Vision variant: image spans (up to vision_max_n_token tokens) are
+        # visible bidirectionally, so prefill index rows widen from
+        # window_size to window_size + max_image_tokens. Text-only models keep
+        # max_image_tokens == 0 and take the original code paths everywhere.
+        self.max_image_tokens = (
+            getattr(hf_config, "vision_max_n_token", 0)
+            if getattr(hf_config, "vision_n_layers", 0) > 0
+            else 0
+        )
+        self.prefill_index_width = self.window_size + self.max_image_tokens
+
         # Detect which DeepseekV4 layer types this model uses so we only build a
         # FlashMLA tile-scheduler plan for types that will actually be called.
         # Models without compress_ratios (pure SWA) fall back to swaonly.
@@ -447,7 +465,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.prefill_swa_indices = torch.zeros(
             max_tokens,
             1,
-            self.window_size,
+            self.prefill_index_width,
             dtype=torch.int32,
             device=self.device,
         )
@@ -456,6 +474,27 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        # In-image visibility side buffers (vision variant only). The span
+        # CSR is uploaded per step from mm_req_doc_ranges; span capacity is
+        # bounded by max_tokens since each span holds at least one token.
+        if self.max_image_tokens > 0:
+            self.left_visible = torch.zeros(
+                max_tokens, dtype=torch.int32, device=self.device
+            )
+            self.right_visible = torch.zeros(
+                max_tokens, dtype=torch.int32, device=self.device
+            )
+            self.span_indptr = torch.zeros(
+                self.vllm_config.scheduler_config.max_num_seqs + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.span_starts = torch.zeros(
+                max_tokens, dtype=torch.int32, device=self.device
+            )
+            self.span_ends = torch.zeros(
+                max_tokens, dtype=torch.int32, device=self.device
+            )
         self.is_valid_token = torch.zeros(
             max_tokens,
             dtype=torch.bool,
@@ -556,6 +595,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     decode_swa_indices,
                     self.decode_swa_lens,
                     self.window_size,
+                    decode_swa_indices.shape[-1],
+                    self.decode_swa_lens,  # unused (HAS_IMAGE=False)
+                    self.decode_swa_lens,  # unused (HAS_IMAGE=False)
                     query_start_loc,
                     seq_lens,
                     token_to_req_indices,
@@ -566,16 +608,42 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                     token_offset=0,
                 )
 
+        # Vision variant: per-token in-image visibility for prefill tokens.
+        # Decode tokens are always past the image spans (spans are prefilled
+        # atomically), so the decode path above never needs them.
+        prefill_left_visible: torch.Tensor | None = None
+        prefill_right_visible: torch.Tensor | None = None
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if (
+            self.max_image_tokens > 0
+            and num_prefill_tokens > 0
+            and mm_ranges
+            and any(mm_ranges.values())
+        ):
+            prefill_left_visible, prefill_right_visible = self._build_image_visibility(
+                common_attn_metadata.num_reqs,
+                mm_ranges,
+                num_decode_tokens,
+                num_prefill_tokens,
+                seq_lens,
+                query_start_loc,
+                token_to_req_indices,
+            )
+
         # Prefill SWA indices live in paged coordinates. `token_offset` lets
         # the kernel read is_valid_token / token_to_req_indices at absolute
         # prefill positions while writing output starting at index 0.
         if num_prefill_tokens > 0:
+            has_image = prefill_left_visible is not None
             prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]
             prefill_swa_lens = self.prefill_swa_lens[:num_prefill_tokens]
             _COMPUTE_SWA_INDICES_AND_LENS_KERNEL(
                 prefill_swa_indices,
                 prefill_swa_lens,
                 self.window_size,
+                self.prefill_index_width,
+                prefill_left_visible if has_image else prefill_swa_lens,
+                prefill_right_visible if has_image else prefill_swa_lens,
                 query_start_loc,
                 seq_lens,
                 token_to_req_indices,
@@ -584,6 +652,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 self.block_size,
                 num_tokens=num_prefill_tokens,
                 token_offset=num_decode_tokens,
+                has_image=has_image,
             )
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
@@ -623,6 +692,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 if num_prefill_tokens > 0
                 else None
             ),
+            prefill_left_visible=prefill_left_visible,
+            prefill_right_visible=prefill_right_visible,
             block_size=self.block_size,
             num_decodes=num_decodes,
             num_prefills=num_prefills,
@@ -641,6 +712,50 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             **deepseek_v4_fields,  # type: ignore[arg-type]
         )
 
+    def _build_image_visibility(
+        self,
+        num_reqs: int,
+        mm_ranges: dict[int, list[tuple[int, int]]],
+        num_decode_tokens: int,
+        num_prefill_tokens: int,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Upload image spans and compute per-token in-image visibility.
+
+        Returns (left, right) int32 tensors indexed by absolute (decode-first)
+        token position; only prefill rows are meaningful.
+        """
+        indptr = [0] * (num_reqs + 1)
+        starts: list[int] = []
+        ends: list[int] = []
+        for req_idx in range(num_reqs):
+            for span_start, span_end in mm_ranges.get(req_idx, ()):
+                starts.append(span_start)
+                ends.append(span_end)
+            indptr[req_idx + 1] = len(starts)
+        num_spans = len(starts)
+        assert num_spans <= self.span_starts.shape[0]
+        self.span_indptr[: num_reqs + 1].copy_(torch.tensor(indptr, dtype=torch.int32))
+        if num_spans > 0:
+            self.span_starts[:num_spans].copy_(torch.tensor(starts, dtype=torch.int32))
+            self.span_ends[:num_spans].copy_(torch.tensor(ends, dtype=torch.int32))
+        _compute_image_visibility_kernel[(num_prefill_tokens,)](
+            self.left_visible,
+            self.right_visible,
+            self.span_indptr,
+            self.span_starts,
+            self.span_ends,
+            query_start_loc,
+            seq_lens,
+            token_to_req_indices,
+            self.max_image_tokens,
+            token_offset=num_decode_tokens,
+        )
+        end = num_decode_tokens + num_prefill_tokens
+        return self.left_visible[:end], self.right_visible[:end]
+
     def update_draft_decode_metadata(
         self,
         metadata: DeepseekSparseSWAMetadata,
@@ -658,6 +773,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             metadata.decode_swa_indices,
             metadata.decode_swa_lens,
             metadata.decode_swa_indices.shape[-1],
+            metadata.decode_swa_indices.shape[-1],
+            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
+            metadata.decode_swa_lens,  # unused (HAS_IMAGE=False)
             metadata.query_start_loc,
             metadata.seq_lens,
             metadata.token_to_req_indices,
@@ -755,7 +873,139 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         return result
 
 
+@triton.jit(do_not_specialize=["token_offset"])
+def _compute_image_visibility_kernel(
+    left_visible_ptr,
+    right_visible_ptr,
+    span_indptr_ptr,
+    span_starts_ptr,
+    span_ends_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    token_to_req_indices_ptr,
+    max_image_tokens,
+    token_offset,
+):
+    """Per-token in-image visible counts (port of `get_image_visible`).
+
+    One program per prefill token. A token at position pos inside a span
+    [span_start, span_end] sees min(pos - span_start, max_image_tokens - 1)
+    extra tokens to its left and min(span_end - pos, max_image_tokens) to its
+    right; tokens outside every span get 0/0 (plain causal window).
+    """
+    pid = tl.program_id(0)
+    token_idx = pid + token_offset
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    pos = seq_len - (query_end - query_start) + token_idx - query_start
+
+    span_lo = tl.load(span_indptr_ptr + req_idx)
+    span_hi = tl.load(span_indptr_ptr + req_idx + 1)
+    left = tl.zeros((), dtype=tl.int32)
+    right = tl.zeros((), dtype=tl.int32)
+    for i in range(span_lo, span_hi):
+        span_start = tl.load(span_starts_ptr + i)
+        span_end = tl.load(span_ends_ptr + i)
+        in_span = (pos >= span_start) & (pos <= span_end)
+        left = tl.where(
+            in_span, tl.minimum(pos - span_start, max_image_tokens - 1), left
+        )
+        right = tl.where(in_span, tl.minimum(span_end - pos, max_image_tokens), right)
+    tl.store(left_visible_ptr + token_idx, left)
+    tl.store(right_visible_ptr + token_idx, right)
+
+
 # TODO(ben): unify this kernel to reduce duplication
+
+
+@triton.jit(
+    do_not_specialize=[
+        "swa_indices_stride",
+        "block_table_stride",
+        "token_offset",
+    ]
+)
+def _compute_swa_indices_and_lens_kernel(
+    swa_indices_ptr,
+    swa_indices_stride,
+    swa_lens_ptr,
+    window_size,
+    index_width,
+    left_visible_ptr,
+    right_visible_ptr,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    token_to_req_indices_ptr,
+    is_valid_token_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    token_offset,
+    HAS_IMAGE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    token_idx = pid + token_offset
+    is_valid = tl.load(is_valid_token_ptr + token_idx)
+    if not is_valid:
+        tl.store(swa_lens_ptr + pid, 0)
+        # Clear the row so a padded token cannot gather through stale indices.
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=offset < index_width,
+            )
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    query_len = query_end - query_start
+
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    prefix_len = seq_len - query_len
+
+    pos = prefix_len + token_idx - query_start
+    if HAS_IMAGE:
+        # In-image bidirectional visibility widens the window: the window
+        # starts up to max(left - (window - 1), 0) positions earlier and
+        # extends `right` positions past the query token.
+        left = tl.load(left_visible_ptr + token_idx)
+        right = tl.load(right_visible_ptr + token_idx)
+    else:
+        left = 0
+        right = 0
+    left_add = tl.maximum(left - (window_size - 1), 0)
+    start_pos = tl.maximum(pos - (window_size - 1) - left_add, 0)
+    end_pos = pos + right + 1
+
+    swa_len = end_pos - start_pos
+    tl.store(swa_lens_ptr + pid, swa_len)
+
+    for i in range(0, index_width, TRITON_BLOCK_SIZE):
+        offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+
+        pos_offset = start_pos + offset
+        block_indices = pos_offset // block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=pos_offset < end_pos,
+        )
+        block_offsets = pos_offset % block_size
+        slot_ids = block_numbers * block_size + block_offsets
+
+        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+        tl.store(
+            swa_indices_ptr + pid * swa_indices_stride + offset,
+            slot_ids,
+            mask=offset < index_width,
+        )
 
 
 class ComputeSWAIndicesAndLensKernel(
@@ -764,81 +1014,12 @@ class ComputeSWAIndicesAndLensKernel(
     @dataclass(frozen=True)
     class CompileKey:
         window_size: int
+        index_width: int
+        has_image: int
         block_size: int
         triton_block_size: int
 
-    @staticmethod
-    @triton.jit(
-        do_not_specialize=[
-            "swa_indices_stride",
-            "block_table_stride",
-            "token_offset",
-        ]
-    )
-    def kernel(
-        swa_indices_ptr,
-        swa_indices_stride,
-        swa_lens_ptr,
-        window_size,
-        query_start_loc_ptr,
-        seq_lens_ptr,
-        token_to_req_indices_ptr,
-        is_valid_token_ptr,
-        block_table_ptr,
-        block_table_stride,
-        block_size,
-        token_offset,
-        TRITON_BLOCK_SIZE: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        token_idx = pid + token_offset
-        is_valid = tl.load(is_valid_token_ptr + token_idx)
-        if not is_valid:
-            tl.store(swa_lens_ptr + pid, 0)
-            # Clear the row so a padded token cannot gather through stale indices.
-            for i in range(0, window_size, TRITON_BLOCK_SIZE):
-                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-                tl.store(
-                    swa_indices_ptr + pid * swa_indices_stride + offset,
-                    -1,
-                    mask=offset < window_size,
-                )
-            return
-
-        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-
-        query_start = tl.load(query_start_loc_ptr + req_idx)
-        query_end = tl.load(query_start_loc_ptr + req_idx + 1)
-        query_len = query_end - query_start
-
-        seq_len = tl.load(seq_lens_ptr + req_idx)
-        prefix_len = seq_len - query_len
-
-        pos = prefix_len + token_idx - query_start
-        start_pos = tl.maximum(pos - window_size + 1, 0)
-        end_pos = pos + 1
-
-        swa_len = end_pos - start_pos
-        tl.store(swa_lens_ptr + pid, swa_len)
-
-        for i in range(0, window_size, TRITON_BLOCK_SIZE):
-            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-
-            pos_offset = start_pos + offset
-            block_indices = pos_offset // block_size
-            block_numbers = tl.load(
-                block_table_ptr + req_idx * block_table_stride + block_indices,
-                mask=pos_offset < end_pos,
-            )
-            block_offsets = pos_offset % block_size
-            slot_ids = block_numbers * block_size + block_offsets
-
-            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-            tl.store(
-                swa_indices_ptr + pid * swa_indices_stride + offset,
-                slot_ids,
-                mask=offset < window_size,
-            )
+    kernel = staticmethod(_compute_swa_indices_and_lens_kernel)
 
     def dispatch(  # type: ignore[override]
         self,
@@ -854,8 +1035,24 @@ class ComputeSWAIndicesAndLensKernel(
         *,
         window_size: int,
         block_size: int,
+        max_image_tokens: int = 0,
     ) -> list[CompileKey]:
+        # Decode rows always use the plain causal window. Vision models widen
+        # prefill rows by max_image_tokens and additionally need the in-image
+        # bidirectional variant for batches that contain image spans.
+        width_has_image = [(window_size, 0)]
+        if max_image_tokens > 0:
+            width_has_image += [
+                (window_size + max_image_tokens, 0),
+                (window_size + max_image_tokens, 1),
+            ]
         return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                *(
+                    dict(index_width=index_width, has_image=has_image)
+                    for index_width, has_image in width_has_image
+                )
+            ),
             window_size=window_size,
             block_size=block_size,
         )
@@ -866,6 +1063,9 @@ class ComputeSWAIndicesAndLensKernel(
             swa_indices=TritonWarmupTensor(torch.int32, shape=(1, 1), strides=(1, 1)),
             swa_lens=int32_ptr,
             window_size=compile_key.window_size,
+            index_width=compile_key.index_width,
+            left_visible=int32_ptr,
+            right_visible=int32_ptr,
             query_start_loc=int32_ptr,
             seq_lens=int32_ptr,
             token_to_req_indices=int32_ptr,
@@ -874,6 +1074,7 @@ class ComputeSWAIndicesAndLensKernel(
             block_size=compile_key.block_size,
             num_tokens=1,
             token_offset=0,
+            has_image=bool(compile_key.has_image),
         )
 
     @kernel_launcher
@@ -882,6 +1083,9 @@ class ComputeSWAIndicesAndLensKernel(
         swa_indices: torch.Tensor,
         swa_lens: torch.Tensor,
         window_size: int,
+        index_width: int,
+        left_visible: torch.Tensor,
+        right_visible: torch.Tensor,
         query_start_loc: torch.Tensor,
         seq_lens: torch.Tensor,
         token_to_req_indices: torch.Tensor,
@@ -891,10 +1095,12 @@ class ComputeSWAIndicesAndLensKernel(
         *,
         num_tokens: int,
         token_offset: int,
+        has_image: bool = False,
     ) -> LaunchSpec:
         return (num_tokens,), dict(
             swa_indices_stride=swa_indices.stride(0),
             block_table_stride=block_table.stride(0),
+            HAS_IMAGE=has_image,
             TRITON_BLOCK_SIZE=1024,
         )
 
