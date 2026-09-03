@@ -443,6 +443,217 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.parametrize(
+    ("num_queries", "on_gfx950", "expected"),
+    [(1023, True, False), (1024, True, True), (1024, False, False)],
+)
+def test_aiter_sparse_prefill_opus_selection(
+    num_queries: int, on_gfx950: bool, expected: bool
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _can_use_aiter_sparse_prefill_opus,
+    )
+
+    device = torch.device("cuda")
+    q = torch.empty(num_queries, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.empty(num_queries, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    attn_sink = torch.empty(16, dtype=torch.float32, device=device)
+    output = torch.empty_like(q)
+
+    assert (
+        _can_use_aiter_sparse_prefill_opus(
+            q, kv, attn_sink, output, on_gfx950=on_gfx950
+        )
+        is expected
+    )
+
+
+def test_aiter_sparse_prefill_opus_selection_rejects_incompatible_inputs() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _can_use_aiter_sparse_prefill_opus,
+    )
+
+    device = torch.device("cuda")
+    q = torch.empty(1024, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.empty(1024, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    attn_sink = torch.empty(16, dtype=torch.float32, device=device)
+    output = torch.empty_like(q)
+
+    assert _can_use_aiter_sparse_prefill_opus(q, kv, attn_sink, output, on_gfx950=True)
+    assert not _can_use_aiter_sparse_prefill_opus(
+        q,
+        kv,
+        attn_sink,
+        torch.empty(16, 1024, HEAD_DIM, dtype=q.dtype).transpose(0, 1),
+        on_gfx950=True,
+    )
+    assert not _can_use_aiter_sparse_prefill_opus(
+        q, kv, attn_sink[:-1], output, on_gfx950=True
+    )
+    assert not _can_use_aiter_sparse_prefill_opus(
+        q.cpu(), kv.cpu(), attn_sink.cpu(), output.cpu(), on_gfx950=True
+    )
+
+
+def test_sparse_attn_prefill_aiter_opus_routing(monkeypatch) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    q = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
+    kv = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
+    indices = torch.tensor([[0], [1]], dtype=torch.int32)
+    topk_length = torch.ones(2, dtype=torch.int32)
+    attn_sink = torch.empty(1, dtype=torch.float32)
+    output = torch.empty_like(q)
+    opus_calls = 0
+
+    def fake_opus(*args, out):
+        nonlocal opus_calls
+        opus_calls += 1
+        assert args[2].dtype == torch.int32
+        assert args[3].dtype == torch.int32
+        assert args[5].numel() == 0
+        assert torch.count_nonzero(args[6]) == 0
+        out.zero_()
+        return out
+
+    monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
+    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: fake_opus)
+    monkeypatch.setattr(
+        mod,
+        "build_ragged_indices_from_dense",
+        lambda *args, **kwargs: (
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([0, 1, 2], dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_rocm_sparse_attn_prefill_triton",
+        lambda *args, **kwargs: pytest.fail("unexpected dense Triton fallback"),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_rocm_sparse_attn_prefill_ragged_triton",
+        lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
+    )
+
+    mod.rocm_sparse_attn_prefill(
+        q=q,
+        kv=kv,
+        indices=indices,
+        topk_length=topk_length,
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        attn_sink=attn_sink,
+        output=output,
+    )
+
+    assert opus_calls == 1
+    assert torch.count_nonzero(output) == 0
+
+
+def test_sparse_attn_prefill_preserves_dense_triton_fallback(monkeypatch) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    q = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
+    kv = torch.empty(2, 1, HEAD_DIM, dtype=torch.bfloat16)
+    indices = torch.tensor([[0], [1]], dtype=torch.int32)
+    topk_length = torch.ones(2, dtype=torch.int32)
+    attn_sink = torch.empty(1, dtype=torch.float32)
+    output = torch.empty_like(q)
+    dense_fallback_calls = 0
+
+    def fake_dense_fallback(*args, **kwargs):
+        nonlocal dense_fallback_calls
+        dense_fallback_calls += 1
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(mod, "_can_use_aiter_sparse_prefill_opus", lambda *args: True)
+    monkeypatch.setattr(mod, "_get_aiter_sparse_prefill_opus", lambda: None)
+    monkeypatch.setattr(mod, "_rocm_sparse_attn_prefill_triton", fake_dense_fallback)
+    monkeypatch.setattr(
+        mod,
+        "_rocm_sparse_attn_prefill_ragged_triton",
+        lambda *args, **kwargs: pytest.fail("unexpected ragged Triton fallback"),
+    )
+
+    mod.rocm_sparse_attn_prefill(
+        q=q,
+        kv=kv,
+        indices=indices,
+        topk_length=topk_length,
+        scale=HEAD_DIM**-0.5,
+        head_dim=HEAD_DIM,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        attn_sink=attn_sink,
+        output=output,
+    )
+
+    assert dense_fallback_calls == 1
+    assert torch.count_nonzero(output) == 0
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_prefill_ragged_aiter_opus(monkeypatch) -> None:
+    opus_mod = pytest.importorskip("aiter.ops.pa_sparse_prefill_opus")
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    monkeypatch.setattr(
+        mod, "_get_aiter_sparse_prefill_opus", lambda: opus_mod.pa_sparse_prefill_opus
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(4)
+    num_queries = 8
+    num_heads = 16
+    q = (
+        torch.randn(
+            num_queries,
+            num_heads,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    kv = torch.randn(num_queries, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    rows = [list(range(query_idx + 1)) for query_idx in range(num_queries)]
+    indices = torch.tensor(
+        [index for row in rows for index in row], dtype=torch.int32, device=device
+    )
+    indptr = torch.tensor(
+        [0]
+        + [
+            sum(len(row) for row in rows[: query_idx + 1])
+            for query_idx in range(num_queries)
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    attn_sink = torch.linspace(
+        -0.25, 0.25, num_heads, dtype=torch.float32, device=device
+    )
+    output = torch.empty_like(q)
+    scale = HEAD_DIM**-0.5
+
+    assert mod._rocm_sparse_attn_prefill_ragged_aiter_opus(
+        q=q,
+        kv=kv,
+        indices=indices,
+        indptr=indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        output=output,
+    )
+    expected = _ref_sparse_prefill_ragged(q, kv, rows, scale, attn_sink)
+
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+
+
 @torch.inference_mode()
 def test_sparse_attn_decode_ragged_kernel() -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (

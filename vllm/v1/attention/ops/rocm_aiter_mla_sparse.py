@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -25,6 +26,8 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+logger = init_logger(__name__)
 
 
 @functools.cache
@@ -39,8 +42,23 @@ def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | N
     return top_k_per_row_prefill, top_k_per_row_decode
 
 
+@functools.cache
+def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mla_enabled():
+        return None
+    try:
+        from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
+    except ImportError:
+        return None
+    logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
+    return pa_sparse_prefill_opus
+
+
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
+_GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 
 
 def _get_aiter_top_k_kernel(
@@ -2642,6 +2660,64 @@ def _rocm_sparse_attn_prefill_triton(
     )
 
 
+def _can_use_aiter_sparse_prefill_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+    on_gfx950: bool = _ON_GFX950,
+) -> bool:
+    return (
+        on_gfx950
+        and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
+        and q.is_cuda
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+        and output.dtype == q.dtype
+        and kv.device == q.device
+        and output.device == q.device
+        and q.stride(-1) == 1
+        and kv.stride(-1) == 1
+        and output.stride() == q.stride()
+        and attn_sink is not None
+        and attn_sink.shape == (q.shape[1],)
+        and attn_sink.dtype == torch.float32
+        and attn_sink.device == q.device
+    )
+
+
+def _rocm_sparse_attn_prefill_ragged_aiter_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+) -> bool:
+    pa_sparse_prefill_opus = _get_aiter_sparse_prefill_opus()
+    if pa_sparse_prefill_opus is None:
+        return False
+
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    empty_indices = indices[:0]
+    empty_indptr = torch.zeros_like(indptr)
+    pa_sparse_prefill_opus(
+        q,
+        kv,
+        indices,
+        indptr,
+        kv[:1],
+        empty_indices,
+        empty_indptr,
+        attn_sink.contiguous(),
+        float(scale),
+        out=output,
+    )
+    return True
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -3136,8 +3212,12 @@ def rocm_sparse_attn_prefill(
     ragged_indices: torch.Tensor | None = None,
     ragged_indptr: torch.Tensor | None = None,
 ) -> None:
+    assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
+    )
+    assert output.shape == q.shape, (
+        f"output buffer shape {output.shape} must match q shape {q.shape}"
     )
     _validate_dsv4_sparse_dims(
         head_dim,
@@ -3145,14 +3225,44 @@ def rocm_sparse_attn_prefill(
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
-    if ragged_indices is not None and ragged_indptr is not None:
-        output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
+    assert q.shape[-1] == head_dim and kv.shape[-1] == head_dim, (
+        f"expected q/kv head dim {head_dim}, got q={q.shape} and kv={kv.shape}"
+    )
+    kv_flat = kv.squeeze(1)
+    sliced_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
+    if (
+        _can_use_aiter_sparse_prefill_opus(q, kv_flat, sliced_attn_sink, output)
+        and _get_aiter_sparse_prefill_opus() is not None
+    ):
+        if ragged_indices is None or ragged_indptr is None:
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        assert sliced_attn_sink is not None
+        if _rocm_sparse_attn_prefill_ragged_aiter_opus(
             q=q,
-            kv=kv.squeeze(1),
+            kv=kv_flat,
             indices=ragged_indices,
             indptr=ragged_indptr,
             scale=scale,
-            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            attn_sink=sliced_attn_sink,
+            output=output,
+        ):
+            return
+
+    if ragged_indices is not None and ragged_indptr is not None:
+        output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
+            q=q,
+            kv=kv_flat,
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=sliced_attn_sink,
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
         )
@@ -3160,10 +3270,10 @@ def rocm_sparse_attn_prefill(
         indices_2d = indices.reshape(indices.shape[0], -1)
         output_chunk = _rocm_sparse_attn_prefill_triton(
             q=q,
-            kv=kv.squeeze(1),
+            kv=kv_flat,
             indices=indices_2d,
             scale=scale,
-            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            attn_sink=sliced_attn_sink,
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
