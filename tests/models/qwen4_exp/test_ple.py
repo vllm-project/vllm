@@ -443,11 +443,11 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
 ) -> None:
     embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
     nn.Module.__init__(embedding)
-    embedding._prefetch_buffer = torch.empty(4, 2, 3)
+    embedding._prefetch_buffer = torch.empty(4, 2, 3, dtype=torch.float8_e4m3fn)
     embedding._output_dim = 6
     embedding.layer_name = "test.ple"
-    hidden_states = torch.zeros(2, 4)
-    expected = torch.arange(12).reshape(2, 6)
+    hidden_states = torch.zeros(2, 4, dtype=torch.bfloat16)
+    expected = torch.arange(12).reshape(2, 6).to(torch.float8_e4m3fn)
 
     def finalize_prefetched(
         actual_hidden_states: torch.Tensor,
@@ -468,7 +468,28 @@ def test_pinned_embedding_forward_finalizes_prefetched_output(
 
     output = embedding(hidden_states)
 
+    assert output.dtype == embedding._prefetch_buffer.dtype
     assert torch.equal(output, expected)
+
+
+def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
+    embedding = Qwen4ExpPinnedHostEmbedding.__new__(Qwen4ExpPinnedHostEmbedding)
+    nn.Module.__init__(embedding)
+    embedding.tp_size = 2
+    reduced_dtypes = []
+
+    def all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        reduced_dtypes.append(tensor.dtype)
+        return tensor.clone()
+
+    embedding.parallel_group = SimpleNamespace(all_reduce=all_reduce)
+    embeddings = torch.arange(8).reshape(2, 4).to(torch.float8_e4m3fn)
+
+    output = embedding._reduce_np_embeddings(embeddings)
+
+    assert reduced_dtypes == [torch.int8]
+    assert output.dtype == embeddings.dtype
+    torch.testing.assert_close(output.float(), embeddings.float())
 
 
 def test_ple_device_embedding_allocates_on_active_device(
@@ -557,13 +578,13 @@ def test_ple_pinned_embedding_loads_on_cpu_and_looks_up_through_uva(
     assert embedding.supports_prefetch
     assert embedding._prefetch_stream.device == embedding._uva_weight.device
     assert embedding._prefetch_buffer.shape == (0, 1, 3)
-    assert output.dtype == torch.bfloat16
-    expected = loaded_weight[input_ids.cpu()].to(device="cuda:0", dtype=torch.bfloat16)
-    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+    assert output.dtype == storage_dtype
+    expected = loaded_weight[input_ids.cpu()].to(device="cuda:0")
+    torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
     expected_scale = 0.25 if fp8_checkpoint else 1.0
     torch.testing.assert_close(
         dequantized,
-        expected * expected_scale,
+        expected.to(torch.bfloat16) * expected_scale,
         rtol=0,
         atol=0,
     )

@@ -432,7 +432,7 @@ def _lookup_ple_embedding_from_pinned_kernel(
         weight_ptr + local_idx * embedding_dim + offsets,
         mask=load_mask,
         other=0.0,
-    ).to(tl.bfloat16)
+    )
     tl.store(
         output_ptr + row_id * embedding_dim + offsets,
         values,
@@ -482,7 +482,7 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             max_total_tokens * self.np_data_parallel_size,
             num_ngram_heads,
             self.embedding_dim,
-            dtype=torch.bfloat16,
+            dtype=self.weight.dtype,
             device=self._uva_weight.device,
         )
         self._output_dim = num_ngram_heads * self.embedding_dim
@@ -507,22 +507,22 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         input_ids: torch.Tensor,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Look up local NP rows from pinned memory into a BF16 GPU tensor."""
+        """Look up local NP rows while preserving the weight storage dtype."""
         expected_shape = (*input_ids.shape, self.embedding_dim)
         if output is None:
             output = torch.empty(
                 expected_shape,
-                dtype=torch.bfloat16,
+                dtype=self.weight.dtype,
                 device=input_ids.device,
             )
         elif (
             tuple(output.shape) != expected_shape
-            or output.dtype != torch.bfloat16
+            or output.dtype != self.weight.dtype
             or output.device != input_ids.device
         ):
             raise ValueError(
-                "PLE prefetch output must match the input shape and be BF16 "
-                "on the input device"
+                "PLE prefetch output must match the input shape, weight dtype, "
+                "and input device"
             )
 
         flat_ids = input_ids.reshape(-1).long()
@@ -543,6 +543,10 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
         if self.tp_size == 1:
             return embeddings
         assert self.parallel_group is not None
+        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
+            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
+            return reduced.view(embeddings.dtype)
         return self.parallel_group.all_reduce(embeddings)
 
     def _prefetch_impl(
@@ -592,7 +596,9 @@ class Qwen4ExpPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
 
     def finalize_prefetch(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Finish the pinned lookup through the graph-splitting custom op."""
-        output = hidden_states.new_empty((hidden_states.shape[0], self._output_dim))
+        output = self._prefetch_buffer.new_empty(
+            (hidden_states.shape[0], self._output_dim)
+        )
         torch.ops.vllm.qwen4_exp_ple_finalize_prefetched(
             hidden_states,
             self._prefetch_buffer,
