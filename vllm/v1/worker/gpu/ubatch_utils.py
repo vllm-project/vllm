@@ -45,17 +45,11 @@ class UBatchState(NamedTuple):
 def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSlices:
     """Split a DP-padded batch into the slices its microbatches run on.
 
-    The split point is the midpoint of the (DP-padded) token count, which all
-    ranks agree on because they run the same number of tokens whenever
-    microbatching is active. That leaves the trailing microbatch anywhere from
-    full to entirely inside the padding region.
-
-    Request slices come back derived from the real token counts, so a
-    microbatch that starts past the last real token owns no request of its own.
-    Clamping it onto the last request leaves it holding that request with zero
-    query tokens -- the shape a request straddling a microbatch boundary
-    already takes -- so it stays well-formed and has no work to do, like a
-    dummy run.
+    Splitting at the midpoint of the DP-padded token count leaves the trailing
+    microbatch anywhere from full to entirely inside the padding. Clamping its
+    request slice onto the last request leaves it holding that request with
+    zero query tokens -- the shape a straddling request already takes -- so it
+    stays well-formed with no work to do, like a dummy run.
     """
     _, ubatch_slices = maybe_create_ubatch_slices(
         True,
@@ -68,15 +62,12 @@ def create_ubatch_slices(input_batch: InputBatch, num_ubatches: int) -> UBatchSl
     return [
         UBatchSlice(
             slice(
-                min(ubatch_slice.request_slice.start, input_batch.num_reqs - 1),
-                min(
-                    ubatch_slice.request_slice.stop,
-                    input_batch.num_reqs_after_padding,
-                ),
+                min(s.request_slice.start, input_batch.num_reqs - 1),
+                min(s.request_slice.stop, input_batch.num_reqs_after_padding),
             ),
-            ubatch_slice.token_slice,
+            s.token_slice,
         )
-        for ubatch_slice in ubatch_slices
+        for s in ubatch_slices
     ]
 
 
@@ -88,24 +79,17 @@ def _slice_input_batch(
 ) -> InputBatch:
     """Build the sub-`InputBatch` a single microbatch runs on.
 
-    The sub-batch covers the requests in `ubatch_slice.request_slice` and the
-    tokens in `ubatch_slice.token_slice`. When a request straddles the boundary
-    it appears in both microbatches, with its query truncated to the tokens each
-    one owns. A microbatch that falls entirely in the padding region is the
-    degenerate case of that: it holds the last request with none of its tokens,
-    so it has no work to do.
+    A request straddling the boundary appears in both microbatches, its query
+    truncated to the tokens each one owns.
 
-    Everything except `query_start_loc` and `seq_lens` is a view of the buffers
-    the full batch already uses, so slicing costs no allocation. Those two have
-    to be rebased onto the microbatch's token range, so the caller passes in
-    buffers to write them to -- one pair per microbatch, since all microbatches
-    are live at once. The writes are plain tensor ops on caller-owned memory, so
-    the result stays usable under CUDA graph capture and replay.
+    Everything except `query_start_loc` and `seq_lens` is a view of the full
+    batch's buffers, so slicing costs no allocation. Those two are rebased onto
+    the microbatch's token range and written to the caller's buffers, which
+    keeps them valid under CUDA graph capture and replay.
 
-    The sub-batch describes the forward pass only (attention metadata and model
-    inputs). Sampling runs once over the merged batch, so `logits_indices`,
-    `cu_num_logits` and the draft-token fields are carried over unchanged and
-    must not be read off a sub-batch.
+    The sub-batch describes the forward pass only. Sampling runs once over the
+    merged batch, so `logits_indices`, `cu_num_logits` and the draft-token
+    fields are carried over unchanged and must not be read off a sub-batch.
     """
     assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
@@ -203,9 +187,8 @@ def _slice_query_start_loc(
 ) -> torch.Tensor:
     """Rebase query_start_loc onto the microbatch's token range.
 
-    Clamping to [0, num_tokens_padded] truncates the two requests that can
-    straddle the microbatch boundary: the leading one loses the tokens the
-    previous microbatch owns, the trailing one the tokens the next one owns.
+    The clamp truncates the requests straddling either boundary to the tokens
+    this microbatch owns.
     """
     torch.sub(query_start_loc[req_start : req_stop + 1], tok_start, out=out)
     return out.clamp_(0, num_tokens_padded)
@@ -221,12 +204,11 @@ def _slice_seq_lens(
 ) -> torch.Tensor:
     """Slice seq_lens, shortening the request truncated at the boundary.
 
-    Only the tokens past the end of this microbatch are missing from the last
-    request's sequence. Tokens it owns in an *earlier* microbatch still count:
-    they are computed before this microbatch reads them, so its sequence ends
-    where those tokens end. Deriving the truncation from the microbatch's own
-    query lengths would subtract them a second time. The truncation is computed
-    from tensors rather than Python ints so this stays valid inside a CUDA graph.
+    Only tokens past the end of this microbatch are missing; tokens it owns in
+    an *earlier* microbatch are computed before this one reads them, so they
+    still count. Deriving the truncation from this microbatch's own query
+    lengths would subtract them twice. It is computed from tensors, not Python
+    ints, so this stays valid inside a CUDA graph.
     """
     out.copy_(seq_lens[req_start:req_stop])
     last = req_stop - req_start - 1
@@ -375,11 +357,9 @@ class UBatchRunner:
     ) -> list[ForwardContext]:
         """Build one forward context per microbatch.
 
-        Each context carries its own DP metadata: the expert all-to-all runs
-        once per microbatch, so it has to see that microbatch's token count
-        rather than the whole batch's. All DP ranks are padded to the same size
-        when microbatching, which is what lets every rank assume the same token
-        count for the other ranks' microbatches.
+        The expert all-to-all runs once per microbatch, so each context's DP
+        metadata carries that microbatch's token count. Microbatching pads every
+        DP rank alike, so each rank can assume that count for the others too.
         """
         dp_size = self.parallel_config.data_parallel_size
         forward_contexts = []
@@ -489,10 +469,5 @@ def maybe_build_ubatch_runner(
         "CUDA graphs on the V2 model runner."
     )
     return UBatchRunner(
-        vllm_config,
-        device,
-        model_state,
-        attn_groups,
-        kv_cache_config,
-        max_num_reqs,
+        vllm_config, device, model_state, attn_groups, kv_cache_config, max_num_reqs
     )

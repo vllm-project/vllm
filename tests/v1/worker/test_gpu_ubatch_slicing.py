@@ -12,7 +12,7 @@ threaded execution of the microbatches.
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -414,6 +414,24 @@ def test_slice_model_inputs_handles_mrope_positions():
     assert sliced["intermediate_tensors"] is None
 
 
+def _make_dbo_config() -> VllmConfig:
+    return VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="deepep_low_latency"
+        ),
+    )
+
+
+def _make_model_inputs(num_tokens: int, device: torch.device) -> dict[str, Any]:
+    return {
+        "input_ids": torch.arange(num_tokens, device=device),
+        "positions": torch.arange(num_tokens, device=device),
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+    }
+
+
 def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
     """A runner for the execution tests below, which never call `prepare()`.
 
@@ -455,12 +473,7 @@ def test_thresholds_below_the_microbatch_count_are_rejected():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_runner_allocates_one_buffer_pair_per_microbatch():
     """All microbatches are live at once, so none may share rebase buffers."""
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True, all2all_backend="deepep_low_latency"
-        ),
-    )
+    vllm_config = _make_dbo_config()
     runner = _make_execution_runner(vllm_config)
 
     for buffers in (runner.ubatch_query_start_loc, runner.ubatch_seq_lens):
@@ -488,22 +501,11 @@ class _YieldingModel(torch.nn.Module):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_ubatch_runner_overlaps_and_matches_single_batch():
     """Microbatches interleave at the yield point and produce the same output."""
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True, all2all_backend="deepep_low_latency"
-        ),
-    )
+    vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
 
-    num_tokens = 16
-    model_inputs = {
-        "input_ids": torch.arange(num_tokens, device=device),
-        "positions": torch.arange(num_tokens, device=device),
-        "inputs_embeds": None,
-        "intermediate_tensors": None,
-    }
+    model_inputs = _make_model_inputs(16, device)
     ubatch_state = _make_ubatch_state(
         vllm_config,
         [
@@ -536,12 +538,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     microbatch, and the V1 runner has the same gap. Fixing that means changing
     `ubatching.py`, which is out of scope for the V2 runner.
     """
-    vllm_config = VllmConfig(
-        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
-        parallel_config=ParallelConfig(
-            enable_dbo=True, all2all_backend="deepep_low_latency"
-        ),
-    )
+    vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
 
@@ -551,12 +548,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
                 raise ValueError("boom")
             return input_ids.float().unsqueeze(-1)
 
-    model_inputs = {
-        "input_ids": torch.arange(8, device=device),
-        "positions": torch.arange(8, device=device),
-        "inputs_embeds": None,
-        "intermediate_tensors": None,
-    }
+    model_inputs = _make_model_inputs(8, device)
     ubatch_state = _make_ubatch_state(
         vllm_config,
         [

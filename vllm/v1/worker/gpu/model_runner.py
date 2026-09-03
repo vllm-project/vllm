@@ -1809,9 +1809,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync.num_tokens_across_dp if dp_sync is not None else None
                 ),
                 batch_descriptor=batch_descriptor,
-                ubatch_slices=(
-                    ubatch_state.slices if ubatch_state is not None else None
-                ),
+                ubatch_slices=ubatch_slices,
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
