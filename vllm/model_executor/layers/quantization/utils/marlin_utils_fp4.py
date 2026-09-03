@@ -47,14 +47,20 @@ def _nvfp4_compute_scale_factor(
     # no rescaling is applied here if active dtype is half.
     if a_dtype is not None and a_dtype == torch.half:
         return 1.0
+    if marlin_scales.numel() == 0:
+        return 1.0
 
-    ws_float = marlin_scales.float() * (2**7)
-    nonzero_mask = ws_float > 0
-    if nonzero_mask.any():
-        max_val = ws_float[nonzero_mask].max()
-        if max_val < 448 * (2**7):
-            sf = (448 * (2**7) / max_val).log2().floor().exp2()
-            return sf.item()
+    # The factor depends only on the largest scale, so reduce the input
+    # directly. Materializing an FP32 copy, a boolean mask, and a gathered
+    # copy of every scale costs up to 9x the tensor size in transient device
+    # memory; for fused MoE parameters (all experts at once) that is several
+    # GiB during weight loading.
+    max_val = marlin_scales.max().float() * (2**7)
+    if torch.isnan(max_val):
+        raise ValueError("NVFP4 Marlin scales contain NaN")
+    if 0 < max_val < 448 * (2**7):
+        sf = (448 * (2**7) / max_val).log2().floor().exp2()
+        return sf.item()
     return 1.0
 
 
