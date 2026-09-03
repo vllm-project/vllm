@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+import logging
 import random
 import typing
 
@@ -157,6 +159,104 @@ def test_nccl_symm_mem_allgather(monkeypatch: pytest.MonkeyPatch, world_size):
 
     mp.spawn(nccl_symm_mem_allgather_worker, args=(world_size,), nprocs=world_size)
     cleanup_dist_env_and_memory()
+
+
+def test_bounded_symm_scratch_reuses_capacity(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    import vllm.distributed.device_communicators.pynccl_allocator as allocator
+
+    monkeypatch.setenv("VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH", "1")
+    monkeypatch.setenv("VLLM_NCCL_SYMM_MEM_ALIAS_DIAGNOSTICS", "1")
+    monkeypatch.setattr(
+        allocator,
+        "nccl_symm_mem_context",
+        lambda _communicator: contextlib.nullcontext(),
+    )
+
+    communicator = object.__new__(CudaCommunicator)
+    communicator.pynccl_comm = object()
+    communicator.unique_name = "test"
+    device = torch.device("cpu")
+    caplog.set_level(logging.WARNING)
+
+    first = communicator._get_symm_scratch("ag_out", (3, 4), torch.float32, device)
+    second = communicator._get_symm_scratch("ag_out", (2, 6), torch.float32, device)
+    assert first.shape == (3, 4)
+    assert second.shape == (2, 6)
+    assert first.untyped_storage().data_ptr() == second.untyped_storage().data_ptr()
+    assert second.untyped_storage().nbytes() == 16 * second.element_size()
+    assert "NCCL bounded symmetric scratch live alias before reuse" in caplog.text
+
+    different_role = communicator._get_symm_scratch(
+        "rs_in", (3, 4), torch.float32, device
+    )
+    assert different_role.untyped_storage().data_ptr() != (
+        second.untyped_storage().data_ptr()
+    )
+
+    first_storage_ptr = first.untyped_storage().data_ptr()
+    communicator.seal_bounded_symm_scratch("unit_test")
+    grown = communicator._get_symm_scratch("ag_out", (5, 4), torch.float32, device)
+    assert grown.shape == (5, 4)
+    assert grown.untyped_storage().nbytes() == 32 * grown.element_size()
+    assert len(communicator._symm_scratch_bufs) == 2
+    assert len(communicator._symm_scratch_retired) == 1
+    assert (
+        communicator._symm_scratch_retired[0].untyped_storage().data_ptr()
+        == first_storage_ptr
+    )
+    assert "NCCL bounded symmetric scratch late grow after seal" in caplog.text
+
+
+def test_bounded_symm_scratch_covers_symmetric_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm.distributed.device_communicators.cuda_communicator as cuda_module
+    import vllm.distributed.device_communicators.pynccl_allocator as allocator
+
+    class FakePyNcclCommunicator:
+        world_size = 8
+
+        @staticmethod
+        def all_reduce(input_: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+            output.copy_(input_)
+            return output
+
+    monkeypatch.setenv("VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH", "1")
+    monkeypatch.setattr(
+        allocator,
+        "nccl_symm_mem_context",
+        lambda _communicator: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        cuda_module, "should_nccl_symm_mem_allreduce", lambda *_args: True
+    )
+
+    communicator = object.__new__(CudaCommunicator)
+    communicator.pynccl_comm = FakePyNcclCommunicator()
+    communicator.fi_ar_comm = None
+    communicator.unique_name = "test"
+    communicator._bounded_symm_scratch_enabled = True
+    communicator._symm_scratch_sealed = False
+    input_ = torch.arange(12, dtype=torch.float32).view(3, 4)
+
+    output = communicator.all_reduce(input_)
+    assert torch.equal(output, input_)
+    cache = communicator._symm_scratch_bufs
+    assert ("flat_capacity", "ar_in", input_.dtype, input_.device) in cache
+    assert ("flat_capacity", "ar_out", input_.dtype, input_.device) in cache
+    ar_out = cache[("flat_capacity", "ar_out", input_.dtype, input_.device)]
+    assert output.untyped_storage().data_ptr() != (ar_out.untyped_storage().data_ptr())
+
+    first_result = output.clone()
+    second_input = input_ + 100
+    second_output = communicator.all_reduce(second_input)
+    assert torch.equal(output, first_result)
+    assert torch.equal(second_output, second_input)
+    assert second_output.untyped_storage().data_ptr() != (
+        ar_out.untyped_storage().data_ptr()
+    )
 
 
 def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):

@@ -753,6 +753,16 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
+        # The max-token profile run precedes KV allocation and should size all
+        # persistent symmetric scratch roles. Seal after allocation so any
+        # serving-time growth is visible in logs.
+        tp_device_communicator = get_tp_group().device_communicator
+        seal_symm_scratch = getattr(
+            tp_device_communicator, "seal_bounded_symm_scratch", None
+        )
+        if seal_symm_scratch is not None:
+            seal_symm_scratch("kv_cache_initialized")
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []

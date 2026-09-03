@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+import weakref
 
 import torch
 from torch.distributed import ProcessGroup
@@ -146,6 +148,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 symm_mem_enabled=(
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
+            )
+
+        self._bounded_symm_scratch_enabled = envs.VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH
+        self._symm_scratch_sealed = False
+        if self._bounded_symm_scratch_enabled and "tp" in self.unique_name:
+            logger.info(
+                "NCCL bounded symmetric scratch enabled: group=%s "
+                "growth=power_of_two retired_generations=retained",
+                self.unique_name,
             )
 
         if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
@@ -317,7 +328,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and not use_fi_ar
             and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
-            out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
+            if self._bounded_symm_scratch_enabled:
+                symm_input = self._get_symm_scratch(
+                    "ar_in", tuple(input_.shape), input_.dtype, input_.device
+                )
+                symm_output = self._get_symm_scratch(
+                    "ar_out", tuple(input_.shape), input_.dtype, input_.device
+                )
+                symm_input.copy_(input_)
+                out = self.pynccl_comm.all_reduce(symm_input, symm_output)
+                if out is not None:
+                    # A reusable registered output must not escape to callers
+                    # that retain consecutive all-reduce results.
+                    out = out.clone()
+            else:
+                out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
         qr_comm = self.qr_comm
@@ -511,7 +536,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         Allocating a fresh symm tensor per collective pays the
         ``nccl_symm_mem_context`` snapshot + window-registration scan on every
         call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
-        allocate once per ``(role, shape, dtype)``, register once, and reuse.
+        allocate once per ``(role, shape, dtype)``, register once, and reuse in
+        the default mode. The bounded mode instead maintains a power-of-two
+        flat capacity per ``(role, dtype, device)``.
 
         Safe for serial (eager) sequence parallelism: each collective's result
         is consumed on the same stream before the next same-role collective
@@ -526,6 +553,86 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         cache = self.__dict__.setdefault("_symm_scratch_bufs", {})
+        bounded = self.__dict__.get("_bounded_symm_scratch_enabled")
+        if bounded is None:
+            bounded = envs.VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH
+            self._bounded_symm_scratch_enabled = bounded
+        if bounded:
+            # Long prefills visit many nearby token counts. NCCL retains every
+            # registered segment, so exact-shape caching grows without bound.
+            requested_elements = math.prod(shape)
+            capacity_elements = max(1, 1 << (requested_elements - 1).bit_length())
+            key = ("flat_capacity", role, dtype, device)
+            buf = cache.get(key)
+            if buf is None or buf.numel() < requested_elements:
+                previous_elements = 0 if buf is None else buf.numel()
+                if buf is not None:
+                    # CUDA graphs and NCCL registration can retain the old
+                    # address. Power-of-two growth bounds all retired storage
+                    # to less than the final live capacity.
+                    self.__dict__.setdefault("_symm_scratch_retired", []).append(buf)
+                with nccl_symm_mem_context(pynccl_comm):
+                    buf = torch.empty((capacity_elements,), dtype=dtype, device=device)
+                cache[key] = buf
+                sealed = bool(self.__dict__.get("_symm_scratch_sealed", False))
+                log_args = (
+                    self.unique_name,
+                    role,
+                    dtype,
+                    shape,
+                    requested_elements,
+                    previous_elements,
+                    capacity_elements,
+                    capacity_elements * buf.element_size() / 2**20,
+                )
+                if sealed:
+                    logger.warning(
+                        "NCCL bounded symmetric scratch late grow after seal: "
+                        "group=%s role=%s dtype=%s requested_shape=%s "
+                        "requested_elements=%d previous_elements=%d "
+                        "capacity_elements=%d mib=%.2f",
+                        *log_args,
+                    )
+                else:
+                    logger.info(
+                        "NCCL bounded symmetric scratch grow: group=%s role=%s "
+                        "dtype=%s requested_shape=%s requested_elements=%d "
+                        "previous_elements=%d capacity_elements=%d mib=%.2f",
+                        *log_args,
+                    )
+
+            view = buf[:requested_elements].view(shape)
+            if envs.VLLM_NCCL_SYMM_MEM_ALIAS_DIAGNOSTICS:
+                aliases = self.__dict__.setdefault("_symm_scratch_last_views", {})
+                previous = aliases.get(key)
+                if previous is not None:
+                    previous_ref, previous_shape, previous_ptr = previous
+                    previous_view = previous_ref()
+                    if (
+                        previous_view is not None
+                        and previous_ptr == view.untyped_storage().data_ptr()
+                    ):
+                        warned = self.__dict__.setdefault(
+                            "_symm_scratch_alias_warned", set()
+                        )
+                        if key not in warned:
+                            warned.add(key)
+                            logger.warning(
+                                "NCCL bounded symmetric scratch live alias before "
+                                "reuse: group=%s role=%s previous_shape=%s "
+                                "requested_shape=%s",
+                                self.unique_name,
+                                role,
+                                previous_shape,
+                                shape,
+                            )
+                aliases[key] = (
+                    weakref.ref(view),
+                    tuple(shape),
+                    view.untyped_storage().data_ptr(),
+                )
+            return view
+
         key = (role, tuple(shape), dtype)
         buf = cache.get(key)
         if buf is None:
@@ -533,6 +640,33 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 buf = torch.empty(shape, dtype=dtype, device=device)
             cache[key] = buf
         return buf
+
+    def seal_bounded_symm_scratch(self, reason: str) -> None:
+        """Mark startup profiling complete and diagnose later growth."""
+        if not self.__dict__.get("_bounded_symm_scratch_enabled", False):
+            return
+        self._symm_scratch_sealed = True
+        cache = self.__dict__.get("_symm_scratch_bufs", {})
+        retired = self.__dict__.get("_symm_scratch_retired", [])
+        capacities = sorted(
+            (
+                str(key[1]),
+                int(buf.numel()),
+                str(key[2]),
+                str(key[3]),
+            )
+            for key, buf in cache.items()
+            if isinstance(key, tuple) and key and key[0] == "flat_capacity"
+        )
+        logger.info(
+            "NCCL bounded symmetric scratch sealed: group=%s reason=%s "
+            "live_buffers=%d retired_generations=%d capacities=%s",
+            self.unique_name,
+            reason,
+            len(capacities),
+            len(retired),
+            capacities,
+        )
 
     def _reduce_scatter_symm_mem(
         self,
@@ -747,12 +881,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
         world_size = self.world_size
 
         symm_outputs = []
-        with nccl_symm_mem_context(pynccl_comm):
-            for inp in inputs:
+        if self._bounded_symm_scratch_enabled:
+            for index, inp in enumerate(inputs):
                 out_size = (inp.size(0) * world_size,) + inp.size()[1:]
                 symm_outputs.append(
-                    torch.empty(out_size, dtype=inp.dtype, device=inp.device)
+                    self._get_symm_scratch(
+                        f"ag_batched_out_{index}", out_size, inp.dtype, inp.device
+                    )
                 )
+        else:
+            with nccl_symm_mem_context(pynccl_comm):
+                for inp in inputs:
+                    out_size = (inp.size(0) * world_size,) + inp.size()[1:]
+                    symm_outputs.append(
+                        torch.empty(out_size, dtype=inp.dtype, device=inp.device)
+                    )
 
         pynccl_comm.group_start()
         for symm_out, inp in zip(symm_outputs, inputs):
