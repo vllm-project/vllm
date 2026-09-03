@@ -1024,19 +1024,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                Tensor dst_slots,"
       "                int row_value_bytes=0) -> ()");
 
-  ops.def(
-      "hisparse_backup_layers(Tensor hot_backing,"
-      "                        Tensor layer_offsets,"
-      "                        Tensor src_indices_ptrs,"
-      "                        Tensor! host_anchor,"
-      "                        Tensor host_cache_ptrs,"
-      "                        Tensor dst_slots,"
-      "                        int num_items,"
-      "                        int src_block_stride,"
-      "                        int src_block_size,"
-      "                        int src_rows,"
-      "                        int row_value_bytes=0) -> ()");
-
 #endif  // !USE_ROCM
 
   // Rotate Q and K, then write to kv cache for MLA
@@ -1153,7 +1140,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
   ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
-  ops.impl("hisparse_backup_layers", TORCH_BOX(&hisparse_backup_layers));
 #endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
