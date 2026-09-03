@@ -438,8 +438,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
 
-        query_key_settings = (self.key_dim, 0, False)
-        value_settings = (self.value_dim, 0, False)
+        query_key_settings = (self.key_dim, 0, 1)
+        value_settings = (self.value_dim, 0, 1)
 
         self.conv1d.weight.weight_loader = mamba_v2_sharded_weight_loader(
             [
