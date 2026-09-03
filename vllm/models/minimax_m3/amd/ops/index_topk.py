@@ -31,6 +31,11 @@ SPARSE_BLOCK_SIZE = 128
 DECODE_SCORE_BALANCED_PROGRAM_BUDGET = 1024
 DECODE_SCORE_HIGH_BATCH_PROGRAM_BUDGET = 768
 MAX_DECODE_SCORE_BALANCED_REQUESTS = 11
+DECODE_SCORE_FALLBACK_TARGET_GRID = 512
+DECODE_SCORE_GFX950_HIGH_BATCH_TARGET_GRID = 1024
+MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 20
+MAX_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS = 64
+MAX_DECODE_SCORE_KV_CHUNKS = 256
 DECODE_TOPK_BLOCKS_PER_CHUNK = 512
 MAX_DECODE_TOPK_FAST_CHUNKS = 16
 DECODE_TOPK_TARGET_GRID = 64
@@ -56,6 +61,39 @@ def _decode_score_program_budget(
     if 9 <= num_reqs <= MAX_DECODE_SCORE_BALANCED_REQUESTS:
         return DECODE_SCORE_HIGH_BATCH_PROGRAM_BUDGET
     return None
+
+
+def _decode_score_fallback_launch_policy(
+    num_reqs: int,
+    head_dim: int,
+    query_dtype: torch.dtype,
+    cache_dtype: torch.dtype,
+    *,
+    is_gfx950: bool,
+) -> tuple[int, bool]:
+    """Choose the shape-only fallback split and high-batch specialization."""
+    use_high_batch_config = (
+        is_gfx950
+        and MIN_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS
+        <= num_reqs
+        <= MAX_DECODE_SCORE_GFX950_HIGH_BATCH_REQUESTS
+        and head_dim == 128
+        and query_dtype == torch.bfloat16
+        and cache_dtype == torch.bfloat16
+    )
+    target_grid = (
+        DECODE_SCORE_GFX950_HIGH_BATCH_TARGET_GRID
+        if use_high_batch_config
+        else DECODE_SCORE_FALLBACK_TARGET_GRID
+    )
+    target = max(
+        1,
+        min(
+            MAX_DECODE_SCORE_KV_CHUNKS,
+            target_grid // max(1, num_reqs),
+        ),
+    )
+    return 1 << (target.bit_length() - 1), use_high_batch_config
 
 
 def _decode_topk_launch_policy(
@@ -1433,14 +1471,19 @@ def minimax_m3_index_decode(
             num_stages=1,
         )
     else:
-        # Preserve the deployed shape-only split for every unmeasured shape.
-        TARGET_GRID = 512
-        MAX_NUM_KV_CHUNKS = 256
-        target = max(
-            1,
-            min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, num_reqs)),
+        # Increase independent work for the measured high-batch gfx950 decode
+        # range while preserving the deployed split for every other shape.
+        num_kv_chunks, use_high_batch_config = _decode_score_fallback_launch_policy(
+            num_reqs,
+            head_dim,
+            idx_q.dtype,
+            index_kv_cache.dtype,
+            is_gfx950=is_gfx950,
         )
-        num_kv_chunks = 1 << (target.bit_length() - 1)
+        if use_high_batch_config and not (
+            num_idx_heads > 1 and max_decode_query_len > 1
+        ):
+            score_kwargs.update({"num_warps": 2, "num_stages": 1})
         grid_score = (num_reqs, num_kv_chunks)
         _decode_index_score_kernel[grid_score](
             idx_q,

@@ -93,6 +93,52 @@ SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
 
 
+@pytest.mark.parametrize(
+    (
+        "num_reqs",
+        "head_dim",
+        "query_dtype",
+        "cache_dtype",
+        "is_gfx950",
+        "expected",
+    ),
+    [
+        (19, 128, torch.bfloat16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.bfloat16, torch.bfloat16, True, (32, True)),
+        (32, 128, torch.bfloat16, torch.bfloat16, True, (32, True)),
+        (33, 128, torch.bfloat16, torch.bfloat16, True, (16, True)),
+        (64, 128, torch.bfloat16, torch.bfloat16, True, (16, True)),
+        (65, 128, torch.bfloat16, torch.bfloat16, True, (4, False)),
+        (20, 128, torch.bfloat16, torch.bfloat16, False, (16, False)),
+        (20, 64, torch.bfloat16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.float16, torch.bfloat16, True, (16, False)),
+        (20, 128, torch.bfloat16, torch.float16, True, (16, False)),
+    ],
+)
+def test_amd_decode_score_fallback_launch_policy(
+    num_reqs: int,
+    head_dim: int,
+    query_dtype: torch.dtype,
+    cache_dtype: torch.dtype,
+    is_gfx950: bool,
+    expected: tuple[int, bool],
+):
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        _decode_score_fallback_launch_policy,
+    )
+
+    assert (
+        _decode_score_fallback_launch_policy(
+            num_reqs,
+            head_dim,
+            query_dtype,
+            cache_dtype,
+            is_gfx950=is_gfx950,
+        )
+        == expected
+    )
+
+
 @pytest.mark.parametrize("num_reqs", range(1, 12))
 def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
     from vllm.models.minimax_m3.amd.ops.index_topk import (
@@ -167,9 +213,12 @@ def test_amd_balanced_decode_score_mapping_exact_coverage(num_reqs: int):
         (8, 37, 4, 1, 4, 1, 1),
         (9, 37, 4, 4, 4, 2, 2),
         (11, 37, 4, 3, 5, 0, 3),
+        (20, 65, 1, 4, 4, 1, 3),
+        (36, 65, 1, 4, 4, 2, 2),
+        (64, 65, 1, 4, 4, 0, 1),
     ],
 )
-def test_amd_balanced_decode_score_bitwise_and_graph_replay(
+def test_amd_optimized_decode_score_bitwise_and_graph_replay(
     num_reqs: int,
     max_block: int,
     num_idx_heads: int,
@@ -181,6 +230,7 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_index_score_balanced_kernel,
         _decode_index_score_kernel,
+        _decode_score_fallback_launch_policy,
         _decode_score_program_budget,
     )
 
@@ -210,7 +260,7 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
         device="cuda",
         dtype=torch.float32,
     )
-    balanced_score = torch.empty_like(deployed_score)
+    optimized_score = torch.empty_like(deployed_score)
     budget = _decode_score_program_budget(
         num_reqs,
         head_dim,
@@ -218,7 +268,16 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
         index_kv_cache.dtype,
         is_gfx950=True,
     )
-    assert budget is not None
+    optimized_chunks = None
+    if budget is None:
+        optimized_chunks, use_high_batch_config = _decode_score_fallback_launch_policy(
+            num_reqs,
+            head_dim,
+            idx_q.dtype,
+            index_kv_cache.dtype,
+            is_gfx950=True,
+        )
+        assert use_high_batch_config
     target = max(1, min(256, 512 // num_reqs))
     deployed_chunks = 1 << (target.bit_length() - 1)
 
@@ -250,35 +309,66 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
             USE_PDL=False,
         )
 
-    def launch_balanced() -> None:
-        _decode_index_score_balanced_kernel[(budget + num_reqs - 1,)](
-            idx_q,
-            index_kv_cache,
-            balanced_score,
-            block_table,
-            seq_lens,
-            num_idx_heads,
-            head_dim,
-            init_blocks,
-            local_blocks,
-            num_reqs,
-            budget,
-            decode_query_len,
-            idx_q.stride(0),
-            idx_q.stride(1),
-            idx_q.stride(2),
-            index_kv_cache.stride(0),
-            index_kv_cache.stride(1),
-            index_kv_cache.stride(2),
-            balanced_score.stride(0),
-            balanced_score.stride(1),
-            balanced_score.stride(2),
-            block_table.stride(0),
-            BLOCK_SIZE_K=BLOCK_SIZE,
-            BLOCK_SIZE_Q=block_size_q,
-            num_warps=2,
-            num_stages=1,
-        )
+    def launch_optimized() -> None:
+        if budget is not None:
+            _decode_index_score_balanced_kernel[(budget + num_reqs - 1,)](
+                idx_q,
+                index_kv_cache,
+                optimized_score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                num_reqs,
+                budget,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                optimized_score.stride(0),
+                optimized_score.stride(1),
+                optimized_score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=BLOCK_SIZE,
+                BLOCK_SIZE_Q=block_size_q,
+                num_warps=2,
+                num_stages=1,
+            )
+        else:
+            assert optimized_chunks is not None
+            _decode_index_score_kernel[(num_reqs, optimized_chunks)](
+                idx_q,
+                index_kv_cache,
+                optimized_score,
+                block_table,
+                seq_lens,
+                num_idx_heads,
+                head_dim,
+                init_blocks,
+                local_blocks,
+                decode_query_len,
+                idx_q.stride(0),
+                idx_q.stride(1),
+                idx_q.stride(2),
+                index_kv_cache.stride(0),
+                index_kv_cache.stride(1),
+                index_kv_cache.stride(2),
+                optimized_score.stride(0),
+                optimized_score.stride(1),
+                optimized_score.stride(2),
+                block_table.stride(0),
+                BLOCK_SIZE_K=BLOCK_SIZE,
+                BLOCK_SIZE_Q=block_size_q,
+                num_kv_chunks=optimized_chunks,
+                USE_PDL=False,
+                num_warps=2,
+                num_stages=1,
+            )
 
     def score_masks(
         expected_seq_lens: torch.Tensor,
@@ -317,20 +407,20 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
         write_mask = write_mask.unsqueeze(0).expand_as(deployed_score)
         topk_mask = topk_mask.unsqueeze(0)
         deployed = deployed_score
-        balanced = balanced_score
+        optimized = optimized_score
         assert torch.equal(
             deployed[write_mask].contiguous().view(torch.int32),
-            balanced[write_mask].contiguous().view(torch.int32),
+            optimized[write_mask].contiguous().view(torch.int32),
         )
         assert torch.isnan(deployed[~write_mask]).all()
-        assert torch.isnan(balanced[~write_mask]).all()
+        assert torch.isnan(optimized[~write_mask]).all()
         deployed_keys = packed_keys(deployed, topk_mask)
-        balanced_keys = packed_keys(balanced, topk_mask)
-        assert torch.equal(deployed_keys, balanced_keys)
+        optimized_keys = packed_keys(optimized, topk_mask)
+        assert torch.equal(deployed_keys, optimized_keys)
         deployed_topk = torch.topk(deployed_keys, 16, dim=-1, sorted=True)
-        balanced_topk = torch.topk(balanced_keys, 16, dim=-1, sorted=True)
-        assert torch.equal(deployed_topk.values, balanced_topk.values)
-        assert torch.equal(deployed_topk.indices, balanced_topk.indices)
+        optimized_topk = torch.topk(optimized_keys, 16, dim=-1, sorted=True)
+        assert torch.equal(deployed_topk.values, optimized_topk.values)
+        assert torch.equal(deployed_topk.indices, optimized_topk.indices)
 
     uniform = torch.full(
         (num_reqs,),
@@ -350,30 +440,30 @@ def test_amd_balanced_decode_score_bitwise_and_graph_replay(
 
     seq_lens.copy_(uniform)
     deployed_score.fill_(float("nan"))
-    balanced_score.fill_(float("nan"))
+    optimized_score.fill_(float("nan"))
     launch_deployed()
-    launch_balanced()
+    launch_optimized()
     assert_exact(uniform)
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        launch_balanced()
+        launch_optimized()
     addresses = (
         seq_lens.data_ptr(),
-        balanced_score.data_ptr(),
+        optimized_score.data_ptr(),
         block_table.data_ptr(),
         index_kv_cache.data_ptr(),
     )
     for pattern in patterns:
         seq_lens.copy_(pattern)
         deployed_score.fill_(float("nan"))
-        balanced_score.fill_(float("nan"))
+        optimized_score.fill_(float("nan"))
         launch_deployed()
         graph.replay()
         assert_exact(pattern)
         assert addresses == (
             seq_lens.data_ptr(),
-            balanced_score.data_ptr(),
+            optimized_score.data_ptr(),
             block_table.data_ptr(),
             index_kv_cache.data_ptr(),
         )
