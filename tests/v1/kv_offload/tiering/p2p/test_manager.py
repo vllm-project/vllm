@@ -40,7 +40,9 @@ from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
     _UNBOUND_STORE_TIMEOUT_S,
+    P2PDestInfo,
     P2PSecondaryTierManager,
+    P2PSourceInfo,
     _annotate_req_context,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import (
@@ -2504,8 +2506,12 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
 
 
 class TestNonDictRoleParamsRejected:
-    """Non-dict values for role sub-dicts must be silently ignored
-    (treated as absent) instead of crashing EngineCore."""
+    """Non-dict role values must not crash EngineCore.
+
+    Consumer roles (remote_prefiller / remote_kv_source) are treated as
+    absent. A present but malformed remote_decoder is a remote-decode
+    signal and must fail closed.
+    """
 
     @pytest.mark.parametrize(
         "bad_value",
@@ -2516,10 +2522,8 @@ class TestNonDictRoleParamsRejected:
             True,
         ],
     )
-    def test_string_remote_prefiller_treated_as_absent(self, bad_value):
+    def test_non_dict_remote_prefiller_treated_as_absent(self, bad_value):
         ctx = _req_context(kv_params={"remote_prefiller": bad_value})
-        from vllm.v1.kv_offload.tiering.p2p.manager import P2PSourceInfo
-
         assert ctx.get_state(P2PSourceInfo) is None
 
     @pytest.mark.parametrize(
@@ -2531,11 +2535,11 @@ class TestNonDictRoleParamsRejected:
             True,
         ],
     )
-    def test_string_remote_decoder_treated_as_absent(self, bad_value):
+    def test_non_dict_remote_decoder_fails_closed(self, bad_value):
         ctx = _req_context(kv_params={"remote_decoder": bad_value})
-        from vllm.v1.kv_offload.tiering.p2p.manager import P2PDestInfo
-
-        assert ctx.get_state(P2PDestInfo) is None
+        dest = ctx.get_state(P2PDestInfo)
+        assert dest is not None
+        assert dest.kv_request_id is None
 
     @pytest.mark.parametrize(
         "bad_value",
@@ -2546,11 +2550,23 @@ class TestNonDictRoleParamsRejected:
             True,
         ],
     )
-    def test_string_remote_kv_source_treated_as_absent(self, bad_value):
+    def test_non_dict_remote_kv_source_treated_as_absent(self, bad_value):
         ctx = _req_context(kv_params={"remote_kv_source": bad_value})
-        from vllm.v1.kv_offload.tiering.p2p.manager import P2PSourceInfo
-
         assert ctx.get_state(P2PSourceInfo) is None
+
+    @pytest.mark.parametrize(
+        "bad_params",
+        [
+            "not-a-dict",
+            42,
+            ["a", "list"],
+            True,
+        ],
+    )
+    def test_non_dict_kv_params_treated_as_absent(self, bad_params):
+        ctx = _req_context(kv_params=bad_params)
+        assert ctx.get_state(P2PSourceInfo) is None
+        assert ctx.get_state(P2PDestInfo) is None
 
     def test_manager_survives_malformed_prefiller_role(self):
         """Full manager flow: malformed remote_prefiller does not crash
@@ -2561,16 +2577,16 @@ class TestNonDictRoleParamsRejected:
         assert result.policy is OffloadPolicy.CHUNK_LEVEL
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
-    def test_manager_survives_malformed_decoder_role(self):
-        """Malformed remote_decoder does not crash on_new_request or
-        submit_store — the job succeeds immediately (no remote dest)."""
+    def test_malformed_decoder_role_fails_store(self):
+        """Malformed remote_decoder does not crash; submit_store fails
+        closed instead of succeeding as a local store."""
         mgr = _make_manager()
         ctx = _req_context(kv_params={"remote_decoder": "not-a-dict"})
         result = mgr.on_new_request(ctx)
         assert result.policy is OffloadPolicy.CHUNK_LEVEL
         job = _job_metadata(job_id=1, kv_params={"remote_decoder": "not-a-dict"})
         mgr.submit_store(job)
-        assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
 
     def test_manager_survives_malformed_kv_source_role(self):
         """Malformed remote_kv_source does not crash — request handled
