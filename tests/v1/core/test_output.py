@@ -139,3 +139,26 @@ def test_strip_covered_mm_data_mrope() -> None:
     assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
     # original list is not mutated
     assert set(covered.data.keys()) == {"pixel_values", "image_grid_thw"}
+
+
+def test_strip_covered_mm_data_shm_address_item() -> None:
+    """SHM address descriptors must survive stripping even when covered: the
+    worker needs the address to resolve the payload and to acknowledge the
+    sender's writer reference. Stripping it crashed the SHM receiver cache on
+    the second identical request (vllm-project/vllm#54994)."""
+    address_item = MultiModalKwargsItem(
+        {
+            "address": MultiModalFieldElem(data=4096, field=MultiModalBatchedField()),
+            "monotonic_id": MultiModalFieldElem(data=7, field=MultiModalBatchedField()),
+        }
+    )
+    feature = MultiModalFeatureSpec(
+        data=address_item,
+        mm_position=PlaceholderRange(offset=0, length=100),
+        identifier="shm_item",
+        modality="image",
+    )
+
+    stripped = strip_covered_mm_data([feature], num_computed_tokens=250)
+
+    assert stripped[0].data is address_item
