@@ -50,11 +50,8 @@ def _nvfp4_compute_scale_factor(
     if marlin_scales.numel() == 0:
         return 1.0
 
-    # The factor depends only on the largest scale, so reduce the input
-    # directly. Materializing an FP32 copy, a boolean mask, and a gathered
-    # copy of every scale costs up to 9x the tensor size in transient device
-    # memory; for fused MoE parameters (all experts at once) that is several
-    # GiB during weight loading.
+    # Reduce the input directly: the FP32 copy, mask, and gathered copy of the
+    # old path cost several times the tensor size in transient memory.
     max_val = marlin_scales.max().float() * (2**7)
     if torch.isnan(max_val):
         raise ValueError("NVFP4 Marlin scales contain NaN")
