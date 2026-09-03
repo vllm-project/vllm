@@ -104,18 +104,18 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
 
 
-def test_sampling_mask_matches_processed_top_k_top_p_support():
+def test_sampling_mask_preserves_top_k_boundary_ties():
     processed_logits = apply_top_k_top_p(
         logits=torch.tensor(
             [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
         ),
         k=torch.tensor([3], device=DEVICE_TYPE),
-        p=torch.tensor([0.9], device=DEVICE_TYPE),
+        p=None,
     )
     expected_token_ids = (
         torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
     )
-    assert 0 < len(expected_token_ids) < processed_logits.shape[1]
+    assert len(expected_token_ids) > 3
 
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
