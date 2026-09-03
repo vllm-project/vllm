@@ -24,6 +24,8 @@ class PendingRecv:
     num_sampled: torch.Tensor  # [num_reqs]
     num_rejected: torch.Tensor  # [num_reqs]
     idx_mapping: torch.Tensor  # [num_reqs]
+    query_start_loc: torch.Tensor  # [num_reqs + 1]
+    is_prefilling: torch.Tensor  # [num_reqs]
     idx_mapping_np: np.ndarray  # [num_reqs]
     # Records which rows need a deferred postprocess (bool).
     need_sampled_mask: np.ndarray  # [num_reqs]
@@ -117,6 +119,8 @@ class PPHandler:
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
+            query_start_loc=slot.query_start_loc,
+            is_prefilling=slot.is_prefilling,
         )
 
     def receive(self, input_batch: InputBatch) -> bool:
@@ -139,6 +143,13 @@ class PPHandler:
                 num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
             )
             combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
+            # These input-buffer views are reused every step. Snapshot them in
+            # the same deferred slot as the sampled output so model-owned state
+            # postprocess observes the query that produced this acceptance.
+            query_start_loc = input_batch.query_start_loc[: num_reqs + 1].clone()
+            is_prefilling = async_copy_to_gpu(
+                input_batch.is_prefilling_np.copy(), device=self.device
+            )
             torch.distributed.broadcast(
                 sampled_tokens, src=self.last_rank, group=self.broadcast_group
             )
@@ -151,12 +162,16 @@ class PPHandler:
             # later used on the main stream.
             sampled_tokens.record_stream(self.main_stream)
             combined.record_stream(self.main_stream)
+            query_start_loc.record_stream(self.main_stream)
+            is_prefilling.record_stream(self.main_stream)
         self.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
             num_sampled,
             num_rejected,
             input_batch.idx_mapping,
+            query_start_loc,
+            is_prefilling,
             input_batch.idx_mapping_np,
             need_sampled_mask,
             gen_at_receive_np,

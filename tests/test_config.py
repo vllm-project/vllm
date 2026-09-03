@@ -61,6 +61,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -92,10 +93,22 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
+
+    config.mamba_config.backend = MambaBackendEnum.TRITON
+    with pytest.raises(ValueError, match="requires --mamba-backend flashinfer"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    config.cache_config.replayssm_buffer_len = 3
+    with pytest.raises(ValueError, match="replayssm-buffer-len"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.cache_config.replayssm_buffer_len = 16
+
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
@@ -236,6 +249,96 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+def _replayssm_config(
+    *,
+    backend: MambaBackendEnum,
+    use_v2_model_runner: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="none",
+            replayssm_buffer_len=16,
+        ),
+        model_config=None,
+        num_speculative_tokens=0,
+        mamba_config=SimpleNamespace(backend=backend),
+        use_v2_model_runner=use_v2_model_runner,
+        kv_transfer_config=None,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "backend",
+        "use_v2_model_runner",
+        "mamba_cache_mode",
+        "num_speculative_tokens",
+        "replayssm_buffer_len",
+        "error_match",
+    ),
+    [
+        (MambaBackendEnum.TRITON, True, "none", 0, 16, "requires Model Runner V1"),
+        (MambaBackendEnum.FLASHINFER, True, "none", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "align", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "all", 0, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "align", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, True, "align", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, False, "all", 3, 16, None),
+        (MambaBackendEnum.FLASHINFER, True, "all", 3, 16, None),
+        (
+            MambaBackendEnum.TRITON,
+            False,
+            "all",
+            0,
+            16,
+            "all mode requires.*flashinfer",
+        ),
+        (
+            MambaBackendEnum.FLASHINFER,
+            False,
+            "none",
+            0,
+            17,
+            "replayssm-buffer-len <= 16",
+        ),
+    ],
+    ids=[
+        "triton-v2-rejected",
+        "flashinfer-v2",
+        "flashinfer-align",
+        "flashinfer-all",
+        "flashinfer-align-spec-v1",
+        "flashinfer-align-spec-v2",
+        "flashinfer-all-spec-v1",
+        "flashinfer-all-spec-v2",
+        "triton-all-rejected",
+        "flashinfer-buffer-too-long",
+    ],
+)
+def test_replayssm_config_matrix(
+    backend: MambaBackendEnum,
+    use_v2_model_runner: bool,
+    mamba_cache_mode: str,
+    num_speculative_tokens: int,
+    replayssm_buffer_len: int,
+    error_match: str | None,
+):
+    config = _replayssm_config(
+        backend=backend,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    config.cache_config.mamba_cache_mode = mamba_cache_mode
+    config.cache_config.replayssm_buffer_len = replayssm_buffer_len
+    config.num_speculative_tokens = num_speculative_tokens
+
+    if error_match is None:
+        assert VllmConfig.validate_mamba_cached_kernel(config) is config
+    else:
+        with pytest.raises(ValueError, match=error_match):
+            VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):

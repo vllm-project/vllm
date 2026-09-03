@@ -84,6 +84,8 @@ class BaseMambaAttentionMetadata:
     bc_pre_scratch: torch.Tensor | None = None
     # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    # Contiguous cache-slot indices shared by all FlashInfer ReplaySSM layers.
+    replayssm_state_indices_d: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -178,7 +180,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.decode_replayssm_scratch: (
             tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
+        self.decode_replayssm_state_indices_d: torch.Tensor | None = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
+        if self.use_replayssm:
+            assert len(kv_cache_spec.replayssm_shapes) == 3, (
+                "FlashInfer ReplaySSM requires x, dt, and B ring-state tensors"
+            )
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -190,9 +197,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int8,
                 device=device,
             )
-            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
-            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-            bc_ngroups = kv_cache_spec.shapes[4][0]
+            # B_cache shape = (ngroups, replayssm_buffer_len, dstate).
+            bc_ngroups = kv_cache_spec.replayssm_shapes[2][0]
             bc_scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
             )
@@ -210,14 +216,20 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 allocate_checkpointing_ssu_scratch,
             )
 
-            nheads = kv_cache_spec.shapes[2][0]
+            nheads = kv_cache_spec.replayssm_shapes[0][0]
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,
-                num_predicted_tokens=1,
+                num_predicted_tokens=1 + self.num_spec_tokens,
                 max_window=self.replayssm_buffer_len,
                 dtype=vllm_config.model_config.dtype,
                 device=device,
+            )
+            # Full CUDA graphs retain capture-time tensor addresses. Keep the
+            # contiguous first-column view used by FlashInfer in a persistent
+            # buffer and refresh its contents before each replay.
+            self.decode_replayssm_state_indices_d = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
             )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
@@ -539,14 +551,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ) = self._compute_prefix_caching_block_indices(
                 common_attn_metadata, mamba_block_size
             )
-            if self.use_spec_decode and prev_last_scheduled_idx is not None:
-                fallback = (num_computed_tokens - 1) // mamba_block_size
-                fallback.clamp_(min=0)
-                block_idx_last_scheduled_token_prev_step = torch.where(
-                    prev_last_scheduled_idx >= 0,
-                    prev_last_scheduled_idx,
-                    fallback,
-                )
+            if self.use_spec_decode:
+                block_idx_last_scheduled_token_prev_step = block_idx_last_computed_token
+                if prev_last_scheduled_idx is not None:
+                    block_idx_last_scheduled_token_prev_step = torch.where(
+                        prev_last_scheduled_idx >= 0,
+                        prev_last_scheduled_idx,
+                        block_idx_last_computed_token,
+                    )
         else:
             state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata.block_table_tensor,
@@ -569,13 +581,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 
-        # Sometimes even with specdec enabled we get single-token prefill chunks that
-        # should be treated as decodes but don't have num_accepted_tokens set.
-        # These should be fine to process as non-spec decodes since there's only
-        # one token, so no risk of placing accepted tokens in the wrong slot.
-        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
+        if num_decodes > 0 and self.use_spec_decode:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
-            num_accepted_tokens = num_accepted_tokens[:num_decodes]
+            if num_accepted_tokens is None:
+                # Single-token prefill chunks can be reclassified as decodes before
+                # speculative decoding has produced acceptance counts. Treat each
+                # token as accepted so recurrent state and ReplaySSM trackers follow
+                # the normal speculative-decode path.
+                num_accepted_tokens = torch.diff(query_start_loc_d)
+            else:
+                num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
         if num_prefills > 0:
             if num_computed_tokens is None:
@@ -743,6 +758,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
         replayssm_scratch = metadata.replayssm_scratch
+        replayssm_state_indices_d = None
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -831,6 +847,27 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     cumAdt_vec[:padded_bs],
                     cb_old[:padded_bs],
                 )
+                assert self.decode_replayssm_state_indices_d is not None
+                live_state_indices = self._select_replayssm_state_indices(
+                    state_indices_tensor_d,
+                    block_idx_last_scheduled_token,
+                )
+                self.decode_replayssm_state_indices_d[:padded_bs].copy_(
+                    live_state_indices, non_blocking=True
+                )
+                replayssm_state_indices_d = self.decode_replayssm_state_indices_d[
+                    :padded_bs
+                ]
+
+        if (
+            self.use_flashinfer_replayssm
+            and state_indices_tensor_d is not None
+            and replayssm_state_indices_d is None
+        ):
+            replayssm_state_indices_d = self._select_replayssm_state_indices(
+                state_indices_tensor_d,
+                block_idx_last_scheduled_token,
+            ).contiguous()
 
         return replace(
             metadata,
@@ -841,12 +878,27 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
             replayssm_scratch=replayssm_scratch,
+            replayssm_state_indices_d=replayssm_state_indices_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
                 block_idx_last_scheduled_token_prev_step
             ),
         )
+
+    def _select_replayssm_state_indices(
+        self,
+        state_indices_tensor_d: torch.Tensor,
+        block_idx_last_scheduled_token: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.vllm_config.cache_config.mamba_cache_mode != "all":
+            return state_indices_tensor_d[:, 0]
+
+        assert block_idx_last_scheduled_token is not None
+        live_cols = block_idx_last_scheduled_token[: state_indices_tensor_d.size(0)].to(
+            torch.int64
+        )
+        return state_indices_tensor_d.gather(1, live_cols.unsqueeze(1)).squeeze(1)
 
     def update_block_table(
         self,
