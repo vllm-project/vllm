@@ -221,3 +221,23 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_regular_decode_restores_previous_spec_state():
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(seq_lens=[65], query_lens=[1])
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor([3], dtype=torch.int32),
+    )
+
+    assert meta.spec_decode_src_indices is not None
+    assert meta.spec_decode_src_indices.tolist() == [
+        common.block_table_tensor[0, 2].item()
+    ]
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.tolist() == [3]
