@@ -738,18 +738,6 @@ ARG NCCL_VERSION
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
-# No public nvidia/cuda:13.4 image exists yet, so for a public CUDA-13.4
-# Rubin build FINAL_BASE_IMAGE is set to plain ubuntu:24.04 (no CUDA apt
-# repo preconfigured, unlike a real nvidia/cuda:*-base-* image). Set these
-# to register NVIDIA's public developer-preview apt repo before the
-# "Install CUDA development tools" step below, so its normal
-# cuda-nvcc-${CUDA_VERSION_DASH} etc. package names resolve. Same mechanism
-# sglang's docker/Dockerfile.cu134 uses. Empty by default (no-op) for a
-# normal FINAL_BASE_IMAGE that already has a CUDA apt repo. See
-# docs/getting_started/installation/gpu.cuda.inc.md ("Public alternative")
-# for the full build command and example values.
-ARG CUDA_PREVIEW_APT_REPO=""
-ARG CUDA_PREVIEW_APT_SUITE=""
 
 # Keep the output image's CUDA metadata aligned with the selected toolkit.
 # This also normalizes prerelease base images with four-component metadata for
@@ -801,27 +789,6 @@ RUN apt-get update -y \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-# Register NVIDIA's public developer-preview apt repo, when set, so the CUDA
-# dev tools install below can find prerelease packages (e.g. cuda-nvcc-13-4)
-# that aren't in the standard CUDA apt repo yet.
-RUN if [ -n "${CUDA_PREVIEW_APT_REPO}" ]; then \
-        apt-get update -y \
-        && apt-get install -y --no-install-recommends ca-certificates wget gnupg \
-        && wget -q -O /tmp/nvidia-preview-keyring.deb \
-            "${CUDA_PREVIEW_APT_REPO}/nvidia-preview-keyring.deb" \
-        && dpkg -i /tmp/nvidia-preview-keyring.deb \
-        && rm -f /tmp/nvidia-preview-keyring.deb \
-        && printf '%s\n' \
-            'X-Repolib-Name: NVIDIA Packages (frozen)' \
-            'Types: deb' \
-            "URIs: ${CUDA_PREVIEW_APT_REPO}" \
-            "Suites: ${CUDA_PREVIEW_APT_SUITE}" \
-            'Components: main' \
-            'Signed-By: /usr/share/keyrings/nvidia-packages-preview.gpg' \
-            'Enabled: yes' \
-            > /etc/apt/sources.list.d/nvidia-packages-preview.sources; \
-    fi
-
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
@@ -842,11 +809,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         numactl && \
     rm -rf /var/lib/apt/lists/*
 
-# A real nvidia/cuda:*-base-* image bakes PATH/LD_LIBRARY_PATH in already; our
-# plain-ubuntu FINAL_BASE_IMAGE (CUDA_PREVIEW_APT_REPO case) doesn't, so nvcc/
-# ptxas (installed above, needed at runtime for FlashInfer/DeepGEMM/EP kernel
-# JIT compilation) are otherwise unreachable on PATH. Harmless no-op if
-# already set by a real CUDA base image.
+# Ensures nvcc/ptxas (installed above, needed at runtime for FlashInfer/
+# DeepGEMM/EP kernel JIT compilation) are reachable on PATH. Harmless no-op
+# if already set by FINAL_BASE_IMAGE.
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
@@ -854,13 +819,11 @@ ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 # Apply the CUDA 13.4-only libcurand compatibility link described in the build
 # stage. CUDA 13.5 uses its native libcurand.so.11. DeepEP expects NCCL directly
 # under its configured /usr prefix, while Ubuntu installs it in a multiarch
-# subdirectory - but that symlink is only possible when the FINAL_BASE_IMAGE
-# already bundles NCCL (internal Rubin CUDA images, nvcr.io/nvidia/cuda-dl-base);
-# our own plain-ubuntu + CUDA_PREVIEW_APT_REPO build has no NCCL yet at this
-# point (it arrives later via the standard nvidia-nccl-cu* pip package,
+# subdirectory - but that symlink is only possible when NCCL is already
+# present (e.g. nvcr.io/nvidia/cuda-dl-base bundles it; a bare-CUDA image
+# doesn't, and gets it later via the standard nvidia-nccl-cu* pip package,
 # UV_OVERRIDE below). Check reality (whether libnccl.so.2 is actually found)
-# rather than inferring from CUDA_PREVIEW_APT_REPO, and tolerate not finding
-# it instead of failing the build.
+# and tolerate not finding it instead of failing the build.
 RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
         CUDA_MAJOR_MINOR=$(echo "${CUDA_VERSION}" | cut -d. -f1,2) \
         && if [ "${CUDA_MAJOR_MINOR}" = "13.4" ]; then \
@@ -1014,10 +977,9 @@ ARG GDRCOPY_OS_VERSION=Ubuntu24_04
 ARG TARGETPLATFORM
 COPY tools/install_gdrcopy.sh /tmp/install_gdrcopy.sh
 # Some Rubin FINAL_BASE_IMAGE choices (internal Rubin CUDA images,
-# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; our own plain-ubuntu +
-# CUDA_PREVIEW_APT_REPO build doesn't, so it falls through to the normal
-# install below. Check reality (ldconfig) rather than inferring from which
-# FINAL_BASE_IMAGE flag is set.
+# nvcr.io/nvidia/cuda-dl-base) already provide GDRCopy; others don't, so it
+# falls through to the normal install below. Check reality (ldconfig) rather
+# than inferring from which FINAL_BASE_IMAGE flag is set.
 RUN set -eux; \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && ldconfig -p | grep -q 'libgdrapi\.so'; then \
         true; \

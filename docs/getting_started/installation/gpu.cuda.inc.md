@@ -494,17 +494,17 @@ kernel. Validate the exact driver version on the target system.
 
 ##### Public alternative (no NVIDIA-internal access required)
 
-NVIDIA also publishes a CUDA 13.4 developer-preview apt repo publicly
-(`packages.nvidia.com`), and `pytorch/manylinux2_28-builder` has a public
-`cuda13.4`-tagged image on Docker Hub. For `FINAL_BASE_IMAGE`, use the public,
-multi-arch `nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04`
-image instead of plain `ubuntu:24.04` - it already bundles nvcc/nvrtc-dev,
-`PATH`/`CUDA_HOME`, NCCL 2.30.7, and GDRCopy 2.5.1, so none of the
-`ubuntu:24.04`-specific workarounds in this Dockerfile are needed.
-`CUDA_PREVIEW_APT_REPO`/`CUDA_PREVIEW_APT_SUITE` are still set below (harmless
-no-op against this image, since it already has everything they'd otherwise
-install) and use the public `manylinux2_28-builder:cuda13.4` image for
-`BUILD_BASE_IMAGE` instead of an internal one:
+For `FINAL_BASE_IMAGE`, use the public, multi-arch
+`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image - it
+already bundles nvcc/nvrtc-dev, `PATH`/`CUDA_HOME`, NCCL 2.30.7, and GDRCopy
+2.5.1. Confirmed via `apt-cache policy`/a dry-run install against this exact
+image tag that every CUDA dev-tools package the Dockerfile installs
+(`cuda-nvcc-13-4`, `cuda-nvrtc-dev-13-4`, `cuda-cudart-13-4`,
+`cuda-cuobjdump-13-4`, `libcurand-dev-13-4`, `libcublas-dev-13-4`, etc.) is
+already installed via `dpkg`, satisfied from `/var/lib/dpkg/status` with no
+NVIDIA apt source registered at all - so no NVIDIA preview apt repo is
+needed against this image. Use the public `manylinux2_28-builder:cuda13.4`
+image for `BUILD_BASE_IMAGE` instead of an internal one:
 
 ??? console "CUDA 13.4 public build command"
 
@@ -522,8 +522,6 @@ install) and use the public `manylinux2_28-builder:cuda13.4` image for
       --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
       --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
       --build-arg CUDA_VERSION=13.4 \
-      --build-arg CUDA_PREVIEW_APT_REPO=https://packages.nvidia.com/noble \
-      --build-arg CUDA_PREVIEW_APT_SUITE=prerelease/cuda/13.4.0 \
       --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
       --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
       .
