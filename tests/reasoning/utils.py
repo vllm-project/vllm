@@ -13,6 +13,7 @@ class StreamingReasoningReconstructor:
         self.other_content = None
 
     def append_delta(self, delta: DeltaMessage):
+        """Accumulate reasoning and response text from a parser delta."""
         # A single delta can cross the reasoning/content boundary, so preserve
         # both fields when the parser returns a compound DeltaMessage.
         if delta.reasoning is not None:
