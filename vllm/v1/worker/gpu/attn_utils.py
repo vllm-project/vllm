@@ -146,10 +146,9 @@ def init_attn_backend(
                 # it on the prefill backend), so each ubatch needs its own.
                 num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
-            # The microbatches' builders share the workspace too: they all
-            # issue their attention on the one compute stream the microbatch
-            # threads hand off (see `vllm.v1.worker.ubatching`), so the buffer
-            # is written serially, as it already is across steps.
+            # The microbatches' builders share the workspace: they all issue
+            # attention on the one compute stream the threads hand off, so the
+            # buffer is written serially, as it already is across steps.
             for builder in group.metadata_builders:
                 if attn_backend_workspace is None:
                     if hasattr(builder, "_get_workspace_buffer"):
@@ -186,12 +185,6 @@ def get_attn_cg_support(
         min_cg_support=min_cg_support,
         min_cg_attn_backend=min_cg_attn_backend,
     )
-
-
-def get_backend_names(attn_groups: list[list[AttentionGroup]]) -> str:
-    """Comma-separated names of the backends behind ``attn_groups``."""
-    names = (group.backend.__name__ for groups in attn_groups for group in groups)
-    return ", ".join(dict.fromkeys(names))
 
 
 def get_query_lens_mismatch_unsupported_backend(

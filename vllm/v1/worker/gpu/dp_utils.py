@@ -93,51 +93,39 @@ def sync_cudagraph_and_dp_padding(
         )
         return synced_desc, None
 
-    if bool(torch.all(allow_ubatching_across_dp == 1).item()):
-        # This rank voted too, so it asked for microbatching itself.
+    if torch.all(allow_ubatching_across_dp == 1):
+        # This rank voted too, so its caller passed a config.
         assert parallel_config is not None
-        # The group is a uniform decode only if every rank runs the same uniform
-        # query length as this one, which this rank already compared against its
-        # own decode length. That length is identical group-wide, so every rank
-        # comes to the same answer here.
-        uniform_decode_across_dp = uniform_decode and bool(
-            torch.all(
-                uniform_token_counts_across_dp == (uniform_token_count or 0)
-            ).item()
+        # A uniform decode only if every rank runs the same uniform query
+        # length, so every rank reaches the same answer here.
+        uniform_decode_across_dp = uniform_decode and torch.all(
+            uniform_token_counts_across_dp == (uniform_token_count or 0)
         )
-        should_ubatch = check_ubatch_thresholds(
+        if check_ubatch_thresholds(
             parallel_config,
-            # The thresholds only grow with the token count, so holding the
-            # smallest rank to them is the same as holding every rank to them.
-            int(num_tokens_across_dp.min().item()),
+            # Thresholds only grow with the token count, so holding the smallest
+            # rank to them holds every rank to them.
+            int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
-        )
-    else:
-        should_ubatch = False
-
-    if should_ubatch:
-        # Microbatching is all-or-nothing: every rank has to split, because the
-        # expert all-to-all is collective, and every rank has to run the same
-        # number of tokens so each can assume the others' microbatches are the
-        # same size. A rank with too few tokens to fill every microbatch pads
-        # into them and does no work there, the same way a dummy run does.
-        # Microbatched steps run eager for now; no CUDA graphs are captured for
-        # them yet, so there is nothing to dispatch to.
-        assert parallel_config is not None
-        ubatch_num_tokens = int(num_tokens_across_dp.max().item())
-        return BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=ubatch_num_tokens,
-            num_reqs=num_reqs,
-            num_ubatches=get_num_ubatches(parallel_config),
-        ), DPSyncState(
-            num_tokens_across_dp=torch.full_like(
-                num_tokens_across_dp, ubatch_num_tokens
-            ),
-            uniform_token_count=synced_uniform_token_count,
-            eager=True,
-            num_reqs=int(num_reqs_across_dp.max().item()),
-        )
+        ):
+            # Microbatching is all-or-nothing: the expert all-to-all is
+            # collective, so every rank splits and pads to the same token count.
+            # A rank too small to fill a microbatch does no work in it, like a
+            # dummy run. Microbatched steps run eager; nothing is captured yet.
+            ubatch_num_tokens = int(num_tokens_across_dp.max())
+            return BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=ubatch_num_tokens,
+                num_reqs=num_reqs,
+                num_ubatches=get_num_ubatches(parallel_config),
+            ), DPSyncState(
+                num_tokens_across_dp=torch.full_like(
+                    num_tokens_across_dp, ubatch_num_tokens
+                ),
+                uniform_token_count=synced_uniform_token_count,
+                eager=True,
+                num_reqs=int(num_reqs_across_dp.max()),
+            )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
 
@@ -154,7 +142,7 @@ def sync_cudagraph_and_dp_padding(
                 num_tokens_across_dp=num_tokens_across_dp,
                 uniform_token_count=synced_uniform_token_count,
                 eager=True,
-                num_reqs=int(num_reqs_across_dp.max().item()),
+                num_reqs=int(num_reqs_across_dp.max()),
             ),
         )
 
@@ -192,7 +180,7 @@ def sync_cudagraph_and_dp_padding(
             synced_desc.num_reqs
             if synced_desc.cg_mode == CUDAGraphMode.FULL
             and synced_desc.num_reqs is not None
-            else int(num_reqs_across_dp.max().item())
+            else int(num_reqs_across_dp.max())
         ),
     )
 

@@ -300,11 +300,9 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
-        # `query_start_loc` and `seq_lens` are the only model inputs a
-        # microbatch cannot take as a view of the full batch's buffers -- both
-        # get rebased onto the microbatch's own token range. All microbatches
-        # are live at once, so each needs its own, and allocating them up front
-        # keeps their addresses stable across CUDA graph replays.
+        # `query_start_loc` and `seq_lens` are rebased onto each microbatch's
+        # own token range, so they cannot be views of the full batch's buffers.
+        # Allocating up front keeps their addresses stable across replays.
         self.ubatch_query_start_loc = [
             torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
             for _ in range(self.num_ubatches)
@@ -324,7 +322,11 @@ class UBatchRunner:
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
     ) -> UBatchState:
-        """Split the batch into the microbatches the step will run on."""
+        """Split the batch into the microbatches the step will run on.
+
+        Attention metadata is built per microbatch and carried in the forward
+        contexts the threads install, not in the caller's.
+        """
         ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
 
         attn_metadata = []

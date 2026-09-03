@@ -1774,10 +1774,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del intermediate_tensors
 
         # Update the EPLB meta.
+        ubatch_slices = ubatch_state.slices if ubatch_state is not None else None
         self.eplb.prepare_forward(
-            self.model_config,
-            input_batch.num_tokens,
-            ubatch_state.slices if ubatch_state is not None else None,
+            self.model_config, input_batch.num_tokens, ubatch_slices
         )
 
         self.step_timing.record_batch(
@@ -1794,12 +1793,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
-            # For piecewise and eager mode, just call model(). A microbatched
-            # step passes the same arguments with `attn_metadata` and
-            # `slot_mapping` still None -- its metadata lives in the
-            # per-microbatch contexts `ubatch_runner.prepare()` built -- so this
-            # context only covers the KV connector: `ubatch_runner.run()` clears
-            # it and the microbatch threads install their own.
+            # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
