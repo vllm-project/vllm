@@ -133,11 +133,15 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_request(self, request: "Request") -> None:
+    def add_request(self, request: "Request") -> list[tuple[str, int]]:
         """Add a new request to the scheduler's internal queue.
 
         Args:
             request: The new request being added.
+
+        Returns:
+            Requests that were synchronously length-capped while applying a
+            resumed streaming-input update.
         """
         raise NotImplementedError
 
