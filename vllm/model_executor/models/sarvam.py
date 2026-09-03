@@ -612,9 +612,21 @@ class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfE
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    @staticmethod
+    def _remap_config(config) -> None:
+        """Default the routing keys the released checkpoints omit."""
+        defaults = {
+            "n_group": 1,
+            "topk_group": 1,
+        }
+        for attr, default in defaults.items():
+            if getattr(config, attr, None) is None:
+                setattr(config, attr, default)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self._remap_config(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
