@@ -31,6 +31,9 @@ MiB = 1024 * 1024
 # same-node all-reduce groups of 2/4/6/8 ranks (custom all-reduce's
 # kernel-supported sizes). Caps allocations if the env is set too high.
 CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT = 256
+# World sizes eligible for the override: custom all-reduce's kernel-supported
+# same-node group sizes (odd counts and >8, e.g. 16, cannot dispatch it).
+CUSTOM_ALLREDUCE_OVERRIDE_WORLD_SIZES = (2, 4, 6, 8)
 
 
 def resolve_custom_allreduce_max_size(
@@ -57,7 +60,7 @@ def resolve_custom_allreduce_max_size(
             "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB must be between 1 and "
             f"{CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT}, got {override_mb}."
         )
-    if not same_node or world_size > 8:
+    if not same_node or world_size not in CUSTOM_ALLREDUCE_OVERRIDE_WORLD_SIZES:
         return default_max_size, False
     return override_mb * MiB, True
 # Max size for each world size in case symmetric memory is available
