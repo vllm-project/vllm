@@ -31,7 +31,9 @@ vllm serve <hybrid-model> \
     --enable-mamba-fine-grained-prefix-cache
 ```
 
-`--prefix-match-unit` is required. Under `align` the attention block size is raised to the Mamba page size, so cache keys are already computed at the block size and no finer boundary exists to match against. Without it the flag has no effect.
+`--prefix-match-unit` is required. It sets the granularity at which prefix-cache keys are computed. When unset it defaults to the greatest common divisor of the prefix-cacheable KV cache group block sizes. Under `align` that is the block size itself, so no sub-block boundary exists and the flag has no effect.
+
+Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
 ## Example workloads
 
