@@ -30,6 +30,10 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import flashinfer as flashinfer_utils
+from vllm.model_executor.layers.fused_moe.flashinfer import (
+    prepare_fp8_moe_layer_for_fi,
+)
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -39,10 +43,6 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
-)
-from vllm.model_executor.layers.quantization.utils import flashinfer_utils
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
