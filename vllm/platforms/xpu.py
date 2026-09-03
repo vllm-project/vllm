@@ -481,8 +481,10 @@ class XPUPlatform(Platform):
     def supports_moe_padding_sentinel(cls) -> bool:
         # The SYCL moe_align_block_size in vllm-xpu-kernels only rejects
         # expert ids >= num_experts, so a topk_id of -1 reaches
-        # cumsum_buffer[-1] and the sort kernel then writes token indices at
-        # an arbitrary offset past sorted_token_ids, corrupting device memory.
+        # cumsum_buffer[-1] and _count_and_sort_expert_tokens then writes
+        # token indices at an arbitrary offset past sorted_token_ids,
+        # corrupting device memory. The small-batch-expert variant of this
+        # kernel has no bound check at all, so it is exposed the same way.
         return False
 
     @classmethod
