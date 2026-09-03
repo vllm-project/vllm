@@ -176,12 +176,12 @@ class SchedulerConfig:
     once every N engine steps, aligned across DP ranks, to better balance
     per-step forward-pass times."""
 
-    enable_prefill_delayer: bool = True
+    enable_prefill_delayer: bool = False
     """For data-parallel deployments, enable the content-aware PrefillDelayer:
     hold new prefills on a rank until sibling DP ranks are also ready, so dense
     prefills fire together (all ranks prefill the same step) and the other steps
     stay pure decode on every rank (fast CUDA graph). A no-op unless
-    data_parallel_size > 1; the default matches ATOM."""
+    data_parallel_size > 1. Disabled by default."""
 
     prefill_delayer_target_fill: float = Field(default=0.9, ge=0.0, le=1.0)
     """Coalescing target for the PrefillDelayer. Once all DP ranks are
@@ -219,6 +219,19 @@ class SchedulerConfig:
     """Request-age SLA for the PrefillDelayer: fire immediately once a rank's
     oldest waiting request has waited this many milliseconds. 0.0 (the default)
     disables the SLA."""
+
+    enable_prefill_idle_ranks: bool = False
+    """On a PrefillDelayer fire step, defer decodes on every rank so prefill-ready
+    ranks run a prefill-only step and decode-only ranks idle, keeping the step
+    prefill-only across the DP group so decode steps stay on the fast CUDA graph.
+    Pairs with long_prefill_token_threshold (small prefill chunks keep the idle
+    windows short). Disabled by default; only active with enable_prefill_delayer
+    and data_parallel_size > 1."""
+
+    prefill_delayer_max_consecutive_prefill_steps: int = Field(default=4, ge=1)
+    """Decode-progress bound for enable_prefill_idle_ranks: force a
+    global-decode step after this many consecutive global-prefill steps so held
+    decodes cannot starve."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to

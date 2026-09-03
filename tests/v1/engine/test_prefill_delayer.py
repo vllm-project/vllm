@@ -140,6 +140,49 @@ def test_reset_clears_state():
     assert d._stall_count == 0
 
 
+def test_global_prefill_step_disabled_by_default():
+    d = _make(target_fill=0.0)
+    # Even on a fire step, without idle_non_prefill_ranks it is never a
+    # global-prefill step.
+    _throttle(d, n_prefillable=DP_SIZE, pending_tokens=1)
+    assert d.should_throttle is False
+    assert d.is_global_prefill_step is False
+
+
+def test_global_prefill_step_on_fire_when_enabled():
+    d = _make(target_fill=0.0, idle_non_prefill_ranks=True)
+    _throttle(d, n_prefillable=DP_SIZE, pending_tokens=1)
+    assert d.should_throttle is False
+    assert d.is_global_prefill_step is True
+
+
+def test_no_global_prefill_step_on_hold():
+    d = _make(target_fill=0.9, idle_non_prefill_ranks=True)
+    # Skewed -> hold -> not a global-prefill step.
+    assert _throttle(d, n_prefillable=3, pending_tokens=1) is True
+    assert d.is_global_prefill_step is False
+
+
+def test_no_global_prefill_step_when_none_prefillable():
+    d = _make(target_fill=0.0, idle_non_prefill_ranks=True)
+    _throttle(d, n_prefillable=0, pending_tokens=0)
+    assert d.is_global_prefill_step is False
+
+
+def test_consecutive_prefill_steps_bounded():
+    d = _make(
+        target_fill=0.0,
+        idle_non_prefill_ranks=True,
+        max_consecutive_prefill_steps=3,
+    )
+    steps = []
+    for _ in range(5):
+        _throttle(d, n_prefillable=DP_SIZE, pending_tokens=1)
+        steps.append(d.is_global_prefill_step)
+    # Three global-prefill steps, then a forced global-decode step, then resume.
+    assert steps == [True, True, True, False, True]
+
+
 if __name__ == "__main__":
     import importlib
     import sys

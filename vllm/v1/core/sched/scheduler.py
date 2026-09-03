@@ -322,6 +322,11 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # DP prefill balancing: optimistic predictor for global-prefill steps.
+        # Assume a waiting prefill will be admissible on the next fire step;
+        # cleared when a fire step admits no new prefill (KV full), so decodes
+        # are not deferred into an empty step.
+        self._release_admitted_prefill = True
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -506,7 +511,9 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+    def schedule(
+        self, throttle_prefills: bool = False, global_prefill_step: bool = False
+    ) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -555,6 +562,29 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        # DP prefill balancing: on a global-prefill (fire) step, defer decodes on
+        # every rank so prefill-ready ranks run a prefill-only step and
+        # decode-only ranks schedule an empty batch, keeping the step
+        # prefill-only across the DP group so decode steps stay on the fast CUDA
+        # graph.
+        prefill_preferred = (
+            self.scheduler_config.enable_prefill_delayer
+            and global_prefill_step
+            and not throttle_prefills
+            and not defer_prefills
+        )
+        has_inflight_prefill = any(r.is_prefill_chunk for r in self.running)
+        has_waiting_prefill = bool(self.waiting or self.skipped_waiting)
+        # Anti-spin fallback: if this rank has a waiting prefill it could not
+        # admit last fire step (KV-blocked), run its decodes to free KV rather
+        # than idling on an empty step.
+        kv_blocked_waiting_prefill = (
+            has_waiting_prefill
+            and not has_inflight_prefill
+            and not self._release_admitted_prefill
+        )
+        defer_decodes = prefill_preferred and not kv_blocked_waiting_prefill
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -587,6 +617,12 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if defer_decodes and not request.is_prefill_chunk:
+                # DP prefill balancing: defer this decode to the next
+                # global-decode step so the fire step is prefill-only.
                 req_index += 1
                 continue
 
@@ -1221,6 +1257,13 @@ class Scheduler(SchedulerInterface):
             # record whether it was capacity-bound.
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
+
+        # DP prefill balancing: update the predictor so a fire step that fails to
+        # admit any new prefill (KV full) stops deferring decodes next time.
+        if prefill_preferred and has_waiting_prefill:
+            self._release_admitted_prefill = bool(
+                scheduled_new_reqs or scheduled_resumed_reqs
+            )
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

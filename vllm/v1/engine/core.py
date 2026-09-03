@@ -595,6 +595,11 @@ class EngineCore:
         Overridden by the DP engine core; never throttles otherwise."""
         return False
 
+    def _global_prefill_step(self) -> bool:
+        """Whether this step is a global-prefill step (DP prefill balancing).
+        Overridden by the DP engine core; never a global-prefill step otherwise."""
+        return False
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -606,7 +611,9 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        scheduler_output = self.scheduler.schedule(
+            self._should_throttle_prefills(), self._global_prefill_step()
+        )
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -664,7 +671,9 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            scheduler_output = self.scheduler.schedule(
+                self._should_throttle_prefills(), self._global_prefill_step()
+            )
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -2074,6 +2083,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 ttft_max_ticks=scheduler_config.prefill_delayer_ttft_max_ticks,
                 partial_max_ticks=scheduler_config.prefill_delayer_partial_max_ticks,
                 stall_ticks=scheduler_config.prefill_delayer_stall_ticks,
+                max_consecutive_prefill_steps=(
+                    scheduler_config.prefill_delayer_max_consecutive_prefill_steps
+                ),
+                idle_non_prefill_ranks=scheduler_config.enable_prefill_idle_ranks,
             )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
@@ -2211,6 +2224,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self.prefill_schedule_interval > 1
             and self.step_counter % self.prefill_schedule_interval != 0
         )
+
+    def _global_prefill_step(self) -> bool:
+        if self._prefill_delayer is not None:
+            # Content-aware path: apply the decision computed from the previous
+            # iteration's DP sync (see _has_global_unfinished_reqs).
+            return self._prefill_delayer.is_global_prefill_step
+        return False
 
     @fault_tolerant_wrapper
     def run_busy_loop(self):

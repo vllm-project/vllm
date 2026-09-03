@@ -651,6 +651,10 @@ class EngineArgs:
         SchedulerConfig.prefill_delayer_kv_low_watermark
     )
     prefill_delayer_max_queue_ms: float = SchedulerConfig.prefill_delayer_max_queue_ms
+    enable_prefill_idle_ranks: bool = SchedulerConfig.enable_prefill_idle_ranks
+    prefill_delayer_max_consecutive_prefill_steps: int = (
+        SchedulerConfig.prefill_delayer_max_consecutive_prefill_steps
+    )
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1649,6 +1653,14 @@ class EngineArgs:
             **scheduler_kwargs["prefill_delayer_max_queue_ms"],
         )
         scheduler_group.add_argument(
+            "--enable-prefill-idle-ranks",
+            **scheduler_kwargs["enable_prefill_idle_ranks"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-delayer-max-consecutive-prefill-steps",
+            **scheduler_kwargs["prefill_delayer_max_consecutive_prefill_steps"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2433,6 +2445,10 @@ class EngineArgs:
             prefill_delayer_kv_high_watermark=(self.prefill_delayer_kv_high_watermark),
             prefill_delayer_kv_low_watermark=(self.prefill_delayer_kv_low_watermark),
             prefill_delayer_max_queue_ms=self.prefill_delayer_max_queue_ms,
+            enable_prefill_idle_ranks=self.enable_prefill_idle_ranks,
+            prefill_delayer_max_consecutive_prefill_steps=(
+                self.prefill_delayer_max_consecutive_prefill_steps
+            ),
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

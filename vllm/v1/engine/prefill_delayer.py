@@ -40,6 +40,8 @@ class PrefillDelayer:
         ttft_max_ticks: int = 200,
         partial_max_ticks: int = 100,
         stall_ticks: int = 10,
+        max_consecutive_prefill_steps: int = 4,
+        idle_non_prefill_ranks: bool = False,
     ):
         """Initialize the delayer.
 
@@ -56,6 +58,13 @@ class PrefillDelayer:
                 is already in flight on some rank.
             stall_ticks: Fire once the queued prefill tokens stop growing for
                 this many consecutive holds.
+            max_consecutive_prefill_steps: On a global-prefill step, force a
+                global-decode step after this many consecutive global-prefill
+                steps so held decodes cannot starve.
+            idle_non_prefill_ranks: Whether a fire step is a global-prefill step
+                on which every rank defers decodes (decode-only ranks idle) so
+                the step is prefill-only across the DP group and decode steps
+                stay on the fast CUDA graph.
         """
         self.dp_size = dp_size
         self.prefill_token_budget = max(1, prefill_token_budget)
@@ -63,28 +72,42 @@ class PrefillDelayer:
         self.ttft_max_ticks = max(1, ttft_max_ticks)
         self.partial_max_ticks = max(1, partial_max_ticks)
         self.stall_ticks = max(1, stall_ticks)
+        self.max_consecutive_prefill_steps = max(1, max_consecutive_prefill_steps)
+        self.idle_non_prefill_ranks = idle_non_prefill_ranks
 
         self._throttle = False
         self._hold_ticks = 0
         self._prev_pending = 0
         self._stall_count = 0
+        self._is_global_prefill_step = False
+        self._consecutive_prefill_steps = 0
+        self._last_n_prefillable = 0
 
         logger.info(
             "PrefillDelayer initialized: dp_size=%d prefill_token_budget=%d "
             "target_fill=%.2f ttft_max_ticks=%d partial_max_ticks=%d "
-            "stall_ticks=%d",
+            "stall_ticks=%d max_consecutive_prefill_steps=%d "
+            "idle_non_prefill_ranks=%s",
             self.dp_size,
             self.prefill_token_budget,
             self.target_fill,
             self.ttft_max_ticks,
             self.partial_max_ticks,
             self.stall_ticks,
+            self.max_consecutive_prefill_steps,
+            self.idle_non_prefill_ranks,
         )
 
     @property
     def should_throttle(self) -> bool:
         """Whether new prefills should be held, per the last update_throttle()."""
         return self._throttle
+
+    @property
+    def is_global_prefill_step(self) -> bool:
+        """Whether the next step is a global-prefill step (all ranks defer
+        decodes), per the last update_throttle()."""
+        return self._is_global_prefill_step
 
     def update_throttle(
         self,
@@ -124,6 +147,23 @@ class PrefillDelayer:
             has_partial,
             queue_hot,
         )
+        self._last_n_prefillable = n_prefillable
+        self._is_global_prefill_step = self._compute_global_prefill_step()
+
+    def _compute_global_prefill_step(self) -> bool:
+        if not self.idle_non_prefill_ranks:
+            return False
+        # Not a fire step, or nothing to prefill anywhere: normal decode.
+        if self._throttle or self._last_n_prefillable == 0:
+            self._consecutive_prefill_steps = 0
+            return False
+        # Decode-progress bound: force a global-decode step after a run of
+        # global-prefill steps so held decodes cannot starve.
+        if self._consecutive_prefill_steps >= self.max_consecutive_prefill_steps:
+            self._consecutive_prefill_steps = 0
+            return False
+        self._consecutive_prefill_steps += 1
+        return True
 
     def _allow(
         self,
