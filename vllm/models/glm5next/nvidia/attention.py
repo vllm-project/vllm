@@ -33,7 +33,6 @@ from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
-from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 
@@ -91,13 +90,10 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
     ``cache_config.block_size``. DeepGEMM's paged-MQA kernel
     (``csrc/apis/attention.hpp``) requires ``block_kv`` to be exactly 32 or
-    64, so the storage block is virtually split into pool pages of the
-    largest such size that tiles it (``storage_kernel_block_size``); this
-    needs ``block_size`` to be a multiple of ``index_kpool * 32`` (512 for
-    ``index_kpool = 16``). A smaller block (e.g. the default 64) silently
-    collapses ``storage_block_size`` (64 // 16 = 4) and only fails later at
-    the opaque C++ assert; ``get_kv_cache_spec`` guards this up front
-    instead.
+    64, so the metadata builder and the kpool kernels re-page each block into
+    such pages (``kpool_page_geometry``); this needs ``block_size`` to be a
+    multiple of ``index_kpool * 32``, which ``get_kv_cache_spec`` checks up
+    front instead of failing at the opaque C++ assert.
     """
 
     def __init__(
@@ -129,32 +125,19 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
         # compression in the current cache-layout API.
         assert isinstance(spec, MLAAttentionSpec)
         spec = replace(spec, tokens_per_state=self._index_kpool)
-
-        # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
-        # (= block_size // index_kpool) is virtually split into pool pages of
-        # the largest such size that tiles it, so it must be a multiple of 32.
-        storage_block_size = spec.block_size // self._index_kpool
-        assert (
-            spec.block_size % self._index_kpool == 0 and storage_block_size % 32 == 0
-        ), (
+        # DeepGEMM paged-MQA pages are 32/64 states; see kpool_page_geometry.
+        num_states = spec.block_size // self._index_kpool
+        assert spec.block_size % self._index_kpool == 0 and num_states % 32 == 0, (
             "Glm5NextIndexerCache: kpool indexer requires cache block_size to "
-            f"be a multiple of index_kpool * 32 ({self._index_kpool * 32}) so "
-            "that DeepGEMM paged-MQA pool pages (32 or 64 entries) tile the "
-            f"storage block, got block_size={spec.block_size} -> "
-            f"storage_block_size={storage_block_size}."
+            f"be a multiple of index_kpool * 32 ({self._index_kpool * 32}), got "
+            f"block_size={spec.block_size}."
         )
-        max_page_size = max(PAGED_MQA_PAGE_SIZES)
-        min_page_size = min(PAGED_MQA_PAGE_SIZES)
-        if storage_block_size <= max_page_size:
-            page_size = storage_block_size
-        elif storage_block_size % max_page_size == 0:
-            page_size = max_page_size
-        else:
-            page_size = min_page_size
-        return replace(
-            spec,
-            storage_block_size=page_size * self._index_kpool,
-        )
+        return spec
+
+    def get_attn_backend(self):
+        from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+
+        return Glm5NextIndexerBackend
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):

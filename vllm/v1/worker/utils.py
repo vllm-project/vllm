@@ -35,7 +35,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
 )
@@ -272,20 +271,13 @@ class AttentionGroup:
         device,
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
+        block_stride_bytes: int | None = None,
     ):
-        if kernel_block_size is None:
-            kv_cache_spec_builder = self.kv_cache_spec
-        elif (
-            isinstance(self.kv_cache_spec, MLAAttentionSpec)
-            and self.kv_cache_spec.storage_block_size is not None
-        ):
-            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
-                self.kv_cache_spec.storage_block_size
-            )
-        else:
-            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
-                kernel_block_size
-            )
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
+        )
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
@@ -305,9 +297,9 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
-        if kernel_block_size is not None:
+        if block_stride_bytes is not None:
             for builder in self.metadata_builders:
-                builder.set_kernel_block_size(kernel_block_size)
+                builder.set_block_stride_bytes(block_stride_bytes)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -444,9 +436,6 @@ def allocate_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
-        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
-            kernel_block_size = spec.storage_block_size
-
         views = create_kv_cache_views(
             buf,
             spec,
@@ -457,6 +446,17 @@ def allocate_kv_cache(
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches
+
+
+def group_block_stride_bytes(
+    kv_cache_config: KVCacheConfig, kv_cache_group_id: int
+) -> int | None:
+    """Byte stride between consecutive blocks of a group's cache tensors."""
+    layer_names = set(kv_cache_config.kv_cache_groups[kv_cache_group_id].layer_names)
+    for tensor in kv_cache_config.kv_cache_tensors:
+        if layer_names.intersection(tensor.layers):
+            return tensor.block_stride
+    return None
 
 
 def prepare_kernel_block_sizes(

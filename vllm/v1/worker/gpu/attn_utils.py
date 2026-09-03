@@ -27,6 +27,7 @@ from vllm.v1.worker.utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     allocate_kv_cache,
     bind_kv_cache,
+    group_block_stride_bytes,
     prepare_kernel_block_sizes,
 )
 
@@ -141,6 +142,9 @@ def init_attn_backend(
                 device=device,
                 kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
+                block_stride_bytes=group_block_stride_bytes(
+                    kv_cache_config, kv_cache_group_id
+                ),
             )
             builder = group.get_metadata_builder(0)
             if attn_backend_workspace is None:

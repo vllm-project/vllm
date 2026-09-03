@@ -31,13 +31,12 @@ from vllm.v1.attention.backends.mla.indexer import (
     compute_kpool_tail_slot_mapping,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
-from vllm.v1.kv_cache_layout import KVCacheLayout
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
-    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
+    layout, *_ = KpoolTailBackend.supported_kv_cache_layouts()
     spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
@@ -48,7 +47,6 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
 
-    assert layout is KVCacheLayout.LBHNC
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1

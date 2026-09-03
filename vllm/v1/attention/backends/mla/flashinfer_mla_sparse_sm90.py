@@ -26,7 +26,7 @@ converted index buffer (illegal address). Per-step content (top-k slots)
 is written into the reserved buffers by kernels inside the captured
 forward, and captured runs read the refreshed plan buffers on replay.
 
-KV cache format: plain contiguous E4M3 ``[num_blocks, block_size, 512]``
+KV cache format: E4M3 ``[num_blocks, block_size, 512]`` (any block stride)
 (uint8 storage) with a per-tensor ``k_scale``; BF16 caches also work. The
 per-token x 128-channel-group ``ckv_scale_arr`` layout is supported by the
 kernel but not wired yet (it needs a group-quantizing cache-write op).
@@ -56,9 +56,10 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadataBuilder,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -150,9 +151,10 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
-    @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBHNC,)
+    @staticmethod
+    def get_kernel_page_rows() -> int | None:
+        # page_size=1: rows are the page table, so any block stride works.
+        return 1
 
 
 class _SM90State:
@@ -444,11 +446,15 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
         # return_valid_counts=True keeps the compacted-prefix layout: valid
         # entries at [0, valid_count), -1 past it — exactly the prefix the
         # planned per-row lengths address.
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
         topk_slots, _ = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_tokens],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
             return_valid_counts=True,
         )
@@ -461,11 +467,11 @@ class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Met
             topk_slots.reshape(-1).clamp_(min=0).to(torch.int32)
         )
 
+        # Row ids index the flat row view; under packed layouts the rows of
+        # other layers sit between blocks and are never referenced.
         flat = (
-            kv_c_and_k_pe_cache.view(torch.float8_e4m3fn)
-            if self.use_fp8_kv_cache
-            else kv_c_and_k_pe_cache
-        ).reshape(-1, 1, self.head_size)
+            kv_rows.view(torch.float8_e4m3fn) if self.use_fp8_kv_cache else kv_rows
+        ).unsqueeze(1)
         ckv = flat[..., : self.kv_lora_rank]
         kpe = flat[..., self.kv_lora_rank :]
 

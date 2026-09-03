@@ -20,6 +20,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    PAGED_MQA_PAGE_SIZES,
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
     native_next_n_supported,
@@ -257,12 +258,54 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return DeepseekV32IndexerMetadataBuilder
 
 
+def kpool_page_geometry(
+    num_states: int, block_stride_bytes: int | None, state_bytes: int
+) -> tuple[int, int, int]:
+    """(page_states, pages_per_block, stride_pages) for a compressed block.
+
+    DeepGEMM's paged-MQA kernels take 32/64-state pages, so a larger block is
+    viewed as consecutive pages; ``stride_pages`` exceeds ``pages_per_block``
+    when other layers' pages sit inside the block (packed layouts).
+    """
+    if num_states <= max(PAGED_MQA_PAGE_SIZES):
+        return num_states, 1, 1
+    page_states = 64 if num_states % 64 == 0 else 32
+    assert num_states % page_states == 0, num_states
+    pages_per_block = num_states // page_states
+    if block_stride_bytes is None:
+        return page_states, pages_per_block, pages_per_block
+    page_bytes = page_states * state_bytes
+    assert block_stride_bytes % page_bytes == 0, (
+        f"block stride {block_stride_bytes} B is not a whole number of "
+        f"{page_bytes} B indexer pages"
+    )
+    return page_states, pages_per_block, block_stride_bytes // page_bytes
+
+
+class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
+    """kpool indexer: re-pages the manager block itself (kpool_page_geometry)."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "GLM5_NEXT_INDEXER"
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # Indexer and MLA pages differ in size and share a block (as DeepSeek-V4).
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # The spec enforces index_kpool * 32 alignment; no worker-side split.
+        return [MultipleOf(1)]
+
+
 class KpoolTailBackend(DeepseekV32IndexerBackend):
     """Storage-only backend for the GLM-5.3-Flash kpool tail cache."""
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        return (KVCacheLayout.LBHNC,)
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
     def get_name() -> str:
@@ -835,6 +878,25 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
+    def _page_geometry(self) -> tuple[int, int, int]:
+        spec = self.kv_cache_spec
+        assert isinstance(spec, MLAAttentionSpec)
+        return kpool_page_geometry(
+            spec.num_states, self.block_stride_bytes, spec.state_content_size_bytes
+        )
+
+    def _indexer_page_table(
+        self, block_table: torch.Tensor
+    ) -> tuple[int, torch.Tensor]:
+        """Block ``b`` becomes pages ``b * stride_pages + j`` for the block's pages."""
+        page_states, pages_per_block, stride_pages = self._page_geometry()
+        if pages_per_block == 1:
+            return page_states, block_table
+        rows = block_table.shape[0]
+        offsets = self.arange_buffer[:pages_per_block]
+        paged = block_table[:, :, None] * stride_pages + offsets
+        return page_states, paged.reshape(rows, -1)
+
     def _dcp_localize_decode_seq_lens(
         self,
         seq_lens: torch.Tensor,
@@ -1049,15 +1111,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         indexer_block_table = block_table
+        page_states = self.kv_cache_spec.num_states
         if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
+            page_states, indexer_block_table = self._indexer_page_table(block_table)
             padded_num_tokens = num_tokens
             if self.pcp_world_size > 1:
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
@@ -1066,7 +1122,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 seq_lens,
                 indexer_block_table,
-                self.kv_cache_spec.num_states,
+                page_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -1211,24 +1267,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
 
             if self.compress_ratio > 1:
-                kernel_block_size = self.kernel_block_size
-                if (
-                    kernel_block_size is not None
-                    and self.kv_cache_spec.block_size != kernel_block_size
-                    and self.kv_cache_spec.block_size % kernel_block_size == 0
-                ):
-                    factor = self.kv_cache_spec.block_size // kernel_block_size
-                    compressed = block_table[:, ::factor] // factor
-                    rows, cols = compressed.shape
+                _, pages_per_block, _ = self._page_geometry()
+                if pages_per_block > 1:
+                    _, paged = self._indexer_page_table(block_table)
+                    rows, cols = paged.shape
                     if self.indexer_decode_block_table_buffer is None:
                         self.indexer_decode_block_table_buffer = torch.zeros(
                             (self._max_num_batched_tokens, cols),
                             dtype=torch.int32,
                             device=self.device,
                         )
-                    self.indexer_decode_block_table_buffer[:rows, :cols].copy_(
-                        compressed
-                    )
+                    self.indexer_decode_block_table_buffer[:rows, :cols].copy_(paged)
                     block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
             seq_lens_is_buffer_view = (use_native and next_n > 1) or (
@@ -1267,7 +1316,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self.kv_cache_spec.num_states,
+                    self._page_geometry()[0],
                     self.num_sms,
                     indices=decode_indices,
                 )

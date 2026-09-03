@@ -118,7 +118,8 @@ def test_forward_wiring(monkeypatch, qk_rope, kv_dtype):
     q_nope = torch.randn(rows, impl.num_heads, HEAD)
     q_rope = torch.randn(rows, impl.num_heads, qk_rope)
     cache = torch.zeros(
-        8 * BLOCK_SIZE,
+        8,
+        BLOCK_SIZE,
         impl.head_size,
         dtype=torch.uint8 if impl.use_fp8_kv_cache else torch.bfloat16,
     )
