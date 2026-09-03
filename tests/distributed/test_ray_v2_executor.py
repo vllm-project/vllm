@@ -107,19 +107,28 @@ def assert_executor(executor, tp_size, pp_size):
         assert handle.node_id is not None
 
 
-def test_dist_init_store_owns_port(monkeypatch):
-    """The rank-0 actor keeps the selected TCPStore port bound."""
+def _detached_rank0_worker() -> ray_executor_v2.RayWorkerProc:
+    """A RayWorkerProc that can create its dist-init store without Ray."""
     worker = ray_executor_v2.RayWorkerProc.__new__(ray_executor_v2.RayWorkerProc)
     worker._parallel_config = SimpleNamespace(world_size=1)
+    return worker
+
+
+def _assert_port_held(port: int):
+    with socket.socket() as contender, pytest.raises(OSError) as exc_info:
+        contender.bind(("127.0.0.1", port))
+    assert exc_info.value.errno == errno.EADDRINUSE
+
+
+def test_dist_init_store_owns_port(monkeypatch):
+    """The rank-0 actor keeps the selected TCPStore port bound."""
     monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    worker = _detached_rank0_worker()
 
     init_method = worker.create_dist_init_method()
     port = urlsplit(init_method).port
     assert port is not None and port != 0
-
-    with socket.socket() as contender, pytest.raises(OSError) as exc_info:
-        contender.bind(("127.0.0.1", port))
-    assert exc_info.value.errno == errno.EADDRINUSE
+    _assert_port_held(port)
 
     reused_store = TCPStore(
         "127.0.0.1",
@@ -131,6 +140,23 @@ def test_dist_init_store_owns_port(monkeypatch):
     )
     worker._dist_init_store.set("key", "value")
     assert reused_store.get("key") == b"value"
+
+
+def test_colocated_dist_init_stores_hold_distinct_ports(monkeypatch):
+    """Replicas sharing a host must never publish the same TCPStore port.
+
+    Each rank-0 store binds a kernel-assigned ephemeral port and keeps it
+    for the actor's lifetime, so concurrently live replicas cannot collide.
+    """
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "127.0.0.1")
+    workers = [_detached_rank0_worker() for _ in range(3)]
+
+    ports = [urlsplit(w.create_dist_init_method()).port for w in workers]
+    assert len(set(ports)) == len(workers)
+    for worker, port in zip(workers, ports):
+        assert port == worker._dist_init_store.port
+        assert port >= 1024
+        _assert_port_held(port)
 
 
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])

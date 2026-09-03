@@ -36,22 +36,15 @@ class PendingRecv:
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
-    with outputs that might be needed in a subsequent (decode) step.
-    Returns None if no sampled outputs are needed in the requests' next step."""
+    that produce a sampled token this step, and therefore must have that token
+    (and the draft block proposed from it) propagated to the earlier PP stages.
+    Returns None if no request in the batch produces a sample."""
 
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
-    max_seq_len = input_batch.max_seq_len_np
-    assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
-    # The scheduler has already counted the prior step's draft tokens.
-    finish_computed = old_computed
-    if input_batch.prev_num_draft_tokens_per_req is not None:
-        finish_computed = old_computed - input_batch.prev_num_draft_tokens_per_req
-    not_finishing = np.maximum(finish_computed, prefill_len) + 1 < max_seq_len
-    need_sampled_mask = produces_sample & not_finishing
-    return need_sampled_mask if need_sampled_mask.any() else None
+    return produces_sample if produces_sample.any() else None
 
 
 class PPHandler:

@@ -85,9 +85,6 @@ class InputBatch:
     # == np.any(is_prefilling_np)
     has_prefill: bool
 
-    # [num_reqs] only populated when pipeline parallelism is enabled.
-    max_seq_len_np: np.ndarray | None
-
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
@@ -111,7 +108,6 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
-    prev_num_draft_tokens_per_req: np.ndarray | None = None
 
     @classmethod
     def make_dummy(
@@ -195,7 +191,6 @@ class InputBatch:
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
             has_prefill=False,
-            max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
             is_padding=is_padding,
