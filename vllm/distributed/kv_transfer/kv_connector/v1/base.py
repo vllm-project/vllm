@@ -396,6 +396,16 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def rebuild_kv_transfer_endpoint(
+        self, local_ip: str, new_engine_id: str | None = None
+    ) -> None:
+        """Rebuild local transport resources after snapshot restore.
+
+        Connectors whose endpoints or clients do not survive restore should
+        override this method. Other connectors require no restore action.
+        """
+        return None
+
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
         Get the KV connector stats collected during the last interval.

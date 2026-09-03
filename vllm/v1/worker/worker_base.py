@@ -131,6 +131,24 @@ class WorkerBase:
         if torch.accelerator.is_available():
             torch.accelerator.synchronize()
 
+    def suspend(self, model_save_path: str | None = None) -> None:
+        """Suspend device state for a process snapshot."""
+        raise NotImplementedError
+
+    def device_unlock(self) -> None:
+        """Release device snapshot resources after checkpoint."""
+        raise NotImplementedError
+
+    def resume(
+        self,
+        local_ip: str,
+        data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
+    ) -> None:
+        """Restore device state after a process snapshot."""
+        raise NotImplementedError
+
     def init_device(self) -> None:
         """Initialize device state, such as loading the model or other on-device
         memory allocations.
