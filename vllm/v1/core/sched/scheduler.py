@@ -60,7 +60,12 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import DraftTokenIds, IterStats, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    IterStats,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -1319,6 +1324,12 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
+        if self.vllm_config.observability_config.token_level_profiling:
+            scheduler_output.iter_batch_size = len(self.running)
+            scheduler_output.iter_waiting_size = len(self.waiting)
+            scheduler_output.iter_total_tokens_count = sum(
+                request.num_tokens for request in self.running
+            )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1788,9 +1799,9 @@ class Scheduler(SchedulerInterface):
         iter_stats: IterStats | None = None
         if self.vllm_config.observability_config.token_level_profiling:
             iter_stats = IterStats(
-                iter_batch_size=len(self.running),
-                iter_waiting_size=len(self.waiting),
-                iter_total_tokens_count=sum(r.num_tokens for r in self.running),
+                iter_batch_size=scheduler_output.iter_batch_size,
+                iter_waiting_size=scheduler_output.iter_waiting_size,
+                iter_total_tokens_count=scheduler_output.iter_total_tokens_count,
                 token_scheduled_time=scheduler_output.scheduled_at,
                 token_output_time=time.time(),
             )

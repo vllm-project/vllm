@@ -267,6 +267,9 @@ class SchedulerOutput:
 
     # Record the scheduling time point
     scheduled_at: float = 0.0
+    iter_batch_size: int = 0
+    iter_waiting_size: int = 0
+    iter_total_tokens_count: int = 0
 
     # EC Cache Manager metadata
     ec_manager_metadata: EncoderCacheManagerMetadata | None = None
