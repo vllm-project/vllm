@@ -426,7 +426,7 @@ def test_noncompiled_architectures_fall_back_when_breakable_disabled(
     config = make_cudagraph_config(architecture, rocm=False)
 
     assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.compilation_config.mode is None
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
@@ -447,7 +447,7 @@ def test_noncompiled_cudagraph_fallback_respects_optimization_level(
     )
 
     assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert config.compilation_config.mode == CompilationMode.NONE
+    assert config.compilation_config.mode is None
     assert config.compilation_config.cudagraph_mode == expected_cudagraph_mode
 
 
@@ -466,50 +466,47 @@ def test_rocm_forced_v2_only_falls_back_for_noncompiled_dsa_model(
     config = make_cudagraph_config(architecture)
 
     assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    expected_compilation_mode = (
-        CompilationMode.NONE if expected_cudagraph_mode is not None else None
-    )
-    assert config.compilation_config.mode == expected_compilation_mode
+    assert config.compilation_config.mode is None
     assert config.compilation_config.cudagraph_mode == expected_cudagraph_mode
 
 
 @pytest.mark.parametrize(
     ("architecture", "use_v2", "input_mode", "expected_compile", "expected_graph"),
     [
-        ("DeepseekV4ForCausalLM", True, None, CompilationMode.NONE, CUDAGraphMode.NONE),
+        ("DeepseekV4ForCausalLM", True, None, None, CUDAGraphMode.NONE),
         (
             "DeepseekV4ForConditionalGeneration",
             True,
             None,
-            CompilationMode.NONE,
+            None,
             CUDAGraphMode.NONE,
         ),
         (
             "DeepseekV4ForConditionalGeneration",
             True,
             CUDAGraphMode.FULL,
-            CompilationMode.NONE,
+            None,
             CUDAGraphMode.FULL,
         ),
         (
             "DeepseekV4ForConditionalGeneration",
             True,
             CUDAGraphMode.FULL_DECODE_ONLY,
-            CompilationMode.NONE,
+            None,
             CUDAGraphMode.FULL_DECODE_ONLY,
         ),
         (
             "DeepseekV4ForConditionalGeneration",
             True,
             CUDAGraphMode.FULL_AND_PIECEWISE,
-            CompilationMode.NONE,
+            None,
             CUDAGraphMode.FULL_DECODE_ONLY,
         ),
         (
             "KimiK3ForConditionalGeneration",
             True,
             None,
-            CompilationMode.NONE,
+            None,
             CUDAGraphMode.FULL_DECODE_ONLY,
         ),
     ],
@@ -555,20 +552,26 @@ def test_rocm_gfx950_noncompiled_cudagraph_policy(
             None,
             True,
         ),
-        (
+        pytest.param(
             CompilationMode.VLLM_COMPILE,
             CUDAGraphMode.NONE,
-            None,
-            True,
+            CUDAGraphMode.NONE,
+            False,
+            id="ngram-gpu-auxiliary-config",
         ),
         (
             CompilationMode.VLLM_COMPILE,
             CUDAGraphMode.FULL_DECODE_ONLY,
-            None,
-            True,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
         ),
         (CompilationMode.VLLM_COMPILE, CUDAGraphMode.PIECEWISE, None, True),
-        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.FULL, None, True),
+        (
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.FULL,
+            False,
+        ),
         (
             CompilationMode.VLLM_COMPILE,
             CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -598,7 +601,7 @@ def test_noncompiled_cudagraph_fallback_validates_explicit_modes(
     )
 
     assert not breakable_enabled
-    assert config.compilation_config.mode == (compile_mode or CompilationMode.NONE)
+    assert config.compilation_config.mode == compile_mode
     assert config.compilation_config.cudagraph_mode == expected_graph
 
 
@@ -712,31 +715,28 @@ def test_late_piecewise_override_is_normalized_by_available_provider(
 
 
 @pytest.mark.parametrize(
-    ("architecture", "mode", "breakable_enabled", "should_raise"),
+    ("mode", "graph_mode", "should_raise"),
     [
-        ("DeepseekV4ForConditionalGeneration", CompilationMode.NONE, False, True),
-        ("DeepseekV4ForConditionalGeneration", CompilationMode.NONE, True, False),
-        ("LlamaForCausalLM", CompilationMode.VLLM_COMPILE, False, False),
+        (CompilationMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY, False),
+        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.FULL_AND_PIECEWISE, False),
+        (CompilationMode.NONE, CUDAGraphMode.NONE, True),
+        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.PIECEWISE, True),
     ],
 )
-def test_adaptive_verification_requires_piecewise_cudagraph_provider(
-    make_cudagraph_config, architecture, mode, breakable_enabled, should_raise
+def test_adaptive_verification_requires_full_cudagraphs(
+    make_cudagraph_config, mode, graph_mode, should_raise
 ):
     config = make_cudagraph_config(
-        architecture,
-        breakable=breakable_enabled,
         compilation_mode=mode,
-        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_mode=graph_mode,
     )
     config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
     config.lora_config = None
     config.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
 
-    validate = lambda: VllmConfig._validate_adaptive_verification(
-        config, breakable_cudagraph_enabled=breakable_enabled
-    )
+    validate = lambda: VllmConfig._validate_adaptive_verification(config)
     if should_raise:
-        with pytest.raises(ValueError, match="requires piecewise CUDA graphs"):
+        with pytest.raises(ValueError, match="requires full CUDA graphs"):
             validate()
     else:
         validate()
