@@ -151,3 +151,53 @@ def test_schedule_records_active_session():
 
     assert request.request_id in output.num_scheduled_tokens
     assert "active" in scheduler._session_last_scheduled_at
+
+
+def test_unscheduled_promotion_restores_fcfs_order(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = make_scheduler(max_num_seqs=1)
+    requests = add_requests(scheduler, ["blocker", "cold", "warm", "tail"])
+    first_output = scheduler.schedule()
+    assert requests[0].request_id in first_output.num_scheduled_tokens
+    assert waiting_ids(scheduler) == ["1", "2", "3"]
+
+    now = time.time()
+    scheduler._session_last_scheduled_at["warm"] = now - 1
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "peek_num_cached_tokens",
+        lambda request: 64 if request is requests[2] else 0,
+    )
+
+    second_output = scheduler.schedule()
+
+    assert requests[2].request_id not in second_output.num_scheduled_tokens
+    assert waiting_ids(scheduler) == ["1", "2", "3"]
+
+
+def test_token_budget_stall_restores_fcfs_order(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = make_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=1,
+        max_model_len=8192,
+    )
+    requests = add_requests(scheduler, ["blocker", "cold", "warm", "tail"])
+    first_output = scheduler.schedule()
+    assert requests[0].request_id in first_output.num_scheduled_tokens
+    assert waiting_ids(scheduler) == ["1", "2", "3"]
+
+    now = time.time()
+    scheduler._session_last_scheduled_at["warm"] = now - 1
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "peek_num_cached_tokens",
+        lambda request: 64 if request is requests[2] else 0,
+    )
+
+    second_output = scheduler.schedule()
+
+    assert requests[2].request_id not in second_output.num_scheduled_tokens
+    assert waiting_ids(scheduler) == ["1", "2", "3"]

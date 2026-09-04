@@ -6,7 +6,7 @@ from itertools import islice
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.request_queue import SchedulingPolicy
+from vllm.v1.core.sched.request_queue import FCFSRequestQueue, SchedulingPolicy
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -31,28 +31,37 @@ class SessionAffinityScheduler(AsyncScheduler):
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         now = time.time()
         self._prune_expired_sessions(now)
-        self._promote_session_continuation(now)
+        promotion = self._promote_session_continuation(now)
         scheduler_output = super().schedule(throttle_prefills)
+        if promotion is not None:
+            promoted_request, original_successor = promotion
+            if promoted_request.request_id not in scheduler_output.num_scheduled_tokens:
+                self._restore_unscheduled_promotion(
+                    promoted_request, original_successor
+                )
         for request_id in scheduler_output.num_scheduled_tokens:
             request = self.requests.get(request_id)
             if request is not None and request.session_id is not None:
                 self._session_last_scheduled_at[request.session_id] = now
         return scheduler_output
 
-    def _promote_session_continuation(self, now: float) -> None:
+    def _promote_session_continuation(
+        self, now: float
+    ) -> tuple[Request, Request | None] | None:
         if not self.cache_config.enable_prefix_caching or len(self.waiting) < 2:
-            return
+            return None
 
         candidates = list(islice(self.waiting, self._affinity_window))
         head = candidates[0]
         if head.status == RequestStatus.PREEMPTED:
-            return
+            return None
         if now - head.arrival_time >= self._affinity_max_wait_s:
-            return
+            return None
 
         best_request: Request | None = None
+        best_index: int | None = None
         best_key: tuple[int, float, float] | None = None
-        for request in candidates[1:]:
+        for index, request in enumerate(candidates[1:], start=1):
             session_id = request.session_id
             if request.status != RequestStatus.WAITING or session_id is None:
                 continue
@@ -70,11 +79,33 @@ class SessionAffinityScheduler(AsyncScheduler):
             )
             if best_key is None or key > best_key:
                 best_request = request
+                best_index = index
                 best_key = key
 
         if best_request is not None:
+            assert best_index is not None
+            original_successor = next(
+                islice(self.waiting, best_index + 1, best_index + 2), None
+            )
             self.waiting.remove_request(best_request)
             self.waiting.prepend_request(best_request)
+            return best_request, original_successor
+        return None
+
+    def _restore_unscheduled_promotion(
+        self,
+        request: Request,
+        original_successor: Request | None,
+    ) -> None:
+        waiting = self.waiting
+        if request not in waiting:
+            return
+        assert isinstance(waiting, FCFSRequestQueue)
+        waiting.remove_request(request)
+        if original_successor is None:
+            waiting.add_request(request)
+        else:
+            waiting.insert(waiting.index(original_successor), request)
 
     def _prune_expired_sessions(self, now: float) -> None:
         oldest_allowed = now - self._affinity_ttl_s
