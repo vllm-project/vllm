@@ -1082,6 +1082,12 @@ class VllmConfig:
 
     def _verify_deferred_pp_sampled_token_recv(self) -> None:
         delay = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV
+        post_model = envs.VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV
+        if post_model and delay == 0:
+            raise ValueError(
+                "VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV requires a non-zero "
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV"
+            )
         if delay == 0:
             return
 

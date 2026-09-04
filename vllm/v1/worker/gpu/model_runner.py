@@ -1579,7 +1579,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
             if scheduler_output.total_num_scheduled_tokens == 0:
-                # No need to run the model.
+                # No model work follows, so post any receive selected above.
+                if self.pp_handler is not None:
+                    self.pp_handler.launch_post_model_receive()
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
@@ -1633,6 +1635,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
+            if not dummy_run and self.pp_handler is not None:
+                self.pp_handler.launch_post_model_receive()
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
@@ -1881,6 +1885,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
         )
+
+        if not dummy_run and self.pp_handler is not None:
+            # Place the sampled-result receive after this rank's model kernels.
+            self.pp_handler.launch_post_model_receive()
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
