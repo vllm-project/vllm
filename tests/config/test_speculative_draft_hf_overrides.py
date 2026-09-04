@@ -48,6 +48,34 @@ def test_none_overrides_fall_back_to_arch_mapping():
 
 
 @pytest.mark.cpu_test
+def test_deepseek_v4_dspark_uses_trained_block_size():
+    hf_config = SpeculativeConfig.hf_config_override(
+        _make_hf_config(
+            model_type="deepseek_v4",
+            num_nextn_predict_layers=3,
+            dspark_block_size=5,
+        )
+    )
+    draft = MagicMock(
+        hf_config=hf_config, architectures=hf_config.architectures, max_model_len=128
+    )
+    draft.registry.inspect_model_cls.return_value = (None, "DSparkDraftModel")
+    target = MagicMock(max_model_len=128, quantization=None, hf_overrides={})
+
+    with patch("vllm.config.speculative.ModelConfig", return_value=draft):
+        config = SpeculativeConfig(
+            model="draft",
+            method="dspark",
+            num_speculative_tokens=5,
+            target_model_config=target,
+            target_parallel_config=ParallelConfig(),
+        )
+
+    assert config.num_speculative_tokens == 5
+    assert config.draft_model_config.hf_config.n_predict == 5
+
+
+@pytest.mark.cpu_test
 def test_callable_overrides_reach_the_draft_config():
     """A callable override (config-to-config transform) composes with the
     architecture-mapping override and is applied to the draft config."""
