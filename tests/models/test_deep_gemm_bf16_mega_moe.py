@@ -16,13 +16,14 @@ from vllm.models.deepseek_v4.nvidia.model import (
 
 
 class _FakeNvfp4QuantConfig:
+    quant_format = "nvfp4-pack-quantized"
     config = {
+        "format": "nvfp4-pack-quantized",
         "config_groups": {
             "experts": {
-                "format": "nvfp4-pack-quantized",
                 "targets": ["Linear"],
             }
-        }
+        },
     }
 
     @staticmethod
@@ -36,7 +37,9 @@ class _FakeMixedNvfp4QuantConfig(_FakeNvfp4QuantConfig):
     def get_scheme_dict(self, _layer, layer_name):
         if layer_name.startswith("model.layers.78."):
             return None
-        return {"format": "nvfp4-pack-quantized"}
+        if layer_name.startswith("model.layers.77."):
+            return {"format": "nvfp4-pack-quantized"}
+        return {"format": "float-quantized"}
 
 
 def test_mega_moe_request_applies_to_mtp_model_config():
@@ -113,6 +116,18 @@ def test_ignored_mtp_layer_uses_unquantized_mega_moe_weights():
     )
 
 
+def test_mixed_format_uses_current_layer_scheme():
+    quant_config = _FakeMixedNvfp4QuantConfig()
+    layer = torch.nn.Identity()
+
+    assert DeepGemmMegaMoEExperts.source_is_nvfp4(
+        quant_config, layer, "model.layers.77.mlp"
+    )
+    assert not DeepGemmMegaMoEExperts.source_is_nvfp4(
+        quant_config, layer, "model.layers.76.mlp"
+    )
+
+
 def test_kimi_ct_nvfp4_mapping_includes_global_scales():
     from vllm.models.kimi_k3.nvidia.model import (
         make_kimi_k3_mega_moe_expert_params_mapping,
@@ -145,6 +160,50 @@ def test_kimi_ct_nvfp4_mapping_includes_global_scales():
             "input_global_scale",
         )
     ]
+
+
+def test_kimi_mtp_selects_nvfp4_mega_moe_mapping(monkeypatch):
+    from vllm.models.kimi_k3.nvidia import model as kimi_model
+    from vllm.models.kimi_k3.nvidia import mtp as kimi_mtp
+
+    draft = object.__new__(kimi_mtp.KimiK3MTP)
+    torch.nn.Module.__init__(draft)
+    draft.config = SimpleNamespace(
+        linear_attn_config=None,
+        q_lora_rank=None,
+        is_moe=True,
+        num_experts=1,
+    )
+    draft.model = torch.nn.Module()
+    draft.model.mtp_start_layer_idx = 0
+    draft.model.num_mtp_layers = 0
+
+    moe = object.__new__(kimi_model.KimiMoE)
+    torch.nn.Module.__init__(moe)
+    moe.use_mega_moe = True
+    moe.experts = torch.nn.Module()
+    moe.experts.source_nvfp4 = True
+    moe.experts.finalize_weights = lambda: None
+    draft.model.moe = moe
+
+    mapping_args: dict[str, object] = {}
+
+    def make_mapping(num_experts, source_nvfp4=False):
+        mapping_args.update(
+            num_experts=num_experts,
+            source_nvfp4=source_nvfp4,
+        )
+        return []
+
+    monkeypatch.setattr(
+        kimi_mtp,
+        "make_kimi_k3_mega_moe_expert_params_mapping",
+        make_mapping,
+    )
+    monkeypatch.setattr(kimi_mtp, "get_pp_missing_layer_names", lambda _: set())
+
+    assert draft.load_weights([]) == set()
+    assert mapping_args == {"num_experts": 1, "source_nvfp4": True}
 
 
 def test_kimi_mega_moe_preserves_activation_transform_kwarg():

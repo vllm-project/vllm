@@ -237,15 +237,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
     ) -> bool:
         if quant_config is None or quant_config.get_name() != "compressed-tensors":
             return False
-        if prefix is not None and should_ignore_layer(
-            prefix, ignore=getattr(quant_config, "ignore", ())
-        ):
-            return False
-        config = getattr(quant_config, "config", None) or {}
-        return any(
-            group.get("format") == "nvfp4-pack-quantized"
-            for group in config.get("config_groups", {}).values()
-        )
+        source_format = getattr(quant_config, "quant_format", None)
+        if layer is not None and prefix is not None:
+            get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
+            if get_scheme_dict is None:
+                return False
+            scheme_dict = get_scheme_dict(layer, prefix)
+            if scheme_dict is None:
+                return False
+            source_format = scheme_dict.get("format") or source_format
+        elif source_format is None:
+            config = getattr(quant_config, "config", None) or {}
+            source_format = config.get("format")
+        return source_format == "nvfp4-pack-quantized"
 
     def __init__(
         self,
