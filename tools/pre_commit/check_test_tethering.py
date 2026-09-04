@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Check that test files are wired into ("tethered to") the Buildkite CI.
 
-A test file is *tethered* when at least one job in ``.buildkite/test_areas/``
-actually collects it - some job's ``commands`` run ``pytest`` (or ``python`` /
-``torchrun``, or a ``find ... | xargs pytest`` pipeline) over a path that
-includes the file. A test that is collected by no job silently never runs: it
-passes review, merges, and rots.
+A test file is *tethered* when at least one Buildkite job actually collects it -
+some job's ``commands`` run ``pytest`` (or ``python`` / ``torchrun``, or a
+``find ... | xargs pytest`` pipeline) over a path that includes the file. A test
+that is collected by no job silently never runs: it passes review, merges, and
+rots.
 
 How it works
 ------------
-1. Parse every ``.buildkite/test_areas/*.yaml`` job (and its ``mirror.amd``
-   sub-step) and turn each shell command into a :class:`Selection` describing
-   which test files that command runs.
+1. Parse every job in ``.buildkite/test_areas/*.yaml`` (and its ``mirror.amd``
+   sub-step) plus the legacy ``.buildkite/test-amd.yaml``, and turn each shell
+   command into a :class:`Selection` describing which test files it runs.
 2. Build the inventory of test files under ``tests/``.
 3. A file is a problem if no selection runs it and it is not in the allowlist
    (``tools/pre_commit/test_tethering_allowlist.txt`` - the set of pre-existing
@@ -23,13 +23,15 @@ Modes
 * **changed-files** (default): pre-commit passes the changed test files as
   arguments; each one must be tethered or allowlisted.
 * **full scan**: ``--all``, or automatically whenever the change set touches a
-  ``test_areas`` yaml or the allowlist itself - because editing a job command
-  can orphan a test that is not otherwise in the diff. The full scan also
-  reports allowlist entries that have since become tethered, or whose file is
-  gone, so the list stays honest.
+  pipeline yaml or the allowlist itself - because editing a job command can
+  orphan a test that is not otherwise in the diff. The full scan also reports
+  allowlist entries that have since become tethered, or whose file is gone, so
+  the list stays honest.
 
-Only ``.buildkite/test_areas/`` is parsed. The legacy hand-maintained
-``.buildkite/test-amd.yaml`` pipeline is out of scope (see the PR description).
+Coverage from either ``.buildkite/test_areas/`` or the legacy
+``.buildkite/test-amd.yaml`` counts. ``test-amd.yaml`` is being folded into
+``test_areas/`` a group at a time; when it is gone, this checker stops parsing
+it and reverts to ``test_areas/`` only.
 
 Usage::
 
@@ -49,6 +51,12 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEST_AREAS_DIR = REPO_ROOT / ".buildkite" / "test_areas"
+# The legacy hand-maintained AMD pipeline. It is being migrated into
+# ``test_areas/`` piecemeal; until that finishes, a test wired only into this
+# file is still genuinely run by CI, so it counts as tethered. When the file is
+# removed, drop it from ``_pipeline_yaml_paths()`` and the checker is back to
+# ``test_areas/`` only, flagging anything the migration left behind.
+TEST_AMD_YAML = REPO_ROOT / ".buildkite" / "test-amd.yaml"
 TESTS_DIR = REPO_ROOT / "tests"
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "test_tethering_allowlist.txt"
 
@@ -421,15 +429,25 @@ def _iter_job_steps(yaml_doc: dict):
                 yield merged
 
 
+def _pipeline_yaml_paths() -> list[Path]:
+    """Every Buildkite pipeline yaml whose jobs count as CI coverage: the
+    ``test_areas/`` set plus the legacy ``test-amd.yaml`` (see ``TEST_AMD_YAML``).
+    """
+    paths = sorted(TEST_AREAS_DIR.glob("*.yaml"))
+    if TEST_AMD_YAML.is_file():
+        paths.append(TEST_AMD_YAML)
+    return paths
+
+
 def load_selections() -> list[Selection]:
-    """Parse every ``.buildkite/test_areas/*.yaml`` into the full list of
-    selections - the CI's complete picture of which test files it runs.
+    """Parse every CI pipeline yaml into the full list of selections - the CI's
+    complete picture of which test files it runs.
 
     A yaml that doesn't parse is fatal: silently skipping it would drop whatever
     coverage it defines and produce false "untethered" reports.
     """
     selections: list[Selection] = []
-    for yaml_path in sorted(TEST_AREAS_DIR.glob("*.yaml")):
+    for yaml_path in _pipeline_yaml_paths():
         try:
             yaml_doc = yaml.safe_load(yaml_path.read_text()) or {}
         except yaml.YAMLError as e:
@@ -518,7 +536,7 @@ def run_full_scan(
     deleted = sorted(path for path in allowlist if not (REPO_ROOT / path).exists())
 
     for path in untethered:
-        print(f"error: {path} is not run by any job in .buildkite/test_areas/")
+        print(f"error: {path} is not run by any Buildkite job")
     for path in now_tethered:
         print(f"note: {path} is now tethered - remove it from the allowlist")
     for path in deleted:
@@ -527,7 +545,8 @@ def run_full_scan(
     if untethered:
         print(
             f"\n{len(untethered)} test file(s) exist but run in no CI job. Wire "
-            "each into a job's `commands` in .buildkite/test_areas/, or add it "
+            "each into a job's `commands` in .buildkite/test_areas/ (or "
+            ".buildkite/test-amd.yaml), or add it "
             f"to {ALLOWLIST_PATH.relative_to(REPO_ROOT)} with a reason."
         )
 
@@ -552,7 +571,7 @@ def run_changed_files_check(
         untethered.append(repo_path)
 
     for path in untethered:
-        print(f"error: {path} is not run by any job in .buildkite/test_areas/")
+        print(f"error: {path} is not run by any Buildkite job")
     if untethered:
         print(
             "\nAdd the test to a job's `commands` (and `source_file_dependencies`)"
@@ -570,10 +589,11 @@ def _to_repo_relative(path: str) -> str:
 
 
 def _change_set_touches_ci_config(paths: list[str]) -> bool:
-    """A change to a test_areas yaml or to the allowlist can orphan a test that
-    is not itself in the change set, so those changes force a full scan."""
+    """A change to a pipeline yaml or to the allowlist can orphan a test that is
+    not itself in the change set, so those changes force a full scan."""
     return any(
         ".buildkite/test_areas/" in path
+        or path.endswith("test-amd.yaml")
         or path.endswith("test_tethering_allowlist.txt")
         for path in paths
     )
