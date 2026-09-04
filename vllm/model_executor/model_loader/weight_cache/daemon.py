@@ -245,16 +245,7 @@ class WeightCacheDaemon:
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
         cmd = request.get("cmd")
-        if cmd == "ping":
-            send_msg(
-                conn,
-                {
-                    "status": "ok",
-                    "cache_config": self.cache_config,
-                    "gpu_uuid": self._gpu_uuid(),
-                },
-            )
-        elif cmd == "get_state":
+        if cmd == "get_state":
             self._handle_get_state(conn, request)
         elif cmd == "release":
             self._handle_release(conn)

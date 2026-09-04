@@ -61,6 +61,11 @@ class UnsupportedQuantForIPCError(Exception):
 # shapes the client cannot reproduce or stamps unrebuildable Python-side state
 # would serve wrong numerics. Extend it only after an end-to-end check against
 # a disk-loaded baseline.
+#
+# This check is config-only so the daemon fails fast before a slow full load,
+# rather than surfacing the incompatibility only after the engine has built the
+# model (where process_weights_after_loading's supports_pre_processed_weights
+# guard would eventually catch it).
 
 
 def _quant_config_field(quant_config: Any, key: str) -> Any:

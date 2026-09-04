@@ -60,7 +60,7 @@ class IpcModelLoader(BaseModelLoader):
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
       the fingerprints mismatch (default: True).
-    - connect_timeout_s: socket connect/ping timeout (default: 5.0).
+    - connect_timeout_s: socket connect timeout (default: 5.0).
     - state_timeout_s: timeout for the weight-transfer request (default: 300.0).
 
     Note: in zero-copy mode the weights live in the daemon's CUDA IPC
