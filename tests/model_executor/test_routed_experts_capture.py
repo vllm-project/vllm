@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import io
 import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -152,6 +154,77 @@ def test_routed_experts_manager_uses_kimi_k3_experts_per_token():
     manager = RoutedExpertsManager(vllm_config, kv_cache_config)
 
     assert manager.routed_experts_by_slot.shape == (8, 3, 2)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_routed_experts_manager_serializes_native_numpy_payload(dtype):
+    routed_experts = np.arange(12, dtype=dtype).reshape(2, 3, 2)
+
+    payload = RoutedExpertsManager.serialize(routed_experts)
+
+    decoded = np.load(io.BytesIO(payload), allow_pickle=False)
+    np.testing.assert_array_equal(decoded, routed_experts)
+
+
+def test_routed_experts_manager_rejects_payload_over_transport_limit(monkeypatch):
+    routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+    payload = RoutedExpertsManager.serialize(routed_experts)
+    monkeypatch.setattr(
+        _REC_MODULE + ".MAX_ROUTED_EXPERTS_PAYLOAD_BYTES", len(payload) - 1
+    )
+
+    with pytest.raises(ValueError, match="63 MiB transport limit"):
+        RoutedExpertsManager.serialize(routed_experts)
+
+
+def test_terminal_routed_experts_omit_payload_when_current_step_capture_is_missing():
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    manager.get = Mock()
+
+    payload = manager.serialize_terminal(
+        [4, 5],
+        3,
+        0,
+        current_step_captured=False,
+    )
+
+    assert payload is None
+    manager.get.assert_not_called()
+
+
+def test_terminal_routed_experts_omit_oversized_payload_before_copy(monkeypatch):
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    manager.routed_experts_by_slot = np.zeros((8, 3, 2), dtype=np.uint8)
+    manager.get = Mock()
+    monkeypatch.setattr(_REC_MODULE + ".MAX_ROUTED_EXPERTS_ARRAY_BYTES", 5)
+
+    payload = manager.serialize_terminal(
+        [4, 5],
+        3,
+        1,
+        current_step_captured=True,
+    )
+
+    assert payload is None
+    manager.get.assert_not_called()
+
+
+def test_terminal_routed_experts_serialize_complete_payload_for_error_step():
+    manager = RoutedExpertsManager.__new__(RoutedExpertsManager)
+    expected = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
+    manager.routed_experts_by_slot = np.zeros((8, 3, 2), dtype=np.uint8)
+    manager.get = Mock(return_value=expected)
+
+    payload = manager.serialize_terminal(
+        [4, 5],
+        3,
+        1,
+        current_step_captured=True,
+    )
+
+    decoded = np.load(io.BytesIO(payload), allow_pickle=False)
+    np.testing.assert_array_equal(decoded, expected)
+    manager.get.assert_called_once_with([4, 5], 3, token_start=1)
 
 
 def test_base_router_capture_pre_eplb_mapping():

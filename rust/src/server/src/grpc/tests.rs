@@ -38,6 +38,7 @@ use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEv
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
 };
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
@@ -718,6 +719,99 @@ async fn unary_generate_with_token_ids_prompt() {
         response.prompt_info.expect("prompt_info").num_prompt_tokens,
         3
     );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_methods_round_trip_large_routed_experts_payload() {
+    let expected = vec![0x5a; 6 * 1024 * 1024 + 1];
+    let engine_payload = expected.clone();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-routed-experts",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    for _ in 0..2 {
+                        let add = recv_engine_message(dealer).await;
+                        let request: EngineCoreRequest =
+                            rmp_serde::from_slice(&add[1]).expect("decode request");
+                        assert_eq!(
+                            request
+                                .sampling_params
+                                .as_ref()
+                                .expect("sampling params")
+                                .routed_experts_prompt_start,
+                            2
+                        );
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![EngineCoreOutput {
+                                    request_id: request.request_id,
+                                    new_token_ids: vec![b'h' as u32, b'i' as u32],
+                                    finish_reason: Some(EngineCoreFinishReason::Length),
+                                    routed_experts_payload: Some(OpaqueData::new(
+                                        engine_payload.clone(),
+                                    )),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
+    let request = |request_id: &str| pb::GenerateRequest {
+        request_id: request_id.to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        response: Some(pb::ResponseOptions {
+            routed_experts_prompt_start: Some(2),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let response = client
+        .generate(request("test-routed-experts-unary"))
+        .await
+        .expect("unary routed-experts generate")
+        .into_inner();
+
+    assert_eq!(
+        response.outputs.expect("outputs").routed_experts.expect("routed experts").data,
+        expected
+    );
+
+    let mut stream = client
+        .generate_stream(request("test-routed-experts-stream"))
+        .await
+        .expect("stream routed-experts generate")
+        .into_inner();
+    let mut streamed_payload = None;
+    while let Some(response) = stream.message().await.expect("stream response") {
+        if let Some(payload) = response.outputs.and_then(|output| output.routed_experts) {
+            streamed_payload = Some(payload.data);
+        }
+    }
+    assert_eq!(streamed_payload, Some(expected));
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
