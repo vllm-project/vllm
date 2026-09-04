@@ -315,6 +315,17 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Validate already-preprocessed multimodal feature modalities and limits.
+    pub fn validate_preprocessed_media<'a>(
+        &self,
+        modalities: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        let model_info = self.processor.backend.multimodal_model_info().ok_or(
+            Error::UnsupportedMultimodalContent("preprocessed multimodal features"),
+        )?;
+        model_info.validate_preprocessed_modalities(modalities)
+    }
+
     /// Prepare media for an already-tokenized request.
     pub async fn prepare_media(
         &self,
