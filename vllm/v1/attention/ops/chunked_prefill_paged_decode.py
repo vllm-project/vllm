@@ -306,6 +306,39 @@ def chunked_prefill_paged_decode(
     is_block_table_ptr: bool = False,
     causal: bool = True,
 ):
+    """Run chunked prefill and paged decode over a mixed batch.
+
+    Prefill sequences go through the Triton chunked-prefill kernel; single-token
+    decode sequences go through paged attention, using the ROCm custom op where
+    `use_rocm_custom_paged_attention` allows it and the Triton paged-decode
+    kernel otherwise. Results are written into `output` in place.
+
+    Args:
+        query: Packed queries for the whole batch, [num_tokens, num_heads,
+            head_size].
+        key: Keys for the current forward pass.
+        value: Values for the current forward pass.
+        output: Destination tensor, written in place.
+        kv_cache_dtype: KV-cache dtype, e.g. "auto" or "fp8".
+        key_cache: Paged key cache.
+        value_cache: Paged value cache.
+        block_table: Per-sequence page table, or a pointer tensor when
+            `is_block_table_ptr` is set.
+        query_start_loc: Cumulative query offsets, length num_seqs + 1.
+        seq_lens: Total context length per sequence.
+        max_seq_len: Longest context length in the batch.
+        max_query_len: Longest query length in the batch; 1 means decode-only.
+        k_scale: Key dequantization scale for quantized KV caches.
+        v_scale: Value dequantization scale for quantized KV caches.
+        alibi_slopes: Per-head ALiBi slopes, or None.
+        sliding_window: Sliding-window size; None or <= 0 disables it.
+        sm_scale: Softmax scale; defaults to 1/sqrt(head_size).
+        output_scale: Output quantization scale, or None.
+        sinks: Optional per-head attention sinks.
+        is_block_table_ptr: Whether `block_table` holds row pointers rather
+            than page ids.
+        causal: Whether to apply the causal mask during prefill.
+    """
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
 
@@ -409,15 +442,10 @@ def chunked_prefill_paged_decode(
         max_passes = (max_num_partitions + 511) // 512
         float4_bytes = 16
         elem_bytes = query.element_size()
-        extra_per_pass = (
-            1 + (float4_bytes + elem_bytes - 1) // elem_bytes
-        )
-        padded_partitions = (
-            max_num_partitions + max_passes * extra_per_pass
-        )
+        extra_per_pass = 1 + (float4_bytes + elem_bytes - 1) // elem_bytes
+        padded_partitions = max_num_partitions + max_passes * extra_per_pass
         tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads,
-                  padded_partitions, head_size),
+            size=(total_num_seq, num_query_heads, padded_partitions, head_size),
             dtype=query.dtype,
             device=output.device,
         )
