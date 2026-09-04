@@ -5,13 +5,23 @@ import fnmatch
 import multiprocessing as mp
 import os
 import shutil
+import sys
+import types
 from tempfile import TemporaryDirectory
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.model_loader import ShardedStateLoader
+from vllm.config.load import LoadConfig
+from vllm.model_executor.model_loader import (
+    FastSafetensorsShardedStateLoader,
+    ShardedStateLoader,
+    get_model_loader,
+)
+from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
 prompts = [
@@ -47,6 +57,113 @@ def test_filter_subtensors():
     for key, tensor in filtered_state_dict.items():
         # NOTE: don't use `equal` here, as the tensor might contain NaNs
         assert tensor is state_dict[key]
+
+
+def _fastsafetensors_module(loader_factory):
+    module: Any = types.ModuleType("fastsafetensors")
+    module.SafeTensorsFileLoader = loader_factory
+    module.SingleGroup = MagicMock(return_value=object())
+    return module
+
+
+def test_fastsafetensors_sharded_loader_routes_and_validates_config():
+    loader = get_model_loader(
+        LoadConfig(
+            load_format="fastsafetensors_sharded",
+            model_loader_extra_config={
+                "pattern": "rank-{rank}-{part}.safetensors",
+                "nogds": True,
+                "bbuf_size_kb": 4096,
+                "max_threads": 4,
+                "max_copy_block_size": 1024,
+                "debug_log": True,
+            },
+        )
+    )
+    assert isinstance(loader, FastSafetensorsShardedStateLoader)
+    assert loader.pattern == "rank-{rank}-{part}.safetensors"
+    assert loader.nogds is True
+    assert loader.bbuf_size_kb == 4096
+    assert loader.max_threads == 4
+    assert loader.max_copy_block_size == 1024
+    assert loader.debug_log is True
+
+    with pytest.raises(ValueError, match="nogds must be a boolean or null"):
+        FastSafetensorsShardedStateLoader(
+            LoadConfig(
+                load_format="fastsafetensors_sharded",
+                model_loader_extra_config={"nogds": "true"},
+            )
+        )
+
+
+def test_fastsafetensors_sharded_loads_all_rank_files_together():
+    loader = FastSafetensorsShardedStateLoader(
+        LoadConfig(
+            load_format="fastsafetensors_sharded",
+            model_loader_extra_config={"nogds": True},
+        )
+    )
+    file_buffer = MagicMock()
+    file_buffer.key_to_rank_lidx = {"weight": None}
+    file_buffer.get_tensor.return_value = torch.ones(1)
+    fast_loader = MagicMock()
+    fast_loader.copy_files_to_device.return_value = file_buffer
+    module = _fastsafetensors_module(MagicMock(return_value=fast_loader))
+    stream = MagicMock()
+
+    with (
+        patch.dict(sys.modules, {"fastsafetensors": module}),
+        patch.object(current_platform, "is_cuda_alike", return_value=True),
+        patch.object(current_platform, "current_device", return_value=0),
+        patch("torch.accelerator.synchronize") as synchronize,
+        patch("torch.accelerator.current_stream", return_value=stream),
+    ):
+        tensors = list(loader.iterate_over_files(["part-1", "part-0"]))
+
+    assert tensors[0][0] == "weight"
+    fast_loader.add_filenames.assert_called_once_with({0: ["part-0", "part-1"]})
+    fast_loader.copy_files_to_device.assert_called_once_with(
+        max_copy_block_size=loader.max_copy_block_size
+    )
+    synchronize.assert_called_once_with(torch.device("cuda:0"))
+    stream.synchronize.assert_called_once()
+    file_buffer.close.assert_called_once()
+    fast_loader.close.assert_called_once()
+
+
+def test_fastsafetensors_sharded_retries_gds_failure_before_copy():
+    loader = FastSafetensorsShardedStateLoader(
+        LoadConfig(load_format="fastsafetensors_sharded")
+    )
+    file_buffer = MagicMock()
+    file_buffer.key_to_rank_lidx = {"weight": None}
+    file_buffer.get_tensor.return_value = torch.ones(1)
+    loaders = [MagicMock(), MagicMock()]
+    loaders[0].copy_files_to_device.side_effect = RuntimeError(
+        "cuFile GDS initialization failed"
+    )
+    loaders[1].copy_files_to_device.return_value = file_buffer
+    loader_factory = MagicMock(side_effect=loaders)
+    module = _fastsafetensors_module(loader_factory)
+
+    with (
+        patch.dict(sys.modules, {"fastsafetensors": module}),
+        patch.object(current_platform, "is_cuda_alike", return_value=True),
+        patch.object(current_platform, "current_device", return_value=0),
+        patch("torch.accelerator.synchronize"),
+        patch("torch.accelerator.current_stream", return_value=MagicMock()),
+    ):
+        tensors = list(loader.iterate_over_files(["part-0"]))
+
+    assert tensors[0][0] == "weight"
+    assert loader.nogds is True
+    assert [call.kwargs["nogds"] for call in loader_factory.call_args_list] == [
+        False,
+        True,
+    ]
+    for fast_loader in loaders:
+        fast_loader.close.assert_called_once()
 
 
 @pytest.fixture(scope="module")

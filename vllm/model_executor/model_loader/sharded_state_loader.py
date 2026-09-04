@@ -6,6 +6,7 @@ import glob
 import os
 import time
 from collections.abc import Generator
+from contextlib import suppress
 from copy import copy
 from typing import Any
 
@@ -212,3 +213,125 @@ class ShardedStateLoader(BaseModelLoader):
                 state_dict_part,
                 os.path.join(path, filename),
             )
+
+
+class FastSafetensorsShardedStateLoader(ShardedStateLoader):
+    """Load rank-local sharded-state checkpoints with FastSafetensors."""
+
+    def __init__(self, load_config: LoadConfig):
+        BaseModelLoader.__init__(self, load_config)
+        extra_config = copy(load_config.model_loader_extra_config or {})
+
+        self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
+        self.nogds = extra_config.pop("nogds", None)
+        self.bbuf_size_kb = self._positive_int(
+            extra_config.pop("bbuf_size_kb", 16 * 1024), "bbuf_size_kb"
+        )
+        self.max_threads = self._positive_int(
+            extra_config.pop("max_threads", 16), "max_threads"
+        )
+        self.max_copy_block_size = self._positive_int(
+            extra_config.pop("max_copy_block_size", 16 * 1024**3),
+            "max_copy_block_size",
+        )
+        self.debug_log = extra_config.pop("debug_log", False)
+
+        if self.nogds is not None and not isinstance(self.nogds, bool):
+            raise ValueError("nogds must be a boolean or null")
+        if not isinstance(self.debug_log, bool):
+            raise ValueError("debug_log must be a boolean")
+        if extra_config:
+            raise ValueError(
+                "Unexpected extra config keys for load format "
+                f"{load_config.load_format}: {tuple(extra_config)}"
+            )
+
+    @staticmethod
+    def _positive_int(value: Any, name: str) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _is_gds_error(error: BaseException) -> bool:
+        message = str(error).lower()
+        return any(marker in message for marker in ("gds", "cufile", "libcufile"))
+
+    def iterate_over_files(
+        self, paths
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        try:
+            from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+        except ImportError as exc:
+            raise ImportError(
+                "fastsafetensors is required for load format "
+                "fastsafetensors_sharded; install it with "
+                "`pip install vllm[fastsafetensors]`"
+            ) from exc
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda_alike():
+            raise ValueError("fastsafetensors_sharded requires an NVIDIA or AMD GPU")
+
+        device = torch.device(f"cuda:{current_platform.current_device()}")
+        filepaths = sorted(str(path) for path in paths)
+        use_nogds = self.nogds is True
+
+        while True:
+            loader = None
+            file_buffer = None
+            copy_started = False
+            copy_synchronized = False
+            try:
+                loader = SafeTensorsFileLoader(
+                    SingleGroup(),
+                    str(device),
+                    bbuf_size_kb=self.bbuf_size_kb,
+                    max_threads=self.max_threads,
+                    nogds=use_nogds,
+                    disable_cache=True,
+                    debug_log=self.debug_log,
+                )
+                loader.add_filenames({0: filepaths})
+                file_buffer = loader.copy_files_to_device(
+                    max_copy_block_size=self.max_copy_block_size
+                )
+
+                # GDS completion must be visible before PyTorch consumes the
+                # returned device views.
+                torch.accelerator.synchronize(device)
+                for key in list(file_buffer.key_to_rank_lidx):
+                    tensor = file_buffer.get_tensor(key)
+                    copy_started = True
+                    yield key, tensor
+
+                # Destination copies may still be queued when the generator
+                # resumes. Keep the shared source allocation alive until they
+                # complete.
+                torch.accelerator.current_stream().synchronize()
+                copy_synchronized = True
+                return
+            except (RuntimeError, OSError) as exc:
+                can_fallback = (
+                    not copy_started
+                    and self.nogds is None
+                    and not use_nogds
+                    and self._is_gds_error(exc)
+                )
+                if not can_fallback:
+                    raise
+                logger.warning(
+                    "FastSafetensors GDS loading failed; retrying with nogds=True: %s",
+                    exc,
+                )
+                use_nogds = True
+                self.nogds = True
+            finally:
+                if copy_started and not copy_synchronized:
+                    with suppress(Exception):
+                        torch.cuda.current_stream(device).synchronize()
+                if file_buffer is not None:
+                    file_buffer.close()
+                if loader is not None:
+                    loader.close()
