@@ -484,7 +484,9 @@ class TestDensePacking:
             _mock_vllm_config("BLNHC"), groups, MEMORY
         )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
-        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
+        assert _pool_bytes_per_block(
+            _mock_vllm_config("BLNHC"), groups
+        ) == _expected_bytes_per_block(groups)
 
         views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)

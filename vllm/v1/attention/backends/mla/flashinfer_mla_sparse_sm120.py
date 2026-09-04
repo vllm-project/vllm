@@ -13,9 +13,12 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
+    FlashInferMLASparseSM120Backend,
     _get_workspace_buffer,
+    _kernel_paged_view,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
 
@@ -118,6 +121,16 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
+        kv_rows, block_stride_rows = flat_kv_row_view(
+            kv_c_and_k_pe_cache, attn_metadata.block_size
+        )
+        kernel_kv_cache = _kernel_paged_view(
+            kv_c_and_k_pe_cache.view(torch.uint8),
+            kv_rows.view(torch.uint8),
+            attn_metadata.block_size,
+            block_stride_rows,
+            FlashInferMLASparseSM120Backend.get_kernel_page_rows(),
+        )
         topk_indices_physical = cast(
             torch.Tensor,
             triton_convert_req_index_to_global_index(
@@ -125,6 +138,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
             ),
         )
@@ -143,7 +157,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
 
         out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+            kv_cache=kernel_kv_cache,
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,

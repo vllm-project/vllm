@@ -767,8 +767,8 @@ class Platform:
     def _get_indexer_block_alignment(cls, vllm_config: "VllmConfig") -> int | None:
         """Extra ``block_size`` multiple a sparse indexer needs, else ``None``.
 
-        The CUDA kpool paged-MQA indexer virtually splits each storage block
-        into pool pages, so ``block_size`` must be a multiple of
+        The CUDA kpool paged-MQA indexer re-pages each block into pool
+        pages, so ``block_size`` must be a multiple of
         ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` — implemented in the CUDA
         platform override. Other platforms impose no extra constraint.
         """

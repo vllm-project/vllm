@@ -92,7 +92,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     metadata = SimpleNamespace(
         req_id_per_token=torch.zeros(1, dtype=torch.int32),
         block_table=torch.zeros((1, 1), dtype=torch.int32),
-        block_size=1,
+        block_size=32,
     )
     recorded_scale = None
 
@@ -129,7 +129,7 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     )
     impl.forward_mqa(
         torch.zeros(1, 1, kv_lora_rank),
-        torch.zeros(1, 1, kv_lora_rank),
+        torch.zeros(1, 32, kv_lora_rank),
         metadata,
         SimpleNamespace(),
     )

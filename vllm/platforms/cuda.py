@@ -419,14 +419,12 @@ class CudaPlatformBase(Platform):
             return None
         from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 
-        # kpool paged-MQA indexer: the storage block (block_size /
-        # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool times a legal pool page.
+        # kpool paged-MQA indexer: the block (block_size / index_kpool states)
+        # is re-paged into pool pages, so block_size must be a multiple of
+        # index_kpool times a legal pool page. DeepGEMM's fp8 paged MQA takes
+        # 32-state pages on SM90/SM100 but only 64 on SM120.
         page = min(PAGED_MQA_PAGE_SIZES)
         if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
             page = max(PAGED_MQA_PAGE_SIZES)
         return index_kpool * page
 

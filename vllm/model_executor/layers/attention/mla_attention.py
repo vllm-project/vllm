@@ -1290,6 +1290,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return MLAAttentionSpec(
             **common_kwargs,
+            kernel_page_rows=self.attn_backend.get_kernel_page_rows(),
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 

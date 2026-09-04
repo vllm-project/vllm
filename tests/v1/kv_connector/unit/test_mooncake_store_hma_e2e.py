@@ -29,8 +29,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -711,13 +711,12 @@ def test_worker_setup_tolerates_finer_scratch_group():
         mamba_cache_mode="align",
     )
     # Scratch block 4 is not divisible by the hash unit 8 below.
-    scratch = KpoolTailSpec(
+    scratch = CircularBufferSpec(
         block_size=4,
         num_kv_heads=2,
         head_size=64,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=4,
     )
     cfg = KVCacheConfig(
         num_blocks=4,

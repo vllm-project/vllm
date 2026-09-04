@@ -3,7 +3,7 @@
 """CPU tests for the kpool tail slot mapping (no GPU required).
 
 The kpool tail cache is a 1-block-per-request circular ring addressed by
-``pos % kpool`` (``KpoolTailSpec`` / ``KpoolTailManager``: exactly one block
+``pos % kpool`` (``CircularBufferSpec`` / ``CircularBufferManager``: exactly one block
 allocated per request, never grown, so only column 0 of its block table is
 ever written; the rest stays zero-initialized).
 
@@ -30,26 +30,23 @@ from vllm.v1.attention.backends.mla.indexer import (
     KpoolTailMetadataBuilder,
     compute_kpool_tail_slot_mapping,
 )
-from vllm.v1.kv_cache_interface import KpoolTailSpec, compute_layout_strides
-from vllm.v1.kv_cache_layout import KVCacheLayout
+from vllm.v1.kv_cache_interface import CircularBufferSpec, compute_layout_strides
 
 KPOOL = 4
 
 
 def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
-    (layout,) = KpoolTailBackend.supported_kv_cache_layouts()
-    spec = KpoolTailSpec(
+    layout, *_ = KpoolTailBackend.supported_kv_cache_layouts()
+    spec = CircularBufferSpec(
         block_size=KPOOL,
         num_kv_heads=2,
         head_size=128,
         head_size_v=0,
         dtype=torch.bfloat16,
-        sliding_window=KPOOL,
     )
     strides = compute_layout_strides(spec, num_blocks=8, num_layers=3, layout=layout)
     _, _, head_stride, state_stride, content_stride = strides
 
-    assert layout is KVCacheLayout.LBHNC
     assert head_stride == KPOOL * 128 * torch.bfloat16.itemsize
     assert state_stride == 128 * torch.bfloat16.itemsize
     assert content_stride == 1
@@ -57,7 +54,7 @@ def test_tail_backend_layout_matches_kernel_pointer_arithmetic():
 
 def make_tail_block_table(own_blocks, width=64):
     """Tail-group block table as BlockTables produces it: column 0 holds the
-    request's single KpoolTailManager block, the remaining columns are never
+    request's single CircularBufferManager block, the remaining columns are never
     written and stay zero."""
     bt = torch.zeros(len(own_blocks), width, dtype=torch.int32)
     bt[:, 0] = torch.tensor(own_blocks, dtype=torch.int32)
@@ -277,26 +274,27 @@ class TailRingMirror:
     completing at pos reads ring slots (pool_start + s) % kpool and uses the
     current token's own K/score for the last member."""
 
-    def __init__(self, num_blocks, kpool=KPOOL):
+    def __init__(self, num_blocks, kpool=KPOOL, ring=None):
         self.kpool = kpool
-        self.k = torch.full((num_blocks, kpool, 3), float("nan"))
-        self.s = torch.full((num_blocks, kpool, 3), float("nan"))
+        self.ring = ring or kpool
+        self.k = torch.full((num_blocks, self.ring, 3), float("nan"))
+        self.s = torch.full((num_blocks, self.ring, 3), float("nan"))
 
     def stash(self, tail_slot, pos, k, s):
-        blk, off = tail_slot // self.kpool, pos % self.kpool
+        blk, off = tail_slot // self.ring, pos % self.ring
         self.k[blk, off] = k
         self.s[blk, off] = s
 
     seed = stash  # the seed kernel writes with the same addressing
 
     def complete(self, tail_slot, pos, k, s):
-        blk = tail_slot // self.kpool
+        blk = tail_slot // self.ring
         start = pos - (self.kpool - 1)
         kk = torch.stack(
-            [self.k[blk, (start + i) % self.kpool] for i in range(self.kpool)]
+            [self.k[blk, (start + i) % self.ring] for i in range(self.kpool)]
         )
         ss = torch.stack(
-            [self.s[blk, (start + i) % self.kpool] for i in range(self.kpool)]
+            [self.s[blk, (start + i) % self.ring] for i in range(self.kpool)]
         )
         kk[-1], ss[-1] = k, s  # is_current for the completing token
         w = torch.softmax(ss, dim=0)
@@ -367,3 +365,37 @@ def test_interleaved_decode_pollution_legacy_vs_circular():
 
     # The circular mapping keeps the rings isolated under interleaving.
     torch.testing.assert_close(circular, ground_truth)
+
+
+@pytest.mark.parametrize("ring_pools", [1, 2])
+def test_rejected_completing_draft_needs_ring_slots(ring_pools):
+    """A speculative step stashes 1 + num_spec rows before acceptance. If the
+    pool-completing token is a rejected draft, the drafts behind it must not
+    have overwritten the pool's committed keys, or the redo compresses wrong
+    keys. One pool of ring fails this; two pools (the QSA rule) hold."""
+    ring_size = ring_pools * KPOOL
+    truth = TailRingMirror(num_blocks=2, ring=ring_size)
+    ring = TailRingMirror(num_blocks=2, ring=ring_size)
+    block = 1
+
+    def slot(pos):
+        return block * ring_size + pos % ring_size
+
+    for pos in range(4, 7):  # committed keys of the open pool [4, 5, 6, 7]
+        truth.stash(slot(pos), pos, *token_kv(0, pos))
+        ring.stash(slot(pos), pos, *token_kv(0, pos))
+    expected = truth.complete(slot(7), 7, *token_kv(0, 7))
+
+    # Spec step [7d, 8d, 9d, 10d]: 7d completes the pool with a wrong key and
+    # is later rejected; 8d, 9d, 10d are stashed behind it.
+    for pos in range(7, 11):
+        k, s = token_kv(9, pos)  # draft values
+        if pos % KPOOL == KPOOL - 1:
+            ring.complete(slot(pos), pos, k, s)
+        ring.stash(slot(pos), pos, k, s)
+    # Redo of position 7 with the accepted key.
+    redo = ring.complete(slot(7), 7, *token_kv(0, 7))
+    if ring_pools == 1:
+        assert not torch.allclose(redo, expected)
+    else:
+        torch.testing.assert_close(redo, expected)

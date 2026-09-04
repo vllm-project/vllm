@@ -22,8 +22,8 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
-    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
@@ -1829,12 +1829,11 @@ def test_opted_out_scratch_group_keeps_partial_hash_hits():
             ),
             KVCacheGroupSpec(
                 ["tail"],
-                KpoolTailSpec(
+                CircularBufferSpec(
                     block_size=mamba_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=mamba_block_size,
                 ),
             ),
         ],
@@ -1887,12 +1886,11 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
             ),
             KVCacheGroupSpec(
                 ["tail"],
-                KpoolTailSpec(
+                CircularBufferSpec(
                     block_size=kpool_block_size,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
-                    sliding_window=kpool_block_size,
                 ),
             ),
         ],
