@@ -209,7 +209,7 @@ class MoeFusedMulSumKernel(VllmTritonJitKernel["MoeFusedMulSumKernel.CompileKey"
         num_tokens, top_k, hidden_size = inputs.shape
         block_k, num_warps, num_stages = _heuristic_config(
             hidden_size,
-            inputs.element_size(),
+            inputs.dtype.itemsize,
         )
         return (num_tokens,), dict(
             top_ids_ptr=topk_ids,
