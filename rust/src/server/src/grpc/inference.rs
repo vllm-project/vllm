@@ -250,6 +250,7 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             kv_transfer_params: collected.kv_transfer_params,
             ec_transfer_params: collected.ec_transfer_params,
             routed_experts: collected.routed_experts,
+            sampling_mask: collected.sampling_mask,
         };
 
         let outputs = convert::to_sequence_output(

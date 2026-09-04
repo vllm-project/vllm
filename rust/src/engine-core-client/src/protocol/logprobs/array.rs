@@ -63,7 +63,7 @@ pub(super) fn decode_array2_u32(
     })
 }
 
-pub(super) fn decode_array1_u32(
+pub(crate) fn decode_array1_u32(
     value: WireNdArray,
     field: &str,
     frames: &[Bytes],

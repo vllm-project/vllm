@@ -161,6 +161,8 @@ message SequenceOutput {
   optional FinishInfo finish_info = 8;
   // Only present in final output when routed-experts capture is enabled.
   optional OpaqueData routed_experts = 9;
+  // Only present in final output when sampling-mask capture is enabled.
+  repeated TokenIds sampling_mask = 10;
 }
 
 message OpaqueData {

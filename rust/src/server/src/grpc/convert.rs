@@ -922,6 +922,10 @@ pub fn to_sequence_output(
             .map(|data| pb::OpaqueData {
                 data: data.as_bytes().to_vec(),
             });
+    let sampling_mask = finished
+        .and_then(|finished| finished.sampling_mask.as_ref())
+        .map(|rows| rows.iter().map(|row| pb::TokenIds { ids: row.clone() }).collect())
+        .unwrap_or_default();
 
     pb::SequenceOutput {
         index: 0, // TODO: multi-sequence (n > 1) not supported
@@ -941,6 +945,7 @@ pub fn to_sequence_output(
         candidate_tokens: candidates,
         finish_info: finished.map(|f| to_finish_info(f, token_ids)),
         routed_experts,
+        sampling_mask,
     }
 }
 
@@ -1466,6 +1471,7 @@ mod tests {
             kv_transfer_params: None,
             ec_transfer_params: None,
             routed_experts: None,
+            sampling_mask: None,
         }
     }
 
@@ -1567,6 +1573,25 @@ mod tests {
     }
 
     #[test]
+    fn sequence_output_only_carries_sampling_mask_on_terminal_output() {
+        let mut fin = finished(FinishReason::Length);
+        fin.sampling_mask = Some(vec![vec![1, 10], vec![2, 20]]);
+
+        let terminal =
+            to_sequence_output("", &[10, 20], None, Some(&fin), &ResponseOpts::default());
+        let intermediate = to_sequence_output("", &[9], None, None, &ResponseOpts::default());
+
+        assert_eq!(
+            terminal.sampling_mask,
+            vec![
+                pb::TokenIds { ids: vec![1, 10] },
+                pb::TokenIds { ids: vec![2, 20] }
+            ]
+        );
+        assert!(intermediate.sampling_mask.is_empty());
+    }
+
+    #[test]
     fn routed_experts_fields_keep_proto_tag_nine() {
         let request = pb::ResponseOptions {
             routed_experts_prompt_start: Some(3),
@@ -1579,5 +1604,18 @@ mod tests {
 
         assert_eq!(request.encode_to_vec(), vec![0x48, 0x03]);
         assert_eq!(response.encode_to_vec(), vec![0x4a, 0x03, 0x0a, 0x01, 0x07]);
+    }
+
+    #[test]
+    fn sampling_mask_uses_additive_proto_tag_ten() {
+        let response = pb::SequenceOutput {
+            sampling_mask: vec![pb::TokenIds { ids: vec![7, 8] }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response.encode_to_vec(),
+            vec![0x52, 0x04, 0x0a, 0x02, 0x07, 0x08]
+        );
     }
 }
