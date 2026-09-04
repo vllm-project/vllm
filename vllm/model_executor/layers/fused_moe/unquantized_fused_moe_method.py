@@ -168,6 +168,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
+        w13_parameter_shape = w13.shape
+        w2_parameter_shape = w2.shape
+
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
@@ -175,6 +178,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_weight=w13,
             w2_weight=w2,
         )
+        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            w13_block_shape = w13_new.shape
+            w2_block_shape = w2_new.shape
+            w13_new = w13_new.view(w13_parameter_shape)
+            w2_new = w2_new.view(w2_parameter_shape)
+            self._flashinfer_block_shapes = (w13_block_shape, w2_block_shape)
+
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
         # calls (e.g. RL weight updates that re-trigger
@@ -202,6 +212,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # the router config that monolithic apply() cannot carry.
                 assert self.moe_kernel is not None
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def _kernel_weights(
+        self, layer: "RoutedExperts"
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        block_shapes = getattr(self, "_flashinfer_block_shapes", None)
+        if block_shapes is None:
+            return layer.w13_weight, layer.w2_weight
+        return (
+            layer.w13_weight.view(block_shapes[0]),
+            layer.w2_weight.view(block_shapes[1]),
+        )
 
     def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
         """Build the MoE kernel from the layer's current (shuffled) weights."""
@@ -307,10 +328,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
+        w13, w2 = self._kernel_weights(layer)
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w13,
+            w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -348,10 +370,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert self.is_monolithic
         assert self.moe_kernel is not None
+        w13, w2 = self._kernel_weights(layer)
         return self.moe_kernel.apply_monolithic(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            w13,
+            w2,
             router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
