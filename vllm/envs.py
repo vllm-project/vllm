@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_PP_DEFER_SAMPLED_TOKEN_RECV: int = 0
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -872,6 +873,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+    # Experimental Model Runner V2 pipeline-parallel optimization. Delay
+    # non-last-rank sampled-token receives by this many scheduler steps.
+    # The default of 0 preserves immediate receive posting.
+    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV": lambda: int(
+        os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (

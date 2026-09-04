@@ -324,6 +324,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                use_async_scheduling=bool(self.scheduler_config.async_scheduling),
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -2115,6 +2116,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pp_handler is not None:
+            self.pp_handler.flush_pending_collectives()
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
