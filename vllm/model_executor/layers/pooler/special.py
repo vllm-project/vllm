@@ -19,7 +19,7 @@ from .seqwise import (
     pooler_for_classify,
     pooler_for_embed,
 )
-from .tokwise import AllPool, pooler_for_token_classify, pooler_for_token_embed
+from .tokwise import pooler_for_token_classify, pooler_for_token_embed
 
 
 class DispatchPooler(Pooler):
@@ -46,7 +46,6 @@ class DispatchPooler(Pooler):
             {
                 "token_classify": pooler_for_token_classify(
                     pooler_config,
-                    pooling=AllPool(),
                     classifier=classifier,
                 ),
                 "classify": pooler_for_classify(
