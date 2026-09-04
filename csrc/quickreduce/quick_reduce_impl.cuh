@@ -747,8 +747,13 @@ struct AllReduceTwoshot {
           // which then propagates through the reduction and poisons the whole
           // line. Saturate instead, matching how the fp8 paths handle out of
           // range inputs.
-          f.x = fminf(fmaxf(f.x, -kFp16Max), kFp16Max);
-          f.y = fminf(fmaxf(f.y, -kFp16Max), kFp16Max);
+          //
+          // NaN is left alone: fminf/fmaxf return the non-NaN operand, so a
+          // bare clamp would silently turn NaN into -kFp16Max and hide a
+          // diverging model behind a plausible-looking value. Only finite
+          // overflow is what this guards against.
+          f.x = isnan(f.x) ? f.x : fminf(fmaxf(f.x, -kFp16Max), kFp16Max);
+          f.y = isnan(f.y) ? f.y : fminf(fmaxf(f.y, -kFp16Max), kFp16Max);
           half_buf[j] = __float22half2_rn(f);
         }
         tA[i] = *reinterpret_cast<const int32x4_t*>(half_buf);
