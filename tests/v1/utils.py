@@ -61,9 +61,8 @@ def get_prometheus_metrics(server: RemoteOpenAIServer) -> dict[str, dict[str, fl
                         continue
 
         return metrics
-    except Exception as e:
+    except requests.RequestException as e:
         pytest.fail(f"Failed to fetch Prometheus metrics: {e}")
-        return {}
 
 
 def get_engine_request_counts(metrics: dict[str, dict[str, float]]) -> dict[str, float]:
