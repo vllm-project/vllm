@@ -4,12 +4,15 @@
 import numpy as np
 import torch
 
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+
+logger = init_logger(__name__)
 
 
 class GPUWatermarkSampler(Sampler):
@@ -32,6 +35,12 @@ class GPUWatermarkSampler(Sampler):
     ) -> None:
         super().add_request(req_idx, prompt_len, sampling_params)
         self.watermarking.np[req_idx] = sampling_params.watermarking
+        if sampling_params.watermarking and sampling_params.temperature == 0:
+            logger.warning_once(
+                "Watermarking is enabled, but greedy decoding "
+                "(temperature=0) cannot be watermarked. This request will use "
+                "ordinary greedy sampling."
+            )
 
     def apply_staged_writes(self) -> None:
         super().apply_staged_writes()
@@ -48,7 +57,9 @@ class GPUWatermarkSampler(Sampler):
         use_flashinfer: bool,
         return_logprobs: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        enabled = self.watermarking.np[idx_mapping_np]
+        enabled = self.watermarking.np[idx_mapping_np] & (
+            self.sampling_states.temperature.np[idx_mapping_np] != 0
+        )
         if not np.any(enabled):
             return super()._sample_random(
                 processed_logits,
@@ -81,7 +92,7 @@ class GPUWatermarkSampler(Sampler):
             random_sample,
         )
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
-        watermarking = self.watermarking.gpu[expanded_idx_mapping]
+        watermarking = self.watermarking.gpu[expanded_idx_mapping] & (temperatures != 0)
         if not np.all(enabled):
             unwatermarked = random_sample(processed_logits)
             sampled = torch.where(watermarking, output.token_ids, unwatermarked)
