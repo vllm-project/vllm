@@ -180,6 +180,7 @@ class RequestRunner:
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
         worker_count: int = 1,
+        retention_interval: int | None = None,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -200,6 +201,7 @@ class RequestRunner:
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.parallel_config.world_size = worker_count
+        vllm_config.cache_config.prefix_cache_retention_interval = retention_interval
 
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
@@ -676,6 +678,7 @@ def request_runner():
         kv_cache_groups=None,
         extra_config_overrides=None,
         worker_count=1,
+        retention_interval=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -685,6 +688,7 @@ def request_runner():
             kv_cache_groups=kv_cache_groups,
             extra_config_overrides=extra_config_overrides,
             worker_count=worker_count,
+            retention_interval=retention_interval,
         )
         runners.append(runner)
         return runner

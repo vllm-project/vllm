@@ -298,6 +298,10 @@ class MooncakeStoreCoordinator:
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
+                # ``spec`` is already DCP-resolved (worker.py applies
+                # resolve_dcp_kv_cache_spec) and ``end_chunk`` is indexed in
+                # that scaled block size, so the mask must not scale again.
+                dcp_world_size=1,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk
