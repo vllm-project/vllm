@@ -15,7 +15,7 @@ from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invar
 from vllm.utils.flashinfer import (
     flashinfer_gemma_fused_add_rmsnorm,
     flashinfer_gemma_rmsnorm,
-    has_flashinfer,
+    has_flashinfer_gemma_norm,
 )
 
 logger = init_logger(__name__)
@@ -135,15 +135,19 @@ class RMSNorm(CustomOp):
 def _flashinfer_gemma_norm_supported(
     x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor | None
 ) -> bool:
-    if not has_flashinfer():
+    if not has_flashinfer_gemma_norm():
         return False
-    if x.dim() != 2 or x.numel() == 0:
+    if x.dim() != 2 or x.numel() == 0 or x.stride(-1) != 1:
         return False
     if weight.shape != x.shape[-1:] or weight.dtype != x.dtype:
         return False
     if weight.stride(-1) != 1:
         return False
-    return residual is None or (residual.shape == x.shape and residual.dtype == x.dtype)
+    return residual is None or (
+        residual.shape == x.shape
+        and residual.dtype == x.dtype
+        and residual.stride(-1) == 1
+    )
 
 
 # --8<-- [start:gemma_rms_norm]

@@ -92,6 +92,17 @@ def has_flashinfer_bf16_gemm() -> bool:
     return mod is not None and callable(getattr(mod, "mm_bf16", None))
 
 
+def has_flashinfer_gemma_norm() -> bool:
+    """Return whether FlashInfer exposes the gemma RMSNorm kernels."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.norm")
+    return mod is not None and all(
+        callable(getattr(mod, name, None))
+        for name in ("gemma_rmsnorm", "gemma_fused_add_rmsnorm")
+    )
+
+
 @functools.cache
 def is_flashinfer_bf16_gemm_supported(
     backend: str,

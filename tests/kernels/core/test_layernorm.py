@@ -294,9 +294,13 @@ def test_gemma_rms_norm_layouts_off_the_fused_path(default_vllm_config) -> None:
             torch.testing.assert_close(out[1], ref[1], atol=1e-2, rtol=1e-2)
 
     x2d = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    strided = torch.randn(4, 2 * hidden_size, dtype=torch.bfloat16)[:, ::2]
     check(torch.randn(2, 3, hidden_size, dtype=torch.bfloat16))
     check(torch.empty(0, hidden_size, dtype=torch.bfloat16))
     check(x2d, torch.randn(4, hidden_size, dtype=torch.float32))
+    check(strided)
+    check(strided, strided.clone())
+    check(x2d, strided)
 
     weight = layer.weight.data
     layer.weight = torch.nn.Parameter(weight.float(), requires_grad=False)
