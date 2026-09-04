@@ -293,8 +293,9 @@ def _hc_combine_norm_kernel(
     NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
     NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
 
-    row = tl.program_id(0)
-    stream = tl.program_id(1)
+    pid = tl.program_id(0)
+    row = pid // HC
+    stream = pid % HC
     offs_hc = tl.arange(0, HC_PAD)
     mask_hc = offs_hc < HC
     tile_ids = tl.arange(0, NUM_TILES_PAD)
@@ -369,7 +370,7 @@ def _hc_combine_norm(
     out = residual.new_empty(residual.shape)
     y = residual.new_empty(residual.shape)
     BLOCK_SIZE = 512
-    _hc_combine_norm_kernel[(N, hc_count)](
+    _hc_combine_norm_kernel[(N * hc_count,)](
         block_output,
         residual,
         injection_logits,
