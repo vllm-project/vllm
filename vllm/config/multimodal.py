@@ -526,10 +526,16 @@ class MultiModalConfig:
             video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
         )
         codec_backend = video_kwargs.get("backend")
-        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+        if VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
             codec_backend is not None
             and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
-        )
+        ):
+            return True
+        # TorchCodec decodes on the CPU by default but runs NVDEC inside the
+        # API server process when ``device`` selects CUDA.
+        return codec_backend == "torchcodec" and str(
+            video_kwargs.get("device") or ""
+        ).startswith("cuda")
 
     def is_multimodal_pruning_enabled(self):
         return self.get_video_pruning_spec() is not None

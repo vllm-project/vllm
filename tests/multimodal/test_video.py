@@ -7,6 +7,7 @@ import sys
 import threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -175,7 +176,7 @@ def test_decode_video_imports_only_selected_backend(
             "torchcodec",
             {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
             {"min_frames": 4},
-            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate", "device": None},
         ),
         (
             "deepstream",
@@ -204,6 +205,16 @@ def test_video_backend_rejects_options_for_another_decoder():
         ValueError, match="num_ffmpeg_threads is not supported by the 'opencv' backend"
     ):
         resolve_video_backend_kwargs("opencv", {"num_ffmpeg_threads": 2})
+
+
+def test_video_backend_device_option_belongs_to_torchcodec():
+    _, backend_kwargs = resolve_video_backend_kwargs("torchcodec", {"device": "cuda"})
+    assert backend_kwargs["device"] == "cuda"
+
+    with pytest.raises(
+        ValueError, match="device is not supported by the 'opencv' backend"
+    ):
+        resolve_video_backend_kwargs("opencv", {"device": "cuda"})
 
 
 @pytest.mark.parametrize(
@@ -1203,6 +1214,103 @@ def test_torchcodec_backend_rejects_frame_recovery(dummy_video_path):
         loader.load_bytes(
             video_data, num_frames=8, backend="torchcodec", frame_recovery=True
         )
+
+
+def test_torchcodec_backend_forwards_decode_device(monkeypatch: pytest.MonkeyPatch):
+    """``device`` reaches ``VideoDecoder`` only when set, and sampled frames
+    are moved to the host before the NumPy conversion."""
+    from vllm.multimodal.video_decoders import torchcodec as torchcodec_module
+
+    constructor_kwargs: list[dict[str, object]] = []
+    requested_indices: list[list[int]] = []
+    cpu_calls: list[None] = []
+    acquired: list[int] = []
+
+    class RecordingPool:
+        @contextmanager
+        def acquire(self, size: int):
+            acquired.append(size)
+            yield
+
+    class FakeTensor:
+        def cpu(self):
+            cpu_calls.append(None)
+            return self
+
+        def numpy(self):
+            return np.zeros((len(requested_indices[-1]), 20, 10, 3), dtype=np.uint8)
+
+    class FakeDecoder:
+        metadata = SimpleNamespace(
+            num_frames=4, average_fps=2.0, duration_seconds=2.0, width=10, height=20
+        )
+
+        def __init__(self, data: bytes, **kwargs):
+            constructor_kwargs.append(kwargs)
+
+        def get_frames_at(self, frame_indices: list[int]):
+            requested_indices.append(list(frame_indices))
+            return SimpleNamespace(data=FakeTensor())
+
+    monkeypatch.setattr(torchcodec_module, "check_torchcodec_available", lambda: None)
+    monkeypatch.setattr(torchcodec_module, "VideoDecoder", FakeDecoder)
+    monkeypatch.setattr(
+        "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", RecordingPool
+    )
+
+    frames, metadata = VideoBackend.load_bytes(
+        b"fake video", num_frames=2, backend="torchcodec"
+    )
+    assert "device" not in constructor_kwargs[-1]
+    assert constructor_kwargs[-1]["dimension_order"] == "NHWC"
+    assert frames.shape == (2, 20, 10, 3)
+    # CPU decode never touches the frontend GPU budget.
+    assert acquired == []
+
+    frames, metadata = VideoBackend.load_bytes(
+        b"fake video", num_frames=2, backend="torchcodec", device="cuda"
+    )
+    assert constructor_kwargs[-1]["device"] == "cuda"
+    assert frames.shape == (2, 20, 10, 3)
+    assert metadata["frames_indices"] == requested_indices[-1]
+    assert len(cpu_calls) == 2
+    # CUDA decode accounts the sampled frames against the frontend budget.
+    assert acquired == [2 * 20 * 10 * 3]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_torchcodec_cuda_backend_matches_cpu_frames():
+    """CUDA decode must select the same frames as CPU decode and return host
+    frames; NVDEC and FFmpeg color conversion may differ by a few levels."""
+    torchcodec = pytest.importorskip("torchcodec")
+    num_frames, height, width = 50, 64, 64
+    video_bytes = create_long_gop_video(
+        num_frames=num_frames, width=width, height=height
+    )
+    try:
+        torchcodec.decoders.VideoDecoder(video_bytes, device="cuda")
+    except Exception as exc:  # CPU-only TorchCodec build or no NVDEC
+        pytest.skip(f"TorchCodec CUDA decode unavailable: {exc}")
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    cpu_frames, cpu_meta = loader.load_bytes(
+        video_bytes, num_frames=4, backend="torchcodec"
+    )
+    gpu_frames, gpu_meta = loader.load_bytes(
+        video_bytes, num_frames=4, backend="torchcodec", device="cuda"
+    )
+
+    assert isinstance(gpu_frames, np.ndarray)
+    assert gpu_frames.shape == cpu_frames.shape == (4, height, width, 3)
+    assert gpu_meta["frames_indices"] == cpu_meta["frames_indices"]
+
+    # The long-GOP fixture stamps a per-frame green marker at the center.
+    cpu_markers = [int(f[height // 2, width // 2, 1]) for f in cpu_frames]
+    gpu_markers = [int(f[height // 2, width // 2, 1]) for f in gpu_frames]
+    assert len(set(gpu_markers)) == 4
+    assert all(abs(a - b) <= 8 for a, b in zip(cpu_markers, gpu_markers))
+    diff = np.abs(gpu_frames.astype(np.int16) - cpu_frames.astype(np.int16))
+    assert diff.mean() < 4.0
 
 
 def test_torchcodec_backend_returns_target_frames_not_keyframes():

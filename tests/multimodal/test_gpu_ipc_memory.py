@@ -209,6 +209,24 @@ def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
     )
 
 
+def test_reserve_mm_ipc_gpu_memory_includes_torchcodec_cuda_decoder_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    available_bytes = 4 * GiB_bytes
+    cpu_config = MultiModalConfig(
+        media_io_kwargs={"video": {"backend": "torchcodec"}},
+    )
+    cuda_config = MultiModalConfig(
+        media_io_kwargs={"video": {"backend": "torchcodec", "device": "cuda"}},
+    )
+
+    assert reserve_mm_ipc_gpu_memory(available_bytes, cpu_config) == available_bytes
+    assert reserve_mm_ipc_gpu_memory(available_bytes, cuda_config) == (
+        available_bytes - _pynvvideocodec_decoder_budget(hw_decoders=1)
+    )
+
+
 def test_reserve_mm_ipc_gpu_memory_uses_env_video_backend(
     monkeypatch: pytest.MonkeyPatch,
 ):

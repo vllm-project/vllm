@@ -265,6 +265,11 @@ class VideoBackend(VideoLoader):
                   creation at the cost of relying on the file's metadata. See
                   https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                   for details.
+                - ``device`` (TorchCodec): decoder device. ``None`` (default)
+                  or ``"cpu"`` decodes with FFmpeg on the CPU; ``"cuda"``
+                  decodes with NVDEC when the installed TorchCodec build has
+                  CUDA support. Sampled frames are copied to host memory for
+                  multimodal preprocessing either way.
                 - ``hw_decoders`` (PyNvVideoCodec): maximum number of
                   concurrent decoder slots. Defaults to 2 and must be a
                   positive integer.

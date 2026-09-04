@@ -850,13 +850,13 @@ backends are supported:
 | Backend | Device | Description |
 | --- | --- | --- |
 | `opencv` (default) | CPU | OpenCV-based decoder |
-| `torchcodec` | CPU | TorchCodec (PyTorch-native) decoder |
+| `torchcodec` | CPU / GPU | TorchCodec (PyTorch-native) decoder; CUDA (NVDEC) decode is optional |
 | `pynvvideocodec` | GPU | NVIDIA PyNvVideoCodec decoder |
 | `deepstream` | GPU | NVIDIA DeepStream decoder |
 
-The two CPU backends are ultimately backed by FFmpeg. `torchcodec` lets you
-choose which FFmpeg version is used while `opencv` relies on whichever
-FFmpeg build it was linked against.
+The `opencv` backend and the default CPU mode of `torchcodec` are ultimately
+backed by FFmpeg. `torchcodec` lets you choose which FFmpeg version is used
+while `opencv` relies on whichever FFmpeg build it was linked against.
 
 Select the backend by passing the `backend` parameter via `--media-io-kwargs`:
 
@@ -876,11 +876,25 @@ The following parameters only apply to the `torchcodec` backend:
   frame-accurate sampling by scanning the file when the decoder is created.
   `"approximate"` skips that scan for faster decoder creation, at the cost of
   relying on the file's metadata (which may yield less accurate seeking).
+- `device`: Device used for decoding. Unset (default) or `"cpu"` decodes with
+  FFmpeg on the CPU; `"cuda"` decodes with NVDEC when the installed TorchCodec
+  build has CUDA support. Sampled frames are copied to host memory before
+  multimodal preprocessing either way, so the rest of the pipeline is
+  unchanged. GPU decoding runs in the API server process, so the
+  [PyNvVideoCodec guidance](#gpu-video-decoding-with-pynvvideocodec-nvdec)
+  on CUDA MPS and `--mm-ipc-gpu-memory-gb` applies to `"cuda"` as well, and
+  vLLM applies the same frontend GPU memory reservation.
 
 ```bash
 # Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
   --media-io-kwargs '{"video": {"backend": "torchcodec", "seek_mode": "approximate", "num_ffmpeg_threads": 4}}'
+```
+
+```bash
+# Example: TorchCodec decoding on the GPU with NVDEC
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"backend": "torchcodec", "device": "cuda"}}'
 ```
 
 **PyNvVideoCodec-specific parameters:**

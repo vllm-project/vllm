@@ -66,6 +66,21 @@ def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
     assert config.use_gpu_video_backend()
 
 
+@pytest.mark.parametrize(
+    ("device", "expected"),
+    [("cuda", True), ("cuda:1", True), ("cpu", False), (None, False)],
+)
+def test_use_gpu_video_backend_for_torchcodec_device(
+    device: str | None, expected: bool
+):
+    video_kwargs: dict[str, object] = {"backend": "torchcodec"}
+    if device is not None:
+        video_kwargs["device"] = device
+    config = MultiModalConfig(media_io_kwargs={"video": video_kwargs})
+
+    assert config.use_gpu_video_backend() is expected
+
+
 def test_mm_encoder_fp8_scale_path_requires_fp8():
     with pytest.raises(ValueError, match="mm_encoder_attn_dtype"):
         MultiModalConfig(mm_encoder_fp8_scale_path="/tmp/scales.json")
