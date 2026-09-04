@@ -173,7 +173,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 "Try converting the model using `--convert classify`."
             )
 
-        # plugin task uses io_processor.parse_request to verify inputs
+        # plugin task uses io_processor.parse_data to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
             if pooling_task not in self.supported_tasks:
                 raise ValueError(

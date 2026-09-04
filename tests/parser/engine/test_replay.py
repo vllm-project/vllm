@@ -34,6 +34,7 @@ from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.mistral import MistralParser
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -63,6 +64,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             and issubclass(obj, ParserEngine)
             and obj is not ParserEngine
         ):
+            continue
+        if obj is MistralParser:
+            # Mistral uses brace-balanced JSON tool args with no TOOL_END
+            # token, so it does not fit this TOOL_END-based replay harness.
+            # It is covered by tests/parser/mistral/ instead.
             continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:

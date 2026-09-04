@@ -28,6 +28,10 @@ USER_SP_TOKEN = "<｜User｜>"
 ASSISTANT_SP_TOKEN = "<｜Assistant｜>"
 LATEST_REMINDER_SP_TOKEN = "<｜latest_reminder｜>"
 
+# Placeholder text inlined at each image's position; the multimodal processor
+# later expands it into the sentinel token block.
+IMAGE_PLACEHOLDER = "<｜deepseek_image｜>"
+
 # Task special tokens for internal classification tasks
 DS_TASK_SP_TOKENS = {
     "action": "<｜action｜>",
@@ -65,11 +69,20 @@ tool_output_template: str = (
     "<tool_result>{content}</tool_result>"
 )
 
-REASONING_EFFORT_MAX = (
-    "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
-    "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
-    "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
-)
+REASONING_EFFORT_PROMPTS: Dict[str, str] = {
+    "low": "",
+    "high": (
+        "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
+        "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
+        "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
+    ),
+    "max": (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n"
+    ),
+}
+DEFAULT_REASONING_EFFORT = "low"
 
 TOOLS_TEMPLATE = """## Tools
 
@@ -190,7 +203,38 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 # Message Rendering
 # ============================================================
 
-def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: str, drop_thinking: bool = True, reasoning_effort: Optional[str] = None) -> str:
+def flatten_content_blocks(content: Any) -> Any:
+    """Flatten OpenAI-style content blocks to plain text.
+
+    Image blocks are inlined as IMAGE_PLACEHOLDER at their position. The image
+    data itself travels out of band (multi_modal_data) and is matched to
+    placeholders by order. Plain-string content passes through unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+        elif block.get("type") in ("image", "image_url"):
+            parts.append(IMAGE_PLACEHOLDER)
+        elif block.get("type") == "text":
+            parts.append(block.get("text", ""))
+        else:
+            raise ValueError(
+                f"Unsupported content block type: {block.get('type')!r}"
+            )
+    return "".join(parts)
+
+
+def render_message(
+    index: int,
+    messages: List[Dict[str, Any]],
+    thinking_mode: str,
+    drop_thinking: bool = True,
+    reasoning_effort: Optional[str] = None,
+    last_user_idx: Optional[int] = None,
+) -> str:
     """
     Render a single message at the given index into its encoded string form.
 
@@ -202,17 +246,25 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
         messages: Full list of messages in the conversation.
         thinking_mode: Either "chat" or "thinking".
         drop_thinking: Whether to drop reasoning content from earlier turns.
-        reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+        reasoning_effort: Reasoning effort level, one of "low", "high", "max".
+            None is treated as "low".
+        last_user_idx: Cached index of the last user/developer message.
 
     Returns:
         Encoded string for this message.
     """
-    assert 0 <= index < len(messages)
-    assert thinking_mode in ["chat", "thinking"], f"Invalid thinking_mode `{thinking_mode}`"
+    if not (0 <= index < len(messages)):
+        raise ValueError(
+            f"Index {index} out of range for messages list of length {len(messages)}"
+        )
+    if thinking_mode not in ["chat", "thinking"]:
+        raise ValueError(f"Invalid thinking_mode `{thinking_mode}`")
 
     prompt = ""
     msg = messages[index]
-    last_user_idx = find_last_user_index(messages)
+    last_user_idx = (
+        find_last_user_index(messages) if last_user_idx is None else last_user_idx
+    )
 
     role = msg.get("role")
     content = msg.get("content")
@@ -227,10 +279,14 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
     if tool_calls:
         tool_calls = tool_calls_from_openai_format(tool_calls)
 
-    # Reasoning effort prefix (only at index 0 in thinking mode with max effort)
-    assert reasoning_effort in ['max', None, 'high'], f"Invalid reasoning effort: {reasoning_effort}"
-    if index == 0 and thinking_mode == "thinking" and reasoning_effort == 'max':
-        prompt += REASONING_EFFORT_MAX
+    reasoning_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
+    if reasoning_effort not in REASONING_EFFORT_PROMPTS:
+        raise ValueError(
+            f"Invalid reasoning effort: {reasoning_effort}, expected one of "
+            f"{list(REASONING_EFFORT_PROMPTS)}"
+        )
+    if index == 0 and thinking_mode == "thinking":
+        prompt += REASONING_EFFORT_PROMPTS[reasoning_effort]
 
     if role == "system":
         prompt += system_msg_template.format(content=content or "")
@@ -240,7 +296,8 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
             prompt += "\n\n" + response_format_template.format(schema=to_json(response_format))
 
     elif role == "developer":
-        assert content, f"Invalid message for role `{role}`: {msg}"
+        if not content:
+            raise ValueError(f"Invalid message for role `{role}`: {msg}")
 
         content_developer = USER_SP_TOKEN
         content_developer += content
@@ -263,6 +320,8 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
                 block_type = block.get("type")
                 if block_type == "text":
                     parts.append(block.get("text", ""))
+                elif block_type in ("image", "image_url"):
+                    parts.append(IMAGE_PLACEHOLDER)
                 elif block_type == "tool_result":
                     tool_content = block.get("content", "")
                     if isinstance(tool_content, list):
@@ -278,7 +337,7 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
                     parts.append(f"[Unsupported {block_type}]")
             prompt += "\n\n".join(parts)
         else:
-            prompt += content or ""
+            prompt += flatten_content_blocks(content) or ""
 
     elif role == "latest_reminder":
         prompt += LATEST_REMINDER_SP_TOKEN + latest_reminder_msg_template.format(content=content)
@@ -330,7 +389,7 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
                 tool_calls=tc_content,
             )
     else:
-        raise NotImplementedError(f"Unknown role: {role}")
+        raise ValueError(f"Invalid role: {role}")
 
     # Append transition tokens based on what follows
     if index + 1 < len(messages) and messages[index + 1].get("role") not in ["assistant", "latest_reminder"]:
@@ -339,7 +398,10 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
     task = messages[index].get("task")
     if task is not None:
         # Task special token for internal classification tasks
-        assert task in VALID_TASKS, f"Invalid task: '{task}'. Valid tasks are: {list(VALID_TASKS)}"
+        if task not in VALID_TASKS:
+            raise ValueError(
+                f"Invalid task: '{task}'. Valid tasks are: {list(VALID_TASKS)}"
+            )
         task_sp_token = DS_TASK_SP_TOKENS[task]
 
         if task != "action":
@@ -351,7 +413,15 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
             prompt += thinking_end_token if thinking_mode != "thinking" else thinking_start_token
             prompt += task_sp_token
 
-    elif messages[index].get("role") in ["user", "developer"]:
+    # A trailing system message opens generation, while a system message
+    # followed by assistant opens that assistant history turn.
+    elif role in ["user", "developer"] or (
+        role == "system"
+        and (
+            index == len(messages) - 1
+            or messages[index + 1].get("role") == "assistant"
+        )
+    ):
         # Normal generation: append Assistant + thinking token
         prompt += ASSISTANT_SP_TOKEN
         if not drop_thinking and thinking_mode == "thinking":
@@ -407,13 +477,15 @@ def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "content_blocks": [tool_block],
                 })
         elif role == "user":
-            text_block = {"type": "text", "text": msg.get("content", "")}
+            # Flatten OpenAI-style content blocks (images become placeholders)
+            text_content = flatten_content_blocks(msg.get("content", ""))
+            text_block = {"type": "text", "text": text_content}
             if merged and merged[-1].get("role") == "user" and "content_blocks" in merged[-1] and merged[-1].get("task") is None:
                 merged[-1]["content_blocks"].append(text_block)
             else:
                 new_msg = {
                     "role": "user",
-                    "content": msg.get("content", ""),
+                    "content": text_content,
                     "content_blocks": [text_block],
                 }
                 # Preserve extra fields (task, wo_eos, mask, etc.)
@@ -497,7 +569,8 @@ def encode_messages(
         drop_thinking: If True, drop reasoning from earlier assistant turns
                       (only keep reasoning for messages after the last user message).
         add_default_bos_token: Whether to prepend BOS token at conversation start.
-        reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+        reasoning_effort: Reasoning effort level, one of "low", "high", "max".
+            Only takes effect in thinking mode. None is treated as "low".
 
     Returns:
         The encoded prompt string.
@@ -530,6 +603,8 @@ def encode_messages(
         num_to_render = len(messages)
         context_len = len(context)
 
+    last_user_idx = find_last_user_index(full_messages)
+
     for idx in range(num_to_render):
         prompt += render_message(
             idx + context_len,
@@ -537,6 +612,7 @@ def encode_messages(
             thinking_mode=thinking_mode,
             drop_thinking=effective_drop_thinking,
             reasoning_effort=reasoning_effort,
+            last_user_idx=last_user_idx,
         )
 
     return prompt

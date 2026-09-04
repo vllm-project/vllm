@@ -9,7 +9,7 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -99,7 +99,7 @@ def extract_named_tool_call_streaming(
     else:
         if is_mistral_tokenizer(tokenizer):
             # Import mistral_common only if we need it.
-            from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+            from vllm.parser.mistral import MistralToolCall
 
             tool_call_id = MistralToolCall.generate_random_id()
         else:

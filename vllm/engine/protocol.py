@@ -62,6 +62,23 @@ class EngineClient(ABC):
     @abstractmethod
     def dead_error(self) -> BaseException: ...
 
+    def check_admission(  # noqa: B027
+        self, n: int = 1, request_id: str | None = None
+    ) -> None:
+        """Reject the request up front if it would exceed queue limits.
+
+        Called before a response is started so that overload rejections can
+        carry an HTTP status, which is not possible once a streaming response
+        has begun. Engines without admission control accept everything.
+
+        Args:
+            n: Number of sequences the request will occupy.
+            request_id: Request id, used for logging only.
+
+        Raises:
+            GracefulHTTPError: If the request cannot be admitted.
+        """
+
     @abstractmethod
     def generate(
         self,
@@ -78,6 +95,7 @@ class EngineClient(ABC):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:

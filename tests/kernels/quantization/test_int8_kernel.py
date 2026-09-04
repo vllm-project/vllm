@@ -7,6 +7,7 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.quant_utils import native_per_token_group_quant_int8
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -15,7 +16,15 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+    pytest.skip(
+        "INT8 Triton kernels require a CUDA-alike or XPU device",
+        allow_module_level=True,
+    )
+
+if current_platform.is_cuda_alike() and not current_platform.has_device_capability(
+    (7, 0)
+):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 
@@ -155,3 +164,25 @@ def test_w8a8_fp8_fused_moe(default_vllm_config, M, N, K, E, topk, dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.05
+
+
+@pytest.mark.parametrize("num_tokens", [1, 33, 64])
+@pytest.mark.parametrize("hidden_dim", [128, 1024])
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_per_token_quant_int8(num_tokens, hidden_dim, dtype):
+    """Covers the round_int8 Triton kernel via per_token_quant_int8."""
+    torch.manual_seed(0)
+    device = current_platform.device_type
+    x = torch.randn((num_tokens, hidden_dim), dtype=dtype, device=device) * 8
+
+    q, s = per_token_quant_int8(x)
+    # Per-token int8 quant is per-token-group quant with group_size = hidden_dim.
+    ref_q, ref_s = native_per_token_group_quant_int8(x, hidden_dim)
+
+    assert q.dtype == torch.int8
+    assert q.shape == (num_tokens, hidden_dim)
+    assert s.shape == (num_tokens, 1)
+    assert torch.allclose(s.float(), ref_s.float(), atol=1e-3, rtol=1e-3)
+    # Quantized values may differ by at most 1 ULP due to rounding.
+    assert torch.all((q.float() - ref_q.float()).abs() <= 1)

@@ -1,0 +1,37 @@
+<｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think><｜User｜>
+
+## Tools
+
+You have access to a set of tools you can use to answer the user's question.
+You can invoke functions by writing a "<｜DSML｜function_calls>" block like the following as part of your reply to the user:
+<｜DSML｜function_calls>
+<｜DSML｜invoke name="$FUNCTION_NAME">
+<｜DSML｜parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</｜DSML｜parameter>
+...
+</｜DSML｜invoke>
+<｜DSML｜invoke name="$FUNCTION_NAME2">
+...
+</｜DSML｜invoke>
+</｜DSML｜function_calls>
+
+String and scalar parameters should be specified as is without any escaping or quotes, while lists and objects should use JSON format. The "string" attribute should be set to "true" for string type parameters and "false" for other types (numbers, booleans, arrays, objects).
+
+If the thinking_mode is enabled, then after function results you should strongly consider outputting a thinking block. Here is an example:
+
+<｜DSML｜function_calls>
+...
+</｜DSML｜function_calls>
+
+<function_results>
+...
+</function_results>
+
+<think>...thinking about results</think>
+
+Here are the functions available in JSONSchema format:
+<functions>
+{"name": "lookup", "parameters": {"type": "object"}}
+</functions>
+
+
+# The user's message is: policy<｜Assistant｜><think>thought</think>answer<｜end▁of▁sentence｜>
