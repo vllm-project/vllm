@@ -1584,52 +1584,56 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        mm_data = dict(mm_data)
-
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**hf_kwargs)
 
         use_direct_path = (
             not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
         )
         if use_direct_path:
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
-                mm_data, hf_processor_mm_kwargs
+                hf_data, hf_kwargs
             )
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**prepared_kwargs),
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
-            processed_data.update(passthrough_data)
-            return processed_data
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            )
 
-        videos = mm_data.get("videos")
-        if isinstance(videos, list) and videos:
+        if (
+            "videos" in hf_data
+            and isinstance(videos := hf_data["videos"], list)
+            and len(videos) > 0
+        ):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
             swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
-            mm_data.pop("videos")
             for item in videos:
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True
                 )
@@ -1669,9 +1673,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            self.info.get_hf_processor(**hf_kwargs),
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
         if swap_video_frame_tokens:
             input_ids = processed_data["input_ids"]
@@ -1679,9 +1683,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
-
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

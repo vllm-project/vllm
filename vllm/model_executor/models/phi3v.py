@@ -397,27 +397,8 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
-
-    def _postprocess_hf_mm_data(
-        self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-        processed_data: BatchFeature,
-    ) -> BatchFeature:
-        if not mm_data:
-            return processed_data
-
-        input_ids = processed_data["input_ids"]
-        assert isinstance(input_ids, torch.Tensor)
-
-        # Phi3v processor has inserted -1, -2 etc as placeholder in prompt_ids,
-        # which will cause OverflowError when decoding the prompt_ids.
-        # Therefore, we need to do an early replacement here
-        input_ids.masked_fill_(input_ids < 0, _IMAGE_TOKEN_ID)
-
-        return processed_data
 
     def _get_mm_fields_config(
         self,

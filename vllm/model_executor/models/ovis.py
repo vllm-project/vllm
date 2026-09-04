@@ -327,6 +327,9 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
 
 
 class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def image_indicators_to_visual_tokens(
         self,
         image_indicators: list[int],
@@ -341,9 +344,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         vte_vocab_size = hf_config.visual_tokenizer_config.vocab_size
         # -300 is image_atom token, filter them out
         return [vte_vocab_size + x + 300 for x in image_indicators if x < -300]
-
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _postprocess_hf_mm_data(
         self,

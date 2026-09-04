@@ -68,6 +68,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    HFMultiModalInputs,
     PromptReplacement,
     PromptUpdate,
     cached_encode,
@@ -200,6 +201,9 @@ NanoNemotronVLVideoInputs: TypeAlias = (
 
 class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
+        # Not accepted by NanoNemotronVLProcessor.__init__
+        kwargs.pop("truncation", None)
+
         return self.ctx.init_processor(
             NanoNemotronVLProcessor,
             config=self.get_hf_config(),
@@ -362,8 +366,22 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
 class NanoNemotronVLMultiModalProcessor(
     BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        # NanoNemotronVLProcessor expects "audios" instead of "audio"
+        hf_data = hf_inputs.hf_data
+        if "audio" in hf_data:
+            hf_data["audios"] = hf_data.pop("audio")
+
+        return hf_inputs
 
     def _get_image_fields_config(self, hf_inputs: BatchFeature):
         if self.info.is_dynamic_tiler:
@@ -733,15 +751,12 @@ class NanoNemotronVLMultiModalProcessor(
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
-        mm_info = self._apply_hf_processor(inputs, timing_ctx)
-        prompt_ids = self._postprocess_prompt(inputs.prompt)
+        mm_res = self._apply_hf_processor(inputs, timing_ctx)
 
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
                 mm_items=mm_items,
-                prompt_ids=prompt_ids,
-                mm_kwargs=mm_info.kwargs,
-                mm_prompt_updates=mm_info.prompt_updates,
+                mm_res=mm_res,
             )
 
         mm_placeholder_ranges = {
@@ -752,8 +767,8 @@ class NanoNemotronVLMultiModalProcessor(
         return MultiModalInput(
             type="multimodal",
             prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_info.kwargs,
-            mm_hashes=mm_info.hashes,
+            mm_kwargs=mm_res.kwargs,
+            mm_hashes=mm_res.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 

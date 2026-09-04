@@ -44,6 +44,7 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    HFMultiModalInputs,
     PromptReplacement,
     PromptUpdate,
     ResolvedPromptUpdate,
@@ -869,32 +870,37 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
-    def _apply_hf_processor_main(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
+
+        # The Phi4MM processor expects "audios" instead of "audio"
+        hf_data = hf_inputs.hf_data
+        if "audio" in hf_data:
+            hf_data["audios"] = hf_data.pop("audio")
+
+        sr = self.info.get_feature_extractor(**hf_inputs.hf_kwargs).sampling_rate
+        if audio_data := hf_data.get("audios", []):
+            hf_data["audios"] = [(data, sr) for data in audio_data]
+
+        return hf_inputs
+
+    def _postprocess_hf_mm_data(
+        self,
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        if not hf_data:
+            return processed_data
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
-
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
-
-        sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
-        if audio_data := mm_data.get("audios", []):
-            mm_data["audios"] = [(data, sr) for data in audio_data]
-
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
         num_img_tokens = [
             self.info.get_num_image_tokens(
                 image_width=img_size[0],
@@ -905,14 +911,19 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         ]
         processed_data["num_img_tokens"] = num_img_tokens
 
-        audio_features = processed_data["input_audio_embeds"]
+        audios = hf_data.get("audios", [])
+        assert isinstance(audios, list)
+        audio_features = processed_data.get("input_audio_embeds")
+        if audio_features is None:
+            return processed_data
+
+        sr = self.info.get_feature_extractor(**hf_kwargs).sampling_rate
         feature_sizes = [
-            self.info.get_audio_num_frames(len(audio), sr) for audio in audio_data
+            self.info.get_audio_num_frames(len(audio), sr) for audio, _ in audios
         ]
         processed_data["input_audio_embeds"] = [
             audio_features[idx, :size] for idx, size in enumerate(feature_sizes)
         ]
-        processed_data.update(passthrough_data)
 
         return processed_data
 

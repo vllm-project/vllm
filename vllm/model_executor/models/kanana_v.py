@@ -460,24 +460,27 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     def media_token_id(self) -> int:
         return self.info.get_hf_config().text_config.eos_token_id + 1
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         """Run the underlying HF processor on text and image data."""
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data or not mm_data.get("images", []):
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data or not hf_data.get("images", []):
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         # Images
-        image_inputs = mm_data.get("images", [])
+        image_inputs = hf_data.get("images", [])
         pixel_sizes = []
         if not isinstance(image_inputs[0], Image.Image):
             image_inputs = [Image.fromarray(image) for image in image_inputs]
@@ -531,8 +534,9 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
             pixel_sizes=torch.tensor(pixel_sizes),
         )
         processed_data = BatchFeature(combined_outputs, tensor_type="pt")
-        processed_data.update(passthrough_data)
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_prompt_updates(
         self,

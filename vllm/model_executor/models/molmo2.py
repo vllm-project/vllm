@@ -1940,6 +1940,9 @@ class Molmo2DummyInputsBuilder(BaseDummyInputsBuilder[Molmo2ProcessingInfo]):
 
 
 class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _postprocess_prompt(self, prompt: list[int]) -> list[int]:
         processor = self.info.get_hf_processor()
         tokenizer = processor.tokenizer
@@ -1954,19 +1957,20 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        mm_counts = mm_items.get_all_counts()
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
 
-        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
-
-        mm_data = dict(processor_data)
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
 
         def patched_call(text=None, images=None, videos=None, **kwargs) -> BatchFeature:
             res = hf_processor(text=text, images=images, videos=videos, **kwargs)
@@ -1981,7 +1985,7 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         tokenizer = hf_processor.tokenizer
         image_processor = hf_processor.image_processor
 
-        if videos := mm_data.pop("videos", []):
+        if videos := hf_data.pop("videos", []):
             assert isinstance(videos, Sequence)
             bos_token_id = tokenizer.bos_token_id or tokenizer.eos_token_id
 
@@ -2001,16 +2005,16 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 # NOTE: metadata.frames_indices indicates
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
-                # do_sample_frames in hf_processor_mm_kwargs is false for
+                # do_sample_frames in hf_kwargs is false for
                 # presampled videos.
 
-                # NOTE: a copy of hf_processor_mm_kwargs is created to update
+                # NOTE: a copy of hf_kwargs is created to update
                 # do_sample_frames, otherwise mm_hash for the object will be
                 # incorrect.
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 if "do_sample_frames" not in video_mm_kwargs:
                     # molmo_utils already has "do_sample_frames" in
-                    # hf_processor_mm_kwargs, don't overwrite it.
+                    # hf_kwargs, don't overwrite it.
                     video_mm_kwargs["do_sample_frames"] = metadata.get(
                         "do_sample_frames", False
                     )
@@ -2075,11 +2079,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
 
         processed_data = self.info.ctx.call_hf_processor(
             patched_call,
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
 
-        if (images := mm_data.get("images")) is not None:
+        if (images := hf_data.get("images")) is not None:
             mm_items = self.info.parse_mm_data({"image": images}, validate=False)
             parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
@@ -2121,10 +2125,11 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             )
 
         processed_data.update(all_video_outputs)
-        processed_data.update(passthrough_data)
         processed_data.pop("input_ids")
 
-        return processed_data
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, processed_data
+        )
 
     def _get_mm_fields_config(
         self,

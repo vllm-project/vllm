@@ -219,17 +219,6 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
     Subclasses add the strategy for locating placeholders in the prompt.
     """
 
-    def _get_hf_mm_data(
-        self,
-        mm_items: MultiModalDataItems,
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        """Rename the parser's `audios` key to the `audio` argument HF audio
-        processors take."""
-        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
-        if self.info._is_audio_model() and "audios" in processor_data:
-            processor_data["audio"] = processor_data.pop("audios")
-        return processor_data, passthrough_data
-
     def _get_modality_field_names(self, modality: str) -> set[str]:
         """Names of the fields the sub-processor for `modality` produces."""
         # TODO: use else branch only once huggingface/transformers#44394 lands.
@@ -599,10 +588,9 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
                 "add_special_tokens": False,
             }
 
-            valid_mm_items = mm_items.select(
-                {k for k, c in mm_items.get_all_counts().items() if c > 0}
+            processor_data, _, passthrough_data = self._get_hf_mm_inputs(
+                mm_items, hf_processor_mm_kwargs
             )
-            processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
             # Ask which modality owns each token of the expanded prompt, which
             # is the only marking of the tokens an expansion adds around an item
@@ -786,31 +774,37 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
         except (AttributeError, KeyError, TypeError):
             return None
 
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> "BatchFeature":
-        mm_counts = mm_items.get_all_counts()
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
+        )
 
-        valid_mm_items = mm_items.select({k for k, c in mm_counts.items() if c > 0})
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        if not hf_data:
+            return self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data)
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_counts)
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
         # Ask for the replacement each placeholder expands to, and record it as
         # per-item fields: its token ids, and the tokens or patches behind them
-        if has_mm_data := any(mm_data.values()):
-            mm_data = {**mm_data, "return_text_replacement_offsets": True}
+        if has_mm_data := any(hf_data.values()):
+            hf_data = {**hf_data, "return_text_replacement_offsets": True}
 
         try:
             hf_inputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
-                dict(text=prompt_text, **mm_data),
-                hf_processor_mm_kwargs,
+                self.info.get_hf_processor(**hf_kwargs),
+                dict(text=prompt_text, **hf_data),
+                hf_kwargs,
             )
         except ValueError:
-            if any(mm_data.values()):
+            if any(hf_data.values()):
                 raise
             # Some processors reject a prompt holding placeholders with
             # no data to go with them, so tokenize it without them
@@ -819,7 +813,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                 dict(input_ids=[tokenizer.encode(prompt_text)]), tensor_type="pt"
             )
         self._unpad_images(hf_inputs)
-        self._unpad_audios(hf_inputs, mm_data, hf_processor_mm_kwargs)
+        self._unpad_audios(hf_inputs, hf_data, hf_kwargs)
 
         # Drop the inputs the model would reject
         hf_inputs.pop("mm_token_type_ids", None)
@@ -839,9 +833,10 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     "so it can be fixed, and install `transformers<5.15.0` in the "
                     "meantime to locate placeholders in the expanded prompt instead."
                 )
-            hf_inputs.update(passthrough_data)
             hf_inputs.pop("input_ids", None)
-            return hf_inputs
+            return self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, hf_inputs
+            )
 
         tokenizer = self.info.get_tokenizer()
         replacements = defaultdict[str, list[list[int]]](list)
@@ -859,7 +854,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, mm_data, len(seqs)
+                    hf_inputs, hf_data, len(seqs)
                 )
             elif modality == "audio":
                 counts = []
@@ -868,10 +863,11 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
                     counts.append(int(ids.eq(_get_embed_token_id(ids)).sum()))
                 hf_inputs["num_audio_tokens"] = torch.tensor(counts)
 
-        hf_inputs.update(passthrough_data)
         hf_inputs.pop("input_ids")
 
-        return hf_inputs
+        return self._finalize_hf_mm_data(
+            hf_data, hf_kwargs, passthrough_data, hf_inputs
+        )
 
 
 # From this version on, a processor reporting no offsets is an error rather than a

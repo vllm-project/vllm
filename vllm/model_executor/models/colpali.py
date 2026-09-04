@@ -21,7 +21,7 @@ from collections.abc import Iterable, Mapping
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PaliGemmaProcessor
+from transformers import PaliGemmaProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
@@ -60,31 +61,19 @@ class ColPaliProcessingInfo(PaliGemmaProcessingInfo):
 class ColPaliMultiModalProcessor(PaliGemmaMultiModalProcessor):
     """Multimodal processor for ColPali."""
 
-    def _apply_hf_processor_main(
+    def _get_hf_mm_inputs(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
-        )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
-
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         # The ColPali tokenizer_config.json ships with a small default
         # max_length (50) that truncates the 1024 image tokens inserted
         # by PaliGemmaProcessor, causing a token-count mismatch.
         # vLLM enforces its own max_model_len, so we disable HF
         # truncation to keep all image + text tokens intact.
-        processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            mm_data,
-            dict(**hf_processor_mm_kwargs, truncation=False),
-        )
-        processed_data.update(passthrough_data)
-        return processed_data
+        return hf_inputs._replace(hf_kwargs=dict(hf_inputs.hf_kwargs, truncation=False))
 
 
 @default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")

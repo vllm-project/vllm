@@ -28,11 +28,10 @@ from vllm.model_executor.models.voxtral import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
-    MultiModalPromptUpdates,
+    MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
@@ -60,10 +59,10 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsOptionalItems,
-        mm_prompt_updates: MultiModalPromptUpdates,
+        mm_res: MultiModalProcessingResult,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        mm_kwargs = mm_res.kwargs
+
         # there are no placeholder audio tokens for streaming
         # so we need to build the place placeholder positions manually
 
@@ -86,7 +85,7 @@ class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
             * [0],  # only used for length computation, so we can take dummy inputs
             is_embed=None,
         )
-        return prompt_ids, {"audio": [features_info]}
+        return mm_res.prompt_ids, {"audio": [features_info]}
 
 
 class TimeEmbedding(torch.nn.Module):
