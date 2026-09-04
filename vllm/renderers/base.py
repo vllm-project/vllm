@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -77,14 +79,18 @@ class BaseRenderer(ABC, Generic[_T]):
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
 
+        self._resources = ExitStack()
+        self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self.tokenizer = tokenizer
 
         # Background multimodal warmup task (a future returned by
-        # ``_mm_executor``) so it overlaps engine-core initialization while
+        # _mm_executor) so it overlaps engine-core initialization while
         # staying serialized with the serving path through the same
         # single-worker executor. None when no background warmup has been
         # launched (or it has already been joined). Routing the warmup through
-        # ``_mm_executor`` (max_workers=1) guarantees it can never run
+        # _mm_executor (max_workers=1) guarantees it can never run
         # concurrently with a serving request inside the numba workqueue
         # parallel region, which would otherwise hit numba's
         # "Concurrent access has been detected" fatal abort (see
@@ -104,10 +110,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
+        self._mm_executor = ThreadPoolExecutor(max_workers=1)
+        self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -152,6 +160,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+                self._resources.callback(mm_processor_cache.close)
 
             # A second processor with its own processor-only cache.
             # Used by the tokenize endpoint so that tokenize-only
@@ -295,11 +304,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def start_mm_warmup_in_background(self) -> None:
         # Launch the multimodal warmup as a task on the single-worker
-        # ``_mm_executor`` so it overlaps with engine-core initialization
+        # _mm_executor so it overlaps with engine-core initialization
         # (model loading) while staying serialized with the serving path.
         #
-        # Why the *same* executor as serving (not a separate Thread):
-        # ``_process_multimodal`` runs on ``_mm_executor`` (max_workers=1) and
+        # Why the same executor as serving (not a separate Thread):
+        # _process_multimodal runs on _mm_executor (max_workers=1) and
         # enters the numba workqueue parallel region (e.g. Kimi K2.5 vision
         # preprocessing via kimi_k25_vision_fused). A separate warmup Thread
         # would run concurrently with that single serving worker, so both
@@ -307,7 +316,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # time and trip numba's "Concurrent access has been detected" ->
         # "Fatal Python error: Aborted" (see vllm/utils/jit_monitor.py, which
         # forces the non-threadsafe workqueue layer). Submitting the warmup to
-        # the *same* single-worker executor makes warmup and serving
+        # the same single-worker executor makes warmup and serving
         # physically incapable of overlapping on the numba threading layer,
         # while still overlapping at the process level with the (forked)
         # engine-core init in the main thread.
@@ -326,7 +335,7 @@ class BaseRenderer(ABC, Generic[_T]):
     def _join_mm_warmup(self) -> None:
         # Wait for the background MM warmup task to finish, if one was started.
         # Called from the main / event-loop thread (reset_mm_cache, warmup,
-        # shutdown) — never from inside the ``_mm_executor`` worker — so
+        # shutdown) — never from inside the _mm_executor worker — so
         # waiting on the future cannot deadlock.
         future = getattr(self, "_mm_warmup_future", None)
         if future is not None:
@@ -376,21 +385,12 @@ class BaseRenderer(ABC, Generic[_T]):
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
-        # Wait for any background MM warmup to finish before closing the
-        # mm_processor_cache and stopping the executors.
+        # Wait for any background MM warmup to finish first: it runs on the
+        # _mm_executor and touches the mm_processor_cache, so it must be
+        # quiescent before _resources.close() tears down the executors and
+        # the cache (both are registered as resources in __init__).
         self._join_mm_warmup()
-
-        mm_processor_cache = self.mm_processor_cache
-        if mm_processor_cache is not None:
-            mm_processor_cache.close()
-
-        if executor := getattr(self, "_executor", None):
-            executor.shutdown(wait=False)
-
-        if (
-            mm_executor := getattr(self, "_mm_executor", None)
-        ) is not None and mm_executor is not executor:
-            mm_executor.shutdown(wait=False)
+        self._resources.close()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -561,6 +561,27 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         return TokensPrompt(prompt_token_ids=list(token_ids), **prompt)
 
+    @staticmethod
+    def _apply_prompt_char_offset(
+        prompt: TokensPrompt, char_offset: int
+    ) -> TokensPrompt:
+        """Map token offsets back to the original prompt after a text pre-trim."""
+        if char_offset == 0:
+            return prompt
+
+        offsets = prompt.get("prompt_token_offsets")
+        if offsets is not None:
+            prompt["prompt_token_offsets"] = [
+                # Fast tokenizers use (0, 0) for special tokens, which are
+                # not character spans in the source prompt.
+                (start, end)
+                if (start, end) == (0, 0)
+                else (start + char_offset, end + char_offset)
+                for start, end in offsets
+            ]
+
+        return prompt
+
     def _tokenize_prompt(
         self,
         prompt: TextPrompt,
@@ -616,8 +637,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -652,8 +677,12 @@ class BaseRenderer(ABC, Generic[_T]):
                     "Expected prompt['prompt'] to be a string before tokenization; "
                     "use 'prompt_token_ids' for token ID inputs"
                 )
+            prompt_char_offset = params._get_text_truncation_offset(
+                self.tokenizer, prompt["prompt"]
+            )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
+            prompt = self._apply_prompt_char_offset(prompt, prompt_char_offset)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
@@ -823,6 +852,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data: MultiModalDataDict,
         mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
+        media_io_kwargs: Mapping[str, Mapping[str, object]] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> "MultiModalInput":
@@ -845,6 +875,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_data_items,
             mm_uuid_items,
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            media_io_kwargs=media_io_kwargs or {},
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
@@ -873,6 +904,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -935,6 +967,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                media_io_kwargs=prompt.get("media_io_kwargs"),
                 skip_mm_cache=skip_mm_cache,
             )
         else:
@@ -974,6 +1007,15 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
 
+    def _get_skip_decoder_start_token(self) -> bool:
+        """Whether the multimodal processor supplies a complete decoder prefix."""
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                return self.mm_processor.skip_decoder_start_token
+        return False
+
     def _process_enc_dec(
         self,
         prompt: EncoderDecoderTokPrompt,
@@ -982,13 +1024,6 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
-
-        skip_decoder_start_token = False
-        if self.mm_processor is not None:
-            from vllm.multimodal.processing import EncDecMultiModalProcessor
-
-            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
-                skip_decoder_start_token = self.mm_processor.skip_decoder_start_token
 
         return build_enc_dec_input(
             encoder_input=self._process_singleton(
@@ -1000,7 +1035,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
-            skip_decoder_start_token=skip_decoder_start_token,
+            skip_decoder_start_token=self._get_skip_decoder_start_token(),
         )
 
     async def _process_enc_dec_async(
@@ -1027,6 +1062,7 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_input=encoder_input,
             decoder_input=decoder_input,
             decoder_start_token_id=self.get_dec_start_token_id(),
+            skip_decoder_start_token=self._get_skip_decoder_start_token(),
         )
 
     def process_for_engine(
@@ -1146,6 +1182,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
@@ -1182,6 +1220,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
+        prompt_extras = dict(prompt_extras or {})
+        prompt_extras["media_io_kwargs"] = chat_params.media_io_kwargs or {}
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = await asyncio.gather(
