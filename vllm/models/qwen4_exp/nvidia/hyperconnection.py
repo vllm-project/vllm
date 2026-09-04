@@ -52,9 +52,10 @@ class GatedResidual(nn.Module):
 
     ``combine_and_mix()`` runs the pre pipeline (grouped GemmaRMSNorm -> merged
     low-rank down+inject GEMM -> silu -> up GEMM -> sigmoid -> gated mean
-    over the HC streams). When passed a pending block output and an injection,
-    it fuses their residual combine with the RMSNorm. Final mixers use
-    ``use_combine=False`` and do not produce a new injection.
+    over the HC streams). When passed a pending block output, it fuses its
+    residual combine with the RMSNorm. A missing injection selects unit-weight
+    combine. Final mixers use ``use_combine=False`` and do not produce a new
+    injection.
 
     Weights: the norm owns the grouped GemmaRMSNorm affine; the projections
     are vLLM Linear modules (merged replicated linear for down+inject), so
@@ -153,13 +154,14 @@ class GatedResidual(nn.Module):
         self,
         hidden_states: torch.Tensor,
         prev_block_output: torch.Tensor,
-        prev_injection: torch.Tensor,
+        prev_injection: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Consume a pending combine, then prepare the next block input.
 
         ``hidden_states`` is the multi-stream state from before the pending
         block's mix. Its combine with ``block_output`` is fused with this
-        module's input RMSNorm.
+        module's input RMSNorm. A missing injection applies the block output
+        to every stream with unit weight.
         """
         hidden_states, xn = hc_combine_norm(
             hidden_states,
@@ -189,7 +191,7 @@ class GatedResidual(nn.Module):
         self,
         hidden_states: torch.Tensor,
         block_output: torch.Tensor,
-        injection: torch.Tensor,
+        injection: torch.Tensor | None,
     ) -> torch.Tensor:
         return hc_combine(hidden_states, block_output, injection, self.hc_count)
 
