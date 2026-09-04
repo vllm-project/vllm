@@ -72,8 +72,13 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
         self._pending_load_kwargs = kwargs
+        self.kv_connector.prepare_forward(**kwargs)
 
-        if scheduler_output.has_sync_kv_loads:
+
+        if (
+            scheduler_output.has_sync_kv_loads
+            or self.kv_connector.requires_pre_forward_start
+        ):
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
         # Otherwise start the async load after forward to keep submission
