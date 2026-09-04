@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
-    VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
@@ -324,7 +323,6 @@ if TYPE_CHECKING:
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
-    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_ENABLE_HPC_OPS: bool = False
 
 
@@ -1067,17 +1065,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
-    # Hash algorithm for multimodal content hashing.
-    # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
-    # - "sha256": FIPS 140-3 compliant, widely supported
-    # - "sha512": FIPS 140-3 compliant, faster on 64-bit systems
-    # Use sha256 or sha512 for FIPS compliance in government/enterprise deployments
-    "VLLM_MM_HASHER_ALGORITHM": env_with_choices(
-        "VLLM_MM_HASHER_ALGORITHM",
-        "blake3",
-        ["blake3", "sha256", "sha512"],
-        case_sensitive=False,
-    ),
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
     "VLLM_XLA_CACHE_PATH": lambda: os.path.expanduser(
@@ -1168,11 +1155,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
-    ),
-    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
-        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
-        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
-        else None
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

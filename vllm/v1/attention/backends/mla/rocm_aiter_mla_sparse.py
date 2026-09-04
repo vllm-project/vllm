@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -617,12 +618,14 @@ class ROCMAiterMLASparseMetadataBuilder(
         reduce_partial_map = None
         if not use_triton_sparse:
             num_reqs = common_attn_metadata.num_reqs
+            with gpu_sync_allowed():
+                seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].cpu().numpy()
             clamped_seq_lens = np.minimum(
-                common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+                seq_lens_cpu,
                 self.topk_tokens,
             )
             clamped_context_lens = np.minimum(
-                common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
+                seq_lens_cpu - seg_lengths,
                 self.topk_tokens,
             )
             metadata_key = (

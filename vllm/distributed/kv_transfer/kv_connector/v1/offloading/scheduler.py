@@ -275,7 +275,7 @@ class SchedulerOffloadConfig(NamedTuple):
         if retention_interval is not None:
             if retention_interval < 0:
                 raise ValueError(
-                    f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                    f"prefix_cache_retention_interval "
                     f"({retention_interval}) must be non-negative."
                 )
             for config in kv_group_configs:
@@ -284,7 +284,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     and retention_interval % config.tokens_per_chunk != 0
                 ):
                     raise ValueError(
-                        f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                        f"prefix_cache_retention_interval "
                         f"({retention_interval}) must be a multiple of "
                         f"tokens_per_chunk ({config.tokens_per_chunk})."
                     )
