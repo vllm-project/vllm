@@ -1865,17 +1865,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.num_computed_tokens.gpu,
             self.req_states.prompt_len.np,
         )
-        if self.prompt_logprobs_worker.prompt_logprob_token_ids:
-            prompt_token_id_logprobs_dict = (
-                self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
-                    self.model.compute_logits,
-                    hidden_states,
-                    input_batch,
-                    self.req_states.prompt_len.np,
-                )
+        prompt_token_id_logprobs_dict = (
+            self.prompt_logprobs_worker.compute_prompt_token_id_logprobs(
+                self.model.compute_logits,
+                hidden_states,
+                input_batch,
+                self.req_states.prompt_len.np,
             )
-        else:
-            prompt_token_id_logprobs_dict = {}
+        )
 
         # Prepare the model runner output.
         model_runner_output = ModelRunnerOutput(

@@ -10,9 +10,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, TokenIdLogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.logprob import (
-    compute_topk_scores,
-)
+from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+
+CHUNK_SIZE = 1024
 
 
 class PromptLogprobsWorker:
@@ -71,32 +71,32 @@ class PromptLogprobsWorker:
             if prompt_row_start == 0 and pending:
                 pending.clear()
             row_start += max(prompt_start - prompt_row_start, 0)
-            prefill_end = int(input_batch.num_computed_prefill_tokens_np[i]) + int(
-                input_batch.num_scheduled_tokens[i]
-            )
+            prefill_end = prompt_row_start + int(input_batch.num_scheduled_tokens[i])
+            is_last_chunk = prefill_end >= int(prompt_lens[state_idx])
             # The final prompt row predicts the first decode token and is not
             # a prompt-position score, matching the existing prompt-logprobs
             # output convention.
-            if prefill_end >= int(prompt_lens[state_idx]):
+            if is_last_chunk:
                 row_end -= 1
             if row_start >= row_end:
+                # This chunk scores nothing; still emit whatever earlier
+                # chunks accumulated once the prompt is fully prefilled.
+                if is_last_chunk and pending:
+                    out[req_id] = TokenIdLogprobsTensors.cat(pending)
+                    pending.clear()
                 continue
             ids = torch.as_tensor(
                 candidate_ids_for_req,
                 dtype=torch.int64,
                 device=hidden_states.device,
             ).expand(row_end - row_start, -1)
-            scores = compute_prompt_token_id_logprobs_with_chunking(
+            part = compute_prompt_token_id_logprobs_with_chunking(
                 ids,
                 hidden_states[row_start:row_end],
                 logits_fn,
                 self.logprobs_mode,
             )
-            part = TokenIdLogprobsTensors(
-                scores.token_ids,
-                scores.logprobs,
-            )
-            if prefill_end < int(prompt_lens[state_idx]):
+            if not is_last_chunk:
                 pending.append(part)
                 continue
             if pending:
@@ -277,7 +277,6 @@ def compute_prompt_logprobs_with_chunking(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
-    CHUNK_SIZE = 1024
     token_ids = []
     scores = []
     ranks = []
@@ -326,8 +325,8 @@ def compute_prompt_token_id_logprobs_with_chunking(
     ids_chunks: list[torch.Tensor] = []
     score_chunks: list[torch.Tensor] = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
-    for start_idx in range(0, candidate_token_ids.shape[0], 1024):
-        end_idx = start_idx + 1024
+    for start_idx in range(0, candidate_token_ids.shape[0], CHUNK_SIZE):
+        end_idx = start_idx + CHUNK_SIZE
         logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
         ids = candidate_token_ids[start_idx:end_idx]
         if logits_mode:

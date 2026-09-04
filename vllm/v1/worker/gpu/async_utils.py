@@ -159,15 +159,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
-            if self.model_runner_output.prompt_token_id_logprobs_dict:
-                self.prompt_token_id_logprobs_dict = {
-                    k: v.to_cpu_nonblocking()
-                    for k, v in (
-                        self.model_runner_output.prompt_token_id_logprobs_dict.items()
-                    )
-                }
-            else:
-                self.prompt_token_id_logprobs_dict = {}
+            token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
+            self.prompt_token_id_logprobs_dict = {
+                k: v.to_cpu_nonblocking() for k, v in token_id_logprobs.items()
+            }
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)

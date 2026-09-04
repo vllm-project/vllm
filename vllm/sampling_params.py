@@ -28,11 +28,13 @@ _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
 MAX_LOGPROB_TOKEN_IDS = 128
-# Prompt scoring gathers one row per prompt position, so OPD's global union
-# can be much larger than the decode-only fixed-ID request limit.
-MAX_PROMPT_LOGPROB_TOKEN_IDS = 16384
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
+MAX_PROMPT_LOGPROB_TOKEN_IDS = 16384
+"""Upper bound on `SamplingParams.prompt_logprob_token_ids` list length.
+Prompt scoring gathers one row per prompt position, so the requested union can
+be much larger than the decode-only `MAX_LOGPROB_TOKEN_IDS` limit."""
 
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
@@ -407,6 +409,7 @@ class SamplingParams(
         logprobs: int | None = None,
         prompt_logprobs: int | None = None,
         prompt_logprob_token_ids: list[int] | None = None,
+        prompt_logprob_start: int | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
@@ -422,7 +425,6 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
-        prompt_logprob_start: int | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
