@@ -178,7 +178,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            positions=positions, x=hidden_states, input_ids=input_ids
         )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
         if self.mtp_block.use_sequence_parallel:
@@ -502,13 +502,16 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
+        self.process_weights_after_loading()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
+
+    def process_weights_after_loading(self) -> None:
+        self.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """

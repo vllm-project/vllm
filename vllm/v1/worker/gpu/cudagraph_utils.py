@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+import itertools
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from itertools import product
-from typing import Any, NamedTuple, Protocol
+from itertools import groupby, product
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import torch
 import torch.nn as nn
@@ -15,7 +17,9 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
@@ -29,13 +33,19 @@ from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
 
@@ -58,6 +68,17 @@ class BatchExecutionDescriptor:
     # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
+
+
+def make_cudagraph_stats(
+    batch_desc: BatchExecutionDescriptor, num_tokens: int
+) -> CUDAGraphStat:
+    return CUDAGraphStat(
+        num_unpadded_tokens=num_tokens,
+        num_padded_tokens=batch_desc.num_tokens,
+        num_paddings=batch_desc.num_tokens - num_tokens,
+        runtime_mode=str(batch_desc.cg_mode),
+    )
 
 
 class CreateForwardFn(Protocol):
@@ -99,6 +120,15 @@ def _is_compatible(
     )
 
 
+def has_compiled_submodule(model: nn.Module) -> bool:
+    """Whether any submodule is an active @support_torch_compile module."""
+    return any(
+        isinstance(m, TorchCompileWithNoGuardsWrapper)
+        and not getattr(m, "do_not_compile", True)
+        for m in model.modules()
+    )
+
+
 class CudaGraphManager:
     def __init__(
         self,
@@ -131,6 +161,12 @@ class CudaGraphManager:
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
         self._graphs_captured = False
+
+        # Profiling hooks, set only by profile_cudagraph_memory() below: cap
+        # FULL-mode capture at the N largest descriptors and record each
+        # captured FULL graph's memory delta for extrapolation.
+        self._max_full_descs_to_capture: int | None = None
+        self._capture_mem_samples: list[int] | None = None
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
@@ -183,9 +219,6 @@ class CudaGraphManager:
         separate_decode_routine = self.cudagraph_mode.separate_routine()
         max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
-        descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
-            defaultdict(list)
-        )
         descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
@@ -198,21 +231,23 @@ class CudaGraphManager:
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
-            num_spec_per_batch_size = (
-                speculative_config.num_speculative_tokens_per_batch_size
-            )
-            # uses_dynamic_speculative_decoding() guarantees this is set.
-            assert num_spec_per_batch_size is not None
             # decode_query_len = num_speculative_steps + num_new_sampled_tokens
             # _per_step. Recover num_new_sampled_tokens_per_step
             # from the values the manager already has.
             num_new_sampled_tokens_per_step = (
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
-            # Each entry is (range_start, range_end, num_speculative_tokens).
-            decode_query_lens = [
-                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
-            ]
+            dense_schedule = build_dynamic_sd_schedule_lookup(
+                speculative_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=self.max_num_reqs,
+                vllm_num_speculative_tokens=self.vllm_config.num_speculative_tokens,
+            )
+            decode_query_lens = sorted(
+                {
+                    num_spec + num_new_sampled_tokens_per_step
+                    for num_spec in dense_schedule[1:]
+                }
+            )
         else:
             decode_query_lens = [self.decode_query_len]
 
@@ -233,7 +268,6 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[decode_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
             elif separate_decode_routine and decode_mode and not self.varlen_decode:
@@ -259,9 +293,6 @@ class CudaGraphManager:
                     # avoid duplicate graphs
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
-                        descs_by_token_lora[
-                            (rounded_num_tokens, num_active_loras)
-                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
@@ -279,26 +310,26 @@ class CudaGraphManager:
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
-
-        if not descs_by_token_lora:
-            return
-
-        all_token_counts = sorted({k[0] for k in descs_by_token_lora})
-        current_range_start = 0
-        for token_cg_size in all_token_counts:
-            for i in range(current_range_start, token_cg_size + 1):
-                for num_active_loras in self.lora_capture_cases:
-                    staging_key = (token_cg_size, num_active_loras)
-                    if staging_key in descs_by_token_lora:
-                        self._candidates[(i, num_active_loras)] = descs_by_token_lora[
-                            staging_key
-                        ]
-            current_range_start = token_cg_size + 1
 
         for mode, descs in descs_by_mode.items():
             descs.sort(key=lambda d: d.num_tokens, reverse=True)
             self._capture_descs[mode] = descs
+
+        for mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+            mode_descs = tuple(reversed(descs_by_mode.get(mode, [])))
+            for num_active_loras in self.lora_capture_cases:
+                lora_descs = [
+                    d for d in mode_descs if d.num_active_loras == num_active_loras
+                ]
+                current_range_start = 0
+                # Dynamic speculative decoding can produce multiple graphs with the same
+                # num_tokens. Group them so each graph covers the same candidate range.
+                for num_tokens, group in groupby(lora_descs, lambda d: d.num_tokens):
+                    matching = list(group)
+                    for i in range(current_range_start, num_tokens + 1):
+                        key = (i, num_active_loras)
+                        self._candidates.setdefault(key, []).extend(matching)
+                    current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
@@ -327,6 +358,14 @@ class CudaGraphManager:
                     continue
 
                 descs = self._capture_descs[mode]
+                if (
+                    mode == CUDAGraphMode.FULL
+                    and self._max_full_descs_to_capture is not None
+                ):
+                    # Profiling only: capture a sample of the largest FULL
+                    # graphs; the total cost is extrapolated from their
+                    # per-graph memory deltas.
+                    descs = descs[: self._max_full_descs_to_capture]
                 if is_global_first_rank():
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
@@ -362,13 +401,22 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        with torch.cuda.graph(graph, self.pool):
+                        if self._capture_mem_samples is not None:
+                            torch.accelerator.synchronize()
+                            free_before = torch.accelerator.get_memory_info()[0]
+                        with torch.cuda.graph(
+                            graph, self.pool, stream=current_stream()
+                        ):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
                             # forks copy_stream, but wait_prefetch only happens in
                             # the next forward pass.
                             get_offloader().join_after_forward()
+                        if self._capture_mem_samples is not None:
+                            torch.accelerator.synchronize()
+                            free_after = torch.accelerator.get_memory_info()[0]
+                            self._capture_mem_samples.append(free_before - free_after)
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
@@ -472,6 +520,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_manager: "PCPManager | None" = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -481,6 +530,16 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
+
+        if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
+            self.use_breakable_cg or has_compiled_submodule(model)
+        ):
+            raise RuntimeError(
+                f"{type(model).__name__}: piecewise CUDA graphs "
+                f"(cudagraph_mode={self.cudagraph_mode.name}) unavailable, "
+                "model is not torch-compiled and breakable CUDA graph is off. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
+            )
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -521,6 +580,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len,
+                pcp_manager=pcp_manager,
             )
 
             # Capture with dummy rows marked as padding.
@@ -613,12 +673,16 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
+    slot_mapping_provider: BlockTables | PCPManager = block_tables
+    if pcp_manager is not None:
+        slot_mapping_provider = pcp_manager
+    slot_mappings = slot_mapping_provider.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
@@ -668,3 +732,196 @@ def prepare_inputs_to_capture(
         for_capture=full_cudagraph,
     )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
+
+
+# ---------------------------------------------------------------------------
+# CUDA graph memory profiling
+# ---------------------------------------------------------------------------
+
+# Number of FULL graphs captured during profiling; the total FULL capture
+# cost is extrapolated from this sample to avoid a second full capture.
+_FULL_GRAPH_PROFILING_SAMPLES = 2
+# Floor for the extrapolated per-graph cost (driver overhead per graph).
+_MIN_PER_GRAPH_BYTES = 1 << 20
+
+
+@torch.inference_mode()
+def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
+    """Estimate the GPU memory needed for CUDA graph capture.
+
+    Called during memory profiling, *before* the real KV cache is allocated,
+    so that ``Worker.determine_available_memory`` can reserve headroom for
+    graph capture. Bootstraps a minimal KV cache, runs ``capture_model()``
+    once, then releases everything so the real init/capture path starts clean.
+
+    FULL graphs bake in KV cache pointers, so only the largest few are
+    captured (into a throwaway pool) and their total cost is extrapolated.
+    PIECEWISE, encoder and speculator graphs are measured in full. All
+    profiling captures are discarded afterwards: replaying graphs recorded
+    against the throwaway profiling state is unsafe (e.g. inductor graph
+    partition reclaims the storages of earlier cudagraph recordings once the
+    real capture records new ones, leading to use-after-free crashes).
+    """
+    if runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        return 0
+
+    gc.collect()
+    torch.accelerator.empty_cache()
+
+    # Run the whole profiling phase against a throwaway CUDA graph pool by
+    # pointing the global graph pool singleton at it: objects that bind the
+    # pool lazily during profiling (speculator cudagraph managers, breakable
+    # runners created mid-capture) then land on the throwaway pool too. Pools
+    # bound before profiling (piecewise wrappers) are swapped explicitly in
+    # the inner block. Profiling graphs captured into the persistent global
+    # pool and then discarded would drop its use_count to 0, tripping the c10
+    # allocator's create_or_incref_pool assert when the real capture reuses
+    # that pool ("use_count > 0 INTERNAL ASSERT FAILED").
+    platform_cls = type(current_platform)
+    saved_global_pool = platform_cls._global_graph_pool
+    throwaway_pool = current_platform.graph_pool_handle()
+    platform_cls._global_graph_pool = throwaway_pool
+
+    try:
+        with set_current_vllm_config(runner.vllm_config):
+            _init_minimal_kv_cache_for_profiling(runner)
+
+        manager = runner.cudagraph_manager
+        assert manager is not None
+
+        # Don't count profiling captures; the real capture_model() runs later.
+        saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
+        saved_capture_triggers = compilation_counter.num_gpu_runner_capture_triggers
+        all_wrappers: list[Any] = []
+        original_pools: dict[int, Any] = {}
+        speculator = getattr(runner, "speculator", None)
+        spec_manager_names: list[str] = []
+        try:
+            if not manager.needs_capture():
+                return 0
+            manager.pool = throwaway_pool
+            if manager.use_breakable_cg:
+                # Create the breakable runner before the wrapper pool swap so
+                # its pool is covered as well.
+                manager.init_breakable_cg_runner(runner.model)
+            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+                BreakableCUDAGraphWrapper._all_instances
+            )
+            for wrapper in all_wrappers:
+                original_pools[id(wrapper)] = wrapper.graph_pool
+                wrapper.graph_pool = throwaway_pool
+            if speculator is not None:
+                spec_manager_names = [
+                    name
+                    for name, value in vars(speculator).items()
+                    if isinstance(value, CudaGraphManager)
+                ]
+            manager._max_full_descs_to_capture = _FULL_GRAPH_PROFILING_SAMPLES
+            mem_samples: list[int] = []
+            manager._capture_mem_samples = mem_samples
+
+            measured = int(runner.capture_model())
+
+            # The measured delta covers PIECEWISE, encoder and speculator graphs
+            # plus the sampled FULL graphs; swap the sampled FULL cost for the
+            # extrapolated total. FULL and PIECEWISE share one pool here just as
+            # they share the global pool at runtime, so the overlap is not
+            # double-counted.
+            num_full_graphs = len(manager._capture_descs.get(CUDAGraphMode.FULL, []))
+            full_estimate = _extrapolate_full_graph_memory(mem_samples, num_full_graphs)
+            return max(measured - sum(mem_samples) + full_estimate, 0)
+        finally:
+            compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+            compilation_counter.num_gpu_runner_capture_triggers = saved_capture_triggers
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            for wrapper in all_wrappers:
+                if id(wrapper) in original_pools:
+                    wrapper.graph_pool = original_pools[id(wrapper)]
+            # Drop the speculator's cudagraph managers; the real
+            # initialize_kv_cache re-creates them. Their profiling graphs
+            # release the throwaway pool here rather than after the real init.
+            for name in spec_manager_names:
+                setattr(speculator, name, None)
+            # Drop local references before teardown detaches the runner's
+            # manager and flushes the allocator.
+            del manager
+            _teardown_profiling_state(runner)
+    finally:
+        platform_cls._global_graph_pool = saved_global_pool
+
+
+def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) -> int:
+    """Extrapolate the total FULL capture cost from samples of the largest
+    graphs. The first capture allocates the pool baseline; later graphs mostly
+    reuse it, so the second sample is taken as the per-graph cost."""
+    if not mem_samples:
+        return 0
+    first_capture = mem_samples[0]
+    per_graph = max(mem_samples[1], _MIN_PER_GRAPH_BYTES) if len(mem_samples) > 1 else 0
+    return first_capture + (total_graphs - 1) * per_graph
+
+
+def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
+    """Allocate the smallest KV cache that still lets every graph be captured."""
+    from vllm.v1.core.kv_cache_utils import (
+        get_kv_cache_config_from_groups,
+        get_kv_cache_groups,
+    )
+
+    kv_cache_spec = runner.get_kv_cache_spec()
+    kv_cache_groups = get_kv_cache_groups(runner.vllm_config, kv_cache_spec)
+    # At least one block per sequence is required to capture the graphs.
+    min_blocks = (
+        min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
+        or 1
+    )
+    saved_override = runner.cache_config.num_gpu_blocks_override
+    runner.cache_config.num_gpu_blocks_override = min_blocks
+    try:
+        minimal_config = get_kv_cache_config_from_groups(
+            runner.vllm_config, kv_cache_groups, available_memory=0
+        )
+    finally:
+        runner.cache_config.num_gpu_blocks_override = saved_override
+
+    runner.initialize_kv_cache(minimal_config, is_profiling=True)
+    runner.cache_config.num_gpu_blocks = minimal_config.num_blocks
+
+
+def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
+    """Release the profiling KV cache and captured graphs while keeping model
+    weights, so the real ``initialize_kv_cache`` starts from a clean slate."""
+    torch.accelerator.synchronize()
+    if hasattr(runner.model_state, "_mamba_ctx"):
+        runner.model_state._mamba_ctx = None
+    # Invalidate the align-mode Mamba group metadata cached from the
+    # profiling KVCacheConfig: the real (e.g. PP-projected) config may
+    # place Mamba layers into a different group layout, so it must be
+    # re-derived from the real config.
+    if hasattr(runner.model_state, "_mamba_group_ids"):
+        runner.model_state._mamba_group_ids = []
+    if hasattr(runner.model_state, "_mamba_spec"):
+        runner.model_state._mamba_spec = None
+    if hasattr(runner, "kv_caches"):
+        runner.kv_caches.clear()
+    if hasattr(runner, "attn_groups"):
+        runner.attn_groups.clear()
+    if hasattr(runner, "kv_cache_config"):
+        del runner.kv_cache_config
+    # Dropping the manager releases the profiling graphs and throwaway pool.
+    runner.cudagraph_manager = None
+    # Release encoder graphs captured during profiling; the real
+    # capture_model() re-captures them.
+    if runner.model_state.supports_mm_inputs:
+        runner.model_state.encoder_runner.clear()
+    # Detach profiling KV tensors held by attention layers. The layers live
+    # in the static forward context for compiled models.
+    layers: Iterable[Any] = runner.compilation_config.static_forward_context.values()
+    if (model := getattr(runner, "model", None)) is not None:
+        layers = itertools.chain(layers, model.modules())
+    clear_layer_kv_caches(layers)
+    runner.cache_config.num_gpu_blocks = None
+    runner.maybe_remove_all_loras(runner.lora_config)
+    gc.collect()
+    torch.accelerator.empty_cache()

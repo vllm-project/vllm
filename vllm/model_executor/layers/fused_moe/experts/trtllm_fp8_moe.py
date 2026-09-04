@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-    trtllm_moe_pack_topk_ids_weights,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
@@ -34,6 +33,28 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
+
+
+def prepare_deepseek_fp8_x_sf(x: torch.Tensor, x_sf: torch.Tensor) -> torch.Tensor:
+    """Validate DeepSeek Blockwise FP8 tensors and return TRTLLM layout."""
+    if x.dtype != current_platform.fp8_dtype():
+        raise ValueError(
+            f"DeepSeekFp8 activations must use the platform E4M3 dtype; got {x.dtype}"
+        )
+    if x.ndim != 2 or x.shape[1] % 128 != 0:
+        raise ValueError(
+            "DeepSeekFp8 activations must be [M,K] with K divisible by 128; "
+            f"got {tuple(x.shape)}"
+        )
+    expected_shape = (x.shape[0], x.shape[1] // 128)
+    if x_sf.dtype != torch.float32 or tuple(x_sf.shape) != expected_shape:
+        raise ValueError(
+            "DeepSeekFp8 activation scales must be FP32 [M,K/128]; "
+            f"expected {expected_shape}, got dtype={x_sf.dtype}, "
+            f"shape={tuple(x_sf.shape)}"
+        )
+    # FlashInfer TRTLLM-gen consumes [K/128,M] for DeepSeekFp8/BlockMajorK.
+    return x_sf.t().contiguous()
 
 
 class TrtLlmFp8ExpertsBase:
@@ -57,12 +78,27 @@ class TrtLlmFp8ExpertsBase:
             activation_key,
             activation_format,
         )
-        if not supported or moe_config.num_experts <= 2048:
+        if not supported:
             return supported, reason
-        return False, (
-            "FlashInfer TRTLLM routing supports at most 2048 experts, "
-            f"but got {moe_config.num_experts}"
-        )
+        # FlashInfer accepts gemm1_alpha/beta/clamp_limit only for MXFP8; the
+        # DeepSeek-FP8 block-scale kernel rejects them and the per-tensor kernel
+        # has no clamp at all, so a model-requested SwiGLU clamp cannot be
+        # honored on those paths.
+        if (
+            moe_config.swiglu_limit is not None
+            or moe_config.swiglu_alpha is not None
+            or moe_config.swiglu_beta is not None
+        ) and (weight_key, activation_key) != (kMxfp8Static, kMxfp8Dynamic):
+            return False, (
+                "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
+                "parameters only for MXFP8 weights"
+            )
+        if moe_config.num_experts > 2048:
+            return False, (
+                "FlashInfer TRTLLM routing supports at most 2048 experts, "
+                f"but got {moe_config.num_experts}"
+            )
+        return True, None
 
     def __init__(
         self,
@@ -236,9 +272,12 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        topk_ids = topk_ids.to(dtype=torch.int32)
 
+        if a1q_scale is None:
+            raise RuntimeError(
+                "TRT-LLM FP8 experts require precomputed activation scales"
+            )
         assert a1q_scale is not None
 
         is_mxfp8 = self.quant_config.block_shape == [1, 32]
@@ -251,10 +290,10 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.BlockMajorK
-            hidden_states_scale = a1q_scale.t().contiguous()
+            hidden_states_scale = prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale)
 
         flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
-            topk_ids=packed_topk_ids,
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,

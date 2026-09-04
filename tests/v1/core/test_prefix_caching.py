@@ -4,6 +4,7 @@
 
 import copy
 from collections.abc import Callable
+from dataclasses import replace
 from math import lcm
 from types import SimpleNamespace
 
@@ -73,6 +74,7 @@ def make_request(
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
     lora_request: LoRARequest | None = None,
+    session_id: str | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -98,6 +100,7 @@ def make_request(
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
+        session_id=session_id,
     )
 
 
@@ -110,6 +113,11 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
     )
+    if "retention_interval" in kwargs:
+        kv_cache_config = replace(
+            kv_cache_config,
+            prefix_cache_retention_interval=kwargs.pop("retention_interval"),
+        )
     return KVCacheManager(kv_cache_config, **kwargs)
 
 
@@ -148,7 +156,7 @@ def make_kv_cache_config_hybrid_model(
     elif second_spec_type == "mamba":
         second_spec = MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
         )
 
@@ -183,7 +191,7 @@ def make_kv_cache_config_three_types(
     if third_spec_type == "mamba":
         third_spec = MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
         )
     elif third_spec_type == "sliding_window":
@@ -224,6 +232,83 @@ def make_kv_cache_config_three_types(
             ),
         ],
     )
+
+
+def test_prefix_cache_hit_uses_per_group_dcp_geometry():
+    """Prefix lookup must use each group's DCP size, not the process-wide one.
+
+    Target and draft MLA are both sharded (DCP=8); Mamba stays replicated
+    (DCP=1). Hits then align to the sharded full-attention block, not the
+    unsharded page size.
+    """
+    block_size = 16
+    dcp = 8
+    sharded_block = block_size * dcp
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["target_mla"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["draft_mla"],
+                MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        scheduler_block_size=sharded_block,
+        dcp_world_size=dcp,
+    )
+    target_mgr, draft_mgr, mamba_mgr = manager.coordinator.single_type_managers
+    assert target_mgr.dcp_world_size == dcp
+    assert draft_mgr.dcp_world_size == dcp
+    assert mamba_mgr.dcp_world_size == 1
+    assert target_mgr.block_size == sharded_block
+    assert draft_mgr.block_size == sharded_block
+    assert mamba_mgr.block_size == block_size
+
+    hash_fn = sha256
+    common_token_ids = [i for i in range(2) for _ in range(sharded_block)]
+    req0 = make_request("0", common_token_ids + [99] * 7, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(req0.prompt_token_ids), 0, computed_blocks
+    )
+    assert blocks is not None
+
+    req1 = make_request("1", common_token_ids + [100] * 5, block_size, hash_fn)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 2 * sharded_block
+    assert [len(group) for group in computed_blocks.blocks] == [2, 2, 16]
+
+    manager.free(req0)
+    manager.free(req1)
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -762,12 +847,12 @@ def _make_hybrid_kv_cache_config(
         ),
         "mamba": lambda: MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
         ),
         "mamba_align": lambda: MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
             mamba_cache_mode="align",
         ),
@@ -1080,9 +1165,10 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
@@ -2294,6 +2380,71 @@ def test_block_stored_event_group_idx(group_id: int):
     )
 
 
+def test_block_stored_event_session_id():
+    block_size = 4
+    session_id = "agent-session-1"
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=5),
+        max_model_len=8192,
+        enable_caching=True,
+        enable_kv_cache_events=True,
+        hash_block_size=block_size,
+    )
+    req = make_request(
+        "req_session_id",
+        prompt_token_ids=list(range(block_size * 2)),
+        block_size=block_size,
+        hash_fn=sha256,
+        session_id=session_id,
+    )
+
+    manager.allocate_slots(req, req.num_tokens)
+    events = manager.take_events()
+
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].session_id == session_id
+
+
+def test_session_id_does_not_affect_prefix_cache_identity():
+    block_size = 4
+    prompt_token_ids = list(range(block_size * 2 + 1))
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, num_blocks=8),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    first_req = make_request(
+        "req_session_a",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        session_id="session-a",
+    )
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(first_req)
+    allocated_blocks = manager.allocate_slots(
+        first_req,
+        first_req.num_tokens,
+        num_computed_tokens,
+        computed_blocks,
+    )
+    assert allocated_blocks is not None
+
+    second_req = make_request(
+        "req_session_b",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        session_id="session-b",
+    )
+    assert second_req.block_hashes == first_req.block_hashes
+
+    cached_blocks, num_cached_tokens, _ = manager.get_computed_blocks(second_req)
+    assert num_cached_tokens == block_size * 2
+    assert cached_blocks.get_block_ids() == (allocated_blocks.get_block_ids()[0][:2],)
+
+
 def test_block_stored_event_group_idx_multiple_groups():
     """
     Test BlockStored events for separate HMA groups that each carry the
@@ -2490,6 +2641,7 @@ def test_emit_cached_block_events():
         prompt_token_ids=list(range(num_tokens)),
         block_size=block_size,
         hash_fn=sha256,
+        session_id="agent-session-reuse",
     )
     assert len(req.block_hashes) >= num_cached_blocks
 
@@ -2527,6 +2679,7 @@ def test_emit_cached_block_events():
     assert event.medium == MEDIUM_GPU
     assert event.lora_id is None
     assert event.lora_name is None
+    assert event.session_id == "agent-session-reuse"
 
 
 def test_emit_cached_block_events_disabled():
@@ -3119,9 +3272,8 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     )
 
 
-def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
+def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     """Verify fixed intervals retain sparse tails plus the latest replay tail."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3153,6 +3305,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=64,
     )
 
     # The SWA manager uses the configured 64-token interval (a multiple of the
@@ -3184,18 +3337,15 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
     "interval, expected_match",
     [
         # scheduler_block_size is 32 (= lcm(4*8, 8)); 33 is not a multiple of it.
-        ("33", "multiple of scheduler_block_size"),
+        (33, "multiple of scheduler_block_size"),
         # A negative multiple (-32 % 32 == 0) must still be rejected explicitly,
         # otherwise it would pass the modulo check and silently degrade to dense.
-        ("-32", "non-negative"),
+        (-32, "non-negative"),
     ],
 )
-def test_hybrid_local_kv_retention_interval_rejects_invalid(
-    monkeypatch, interval, expected_match
-):
+def test_hybrid_local_kv_retention_interval_rejects_invalid(interval, expected_match):
     """A retention interval that is negative or not a multiple of
     scheduler_block_size errors out at construction time."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", interval)
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3228,12 +3378,36 @@ def test_hybrid_local_kv_retention_interval_rejects_invalid(
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=interval,
         )
 
 
-def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
+def test_zero_retention_is_ignored_for_full_attention():
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=16,
+        retention_interval=0,
+    )
+    assert manager.coordinator.retention_interval == 0
+
+
+def test_positive_retention_rejects_full_attention():
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
+    with pytest.raises(ValueError, match="no sliding-window or Mamba"):
+        make_kv_cache_manager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=16,
+            retention_interval=16,
+        )
+
+
+def test_hybrid_local_kv_retention_interval_survives_recycling():
     """Verify retained local checkpoints are reused after block recycling."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "1024")
     hash_block_size = 4
     kv_cache_config = KVCacheConfig(
         num_blocks=800,
@@ -3246,7 +3420,7 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.uint8,
-                    compress_ratio=4,
+                    tokens_per_state=4,
                 ),
             ),
             KVCacheGroupSpec(
@@ -3286,6 +3460,7 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
         max_model_len=4096,
         enable_caching=True,
         hash_block_size=hash_block_size,
+        retention_interval=1024,
     )
 
     def fill_request(request_id: str, token_offset: int) -> list[int]:
@@ -3314,9 +3489,8 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
     assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 16, 128, 256]
 
 
-def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatch):
+def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     """Verify latest-only retention reuses only the replayable prompt boundary."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3348,6 +3522,7 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=0,
     )
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
@@ -3388,14 +3563,13 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
     assert len(computed_blocks.blocks[1]) == 0
 
 
-def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
+def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     """Verify MTP/EAGLE SWA retention keeps the extra proof block.
 
     EAGLE/MTP lookup matches one additional local block after the returned
     prefix and then drops it. Sparse retention must therefore cache the normal
     local tail at the latest replay boundary plus one extra SWA block.
     """
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3428,6 +3602,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        retention_interval=0,
         use_eagle=True,
     )
 
@@ -3824,12 +3999,11 @@ def test_cache_hit_local_and_external_two_groups_preempt_and_reallocate():
     assert manager.get_blocks("test").get_block_ids() != ([], [])
 
 
-def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):
-    """Default path (no retention): freeing an SWA request must place its
+def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
+    """Dense retention: freeing an SWA request must place its
     uncached scratch blocks at the front of the free queue (recycled first)
     and keep its cached checkpoint blocks at the back (retained for prefix
     hits). This split is always-on, independent of the retention interval."""
-    monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 8
     kv_cache_config = KVCacheConfig(
         num_blocks=100,
@@ -3937,13 +4111,14 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
     )
 
 
-def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
+def test_pure_swa_retention_interval_caches_sparse_tails():
     """Sparse retention must work for a pure-SWA single-group model, not just
     hybrid models: only the per-interval tails plus the latest replay tail are
     cached, and a replay still hits the latest replayable boundary."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
     block_size = 16
-    manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
+    manager = _make_pure_swa_manager(
+        block_size, sliding_window=block_size, retention_interval=64
+    )
     assert type(manager.coordinator).__name__ == "UnitaryKVCacheCoordinator"
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
@@ -3976,11 +4151,12 @@ def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
     assert num_computed == 240
 
 
-def test_pure_swa_retention_latest_only(monkeypatch):
+def test_pure_swa_retention_latest_only():
     """`=0` on a pure-SWA model keeps only the latest replay tail."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 16
-    manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
+    manager = _make_pure_swa_manager(
+        block_size, sliding_window=block_size, retention_interval=0
+    )
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
@@ -4008,10 +4184,9 @@ def test_pure_swa_retention_latest_only(monkeypatch):
     assert num_computed == 240
 
 
-def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
-    """With retention unset, a pure-SWA model must keep the dense behavior:
+def test_pure_swa_dense_retention_caches_all():
+    """With retention set to ``None``, a pure-SWA model keeps dense behavior:
     every block boundary is a potential hit, so all blocks are cached."""
-    monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
     block_size = 16
     manager = _make_pure_swa_manager(block_size, sliding_window=block_size)
 
@@ -4037,7 +4212,7 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
 
 
 def test_mamba_reachable_block_mask_sparsifies_retention():
-    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    """Mamba state-snapshot retention: with a configured retention interval,
     the manager keeps one cached state per interval-sized segment (plus the
     latest replay boundary) instead of a snapshot per block, which is what
     lets a small attention block_size avoid Mamba dominating the KV pool."""
@@ -4063,7 +4238,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
-    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    # Dense retention (None) -> no mask, every block cached.
     assert retained(None) is None
     # interval == block_size -> every block is a boundary -> stays dense.
     assert retained(block_size) is None
@@ -4111,7 +4286,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 100) == {5, 14}
     # Coexists with segment tails (interval 64 -> {3,7,11,15} + replay 14).
     assert retained(64, 96) == {3, 5, 7, 11, 14, 15}
-    # Dense default ignores the hint (nothing to sparsify).
+    # Dense retention ignores the hint (nothing to sparsify).
     assert retained(None, 96) is None
     # Out-of-range boundary is a no-op (only replay 14 remains).
     assert retained(0, 16 * block_size * 2) == {14}
@@ -4120,14 +4295,13 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     assert retained(0, None) == {14}
 
 
-def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
+def test_mamba_shared_prefix_survives_zero_retention():
     """Manager-level check of the full wiring: a pinned shared-prefix boundary
     (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
     detection) keeps its Mamba state block cached under
-    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``, which otherwise retains only the
+    ``prefix_cache_retention_interval=0``, which otherwise retains only the
     end-of-prompt replay boundary. Without this, a shared prefix (junction
     before ``num_prompt``) would be recomputed by every sharing request."""
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
     block_size = 16
 
     # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
@@ -4140,6 +4314,7 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=0,
         )
         req = make_request("r", token_ids, block_size, sha256)
         req.shared_prefix_boundary = shared_prefix_boundary
@@ -4163,24 +4338,21 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
     assert cached_mamba_blocks(96) == {5, 14}
 
 
-def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
+def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
-    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without the pin the junction is
+    ``prefix_cache_retention_interval=0``. Without the pin the junction is
     masked out and the later request misses; with it (and under dense) the reuse
     is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):
-        if retention is None:
-            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
         manager = make_kv_cache_manager(
             _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=retention,
         )
         shared = [7 for _ in range(2 * block_size)]  # 2-block shared prefix
 
@@ -4261,23 +4433,175 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
-def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
+def test_swa_reachable_block_mask_with_dcp_scaling():
+    """DCP shards each block's KV across ranks, scaling the effective block size.
+    Verify that dcp_world_size > 1 scales block size in reachability calculations,
+    producing different masks than dcp_world_size=1."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    sliding_window = 32  # need = cdiv(31, 16) = 2
+
+    def get_mask(dcp_world_size):
+        spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window,
+        )
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,  # alignment constraint
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: 1 state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # With dcp_world_size=1: effective block_size = 16
+    # per_segment = 64 // 16 = 4 blocks per segment
+    # need = 2, so 2 < 4 -> sparse retention with coarser granularity
+    mask_no_dcp = get_mask(dcp_world_size=1)
+
+    # With dcp_world_size=2: effective block_size = 32
+    # per_segment = 64 // 32 = 2 blocks per segment
+    # need = 2, so 2 >= 2 -> different retention granularity
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    # DCP scaling changes block_size, altering segment granularity
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    # Different DCP world sizes should produce different masks
+    assert mask_no_dcp != mask_with_dcp, (
+        "DCP scaling should change retention granularity"
+    )
+
+
+@pytest.mark.parametrize(
+    "block_size,dcp_world_size,alignment_tokens",
+    [
+        (16, 1, 24),  # 24 % 16 != 0
+        (16, 3, 64),  # effective block_size 48; 64 % 48 != 0
+    ],
+)
+def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
+    block_size, dcp_world_size, alignment_tokens
+):
+    """The mask is block-granular, so a sub-block alignment_tokens (not a
+    multiple of the DCP-scaled block size) cannot be represented exactly. This
+    happens for hybrid offloading (e.g. Gemma), where alignment_tokens is the
+    full-attention chunk size and need not divide the SWA block size. The mask
+    must fall back to dense (None) rather than raise."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=alignment_tokens,
+        reachable_boundaries=(),
+        dcp_world_size=dcp_world_size,
+    )
+    assert mask is None
+
+
+def test_mamba_reachable_block_mask_ignores_dcp():
+    """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
+    state block spans kv_cache_spec.block_size tokens regardless of DCP. The
+    mask must not scale by dcp_world_size, so retention granularity is
+    identical for any DCP world size."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def get_mask(dcp_world_size):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: one state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # block_size stays 16 regardless of DCP: per_segment = 64 // 16 = 4.
+    mask_no_dcp = get_mask(dcp_world_size=1)
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    assert mask_no_dcp == mask_with_dcp, "DCP must not change Mamba retention"
+
+
+def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
+    """A large DCP world size must not scale the Mamba block size, so it can
+    never collapse sparse retention into dense caching."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    spec = MambaSpec(
+        block_size=8,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def get_mask(dcp_world_size):
+        return MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+
+    # block_size stays 8 regardless of DCP: per_segment = 64 // 8 = 8, sparse.
+    mask_no_dcp = get_mask(dcp_world_size=1)
+    mask_large_dcp = get_mask(dcp_world_size=16)
+
+    assert mask_no_dcp is not None, "Sparse retention expected"
+    assert mask_large_dcp is not None, "Large DCP must not force dense caching"
+    assert mask_no_dcp == mask_large_dcp, "DCP must not change Mamba retention"
+
+
+def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
-    must stay reusable under ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without
+    must stay reusable under ``prefix_cache_retention_interval=0``. Without
     the pin the junction window is masked out and a later request misses; with
     it (and under dense) reuse is preserved."""
     block_size = 16
 
     def last_req_hit(retention, pin):
-        if retention is None:
-            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
         manager = make_kv_cache_manager(
             _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"]),
             max_model_len=8192,
             enable_caching=True,
             hash_block_size=block_size,
+            retention_interval=retention,
         )
         shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
 

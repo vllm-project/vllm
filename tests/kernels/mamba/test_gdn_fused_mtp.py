@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import types
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +38,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noq
 )
 from vllm.utils.torch_utils import _encode_layer_name  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
@@ -55,13 +57,13 @@ EPS = 1e-6
 
 
 class _TestGatedNorm:
-    def __init__(self, weight: torch.Tensor) -> None:
+    def __init__(self, weight: torch.Tensor, activation: str) -> None:
         self.weight = weight
         self.bias = None
         self.eps = EPS
         self.group_size = None
         self.norm_before_gate = True
-        self.activation = "silu"
+        self.activation = activation
 
     def __call__(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return rmsnorm_fn(
@@ -97,6 +99,7 @@ def _build_layer(
     dt_bias: torch.Tensor,
     conv_weight: torch.Tensor,
     norm_weight: torch.Tensor,
+    output_gate_activation: str,
 ):
     layer = types.SimpleNamespace(
         prefix=PREFIX,
@@ -114,7 +117,7 @@ def _build_layer(
         dt_bias=dt_bias,
         conv1d=types.SimpleNamespace(weight=conv_weight, bias=None),
         kv_cache=(conv_state, ssm_state),
-        norm=_TestGatedNorm(norm_weight),
+        norm=_TestGatedNorm(norm_weight, output_gate_activation),
         layer_norm_epsilon=EPS,
         gdn_decode_kernel="cuda",
     )
@@ -137,6 +140,46 @@ def _build_layer(
             types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
         )
     return layer
+
+
+@pytest.mark.parametrize(
+    "num_v_heads,expected",
+    [
+        pytest.param(2, True, id="ratio1"),
+        pytest.param(4, True, id="ratio2"),
+        pytest.param(6, True, id="ratio3"),
+        pytest.param(8, True, id="ratio4"),
+        pytest.param(16, True, id="ratio8"),
+        pytest.param(5, False, id="non-integral-ratio"),
+        pytest.param(10, False, id="unsupported-ratio5"),
+    ],
+)
+def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
+    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        pytest.skip("fused GDN decode MTP op is not built")
+
+    layer = types.SimpleNamespace(
+        num_k_heads=2,
+        num_v_heads=num_v_heads,
+        kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),
+        gdn_decode_kernel="cuda",
+    )
+    attn_metadata = types.SimpleNamespace(
+        spec_state_indices_tensor=torch.ones(
+            1, SPEC_TOKENS, dtype=torch.int32, device="cuda"
+        ),
+        spec_sequence_masks=object(),
+        num_decodes=0,
+        num_spec_decodes=1,
+    )
+
+    assert (
+        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(
+            cast(QwenGatedDeltaNetAttention, layer),
+            cast(GDNAttentionMetadata, attn_metadata),
+        )
+        is expected
+    )
 
 
 @torch.inference_mode()
@@ -208,12 +251,14 @@ def test_fused_forward_uses_packed_entrypoint() -> None:
         pytest.param([128], [1], [-1], 0, id="pure-decode"),
     ],
 )
+@pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
 @torch.inference_mode()
 def test_fused_model_path_matches_reference(
     seq_lens: list[int],
     query_lens: list[int],
     draft_tokens: list[int],
     expected_fused_calls: int,
+    output_gate_activation: str,
 ) -> None:
     """Fused MTP and its mixed/prefill/decode fallbacks match the reference."""
     torch.manual_seed(1)
@@ -292,6 +337,7 @@ def test_fused_model_path_matches_reference(
         dt_bias,
         conv_weight,
         norm_weight,
+        output_gate_activation,
     )
     reference_out = torch.zeros_like(output_gate)
     with patch.object(
@@ -313,6 +359,7 @@ def test_fused_model_path_matches_reference(
         dt_bias,
         conv_weight,
         norm_weight,
+        output_gate_activation,
     )
     context.no_compile_layers = {PREFIX: fused_layer}
     fused_out = torch.zeros_like(output_gate)
