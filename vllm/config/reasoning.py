@@ -38,10 +38,13 @@ class ReasoningConfig:
 
     loop_break_min_pattern_size: int = 0
     """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
-    defaults to 1. Must be <= ``loop_break_max_pattern_size``. Raising it does
-    not exclude shorter cycles -- a cycle matches at every multiple of its own
-    period -- so tune benign repeats out with ``loop_break_min_count``, which
-    sets how many tokens must repeat before a break fires."""
+    defaults to 1. Must be <= ``loop_break_max_pattern_size``. A cycle of
+    period ``p`` is only detected at candidate lengths divisible by ``p``, so
+    raising this CAN hide a shorter cycle when no multiple of its period falls
+    in ``[min, max]``: a 3-token cycle is missed at min=max=4 and caught at
+    min=4, max=6. A single repeated token (period 1) matches at every length,
+    which is why separator runs still fire. Tune benign repeats out with
+    ``loop_break_min_count`` rather than by raising this."""
 
     loop_break_min_count: int = 0
     """Number of consecutive repetitions of a pattern that triggers reasoning

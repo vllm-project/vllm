@@ -399,7 +399,6 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
-        thinking_loop_break: bool | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -421,6 +420,10 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        # Appended rather than placed beside thinking_token_budget: from_optional
+        # takes positional arguments, so inserting mid-signature would silently
+        # rebind every later positional argument of existing callers.
+        thinking_loop_break: bool | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
