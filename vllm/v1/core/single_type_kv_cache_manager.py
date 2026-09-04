@@ -481,6 +481,7 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
+            dcp_world_size=self.dcp_world_size,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -504,6 +505,7 @@ class SingleTypeKVCacheManager(ABC):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -1028,14 +1030,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
-        assert alignment_tokens % kv_cache_spec.block_size == 0
+        block_size = kv_cache_spec.block_size * dcp_world_size
+        if alignment_tokens % block_size != 0:
+            # The mask is block-granular, so a sub-block alignment cannot be
+            # represented exactly. This happens for hybrid offloading, where
+            # ``alignment_tokens`` is the full-attention chunk size and need not
+            # be a multiple of this SWA group's (DCP-scaled) block size (e.g.
+            # Gemma). Fall back to dense: every block is reachable, which never
+            # drops a block that could serve a hit.
+            return None
 
-        block_size = kv_cache_spec.block_size
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
             window_size=kv_cache_spec.sliding_window,
@@ -1494,6 +1504,7 @@ class MambaManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        dcp_world_size: int = 1,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
