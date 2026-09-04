@@ -333,6 +333,15 @@ class AsyncModelRunnerOutput(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output.
+
+        This method should return the pending KV connector output without
+        consuming it, or None if there is no pending output.
+        """
+        pass
+
 
 @dataclass
 class DraftTokenIds:

@@ -349,6 +349,17 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output.
+
+        In FT scenario, even if the forward pass throws an exception,
+        we need to extract the kv_connector_output and pass it to the
+        executor so that KV transfer progress is not lost.
+        For v1 model runner, the KV connector output is stored in the
+        model_runner_output's kv_connector_output field.
+        """
+        return self._model_runner_output.kv_connector_output
+
 
 def _copy_pooler_output_to_cpu(
     raw_pooler_output: PoolerOutput, finished_mask: list[bool]

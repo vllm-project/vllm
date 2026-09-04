@@ -60,6 +60,12 @@ class KVOutputAggregator:
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
         self._expected_finished_count = expected_finished_count
+        
+        # Pending invalid block ids from failed workers
+        self._pending_invalid_block_ids = set[int]()
+        # Pending finished sending/recving from failed workers
+        self._pending_finished_sending = set[str]()
+        self._pending_finished_recving = set[str]()
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
@@ -156,6 +162,15 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
 
+        # Add pending finished sets and invalid block ids from failed workers
+        # (fault tolerance scenario), then clear them.
+        finished_sending |= self._pending_finished_sending
+        finished_recving |= self._pending_finished_recving
+        invalid_block_ids |= self._pending_invalid_block_ids
+        self._pending_finished_sending.clear()
+        self._pending_finished_recving.clear()
+        self._pending_invalid_block_ids.clear()
+
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
@@ -171,6 +186,57 @@ class KVOutputAggregator:
         )
 
         return output
+
+    def merge_kv_connector_output(
+        self, kv_connector_outputs: list[KVConnectorOutput | None]
+    ) -> None:
+        """Merge KV connector outputs from failed workers into the aggregator.
+
+        Unlike aggregate(), this method does NOT return the merged result.
+        It only updates the internal state (remaining count dictionaries and
+        invalid_block_ids), so that when all workers recover and complete
+        successfully in a future step, the finished requests can be properly
+        identified and returned.
+
+        This is used in fault tolerance scenarios where some workers fail
+        but their KV transfer progress needs to be preserved for later
+        aggregation.
+        """
+
+        def update_remaining_count(
+            req_ids: set[str] | None,
+            remaining_count_dict: dict[str, int],
+            pending_finished_set: set[str],
+        ) -> None:
+            for req_id in req_ids or ():
+                remaining_count = remaining_count_dict.get(
+                    req_id, self._expected_finished_count
+                )
+                remaining_count_dict[req_id] = remaining_count - 1
+                if remaining_count_dict[req_id] == 0:
+                    # All workers have finished this request, add to pending
+                    # finished set so it can be returned in future aggregate()
+                    pending_finished_set.add(req_id)
+                    del remaining_count_dict[req_id]
+
+        for kv_output in kv_connector_outputs:
+            if not kv_output:
+                continue
+
+            # Merge finished sending/recving into remaining count
+            update_remaining_count(
+                kv_output.finished_sending,
+                self._send_remaining_count,
+                self._pending_finished_sending,
+            )
+            update_remaining_count(
+                kv_output.finished_recving,
+                self._recv_remaining_count,
+                self._pending_finished_recving,
+            )
+
+            # Merge invalid block ids
+            self._pending_invalid_block_ids |= kv_output.invalid_block_ids
 
 
 def _make_src_and_dst_indices(

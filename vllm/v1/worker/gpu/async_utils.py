@@ -89,6 +89,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         return self.model_runner_output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output.
+
+        In FT scenario, even if the forward pass throws an exception,
+        we need to extract the kv_connector_output and pass it to the
+        executor so that KV transfer progress is not lost.
+        """
+        return self.model_runner_output.kv_connector_output
+
 
 class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -132,6 +141,17 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.copy_event.synchronize()
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output.
+
+        In FT scenario, even if the forward pass throws an exception,
+        we need to extract the kv_connector_output and pass it to the
+        executor so that KV transfer progress is not lost.
+        For v2 model runner, the KV connector output is stored in the
+        model_runner_output's kv_connector_output field.
+        """
+        return self.model_runner_output.kv_connector_output
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
