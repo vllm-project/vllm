@@ -268,6 +268,15 @@ RAW_ANSWER = (
     "<|start|>assistant to=user<|message|>The answer is 42.<|eot|>"
 )
 
+ATEM_MARKERS = (
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "<atem:invoke",
+    "</atem:invoke>",
+    "<atem:parameter",
+    "</atem:parameter>",
+)
+
 # NO closing <|eom|> -> truncated CoT
 RAW_TRUNCATED = (
     " to=self<|message|>Maybe I should call "
@@ -316,6 +325,36 @@ def test_streaming_reasoning_then_content():
     assert reasoning == "Think about it.", repr(reasoning)
     assert content == "The answer is 42.", repr(content)
     assert tcs == []
+
+
+@pytest.mark.parametrize("marker", ATEM_MARKERS)
+def test_tool_phase_atem_marker_split_at_every_boundary(marker):
+    prefix = " to=user<|message|>Visible answer"
+    for split in range(1, len(marker)):
+        parser = MuseGlimmerToolParser(object())
+        partial = prefix + marker[:split]
+        first = parser.extract_tool_calls_streaming(
+            "", partial, partial, [], [], [], _FakeReq()
+        )
+        complete = prefix + marker
+        second = parser.extract_tool_calls_streaming(
+            partial, complete, marker[split:], [], [], [], _FakeReq()
+        )
+        content = "".join(dm.content or "" for dm in (first, second) if dm is not None)
+        assert content == "Visible answer", (marker, split, content)
+
+
+@pytest.mark.parametrize("marker", ATEM_MARKERS)
+def test_tool_phase_final_incomplete_atem_marker_is_dropped(marker):
+    prefix = " to=user<|message|>Visible answer"
+    for truncated_at in range(1, len(marker)):
+        parser = MuseGlimmerToolParser(object())
+        partial = prefix + marker[:truncated_at]
+        delta = parser.extract_tool_calls_streaming(
+            "", partial, partial, [], [], [], _FakeReq()
+        )
+        assert delta is not None
+        assert delta.content == "Visible answer", (marker, truncated_at, delta)
 
 
 def test_truncated_cot_no_toolcall_nonstreaming():

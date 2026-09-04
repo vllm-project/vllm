@@ -81,10 +81,26 @@ _MSG_END_RE = re.compile(r"<\|eom\|>|<\|eot\|>")
 _REASONING_RECIPIENT = "self"
 _USER_RECIPIENT = "user"
 
+_ATEM_CONTROL_MARKERS = (
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "<atem:invoke",
+    "</atem:invoke>",
+    "<atem:parameter",
+    "</atem:parameter>",
+)
+
 # Structural markers that must never reach the client. A streamed body is held
 # back by up to len(marker)-1 characters so a marker split across two chunks is
-# not emitted as content.
-_STRUCTURAL_MARKERS = ("<|eom|>", "<|eot|>", "<|start|>", "<|message|>")
+# not emitted as content. This includes ATEM markers: a generation that ends in
+# a partial marker is a truncated control sequence, not ordinary content.
+_STRUCTURAL_MARKERS = (
+    "<|eom|>",
+    "<|eot|>",
+    "<|start|>",
+    "<|message|>",
+    *_ATEM_CONTROL_MARKERS,
+)
 _MAX_MARKER_LEN = max(len(m) for m in _STRUCTURAL_MARKERS)
 # A trailing " to=NAME" that could still grow into a bare message header (the
 # first message of a turn has no <|start|> prefix -- the prompt ends with
@@ -283,7 +299,8 @@ class MuseGlimmerToolParser(ToolParser):
                 reasoning_parts.append(body)
                 reasoning_open = not closed
             elif rcpt is None or rcpt == _USER_RECIPIENT:
-                content_parts.append(body)
+                if not any(marker in body for marker in _ATEM_CONTROL_MARKERS):
+                    content_parts.append(body)
                 content_open = not closed
         return (
             "".join(content_parts),
