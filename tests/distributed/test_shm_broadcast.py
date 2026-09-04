@@ -742,11 +742,39 @@ def test_check_cgroup_memory_available_raises(monkeypatch):
         lambda: (1 << 30, 512 << 20),
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="512 MiB available.*512 MiB current usage",
+    with (
+        mock.patch.object(cpu_resource_utils.logger, "info") as log_info,
+        pytest.raises(
+            RuntimeError,
+            match="512 MiB available.*512 MiB current usage",
+        ),
     ):
         check_cgroup_memory_available(600 << 20, "mmap")
+
+    log_info.assert_not_called()
+
+
+def test_check_cgroup_memory_available_logs_preflight(monkeypatch):
+    monkeypatch.setattr(
+        cpu_resource_utils,
+        "get_cgroup_memory_limit",
+        lambda: (1 << 30, 512 << 20),
+    )
+
+    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
+        check_cgroup_memory_available(256 << 20, "mmap")
+
+    log_info.assert_called_once_with(
+        "Cgroup memory preflight passed for %s: %.0f MiB required, %.0f MiB "
+        "current usage, %.0f MiB available under %.0f MiB limit, %.0f MiB "
+        "estimated remaining after allocation.",
+        "mmap",
+        256.0,
+        512.0,
+        512.0,
+        1024.0,
+        256.0,
+    )
 
 
 def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
@@ -755,7 +783,10 @@ def test_check_cgroup_memory_available_passes_without_limit(monkeypatch):
         "get_cgroup_memory_limit",
         lambda: (None, None),
     )
-    check_cgroup_memory_available(1 << 60, "mmap")
+    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
+        check_cgroup_memory_available(1 << 60, "mmap")
+
+    log_info.assert_not_called()
 
 
 def test_check_cgroup_memory_available_skips_without_usage(monkeypatch):
@@ -764,7 +795,10 @@ def test_check_cgroup_memory_available_skips_without_usage(monkeypatch):
         "get_cgroup_memory_limit",
         lambda: (1 << 30, None),
     )
-    check_cgroup_memory_available(1 << 60, "mmap")
+    with mock.patch.object(cpu_resource_utils.logger, "info") as log_info:
+        check_cgroup_memory_available(1 << 60, "mmap")
+
+    log_info.assert_not_called()
 
 
 def test_shm_ring_buffer_creation_checks_free_space():
