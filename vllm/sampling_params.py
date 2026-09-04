@@ -354,6 +354,11 @@ class SamplingParams(
     _bad_words_token_ids: list[list[int]] | None = None
 
     skip_reading_prefix_cache: bool | None = None
+    disable_spec_decode: bool = False
+    """If True, speculative decoding is skipped for this request: no draft
+    tokens are proposed or verified for it, so it decodes one token per step
+    while other requests in the same batch keep speculating. Has no effect
+    when the engine is not configured for speculative decoding."""
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
 

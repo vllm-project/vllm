@@ -295,6 +295,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Request IDs scheduled in this step for which speculative decoding is
+    # skipped (see `Scheduler.spec_decode_disabled`). The model runner uses it
+    # to avoid proposing draft tokens for those requests. None if empty.
+    spec_decode_skip_req_ids: set[str] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(

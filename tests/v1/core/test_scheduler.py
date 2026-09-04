@@ -6339,3 +6339,77 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+def test_no_spec_tokens_for_disable_spec_decode_requests():
+    """Requests with `SamplingParams.disable_spec_decode=True` never get draft
+    tokens scheduled and are reported in `spec_decode_skip_req_ids`, while other
+    requests in the same batch keep speculating."""
+    num_spec_tokens = 3
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
+    # Separate create_requests calls: the helper shares one SamplingParams
+    # object across the requests of a single call.
+    (spec_req,) = create_requests(num_requests=1, num_tokens=10, req_ids=["spec"])
+    (plain_req,) = create_requests(num_requests=1, num_tokens=10, req_ids=["plain"])
+    plain_req.sampling_params.disable_spec_decode = True
+    requests = [spec_req, plain_req]
+    for req in requests:
+        scheduler.add_request(req)
+
+    # First step: prefill both.
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    assert output.spec_decode_skip_req_ids == {plain_req.request_id}
+    req_to_index = {req.request_id: i for i, req in enumerate(requests)}
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[42], [43]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+
+    # Drafter proposes for both; the disabled request's drafts are dropped.
+    scheduler.update_draft_token_ids(
+        DraftTokenIds(
+            [spec_req.request_id, plain_req.request_id], [[1, 2, 3], [4, 5, 6]]
+        )
+    )
+    assert spec_req.spec_token_ids == [1, 2, 3]
+    assert plain_req.spec_token_ids == []
+
+    # Second step: only the speculating request gets spec tokens scheduled.
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[spec_req.request_id] == 1 + num_spec_tokens
+    assert output.num_scheduled_tokens[plain_req.request_id] == 1
+    assert output.scheduled_spec_decode_tokens == {spec_req.request_id: [1, 2, 3]}
+    assert output.spec_decode_skip_req_ids == {plain_req.request_id}
+
+
+def test_spec_decode_skip_req_ids_none_without_disabled_requests():
+    scheduler = create_scheduler(num_speculative_tokens=2)
+    requests = create_requests(num_requests=2, num_tokens=10)
+    for req in requests:
+        scheduler.add_request(req)
+    output = scheduler.schedule()
+    assert output.spec_decode_skip_req_ids is None
+
+
+def test_update_draft_token_ids_in_output_invalidates_disabled_requests():
+    """Async-scheduling path: placeholder draft slots of a request with
+    speculative decoding disabled are all reported invalid."""
+    num_spec_tokens = 2
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.sampling_params.disable_spec_decode = True
+    scheduler.add_request(req)
+    output = scheduler.schedule()
+    # Simulate the placeholder slots the async scheduler would have reserved.
+    output.scheduled_spec_decode_tokens[req.request_id] = [-1] * num_spec_tokens
+    scheduler.update_draft_token_ids_in_output(
+        DraftTokenIds([req.request_id], [[7, 8]]), output
+    )
+    assert output.scheduled_spec_decode_tokens[req.request_id] == [-1, -1]
+    assert output.num_invalid_spec_tokens == {req.request_id: num_spec_tokens}

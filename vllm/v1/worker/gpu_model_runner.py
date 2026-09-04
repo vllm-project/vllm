@@ -5119,6 +5119,18 @@ class GPUModelRunner(
         num_spec_tokens_to_schedule = scheduler_output.num_spec_tokens_to_schedule
         self._draft_probs = None
         self._draft_prob_req_ids = None
+        skip_req_ids = scheduler_output.spec_decode_skip_req_ids
+        if skip_req_ids and isinstance(sampled_token_ids, list):
+            # Drafters that consume CPU sampled tokens (ngram, suffix,
+            # custom_class) skip requests with no sampled tokens, so requests
+            # with speculative decoding disabled do no proposal work at all.
+            # GPU drafters are handled by the scheduler dropping their drafts.
+            sampled_token_ids = [
+                [] if req_id in skip_req_ids else token_ids
+                for req_id, token_ids in zip(
+                    self.input_batch.req_ids, sampled_token_ids
+                )
+            ]
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 

@@ -539,6 +539,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        spec_decode_skip_req_ids: set[str] = set()
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
         # Whether any scheduled request has a synchronous connector KV load.
@@ -737,6 +738,9 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
+            if self.num_spec_tokens > 0 and self.spec_decode_disabled(request):
+                spec_decode_skip_req_ids.add(request_id)
+                request.spec_token_ids = []
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
@@ -1175,8 +1179,12 @@ class Scheduler(SchedulerInterface):
                     )
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
+                    if self.num_spec_tokens > 0 and self.spec_decode_disabled(request):
+                        spec_decode_skip_req_ids.add(request.request_id)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                    if self.num_spec_tokens > 0 and self.spec_decode_disabled(request):
+                        spec_decode_skip_req_ids.add(request.request_id)
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -1362,6 +1370,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            spec_decode_skip_req_ids=spec_decode_skip_req_ids or None,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -2328,6 +2337,14 @@ class Scheduler(SchedulerInterface):
                 # rejection or drafter gather can reference it.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
+    def spec_decode_disabled(self, request: Request) -> bool:
+        """Whether speculative decoding is skipped for `request` in the current
+        step: no draft tokens are scheduled for it and the model runner does not
+        propose any. Defaults to the request's `disable_spec_decode` sampling
+        parameter; subclasses may override to apply scheduler-side policies."""
+        sampling_params = request.sampling_params
+        return sampling_params is not None and sampling_params.disable_spec_decode
+
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -2338,8 +2355,9 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-            if request.is_prefill_chunk:
-                # Ignore draft tokens for prefill chunks.
+            if request.is_prefill_chunk or self.spec_decode_disabled(request):
+                # Ignore draft tokens for prefill chunks and for requests with
+                # speculative decoding disabled.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
                 continue
@@ -2373,6 +2391,9 @@ class Scheduler(SchedulerInterface):
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
+            if self.spec_decode_disabled(request):
+                # Speculative decoding disabled: every draft slot is invalid.
+                del spec_token_ids[:]
             # Filter out spec tokens which do not adhere to the grammar.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
