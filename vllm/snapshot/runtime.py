@@ -59,6 +59,10 @@ _COMMON_CRIU_OPTIONS = (
     "--link-remap",
     "--file-locks",
 )
+_TCP_TABLES = (
+    ("AF_INET", Path("/proc/net/tcp")),
+    ("AF_INET6", Path("/proc/net/tcp6")),
+)
 
 _CACHE_REMEDY = "recreate the snapshot or restore with the same cache state"
 # Recorded instead of a digest for files whose content is volatile by design.
@@ -361,10 +365,9 @@ class LocalSnapshotTools:
 
     def _tcp_records(self) -> tuple[_TcpSocketRecord, ...]:
         records: list[_TcpSocketRecord] = []
-        for family, table in (
-            ("AF_INET", Path("/proc/net/tcp")),
-            ("AF_INET6", Path("/proc/net/tcp6")),
-        ):
+        for family, table in _TCP_TABLES:
+            if not table.exists():
+                continue
             for row in table.read_text().splitlines()[1:]:
                 fields = row.split()
                 if fields[3] != "01":
@@ -766,17 +769,19 @@ class LocalSnapshotTools:
         redacted_argv = list(engine_argv)
         redact_api_keys = False
         for index, argument in enumerate(redacted_argv):
-            if argument == "--api-key":
+            option, separator, value = argument.partition("=")
+            normalized_argument = option.replace("_", "-") + separator + value
+            if normalized_argument == "--api-key":
                 redact_api_keys = True
-            elif argument.startswith("--api-key="):
-                redacted_argv[index] = "--api-key=***"
+            elif normalized_argument.startswith("--api-key="):
+                redacted_argv[index] = f"{option}=***"
                 redact_api_keys = False
-            elif argument == "--hf-token":
+            elif normalized_argument == "--hf-token":
                 if index + 1 < len(redacted_argv):
                     redacted_argv[index + 1] = "***"
                 redact_api_keys = False
-            elif argument.startswith("--hf-token="):
-                redacted_argv[index] = "--hf-token=***"
+            elif normalized_argument.startswith("--hf-token="):
+                redacted_argv[index] = f"{option}=***"
                 redact_api_keys = False
             elif argument.startswith("-"):
                 redact_api_keys = False

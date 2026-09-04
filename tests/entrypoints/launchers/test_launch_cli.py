@@ -236,6 +236,36 @@ def test_snapshot_environment_contract(
     )
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        (("--hf_token", "SECRET"), ("--hf_token", "***")),
+        (("--hf_token=SECRET",), ("--hf_token=***",)),
+        (("--api_key", "SECRET"), ("--api_key", "***")),
+        (("--api_key=SECRET",), ("--api_key=***",)),
+        (("--hf-overrides", "value"), ("--hf-overrides", "value")),
+    ],
+)
+def test_snapshot_manifest_redacts_underscore_options(case):
+    engine_argv, expected = case
+    tools = create_autospec(LocalSnapshotTools, instance=True)
+    tools.current_identity.return_value = _runtime_identity()
+    tools._artifact_bytes.return_value = 0
+    manifest = LocalSnapshotTools.make_manifest(
+        tools,
+        argparse.Namespace(model="model", model_tag=None),
+        engine_argv,
+        ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
+        _oracle(),
+        Path(),
+    )
+
+    assert manifest.engine_argv == expected
+    if "SECRET" in " ".join(engine_argv):
+        assert "***" in " ".join(manifest.engine_argv)
+        assert "SECRET" not in " ".join(manifest.engine_argv)
+
+
 def parse_snapshot(*argv: str):
     parser = FlexibleArgumentParser()
     subparsers = parser.add_subparsers(dest="subparser", required=True)
@@ -779,6 +809,21 @@ def test_decode_endpoint_families():
         _decode_endpoint("AF_INET6", "00000000000000000000000001000000:01BB")
         == "[::1]:443"
     )
+
+
+def test_tcp_records_skips_missing_tables(tmp_path, monkeypatch):
+    tcp, tcp6 = tmp_path / "tcp", tmp_path / "tcp6"
+    contents = "header\n0: 0100007F:1F90 00000000:0000 01 0 0 0 0 0 41\n"
+    tcp.write_text(contents)
+    tables = (("AF_INET", tcp), ("AF_INET6", tcp6))
+    monkeypatch.setattr(snapshot_runtime, "_TCP_TABLES", tables)
+
+    tools = LocalSnapshotTools()
+    assert tuple(record.family for record in tools._tcp_records()) == ("AF_INET",)
+
+    tcp6.write_text(contents)
+    families = tuple(record.family for record in tools._tcp_records())
+    assert families == ("AF_INET", "AF_INET6")
 
 
 def test_snapshot_manifest_records_external_cache_files(tmp_path: Path):
