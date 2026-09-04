@@ -73,7 +73,7 @@ type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 #[test]
 fn lora_salts_multimodal_encoder_cache_identifiers() {
-    let features = vec![MmFeatureSpec {
+    let feature = MmFeatureSpec {
         data: None,
         modality: "image".to_string(),
         identifier: "content-hash".to_string(),
@@ -83,12 +83,44 @@ fn lora_salts_multimodal_encoder_cache_identifiers() {
             is_embed: None,
         },
         mm_hash: Some("processor-hash".to_string()),
-    }];
+    };
 
-    let salted = salt_multimodal_identifiers_for_lora(Some(features), "adapter")
+    let salted = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter")
         .expect("features should remain present");
-    assert_eq!(salted[0].identifier, "adapter:content-hash");
+    let repeated = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter")
+        .expect("features should remain present");
+    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature]), "")
+        .expect("features should remain present");
+
+    assert_eq!(salted[0].identifier, repeated[0].identifier);
+    assert_ne!(salted[0].identifier, base[0].identifier);
+    assert_eq!(salted[0].identifier.len(), 64);
+    assert!(salted[0].identifier.bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert_eq!(salted[0].mm_hash.as_deref(), Some("processor-hash"));
+}
+
+#[test]
+fn multimodal_encoder_cache_identifiers_do_not_collide_with_base_model_keys() {
+    fn feature(identifier: &str) -> MmFeatureSpec {
+        MmFeatureSpec {
+            data: None,
+            modality: "image".to_string(),
+            identifier: identifier.to_string(),
+            mm_position: PlaceholderRange {
+                offset: 1,
+                length: 2,
+                is_embed: None,
+            },
+            mm_hash: None,
+        }
+    }
+
+    let lora = salt_multimodal_identifiers_for_lora(Some(vec![feature("x")]), "adapter")
+        .expect("features should remain present");
+    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature("adapter:x")]), "")
+        .expect("features should remain present");
+
+    assert_ne!(lora[0].identifier, base[0].identifier);
 }
 
 fn boxed_test_future<'a>(future: impl Future<Output = ()> + Send + 'a) -> TestFuture<'a> {

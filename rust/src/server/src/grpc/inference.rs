@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::{Stream, StreamExt as _};
+use sha2::{Digest as _, Sha256};
 use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -29,18 +30,24 @@ pub(super) fn salt_multimodal_identifiers_for_lora(
     features: Option<MmFeatures>,
     lora_name: &str,
 ) -> Option<MmFeatures> {
-    if lora_name.is_empty() {
-        return features;
-    }
     features.map(|features| {
         features
             .into_iter()
             .map(|feature| MmFeatureSpec {
-                identifier: format!("{lora_name}:{}", feature.identifier),
+                identifier: multimodal_cache_identifier(lora_name, &feature.identifier),
                 ..feature
             })
             .collect()
     })
+}
+
+fn multimodal_cache_identifier(lora_name: &str, identifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    for component in [lora_name.as_bytes(), identifier.as_bytes()] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 /// gRPC inference service backed by the shared application state.
