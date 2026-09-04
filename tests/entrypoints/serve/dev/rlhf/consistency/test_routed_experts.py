@@ -16,6 +16,7 @@ import pybase64 as base64
 import pytest
 import torch
 
+from tests.utils import VLLM_PATH
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
@@ -141,6 +142,10 @@ def models_server(request):
         "dummy",
         "--hf-overrides",
         json.dumps(spec.overrides),
+        # Chat requests need a template; pin the repo example so the test
+        # does not depend on the remote tokenizer_config.json shipping one.
+        "--chat-template",
+        str(VLLM_PATH / "examples/template_chatml.jinja"),
     ]
     with _launch(spec.model, extra_args, True) as url:
         yield url, REDUCED_SHAPE
@@ -166,20 +171,32 @@ class TestRoutedExperts:
         assert choice["token_ids"] is not None
         assert_valid_routed_experts(choice["routed_experts"], ROUTING_SHAPE)
 
-    # OpenAI completions frontend (/v1/completions) across the reduced
-    # model matrix (Qwen3.5-MoE / DeepSeek-V4-Flash, dummy weights).
-    def test_completions_routed_experts_models(self, models_server):
+    # OpenAI frontends (/v1/completions and /v1/chat/completions) across
+    # the reduced model matrix (Qwen3.5-MoE / DeepSeek-V4-Flash, dummy
+    # weights). Both frontends run against every model so the coverage
+    # survives the Blackwell skip: on H100s Qwen still exercises both.
+    def test_openai_frontends_routed_experts_models(self, models_server):
         url, shape = models_server
-        response = openai.OpenAI(
+        client = openai.OpenAI(
             base_url=f"{url}/v1", api_key="EMPTY", max_retries=0
-        ).completions.create(
-            model=SERVED_MODEL_NAME,
-            prompt="Hello, world",
-            max_tokens=10,
-            temperature=0,
-            extra_body={"return_token_ids": True},
         )
-        choice = response.model_dump()["choices"][0]
-
-        assert choice["token_ids"] is not None
-        assert_valid_routed_experts(choice["routed_experts"], shape)
+        responses = {
+            "completions": client.completions.create(
+                model=SERVED_MODEL_NAME,
+                prompt="Hello, world",
+                max_tokens=10,
+                temperature=0,
+                extra_body={"return_token_ids": True},
+            ),
+            "chat": client.chat.completions.create(
+                model=SERVED_MODEL_NAME,
+                messages=[{"role": "user", "content": "Hello, world"}],
+                max_tokens=10,
+                temperature=0,
+                extra_body={"return_token_ids": True},
+            ),
+        }
+        for frontend, response in responses.items():
+            choice = response.model_dump()["choices"][0]
+            assert choice["token_ids"] is not None, frontend
+            assert_valid_routed_experts(choice["routed_experts"], shape)
