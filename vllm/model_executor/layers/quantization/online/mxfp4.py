@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
@@ -27,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
-    _Fp8OnlineLinearBase,
+    OnlineLinearBase,
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
@@ -73,7 +74,7 @@ def _quantize_mxfp4_moe_weight(
     return w_quant, w_scales
 
 
-class Mxfp4OnlineLinearMethod(_Fp8OnlineLinearBase):
+class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     """Online MXFP4 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP4 (microscaling
     FP4 with block-32 scales) during weight loading.
@@ -144,8 +145,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     activation_quant_key = kMxfp4Dynamic
 
-    def __init__(self, *, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+    def __init__(self, *, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 

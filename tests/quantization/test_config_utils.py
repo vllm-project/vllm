@@ -58,7 +58,7 @@ def test_online_ignore_supports_fnmatch_patterns():
     )
 
     with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
-        config._dispatch_target(layer_name, Mock())
+        config.resolve_quant_method_cls(Mock(), layer_name)
 
 
 @pytest.mark.parametrize(

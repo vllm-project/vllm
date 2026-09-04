@@ -83,6 +83,7 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     assert fc_no_quant.output_size == output_size
 
     mock_quant_config = Mock()
+    mock_quant_config.online_quantization_config = None
     fc_with_quant = ReplicatedLinear(
         input_size=input_size,
         output_size=output_size,
