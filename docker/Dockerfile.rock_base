@@ -3,8 +3,6 @@ ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.12.0+rocm10.0.0
 ARG TORCHVISION_VERSION=0.27.0+rocm10.0.0
 ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
-# Prebuilt on the whl-next index, and exactly what torch 2.12.0+rocm10.0.0 asks for in
-# Requires-Dist. 3.8.x also carries the lgkmcnt fix for the _mla_gluon waitcnt fault.
 ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.0.0
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
@@ -16,7 +14,6 @@ ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
-# The whl-next channels carry ROCm 10; the older whl-multi-arch ones stop at 7.14.0.
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL="https://stable.repo.amd.com/rocm/whl-next/" # For pre-built GPU images, packages, etc.
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=10.0.0
@@ -104,9 +101,6 @@ RUN pip install \
     "torchaudio==${TORCHAUDIO_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
     "triton==${TRITON_VERSION}"
-RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.version.hip}')" \
-    && python3 -c "import triton; print(f'triton={triton.__version__}')" \
-    && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}"
 
 # Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
 
@@ -276,14 +270,9 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 
 FROM base AS final
 
-# Triton (the prebuilt TRITON_VERSION wheel) is already installed in base and is exactly
-# what torch's Requires-Dist names, so installing the debs wheels resolves against it
-# cleanly - no METADATA surgery or force-reinstall needed. The source rebuild that would
-# carry the newer release/internal/3.8.x commits is a planned follow-up.
 ARG TRITON_VERSION
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl \
-    # Nothing should displace our pins, so any complaint here is real.
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
@@ -296,8 +285,6 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
-
-RUN ldconfig
 
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
