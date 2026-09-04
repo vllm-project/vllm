@@ -50,12 +50,14 @@ if [[ -z "${BK_TOKEN}" ]]; then
         echo "buildkite-agent is not on PATH; cannot read secret '${TOKEN_SECRET_KEY}'"
     else
         secret_err="$(mktemp)"
-        # --skip-redaction because the step runs under the docker plugin, which
-        # does not expose the Job API socket to the container. Without it the
-        # agent fetches the secret and then refuses to print it, having no way
-        # to register the value with the log redactor. The value only ever
-        # reaches BK_TOKEN and a curl header, so it cannot land in the log.
-        if BK_TOKEN="$(buildkite-agent secret get --skip-redaction "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
+        # Deliberately not passing --skip-redaction. On the deployed agent
+        # (v3.73.1) the flag cannot help: secret_get.go creates the Job API
+        # client unconditionally and only checks SkipRedaction afterwards, so
+        # under the docker plugin -- which does not expose the Job API socket to
+        # the container -- it fails before the flag is read. That ordering was
+        # only fixed in v3.107.0. Skipping redaction would also stop the token
+        # being registered with the log redactor, for no gain here.
+        if BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
             if [[ -z "${BK_TOKEN}" ]]; then
                 echo "secret '${TOKEN_SECRET_KEY}' resolved but is empty"
             fi
