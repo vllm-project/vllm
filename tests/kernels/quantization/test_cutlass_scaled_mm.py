@@ -759,8 +759,8 @@ def test_cutlass_fp8_group_gemm(
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
 
 
-# Weight sizes chosen so the SM 12.x swizzled path (weight > device L2, M > 4096)
-# is exercised on every part: 5120x5120 FP8 = 25 MiB and 16384x2560 = 42 MB
+# Weight sizes chosen so the SM 12.x swizzled path (weight > device L2 and an
+# activation slab of >= 12 MiB) is exercised on every part: 5120x5120 FP8 = 25 MiB and 16384x2560 = 42 MB
 # exceed GB10's 24 MiB L2, 57344x2560 = 147 MB exceeds full GB202's 128 MiB L2;
 # 2048x2560 = 5 MB is the default-order control. The assertions hold on either
 # path. The 147 MB weight runs once (baseline cost: 20 x 448 block matmuls).
@@ -794,13 +794,17 @@ def _blockwise_fp8_inputs(m: int, n: int, k: int):
 
 
 def _row_sliced_reference(a, b, scale_a, scale_b) -> torch.Tensor:
-    """The same GEMM as independent launches of at most 4096 rows (each below
-    the SM 12.x swizzle threshold, i.e. the scheduler's default order), with
-    the activation scales re-laid out per slice. Neither splitting M nor the
-    CTA order changes an output element's K-reduction, so on SM 12.x the
-    swizzled full-M launch must equal this bit for bit."""
+    """The same GEMM as independent launches of balanced slices of at most
+    4096 rows, with the activation scales re-laid out per slice. Balanced so
+    that every slice stays above the small-M dispatch thresholds (M <= 256
+    pingpong, M <= 64 swap-AB) and hence in the same kernel configuration as
+    the full-M launch, and below the SM 12.x swizzle threshold, i.e. in the
+    scheduler's default order. Neither splitting M nor the CTA order changes
+    an output element's K-reduction, so on SM 12.x the swizzled full-M launch
+    must equal this bit for bit."""
     m, k = a.shape
-    rows = 4096
+    num_slices = (m + 4095) // 4096
+    rows = (m + num_slices - 1) // num_slices
     out = torch.empty((m, b.shape[0]), dtype=torch.bfloat16, device="cuda")
     for i in range(0, m, rows):
         sa = scale_a[i : i + rows].t().contiguous().t()
@@ -818,7 +822,7 @@ def _row_sliced_reference(a, b, scale_a, scale_b) -> torch.Tensor:
 def test_cutlass_fp8_blockwise_large_m(m: int, n: int, k: int):
     """Large-M blockwise GEMM against the dequantized fp32 baseline, and — on
     SM 12.x, where the op switches the tile scheduler to a swizzled CTA order
-    once the weight exceeds the L2 and M > 4096 — bit-identical to the same
+    once the weight exceeds the L2 and the activation slab 12 MiB — bit-identical to the same
     GEMM issued as row slices in the default order. Other architectures may
     pick different kernel configurations per launch (e.g. the SM90 swap-AB
     dispatch on M % 4), so exact equality is asserted only where the C++ path

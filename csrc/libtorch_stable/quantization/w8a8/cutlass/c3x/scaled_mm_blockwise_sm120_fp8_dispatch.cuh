@@ -239,10 +239,10 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
-  // CTA rasterization: with max_swizzle_size > 1 the persistent tile scheduler
-  // visits the M tiles of one weight (N) column group before moving on, so the
-  // weight tiles are re-read from L2 instead of DRAM. Bit-identical to the
-  // default order (each output tile's K-reduction is unchanged).
+  // CTA rasterization: max_swizzle_size > 1 groups nearby M/N tiles in the
+  // persistent scheduler's raster, improving the temporal locality of the
+  // shared weight (B) tiles in the L2. Bit-identical to the default order
+  // (each output tile's K-reduction is unchanged).
   typename GemmKernel::TileSchedulerArguments scheduler{};
   scheduler.max_swizzle_size = max_swizzle_size;
   c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
