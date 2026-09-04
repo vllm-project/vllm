@@ -103,6 +103,89 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+@pytest.mark.parametrize("chunk_blocks", [1, 2])
+@pytest.mark.parametrize("in_flight_chunks", [0, 1, 2])
+def test_mamba_sparse_retirement_preserves_in_flight_states(
+    chunk_blocks, in_flight_chunks
+):
+    block_size = 4
+    num_speculative_blocks = 5
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
+    )
+    pool = BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    chunk = chunk_blocks * block_size
+    for step in range(12):
+        computed = step * chunk
+        committed = max(0, computed - in_flight_chunks * chunk)
+        first_live_block = max(0, committed - 1) // block_size
+        before = list(manager.req_to_blocks["r"])
+
+        manager.remove_skipped_blocks("r", committed)
+
+        blocks = manager.req_to_blocks["r"]
+        assert blocks[first_live_block:] == before[first_live_block:]
+        assert all(
+            block.is_null or block.ref_cnt == 1 for block in blocks[first_live_block:]
+        )
+        assert all(block.is_null for block in blocks[:first_live_block])
+        target = computed + chunk
+        manager.get_num_blocks_to_allocate("r", target, [], computed, computed, target)
+        manager.allocate_new_blocks("r", target, target)
+        held = pool.num_gpu_blocks - 1 - pool.get_num_free_blocks()
+        assert held <= num_speculative_blocks + 2 + in_flight_chunks
+
+
+def test_mamba_sparse_retirement_does_not_rescan_freed_prefix():
+    class CountingBlocks(list):
+        accesses = 0
+
+        def __getitem__(self, index):
+            self.accesses += 1
+            return super().__getitem__(index)
+
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=16, enable_caching=False, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    blocks = CountingBlocks(pool.get_new_blocks(8))
+    manager.req_to_blocks["r"] = blocks
+    for boundary in range(1, 8):
+        blocks.accesses = 0
+        manager.remove_skipped_blocks("r", boundary * 4 + 1)
+        assert blocks.accesses <= 2
+        blocks.accesses = 0
+        manager.remove_skipped_blocks("r", boundary * 4 + 1)
+        assert blocks.accesses == 0
+
+    manager.free("r")
+    manager.req_to_blocks["r"] = pool.get_new_blocks(2)
+    manager.remove_skipped_blocks("r", 5)
+    assert manager.req_to_blocks["r"][0].is_null
+    assert manager.req_to_blocks["r"][1].ref_cnt == 1
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
