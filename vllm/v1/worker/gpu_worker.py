@@ -742,8 +742,10 @@ class Worker(WorkerBase):
             ),
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
+        if self.vllm_config.artifact_config.enabled:
+            self.model_runner.init_artifact_connector(  # type: ignore[attr-defined]
+                kv_cache_config
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch

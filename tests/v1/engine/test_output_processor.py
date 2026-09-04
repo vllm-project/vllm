@@ -3,8 +3,9 @@
 
 import math
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
+import numpy as np
 import pytest
 
 from tests.v1.engine.utils import (
@@ -1252,6 +1253,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 async def test_request_output_collector():
     NUM_REQS = 3
     TEXT = "a"
+    routed_experts = np.arange(12, dtype=np.uint8).reshape(2, 3, 2)
 
     def make_outputs() -> list[RequestOutput]:
         return [
@@ -1267,6 +1269,9 @@ async def test_request_output_collector():
                         token_ids=[idx],
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
+                        routed_experts=(
+                            routed_experts if idx == NUM_REQS - 1 else None
+                        ),
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
                     )
                 ],
@@ -1319,6 +1324,7 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
+    np.testing.assert_array_equal(output.outputs[0].routed_experts, routed_experts)
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
@@ -1328,6 +1334,46 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+def test_routed_experts_are_accumulated_until_finish():
+    state = RequestState(
+        request_id="request-int",
+        external_req_id="request",
+        parent_req=None,
+        request_index=0,
+        lora_request=None,
+        output_kind=RequestOutputKind.DELTA,
+        prompt="prompt",
+        prompt_token_ids=[1, 2, 3, 4],
+        prompt_embeds=None,
+        logprobs_processor=Mock(
+            logprobs=None,
+            cumulative_logprob=0.0,
+            pop_prompt_logprobs=Mock(return_value=None),
+        ),
+        detokenizer=Mock(get_next_output_text=Mock(return_value="")),
+        max_tokens_param=2,
+        arrival_time=0.0,
+        queue=None,
+        log_stats=False,
+        stream_interval=1,
+    )
+    prompt_chunk = np.arange(24, dtype=np.uint8).reshape(4, 3, 2)
+    decode_chunk = np.arange(12, dtype=np.uint8).reshape(2, 3, 2) + 24
+    state.routed_experts_chunks.append(prompt_chunk)
+
+    partial = state.make_request_output([5], None, None, None)
+    assert partial is not None
+    assert partial.outputs[0].routed_experts is None
+
+    state.routed_experts_chunks.append(decode_chunk)
+    finished = state.make_request_output([6], None, FinishReason.LENGTH, None)
+    assert finished is not None
+    np.testing.assert_array_equal(
+        finished.outputs[0].routed_experts,
+        np.concatenate((prompt_chunk, decode_chunk)),
+    )
 
 
 @pytest.mark.asyncio

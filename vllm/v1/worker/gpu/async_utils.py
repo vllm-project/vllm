@@ -15,12 +15,12 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsTensors,
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
+    from vllm.distributed.artifact_connector.worker import PendingArtifactOutput
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -121,7 +121,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool = False,
-        routed_experts: RoutedExpertsTensors | None = None,
+        pending_artifact_output: "PendingArtifactOutput | None" = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -129,7 +129,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.routed_experts = routed_experts
+        self.pending_artifact_output = pending_artifact_output
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
@@ -152,13 +152,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self.sampling_mask_tensors = (
                     sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
                 )
-            self.routed_experts_cpu: RoutedExpertsTensors | None = None
-            if routed_experts is not None:
-                self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
             self.prompt_logprobs_dict = {
                 k: v.to_cpu_nonblocking() if v is not None else None
                 for k, v in self.model_runner_output.prompt_logprobs_dict.items()
             }
+            if pending_artifact_output is not None:
+                self.routed_experts = async_copy_to_np(
+                    pending_artifact_output.routed_experts
+                )
+                self.num_rejected = async_copy_to_np(sampler_output.num_rejected)
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
@@ -192,8 +194,21 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self.routed_experts_cpu is not None:
-            self.model_runner_output.routed_experts = self.routed_experts_cpu.tolists()
+        if self.pending_artifact_output is not None:
+            pending = self.pending_artifact_output
+            try:
+                self.model_runner_output.artifact_connector_output = (
+                    pending.connector.process_output(
+                        self.model_runner_output.req_ids,
+                        pending.token_starts,
+                        pending.query_start_loc,
+                        self.routed_experts,
+                        self.num_sampled_tokens_np,
+                        self.num_rejected,
+                    )
+                )
+            finally:
+                pending.complete()
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()

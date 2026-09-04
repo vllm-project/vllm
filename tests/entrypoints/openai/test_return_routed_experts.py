@@ -12,15 +12,13 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "TitanML/tiny-mixtral"
 
 # tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers.
-# The published config has sliding_window=4096, which produces
-# SlidingWindowSpec kv-cache groups; RoutedExpertsManager requires a
-# FullAttentionSpec group, so we override sliding_window=null below.
+# Its published sliding window is incompatible with Artifact retention.
 NUM_LOCAL_EXPERTS = 8
 NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
 
 
-def assert_valid_routed_experts(encoded: str | None) -> None:
+def decode_routed_experts(encoded: str | None) -> np.ndarray:
     assert encoded is not None
     routed_experts = np.load(io.BytesIO(base64.b64decode(encoded)))
     assert routed_experts.ndim == 3
@@ -30,6 +28,7 @@ def assert_valid_routed_experts(encoded: str | None) -> None:
     assert topk == NUM_EXPERTS_PER_TOK
     assert (routed_experts >= 0).all()
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+    return routed_experts
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +43,11 @@ def server():
         "--hf-overrides",
         '{"sliding_window": null}',
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"},
+    ) as remote_server:
         yield remote_server
 
 
@@ -63,4 +66,8 @@ async def test_routed_experts(server):
         choice = result.model_dump()["choices"][0]
 
         assert choice["token_ids"] is not None
-        assert_valid_routed_experts(choice["routed_experts"])
+        assert result.usage is not None
+        routed_experts = decode_routed_experts(choice["routed_experts"])
+        assert len(routed_experts) == (
+            result.usage.prompt_tokens + len(choice["token_ids"]) - 1
+        )

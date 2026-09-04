@@ -15,9 +15,7 @@ MODEL_NAME = "TitanML/tiny-mixtral"
 GEN_ENDPOINT = "/inference/v1/generate"
 
 # tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers.
-# The published config has sliding_window=4096, which produces
-# SlidingWindowSpec kv-cache groups; RoutedExpertsManager requires a
-# FullAttentionSpec group, so we override sliding_window=null below.
+# Its published sliding window is incompatible with Artifact retention.
 NUM_LOCAL_EXPERTS = 8
 NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
@@ -38,7 +36,10 @@ def server():
     with RemoteOpenAIServer(
         MODEL_NAME,
         args,
-        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+        env_dict={
+            "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1",
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
+        },
     ) as remote_server:
         yield remote_server
 
@@ -59,9 +60,10 @@ async def client(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_generate_routed_experts(client):
     """Test that /inference/v1/generate returns routed_experts when enabled."""
+    prompt_token_ids = [1, 2, 3]
     payload = {
         "model": MODEL_NAME,
-        "token_ids": [1, 2, 3],
+        "token_ids": prompt_token_ids,
         "sampling_params": {"max_tokens": 10, "temperature": 0.0},
         "stream": False,
     }
@@ -83,3 +85,4 @@ async def test_generate_routed_experts(client):
     assert topk == NUM_EXPERTS_PER_TOK
     assert (routed_experts >= 0).all()
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+    assert num_tokens == len(prompt_token_ids) + len(choice["token_ids"]) - 1
