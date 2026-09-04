@@ -7,8 +7,10 @@ from dataclasses import dataclass, replace
 import torch
 import torch.distributed as dist
 
+from vllm.config import ParallelConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.config.fault_tolerance import ft_tp_barrier_required
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -46,6 +48,7 @@ def sync_cudagraph_and_dp_padding(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
@@ -63,6 +66,22 @@ def sync_cudagraph_and_dp_padding(
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = num_reqs
     dist.all_reduce(tensor, group=group)
+
+    if parallel_config.enable_fault_tolerance:
+        # Per-step barrier over the TP cpu group: a faulted sibling stops
+        # arriving, so survivors fail here on the host instead of leaving
+        # an orphaned TP collective running on device.
+        if ft_tp_barrier_required(parallel_config):
+            dist.barrier(group=get_tp_group().cpu_group)
+
+        if dead_dp_ranks := get_dp_group().dead_dp_ranks:
+            # A dead rank's column stays 0 after the SUM allreduce; rewrite
+            # it with aggregate-neutral values: INT32_MAX for the min-
+            # aggregated cg_mode row, and the row max for the uniform-token
+            # row.
+            dead_cols = sorted(dead_dp_ranks)
+            tensor[1, dead_cols] = torch.iinfo(torch.int32).max
+            tensor[2, dead_cols] = tensor[2].max()
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -148,6 +167,7 @@ def dispatch_cg_and_sync_dp(
     uniform_token_count: int | None,
     dp_size: int,
     dp_rank: int,
+    parallel_config: ParallelConfig,
     max_query_len: int | None = None,
     need_eager: bool = False,
     num_active_loras: int = 0,
@@ -237,6 +257,7 @@ def dispatch_cg_and_sync_dp(
         uniform_token_count,
         dp_size,
         dp_rank,
+        parallel_config,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
     )

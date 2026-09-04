@@ -21,7 +21,7 @@ import msgspec
 import zmq
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -1056,9 +1056,11 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
+
+        def executor_fail_callback():
+            self.input_queue.put_nowait((EngineCoreRequestType.EXECUTOR_FAILED, b""))
+            if ft_sentinel := getattr(self, "ft_sentinel", None):
+                ft_sentinel.on_executor_failed()
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -2076,7 +2078,10 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.dp_rank = dp_rank
         self.dp_size = dp_size
-        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        with set_current_vllm_config(vllm_config):
+            dp_group, dp_store = parallel_config.stateless_init_dp_group(
+                return_store=True
+            )
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
@@ -2140,7 +2145,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if has_global_unfinished:
+        # Once a scale_down has disabled the DP coordinator, resume into
+        # always-running — no coordinator wake-up is available.
+        if has_global_unfinished or (
+            self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
+        ):
             self.engines_running = True
 
     def barrier(self):
@@ -2295,6 +2304,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
+            # Coordinator disabled: never idle-pause; engines keep stepping.
+            return True
 
         return has_unfinished
 

@@ -442,6 +442,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync=batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
