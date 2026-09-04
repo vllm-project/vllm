@@ -149,6 +149,7 @@ def _construct_expected_sampling_metadata(
         top_k=None
         if all(x == 0 for x in top_k)
         else torch.tensor(top_k, dtype=torch.int, device=device),
+        has_top_k_one=any(x == 1 for x in top_k),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
