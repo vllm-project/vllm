@@ -5593,7 +5593,7 @@ class GPUModelRunner(
 
         self.model.set_aux_hidden_state_layers(aux_layers)
 
-        # PARD-2 (https://arxiv.org/abs/2504.18583) was trained on HF's
+        # PARD-2 (https://arxiv.org/abs/2605.08632) was trained on HF's
         # `output_hidden_states[-1]` for its final (-1) aux layer, i.e. the value
         # *after* the model's final norm. vLLM captures aux states inside the decoder
         # loop (pre-norm), so flag the final layer to be swapped for the post-norm
