@@ -104,7 +104,10 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
 
 
-def test_sampling_mask_preserves_top_k_boundary_ties():
+def test_sampling_mask_matches_processed_top_k_top_p_support():
+    """The mask must exactly mirror whatever support `apply_top_k_top_p`
+    (the real logits-processing function used by the sampler) actually
+    produces, whatever backend implements it."""
     processed_logits = apply_top_k_top_p(
         logits=torch.tensor(
             [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
@@ -115,7 +118,27 @@ def test_sampling_mask_preserves_top_k_boundary_ties():
     expected_token_ids = (
         torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
     )
-    assert len(expected_token_ids) > 3
+    assert 0 < len(expected_token_ids) <= processed_logits.shape[1]
+
+    tensors = SamplingMaskTensors.from_logits(
+        processed_logits,
+        num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
+        max_num_kept=3,
+    )
+    result = tensors.tolists()
+
+    assert result.to_nested_list() == [expected_token_ids]
+
+
+def test_sampling_mask_preserves_top_k_boundary_ties():
+    """When the kept support is wider than `max_num_kept` (e.g. a top-k
+    boundary tie keeps more than k logits), the mask must fall back to the
+    exact bitmask instead of silently truncating to `max_num_kept` ids."""
+    processed_logits = torch.tensor(
+        [[6.0, 5.0, 4.0, 4.0, 4.0, float("-inf"), float("-inf"), float("-inf")]],
+        device=DEVICE_TYPE,
+    )
+    expected_token_ids = [0, 1, 2, 3, 4]
 
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
