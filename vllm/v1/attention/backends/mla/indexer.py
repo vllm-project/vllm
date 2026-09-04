@@ -233,7 +233,11 @@ def split_indexer_prefill_chunks(
 # Below this row count the TP all-gather latency is larger than the saved
 # replicated indexer work on Hopper.  Keep the threshold conservative so small
 # /medium prefills retain the zero-communication path.
-MIN_TP_SHARD_ROWS_PER_RANK = 1024
+# The all-gather only amortizes its launch and synchronization cost once a
+# rank owns a substantial prefill slice.  Keep the replicated path for
+# short/medium requests; on TP4 this makes the optimized path start at 64K
+# prefill rows while retaining the long-context benefit.
+MIN_TP_SHARD_ROWS_PER_RANK = 16_384
 
 
 def balanced_prefill_row_shard(

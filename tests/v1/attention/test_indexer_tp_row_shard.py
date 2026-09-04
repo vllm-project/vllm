@@ -326,8 +326,8 @@ def test_balanced_row_shard_equalises_scored_keys(tp_size: int, shape: str) -> N
         query_lens = [rows_needed // 2, 2 * rows_needed - rows_needed // 2]
         seq_lens = [query_lens[0] + 500_000, query_lens[1]]
     elif shape == "tight":
-        # Just above the total-size gate, where sub-1024 inexpensive shards are
-        # still beneficial.
+        # Just above the total-size gate, where the minimum per-rank floor is
+        # large enough to amortize the all-gather.
         query_lens, seq_lens = [rows_needed + 2], [rows_needed + 2]
     else:  # a mid-prompt chunk: high, nearly flat cost
         query_lens, seq_lens = [per_req], [per_req + 15 * per_req]
