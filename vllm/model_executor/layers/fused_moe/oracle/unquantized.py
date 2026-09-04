@@ -326,6 +326,16 @@ def select_unquantized_moe_backend(
     )
 
 
+def aiter_moe_intermediate_alignment(intermediate: int) -> int:
+    """Intermediate-size alignment required by AITER's CK 2stages MoE kernel.
+
+    AITER dispatches on ``inter_dim <= 192``: below the threshold both stages
+    use 64-wide tiles, above it at least one stage uses a 128-wide tile, and
+    CK's ``IsSupportedArgument`` rejects a size not divisible by that width.
+    """
+    return 64 if intermediate <= 192 else 128
+
+
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     moe_config: FusedMoEConfig,
