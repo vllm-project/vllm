@@ -45,6 +45,8 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    resume_device_comms,
+    suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -220,10 +222,14 @@ class Worker(WorkerBase):
         # Freezing that graph prevents gc.collect() from reaching LLM.__del__.
         self._freeze_gc_heap_on_init = envs.VLLM_ENABLE_V1_MULTIPROCESSING
 
+        # Device handles of the previous step's PP intermediate-tensor send.
+        self._pp_send_work: list[Handle] = []
+
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
 
-    def _get_sleep_mode_backend(self) -> "SleepModeBackend":
+    @property
+    def sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
             from vllm.device_allocator.sleep_mode_backend import (
                 SleepModeBackendFactory,
@@ -250,7 +256,9 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self._get_sleep_mode_backend().suspend(level)
+        self.sleep_mode_backend.suspend(level)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            suspend_device_comms()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -270,7 +278,9 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self._get_sleep_mode_backend().resume(tags)
+        self.sleep_mode_backend.resume(tags)
+        if self.vllm_config.model_config.enable_nccl_comm_suspend:
+            resume_device_comms()
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
@@ -1110,6 +1120,13 @@ class Worker(WorkerBase):
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # Wait for the previous step's sends so this forward pass cannot
+        # overwrite buffers they are still reading.
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1182,16 +1199,15 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # launch non-blocking send of intermediate tensors; the
-        # GroupCoordinator self-retains the source tensors and the
-        # metadata handle in ``_pending_isends`` and reaps them lazily on
-        # the next ``isend_tensor_dict(is_async=True)`` call, so this
-        # step returns without waiting for the receiver to drain.
-        get_pp_group().isend_tensor_dict(
+        # Non-blocking send of the intermediate tensors. The metadata handle
+        # is reaped lazily by the GroupCoordinator; the device handles are
+        # waited at the top of the next step.
+        handles = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
         )
+        self._pp_send_work = handles[1:]
 
         return None
 
