@@ -18,6 +18,7 @@ from vllm.models.deepseek_v32.nvidia import glm52_low_latency_gemm as glm52_gemm
 from vllm.models.kimi_k3.nvidia import low_latency_gemm as k3_gemm
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import KIMI_K3_PROJECTIONS
 from vllm.models.qwen4_exp.nvidia import low_latency_gemm as qwen4_exp_gemm
+from vllm.platforms import current_platform
 
 # Keyed by local (N, K): (cute token counts, dsv3 token counts). 1536x7168 is
 # the unified shared_gate_up_proj/mla_g_proj entry (dsv3 M1..16).
@@ -284,7 +285,7 @@ def test_kda_projection_overlap_is_tp8_only(tp_size: int) -> None:
 def test_kda_qkvg_autotune_enables_full_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import flashinfer.gemm
+    flashinfer_gemm = pytest.importorskip("flashinfer.gemm")
 
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
@@ -302,7 +303,7 @@ def test_kda_qkvg_autotune_enables_full_overlap(
         calls.append((a.shape, b.shape, pdl, backend))
         return torch.empty(a.shape[0], b.shape[1], dtype=a.dtype)
 
-    monkeypatch.setattr(flashinfer.gemm, "mm_bf16", fake_mm_bf16)
+    monkeypatch.setattr(flashinfer_gemm, "mm_bf16", fake_mm_bf16)
 
     k3_gemm.autotune_kda_qkvg(kda)
 
@@ -995,20 +996,20 @@ def test_glm_dsv3_selected_shapes(
     assert cosine > 0.999
 
 
-def test_nonpacked_single_token_dsv3_falls_back() -> None:
+@pytest.mark.parametrize("num_tokens", [1, 4])
+def test_kda_f_b_nonpacked_dsv3_dispatches(num_tokens: int) -> None:
     _require_sm103_and_dsv3()
     n, k = 1536, 128
-    storage = torch.randn(1, k + 16, dtype=torch.bfloat16, device="cuda")
-    x = storage[:, :k]
+    storage = torch.randn(num_tokens, 6288, dtype=torch.bfloat16, device="cuda")
+    x = storage[:, 6144 : 6144 + k]
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
     spec = k3_gemm.KIMI_K3_PROJECTIONS[(n, k)]
     method = k3_gemm.KimiK3LowLatencyLinearMethod(
         k3_gemm._build_plan(spec), k3_gemm._build_residual_plan(spec)
     )
 
-    assert x.is_contiguous()
-    assert x.stride() == (k + 16, 1)
-    assert not k3_gemm._runtime_ok(x, weight)  # strict guard rejects the view
+    assert x.stride() == (6288, 1)
+    assert k3_gemm._runtime_ok(x, weight)
     output = method.apply(SimpleNamespace(weight=weight), x)
 
     reference = torch.nn.functional.linear(x, weight)
@@ -1216,6 +1217,12 @@ def test_residual_dispatch_falls_back_to_addmm(
     assert output is fallback
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="The base UnquantizedLinearMethod is platform-dispatched: on ROCm it "
+    "goes through the vllm::rocm_unquantized_gemm custom op, which has no CPU "
+    "kernel, so the CPU-tensor fallback cannot be exercised there.",
+)
 def test_fallback_preserves_default_method() -> None:
     x = torch.randn(2, 4)
     weight = torch.randn(3, 4)

@@ -77,9 +77,13 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
@@ -2613,6 +2617,9 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
 
+        if self.cache_config.mamba_cache_mode == "all":
+            unsupported.append("mamba cache mode 'all'")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
@@ -2702,6 +2709,13 @@ class VllmConfig:
             # fixed-width logprobs gather cannot reasonably size for.
             blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
 
+        if self.model_config is not None and self.model_config.return_sampling_mask:
+            # gather_sampler_output() drops SamplingMaskTensors: masks come back None.
+            blockers.append(
+                "return_sampling_mask is set and the batch-sharded gather does "
+                "not forward sampling masks"
+            )
+
         if (
             self.speculative_config is not None
             and self.speculative_config.enable_adaptive_verification
@@ -2746,7 +2760,7 @@ class VllmConfig:
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_config: "KVCacheConfig"
     ) -> None:
-        """Normalize DCP interleave size against the resolved block_size for PD.
+        """Normalize DCP interleave size against block_size for NIXL P/D.
 
         Called by each worker (via ensure_kv_transfer_initialized), once it knows its
         own final block_size via kv_cache_config.
@@ -2754,11 +2768,6 @@ class VllmConfig:
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
             return
-        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
-        # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(
-            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
-        )
         if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
             self.parallel_config.cp_kv_cache_interleave_size
             != self.parallel_config.dcp_kv_cache_interleave_size
@@ -2772,11 +2781,17 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector is not None
-            and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
+            "NixlConnector"
         ):
+            return
+
+        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
+        # scaling by dcp_size (we need the local block_size here).
+        local_block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+        )
+        if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
             logger.info_once(
@@ -2797,14 +2812,13 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility when a KV connector is configured:
-        # cp_kv_cache_interleave_size is pinned to block_size for PD by each worker
-        pd_active = (
+        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
+        # size is pinned to block_size by each worker.
+        nixl_pd_active = (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector is not None
-            and self.kv_transfer_config.is_kv_transfer_instance
+            and self.kv_transfer_config.has_connector("NixlConnector")
         )
-        if self.parallel_config.decode_context_parallel_size > 1 and not pd_active:
+        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
