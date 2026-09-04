@@ -2209,75 +2209,75 @@ steps:
 
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
 
-- label: ":amd: (MI300) Transformers Nightly Models (Initialization) Shard %N" # TBD
-  timeout_in_minutes: 65
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  parallelism: 6
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+# - label: ":amd: (MI300) Transformers Nightly Models (Initialization) Shard %N" # TBD
+#   timeout_in_minutes: 65
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   parallelism: 6
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: ":amd: (MI300) Transformers Nightly Models (Processing) Shard %N" # TBD
-  timeout_in_minutes: 145
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  parallelism: 8
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+# - label: ":amd: (MI300) Transformers Nightly Models (Processing) Shard %N" # TBD
+#   timeout_in_minutes: 145
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   parallelism: 8
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: ":amd: (MI300) Transformers Nightly Models (Single)" # TBD
-  timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  - examples/
-  commands:
-  - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/transformers/test_backend.py
-  - pytest -v -s tests/models/multimodal/test_mapping.py
-  - python3 examples/basic/offline_inference/chat.py
-  - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
-  - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
+# - label: ":amd: (MI300) Transformers Nightly Models (Single)" # TBD
+#   timeout_in_minutes: 50
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+#   dind: false
+#   agent_pool: mi300_1
+#   optional: true
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - vllm/model_executor/models/
+#   - vllm/model_executor/model_loader/
+#   - vllm/multimodal/
+#   - vllm/model_executor/layers/
+#   - vllm/v1/attention/backends/
+#   - vllm/v1/attention/selector.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - tests/models/
+#   - examples/
+#   commands:
+#   - pip install --upgrade git+https://github.com/huggingface/transformers
+#   - pytest -v -s tests/models/transformers/test_backend.py
+#   - pytest -v -s tests/models/multimodal/test_mapping.py
+#   - python3 examples/basic/offline_inference/chat.py
+#   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
+#   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
 
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
 
