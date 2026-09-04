@@ -77,9 +77,13 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
@@ -438,7 +442,7 @@ class VllmConfig:
     remaining requests are aborted once the timeout is reached.
     """
 
-    def compute_hash(self) -> str:
+    def compute_hash(self, include_version: bool = True) -> str:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -449,14 +453,18 @@ class VllmConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        Args:
+            include_version: Include the vLLM version in the hash.
         """
         factors: list[Any] = []
 
         # summarize vllm config
         vllm_factors: list[Any] = []
-        from vllm import __version__
+        if include_version:
+            from vllm import __version__
 
-        vllm_factors.append(__version__)
+            vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
             if (
@@ -2588,8 +2596,8 @@ class VllmConfig:
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
 
-        if self.parallel_config.enable_dbo:
-            unsupported.append("dual batch overlap")
+        if self.parallel_config.use_ubatching:
+            unsupported.extend(self._get_dbo_unsupported_features())
 
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
@@ -2608,6 +2616,9 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
+
+        if self.cache_config.mamba_cache_mode == "all":
+            unsupported.append("mamba cache mode 'all'")
 
         return unsupported
 
@@ -2698,6 +2709,13 @@ class VllmConfig:
             # fixed-width logprobs gather cannot reasonably size for.
             blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
 
+        if self.model_config is not None and self.model_config.return_sampling_mask:
+            # gather_sampler_output() drops SamplingMaskTensors: masks come back None.
+            blockers.append(
+                "return_sampling_mask is set and the batch-sharded gather does "
+                "not forward sampling masks"
+            )
+
         if (
             self.speculative_config is not None
             and self.speculative_config.enable_adaptive_verification
@@ -2721,6 +2739,47 @@ class VllmConfig:
                 f"{'; '.join(blockers)}."
             )
 
+    def _get_dbo_unsupported_features(self) -> list[str]:
+        """Collect what the V2 model runner cannot combine with DBO.
+
+        The V2 runner microbatches a plain decoder forward pass. Anything that
+        slices or replays the batch differently (drafting, adapters, pipeline
+        stages, context parallelism, encoders) is not handled yet.
+        """
+        # TODO: DBO with model runner V2 is under development.
+        # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
+        # Remove it when stable.
+        if envs.VLLM_USE_V2_MODEL_RUNNER is None:
+            return ["dual batch overlap"]
+
+        unsupported: list[str] = []
+        model_config = self.model_config
+        parallel_config = self.parallel_config
+
+        if self.lora_config is not None:
+            unsupported.append("dual batch overlap with LoRA")
+        if self.speculative_config is not None:
+            unsupported.append("dual batch overlap with speculative decoding")
+        if parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("dual batch overlap with pipeline parallelism")
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            unsupported.append("dual batch overlap with context parallelism")
+        if model_config is not None and (
+            model_config.is_multimodal_model or model_config.is_encoder_decoder
+        ):
+            unsupported.append("dual batch overlap with multimodal models")
+        if model_config is not None and model_config.is_hybrid:
+            unsupported.append("dual batch overlap with hybrid models")
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.is_mm_encoder_only:
+            unsupported.append("dual batch overlap with encoder only models")
+
+        return unsupported
+
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
@@ -2742,7 +2801,7 @@ class VllmConfig:
     def adjust_dcp_kv_cache_interleave_size(
         self, kv_cache_config: "KVCacheConfig"
     ) -> None:
-        """Normalize DCP interleave size against the resolved block_size for PD.
+        """Normalize DCP interleave size against block_size for NIXL P/D.
 
         Called by each worker (via ensure_kv_transfer_initialized), once it knows its
         own final block_size via kv_cache_config.
@@ -2750,11 +2809,6 @@ class VllmConfig:
         dcp_size = self.parallel_config.decode_context_parallel_size
         if dcp_size <= 1:
             return
-        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
-        # scaling by dcp_size (we need the local block_size here).
-        local_block_size = min(
-            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
-        )
         if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
             self.parallel_config.cp_kv_cache_interleave_size
             != self.parallel_config.dcp_kv_cache_interleave_size
@@ -2768,11 +2822,17 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
-        if (
-            self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector is not None
-            and self.parallel_config.cp_kv_cache_interleave_size != local_block_size
+        if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
+            "NixlConnector"
         ):
+            return
+
+        # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
+        # scaling by dcp_size (we need the local block_size here).
+        local_block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+        )
+        if self.parallel_config.cp_kv_cache_interleave_size != local_block_size:
             interleave = self.parallel_config.cp_kv_cache_interleave_size
             self.parallel_config.cp_kv_cache_interleave_size = local_block_size
             logger.info_once(
@@ -2793,14 +2853,13 @@ class VllmConfig:
         """
         block_size = self.cache_config.block_size
 
-        # Skip DCP interleave-size compatibility when a KV connector is configured:
-        # cp_kv_cache_interleave_size is pinned to block_size for PD by each worker
-        pd_active = (
+        # Skip DCP interleave-size compatibility for NIXL P/D: the interleave
+        # size is pinned to block_size by each worker.
+        nixl_pd_active = (
             self.kv_transfer_config is not None
-            and self.kv_transfer_config.kv_connector is not None
-            and self.kv_transfer_config.is_kv_transfer_instance
+            and self.kv_transfer_config.has_connector("NixlConnector")
         )
-        if self.parallel_config.decode_context_parallel_size > 1 and not pd_active:
+        if self.parallel_config.decode_context_parallel_size > 1 and not nixl_pd_active:
             assert (
                 self.parallel_config.cp_kv_cache_interleave_size <= block_size
                 and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0

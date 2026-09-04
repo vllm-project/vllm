@@ -355,7 +355,7 @@ class ConvModule(nn.Module):
         causal: bool = False,
         batch_norm: bool = False,
         chunk_se: int = 0,
-        chunk_size: int = 18,
+        chunk_size: int | list[int] = 18,
         activation: str = "relu",
         glu_type: str = "sigmoid",
         bias_in_glu: bool = True,
@@ -790,7 +790,7 @@ class AbsolutePositionalEncoding(nn.Module):
         self.d_model = d_model
         self.xscale = math.sqrt(self.d_model)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
-        self.pe = None
+        self.pe: torch.Tensor | None = None
         self.extend_pe(torch.tensor(0.0).expand(1, max_len))
         self._register_load_state_dict_pre_hook(_pre_hook)
 
@@ -826,6 +826,7 @@ class AbsolutePositionalEncoding(nn.Module):
 
         """
         self.extend_pe(x)
+        assert self.pe is not None
         x = x * self.xscale + self.pe[:, : x.size(1)]
         return self.dropout(x)
 
@@ -880,7 +881,7 @@ class CausalConv1D(nn.Conv1d):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        padding: str | int = 0,
+        padding: str | int | list[int] | None = 0,
         dilation: int = 1,
         groups: int = 1,
         bias: bool = True,
@@ -888,7 +889,9 @@ class CausalConv1D(nn.Conv1d):
         device=None,
         dtype=None,
     ) -> None:
-        self.cache_drop_size = None
+        self.cache_drop_size: int | None = None
+        self._left_padding: int
+        self._right_padding: int
         if padding is None:
             self._left_padding = kernel_size - 1
             self._right_padding = stride - 1
@@ -933,6 +936,7 @@ class CausalConv1D(nn.Conv1d):
         else:
             new_x = F.pad(x, pad=(0, self._right_padding))
             new_x = torch.cat([cache, new_x], dim=-1)
+            assert self.cache_drop_size is not None
             if self.cache_drop_size > 0:
                 next_cache = new_x[:, :, : -self.cache_drop_size]
             else:
@@ -965,7 +969,7 @@ class CausalConv2D(nn.Conv2d):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        padding: str | int = 0,
+        padding: str | int | None = 0,
         dilation: int = 1,
         groups: int = 1,
         bias: bool = True,

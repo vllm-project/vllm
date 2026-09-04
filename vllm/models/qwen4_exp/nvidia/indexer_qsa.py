@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp weight-free QSA indexer."""
 
-from __future__ import annotations
-
 from typing import cast
 
 import torch
@@ -169,7 +167,18 @@ class QSAIndexer(nn.Module):
 
     @property
     def output_width(self) -> int:
+        """Selection (index) columns per row."""
         return self.token_topk + self.compress_ratio - 1
+
+    @property
+    def packed_output_width(self) -> int:
+        """Packed selection-buffer width: output_width + 1.
+
+        The trailing column holds each row's valid-entry count (written by
+        the expand kernel) — never a token index; the sparse attention
+        kernel reads it as its tile-loop bound.
+        """
+        return self.output_width + 1
 
     def _metadata(
         self,
@@ -185,6 +194,22 @@ class QSAIndexer(nn.Module):
         )
         if raw.num_actual_tokens != compressed.num_actual_tokens:
             raise RuntimeError("QSA side-cache metadata token counts disagree")
+        raw_split = (
+            raw.num_decodes,
+            raw.num_decode_tokens,
+            raw.num_prefills,
+            raw.num_prefill_tokens,
+            raw.decode_query_len,
+        )
+        compressed_split = (
+            compressed.num_decodes,
+            compressed.num_decode_tokens,
+            compressed.num_prefills,
+            compressed.num_prefill_tokens,
+            compressed.decode_query_len,
+        )
+        if raw_split != compressed_split:
+            raise RuntimeError("QSA side-cache metadata batch splits disagree")
         if not raw.logical_positions.is_cuda and (
             not torch.equal(raw.logical_positions, compressed.logical_positions)
         ):
@@ -197,7 +222,14 @@ class QSAIndexer(nn.Module):
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return fixed-width request-relative token indices padded with ``-1``."""
+        """Select each query row's token indices.
+
+        Returns the packed buffer of shape [num_tokens, output_width + 1]:
+        the leading ``output_width`` columns are ``-1``-padded
+        request-relative token indices, and the trailing column is the row's
+        valid-entry count (the attention kernel's loop bound, never a token
+        index).
+        """
 
         metadata = self._metadata()
         if metadata is None:
@@ -205,20 +237,23 @@ class QSAIndexer(nn.Module):
             if self.skip_topk and out is not None:
                 return out
             result = torch.full(
-                (hidden_states.shape[0], self.output_width),
+                (hidden_states.shape[0], self.packed_output_width),
                 -1,
                 dtype=torch.int32,
                 device=hidden_states.device,
             )
+            # Inert rows carry a zero valid count (empty loop bound), not -1.
+            result[:, -1] = 0
             if out is not None:
                 out.copy_(result)
                 return out
             return result
 
-        from .ops.qsa import (
-            qsa_compress_groups_with_ratio,
-            qsa_select_paged_tokens,
-            qsa_store_cache_rows,
+        from .ops.qsa import qsa_compress_groups_with_ratio, qsa_store_cache_rows
+        from .ops.qsa_indexer import (
+            expand_qsa_block_indices,
+            qsa_select_paged_decode,
+            qsa_select_paged_prefill,
         )
 
         raw_metadata, compressed_metadata = metadata
@@ -339,18 +374,68 @@ class QSAIndexer(nn.Module):
                 raise RuntimeError("QSA top-k reuse requires an output buffer")
             return out
 
-        # Score compressed keys, select blocks, then expand them to token indices.
-        return qsa_select_paged_tokens(
-            q,
-            compressed_key_cache,
-            compressed_metadata.block_table,
-            compressed_metadata.token_to_req,
-            compressed_metadata.logical_positions,
-            compressed_metadata.seq_lens,
-            self.token_topk,
+        if out is None:
+            out = torch.empty(
+                num_tokens,
+                self.packed_output_width,
+                dtype=torch.int32,
+                device=q.device,
+            )
+        elif out.shape != (num_tokens, self.packed_output_width):
+            raise ValueError("QSA selection output has an invalid shape")
+
+        num_decode_tokens = compressed_metadata.num_decode_tokens
+        decode_query_len = compressed_metadata.decode_query_len
+        visible_blocks = compressed_metadata.visible_blocks[:num_tokens]
+        block_indices = torch.empty(
+            num_tokens,
+            self.token_topk // self.compress_ratio,
+            dtype=torch.int32,
+            device=q.device,
+        )
+
+        # Decode requests occupy the leading rows and share one query length.
+        if num_decode_tokens:
+            num_decodes = compressed_metadata.num_decodes
+            if num_decodes * decode_query_len != num_decode_tokens:
+                raise ValueError("QSA decode rows must form a uniform request batch")
+            decode_slice = slice(0, num_decode_tokens)
+            qsa_select_paged_decode(
+                q[decode_slice],
+                compressed_key_cache,
+                compressed_metadata.block_table[:num_decodes],
+                visible_blocks[decode_slice],
+                self.token_topk,
+                self.compress_ratio,
+                decode_query_len,
+                block_indices[decode_slice],
+            )
+
+        # Prefill requests follow the leading decode rows in the reordered batch.
+        if num_decode_tokens < num_tokens:
+            num_decodes = compressed_metadata.num_decodes
+            prefill_slice = slice(num_decode_tokens, num_tokens)
+            qsa_select_paged_prefill(
+                q[prefill_slice],
+                compressed_key_cache,
+                compressed_metadata.block_table[num_decodes:],
+                compressed_metadata.query_start_loc[num_decodes:],
+                visible_blocks[prefill_slice],
+                self.token_topk,
+                self.compress_ratio,
+                compressed_metadata.max_query_len,
+                block_indices[prefill_slice],
+                compressed_metadata.max_seq_len,
+            )
+        expand_qsa_block_indices(
+            block_indices,
+            compressed_metadata.logical_positions[:num_tokens],
+            visible_blocks,
             self.compress_ratio,
+            self.token_topk,
             out,
         )
+        return out
 
 
 __all__ = ["QSAIndexer", "apply_qsa_rope"]

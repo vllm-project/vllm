@@ -24,6 +24,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.determinism.batch_invariant import (
     linear_batch_invariant,
 )
+from vllm.model_executor.layers.quantization import resolve_quant_method
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -55,13 +56,10 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "AutoGPTQLinearMethod",
     "Fp8LinearMethod",
     "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod",
-    "ModelOptFp8PcPtLinearMethod",
-    "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
-    "ModelOptNvFp4LinearMethod",
-    "ModelOptNvFp4W4A16LinearMethod",
     "HummingLinearMethod",
+    # ModelOptLinearMethod self-registers via
+    # register_weight_loader_v2_supported_method (see modelopt.py).
 ]
 
 
@@ -166,6 +164,8 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    supports_pre_processed_weights = True
+
     def __init__(self) -> None:
         config = get_current_vllm_config_or_none()
         linear_backend = (
@@ -231,7 +231,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+        if envs.VLLM_BATCH_INVARIANT and (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             return linear_batch_invariant(x, layer.weight, bias)
         return self._gemm_impl(layer, x, layer.weight, bias)
 
@@ -281,7 +283,7 @@ class LinearBase(PluggableLayer):
         self.quant_method: QuantizeMethodBase
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
-        elif quant_method := quant_config.get_quant_method(self, prefix=prefix):
+        elif quant_method := resolve_quant_method(quant_config, self, prefix=prefix):
             self.quant_method = quant_method
         else:
             raise ValueError("All linear layers should support quant method.")
