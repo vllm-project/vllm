@@ -1116,6 +1116,10 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
+    # Aux hidden taps ride the pipeline packed inside IntermediateTensors, so a
+    # DSpark drafter on the last stage may tap target layers on any stage.
+    supports_pp_aux_hidden_state_transport = True
+
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvgfab": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj"],
@@ -1220,14 +1224,25 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 cdiv(self.start_layer, self.attn_res_block_size),
                 self.config.hidden_size,
             )
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
-            }
+        tensors: dict[str, torch.Tensor] = {
+            "hidden_states": torch.zeros(
+                (batch_size, self.config.hidden_size), dtype=dtype, device=device
+            ),
+            "residual": torch.zeros(residual_shape, dtype=dtype, device=device),
+        }
+        # Aux taps at or below this stage's first layer are captured by earlier
+        # stages and arrive packed along the feature dim.
+        num_incoming_aux = sum(
+            layer <= self.start_layer
+            for layer in getattr(self, "aux_hidden_state_layers", ())
         )
+        if num_incoming_aux:
+            tensors["aux_hidden_states"] = torch.zeros(
+                (batch_size, num_incoming_aux * self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            )
+        return IntermediateTensors(tensors)
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
@@ -1325,10 +1340,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            packed_aux_hidden_states = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            packed_aux_hidden_states = intermediate_tensors.tensors.get(
+                "aux_hidden_states"
+            )
         assert hidden_states is not None
 
         full_num_tokens = positions.shape[0]
@@ -1341,9 +1360,19 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if packed_aux_hidden_states is not None:
+            # Unpack the taps earlier stages captured (ascending layer order).
+            aux_hidden_states.extend(
+                packed_aux_hidden_states.split(self.config.hidden_size, dim=-1)
+            )
+        # The stage-entry capture doubles the previous stage's own last-layer
+        # tap once aux states flow across stages, so it only makes sense on the
+        # first stage (e.g. a tap on the embedding output).
+        if (
+            get_pp_group().is_first_rank
+            and self.start_layer in self.aux_hidden_state_layers
+        ):
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1393,9 +1422,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            if aux_hidden_states:
+                tensors["aux_hidden_states"] = torch.cat(aux_hidden_states, dim=-1)
+            return IntermediateTensors(tensors)
 
         if self.use_attn_res:
             assert prefix_sum is not None

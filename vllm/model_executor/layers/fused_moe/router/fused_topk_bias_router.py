@@ -165,6 +165,7 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
+                is_padding=_get_padding_mask(gating_output.shape[0]),
                 input_ids=input_tokens,
                 bias_vl=bias_vl,
                 image_sentinel_lo=image_sentinel_lo,
