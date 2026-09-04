@@ -64,8 +64,13 @@ def aux_hidden_state_relay_keys(model: nn.Module) -> tuple[str, ...]:
 
 
 def reserve_aux_intermediate_tensor_slots(model: nn.Module) -> None:
-    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.parallel_state import (
+        get_pp_group,
+        model_parallel_is_initialized,
+    )
 
+    if not model_parallel_is_initialized():
+        return
     pp = get_pp_group()
     if pp.world_size < 2 or pp.is_first_rank:
         return
