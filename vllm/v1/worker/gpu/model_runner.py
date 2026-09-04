@@ -173,7 +173,7 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     get_uniform_decode_token_count,
 )
-from vllm.v1.worker.workspace import use_workspace_lane
+from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
 
@@ -928,7 +928,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return _profile_cudagraph_memory(self)
 
     @torch.inference_mode()
-    def capture_model(self) -> int:
+    def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
         capture_encoder = (
             self.model_state.supports_mm_inputs
@@ -985,6 +985,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.adaptive_verification.set_initial_cost_curves(timings)
 
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+
+        if not profile_only:
+            # Lock workspace to prevent resizing during execution. A resize after
+            # capture frees the static cuda graph buffer.
+            lock_workspace()
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
