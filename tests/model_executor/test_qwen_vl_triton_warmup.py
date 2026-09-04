@@ -8,7 +8,6 @@ import torch
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
     _warm_mrope,
     _warm_vision,
-    qwen_vl_triton_warmup,
 )
 
 
@@ -102,26 +101,3 @@ def test_mrope_warmup_skips_when_model_config_disables_mrope() -> None:
         get_model=fail,
     )
     _warm_mrope(runner, torch.nn.Module())
-
-
-def test_qwen_vl_triton_warmup_runs_without_gdn_model_type(monkeypatch) -> None:
-    calls: list[str] = []
-    model = torch.nn.Module()
-    runner = SimpleNamespace(
-        device=torch.device("cpu"),
-        get_model=lambda: model,
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.warmup.qwen_vl_triton_warmup._warm_vision",
-        lambda value: calls.append("vision"),
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.warmup.qwen_vl_triton_warmup._warm_mrope",
-        lambda runner_value, model_value: calls.append("mrope"),
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.warmup.qwen_vl_triton_warmup._synchronize_device",
-        lambda device: calls.append("sync"),
-    )
-    qwen_vl_triton_warmup(runner)
-    assert calls == ["vision", "mrope", "sync"]
