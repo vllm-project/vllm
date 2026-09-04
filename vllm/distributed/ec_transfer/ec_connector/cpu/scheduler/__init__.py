@@ -7,7 +7,8 @@ Owns the mmap region and the embedding cache, and handles the producer
 for the ECCPUConnector.
 """
 
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -42,18 +43,20 @@ _ADMIT_DEFER_TIMEOUT_S = 60.0
 
 @dataclass
 class _AnnounceHold:
-    """Pins kept for consumers that were told where to read an encoding.
+    """Leases kept for consumers that were told where to read an encoding.
 
-    One per announcement, not one per encoding: two requests routed to two
-    consumers each need the entry to survive until their own read lands.
+    One lease per announcement, not one per encoding: two requests routed to
+    two consumers each need the entry to survive until their own read lands,
+    and each waits out its own window. A later announcement must not extend
+    an earlier one, or an encoding announced faster than the lease to
+    consumers that never read would stay pinned indefinitely.
     """
 
-    deadline: float
-    # Pins taken on a ready entry.
-    holds: int = 0
-    # Announcements made before the save landed. A not-ready entry cannot be
-    # evicted, so these take their pins at mark_ready.
-    pending: int = 0
+    # Deadlines of the announcements holding a pin, oldest first.
+    holds: deque[float] = field(default_factory=deque)
+    # Deadlines of announcements made before the save landed. A not-ready
+    # entry cannot be evicted, so these take their pins at mark_ready.
+    pending: deque[float] = field(default_factory=deque)
 
 
 class ECCPUScheduler:
@@ -436,24 +439,22 @@ class ECCPUScheduler:
     def _hold_announced(self, mm_hash: str, entry: Any) -> None:
         """Hold an announced encoding until its consumer has read it.
 
-        One hold per announcement: the same encoding announced to two
+        One lease per announcement: the same encoding announced to two
         consumers must survive until both reads land, so re-announcing takes
-        a second pin rather than only extending the window.
+        its own pin and its own window rather than extending an earlier one.
         """
         import time
 
-        hold = self._announce.get(mm_hash)
-        if hold is None:
-            hold = self._announce[mm_hash] = _AnnounceHold(0.0)
-        hold.deadline = time.monotonic() + self._announce_lease_s
+        hold = self._announce.setdefault(mm_hash, _AnnounceHold())
+        deadline = time.monotonic() + self._announce_lease_s
         if entry.ready:
             self._cache.pin(mm_hash)
-            hold.holds += 1
+            hold.holds.append(deadline)
         else:
-            hold.pending += 1
+            hold.pending.append(deadline)
 
     def _release_announce_pins(self) -> None:
-        """Release one hold per landed read, and sweep lapsed leases."""
+        """Release one lease per landed read, and sweep lapsed leases."""
         import time
 
         assert self._producer_session is not None
@@ -462,21 +463,34 @@ class ECCPUScheduler:
             if hold is None:
                 # Already swept by a lapsed lease; nothing left to release.
                 continue
+            # A read names only the encoding, so it retires the oldest lease
+            # on it; every lease is the same length, so which one it was does
+            # not change when the others expire.
             if hold.holds:
-                hold.holds -= 1
+                hold.holds.popleft()
                 self._unpin_announced(mm_hash)
             elif hold.pending:
-                hold.pending -= 1
+                hold.pending.popleft()
             if not hold.holds and not hold.pending:
                 del self._announce[mm_hash]
         now = time.monotonic()
         for mm_hash, hold in list(self._announce.items()):
-            if now <= hold.deadline:
-                continue
-            for _ in range(hold.holds):
+            lapsed = 0
+            while hold.holds and hold.holds[0] < now:
+                hold.holds.popleft()
                 self._unpin_announced(mm_hash)
-            del self._announce[mm_hash]
-            logger.debug("EC producer: hold on mm_hash=%s lapsed; releasing", mm_hash)
+                lapsed += 1
+            while hold.pending and hold.pending[0] < now:
+                hold.pending.popleft()
+                lapsed += 1
+            if not hold.holds and not hold.pending:
+                del self._announce[mm_hash]
+            if lapsed:
+                logger.debug(
+                    "EC producer: %d hold(s) on mm_hash=%s lapsed; releasing",
+                    lapsed,
+                    mm_hash,
+                )
 
     def _unpin_announced(self, mm_hash: str) -> None:
         # A pinned entry cannot be evicted or discarded, so it is normally
@@ -628,10 +642,10 @@ class ECCPUScheduler:
                 # the save was in flight take their pins now.
                 hold = self._announce.get(mm_hash)
                 if hold is not None and hold.pending:
-                    for _ in range(hold.pending):
+                    for _ in range(len(hold.pending)):
                         self._cache.pin(mm_hash)
-                    hold.holds += hold.pending
-                    hold.pending = 0
+                    hold.holds.extend(hold.pending)
+                    hold.pending.clear()
                 logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
         for transfer_id in meta.completed_loads:
             pending = self._load_acks.get(transfer_id)

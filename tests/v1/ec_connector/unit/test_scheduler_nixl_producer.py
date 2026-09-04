@@ -206,7 +206,7 @@ def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
     entry = s._cache.alloc("h1", 2)
     assert entry is not None and not entry.ready
     _announce(s, "h1")
-    assert s._announce["h1"].pending == 1
+    assert len(s._announce["h1"].pending) == 1
 
     s.update_connector_output(
         ECConnectorOutput(
@@ -238,5 +238,39 @@ def test_each_announcement_keeps_its_own_hold(monkeypatch):
 
     s._producer_session.served.append("h1")
     s.build_connector_meta(scheduler_output=None)
+    assert entry.evictable
+    s.shutdown()
+
+
+def test_a_reannouncement_does_not_extend_the_earlier_hold(monkeypatch):
+    """Each announcement waits out its own lease, not the newest one.
+
+    An encoding announced again before its lease expires, to consumers that
+    never read, would otherwise keep a pin that no read and no expiry ever
+    releases, leaving the entry non-evictable for as long as it stays hot.
+    """
+    import time
+
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    s = _announcing_sched(monkeypatch, lease=30.0)
+    entry = s._cache.alloc("h1", 2)
+    s._cache.mark_ready("h1")
+
+    _announce(s, "h1")
+    clock[0] += 29.0
+    _announce(s, "h1")
+    assert len(s._announce["h1"].holds) == 2
+
+    # Past the first lease, inside the second.
+    clock[0] += 2.0
+    s.build_connector_meta(scheduler_output=None)
+    assert len(s._announce["h1"].holds) == 1
+    assert not entry.evictable
+
+    clock[0] += 30.0
+    s.build_connector_meta(scheduler_output=None)
+    assert "h1" not in s._announce
     assert entry.evictable
     s.shutdown()
