@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import html
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -67,16 +69,22 @@ ACTIVE_BUILD_STATES = {
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 SETUP_STEP_KEYS = {
+    "bootstrap",
     "ensure-ci-base-amd",
     "pre-commit",
     "refresh-rocm-base-amd",
 }
+GENERATOR_ERROR_ANNOTATION_CONTEXT = "pipeline-generator-error"
 
 
 class ApiError(RuntimeError):
     def __init__(self, status: int | None, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+class Refusal(str):
+    """A command the bot declined to run, reported with a cross, not a tick."""
 
 
 def rate_limit_jitter() -> float:
@@ -403,6 +411,13 @@ class BuildkiteClient:
             path=f"/{number}/retry_failed_jobs",
         )
 
+    def list_annotations(self, build_number: int) -> list[dict[str, Any]]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        response = self._request(path=f"/{number}/annotations")
+        if not isinstance(response, list):
+            raise ApiError(None, "Buildkite API returned an invalid annotation list.")
+        return response
+
     def cancel_build(self, build_number: int) -> dict[str, Any]:
         number = urllib.parse.quote(str(build_number), safe="")
         return self._request(method="PUT", path=f"/{number}/cancel")
@@ -656,6 +671,56 @@ def create_retry_build_payload(
     return payload
 
 
+def is_setup_step(step_key: str) -> bool:
+    return step_key.startswith("image-build") or step_key in SETUP_STEP_KEYS
+
+
+def generator_error(buildkite: BuildkiteClient, build_number: int) -> str | None:
+    """The pipeline generator's own error for this build, if it recorded one.
+
+    ci-infra annotates every generation failure so the cause can be quoted on
+    the PR instead of left in the bootstrap log. Needs only the read_builds
+    scope, and a build that failed before generating a pipeline has no
+    annotation, which usually means infrastructure rather than configuration.
+    """
+    try:
+        annotations = buildkite.list_annotations(build_number)
+    except ApiError as error:
+        print(f"Could not read build annotations: {error}", file=sys.stderr)
+        return None
+    for annotation in annotations:
+        if annotation.get("context") != GENERATOR_ERROR_ANNOTATION_CONTEXT:
+            continue
+        body = re.sub(r"<[^>]+>", " ", str(annotation.get("body_html") or ""))
+        text = " ".join(html.unescape(body).split())
+        if text:
+            return text[:500]
+    return None
+
+
+def setup_failure(
+    buildkite: BuildkiteClient,
+    build: Mapping[str, Any],
+    ci_name: str,
+    *,
+    retry_command: str,
+    run_command: str,
+) -> Refusal:
+    link = f"[Buildkite {ci_name} #{build['number']}]({build['web_url']})"
+    reason = generator_error(buildkite, build["number"])
+    if reason is None:
+        return Refusal(
+            f"{link} failed during CI setup before generating its pipeline, so "
+            "its test failure set is incomplete. No configuration error was "
+            f"reported, so this may be infrastructure. Comment `{retry_command}` "
+            f"to try again, or `{run_command}` for a full build."
+        )
+    return Refusal(
+        f"{link} failed during CI setup, so its test failure set is incomplete."
+        f"\n\nCI setup reported:\n\n```\n{reason}\n```\n\nUse `{run_command}`."
+    )
+
+
 def add_reaction_safely(
     github: GitHubClient,
     comment_id: int,
@@ -870,6 +935,22 @@ def handle_retry_failed(
                 f"{ci_name} was already requested by this comment: {build['web_url']}"
             )
 
+        # A retry build pins VLLM_CI_ONLY_STEP_KEYS, so re-running its setup in
+        # place can only fail the same way. An ordinary run's bootstrap may have
+        # flaked, so it stays retryable.
+        if metadata.get("github-retry-source-build") and any(
+            is_setup_step(str(job.get("step_key") or ""))
+            for job in buildkite.list_failed_jobs(build["number"])
+            if job.get("type") == "script"
+        ):
+            return setup_failure(
+                buildkite,
+                build,
+                ci_name,
+                retry_command=retry_command,
+                run_command=run_command,
+            )
+
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
             return (
@@ -910,7 +991,7 @@ def handle_retry_failed(
     failed_script_jobs = [job for job in failed_jobs if job.get("type") == "script"]
     missing_step_keys = [job for job in failed_script_jobs if not job.get("step_key")]
     if missing_step_keys:
-        return (
+        return Refusal(
             f"[Buildkite {ci_name} #{source_build['number']}]"
             f"({source_build['web_url']}) has failed jobs without stable step "
             "keys, so they cannot be retried on a new commit. "
@@ -919,15 +1000,15 @@ def handle_retry_failed(
 
     failed_step_keys = {str(job["step_key"]) for job in failed_script_jobs}
     setup_failures = sorted(
-        step_key
-        for step_key in failed_step_keys
-        if step_key.startswith("image-build") or step_key in SETUP_STEP_KEYS
+        step_key for step_key in failed_step_keys if is_setup_step(step_key)
     )
     if setup_failures:
-        return (
-            f"[Buildkite {ci_name} #{source_build['number']}]"
-            f"({source_build['web_url']}) failed during CI setup, so its test "
-            f"failure set is incomplete. Use `{run_command}` for the new commit."
+        return setup_failure(
+            buildkite,
+            source_build,
+            ci_name,
+            retry_command=retry_command,
+            run_command=run_command,
         )
 
     step_keys = sorted(failed_step_keys)
@@ -1097,8 +1178,13 @@ def run(
             )
         else:
             raise ValueError(f"Unsupported CI command: {command}")
-        add_reaction_safely(github, comment_id, "rocket")
-        github.add_comment(issue_number, f"✅ {message}")
+        # Both reactions are terminal for is_already_handled, so a refused
+        # command is not reprocessed if the workflow runs again.
+        icon, reaction = (
+            ("❌", "-1") if isinstance(message, Refusal) else ("✅", "rocket")
+        )
+        add_reaction_safely(github, comment_id, reaction)
+        github.add_comment(issue_number, f"{icon} {message}")
     except Exception:
         add_reaction_safely(github, comment_id, "confused")
         raise

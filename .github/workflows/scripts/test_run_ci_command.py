@@ -138,7 +138,10 @@ class FakeBuildkite:
         self,
         build_lists: list[list[dict[str, Any]]] | None = None,
         failed_job_lists: list[list[dict[str, Any]]] | None = None,
+        annotations: list[dict[str, Any]] | None = None,
     ) -> None:
+        self.annotations = annotations
+        self.annotation_calls: list[int] = []
         self.build_lists = build_lists or []
         self.created_builds: list[dict[str, Any]] = []
         self.failed_job_lists = failed_job_lists or []
@@ -189,6 +192,12 @@ class FakeBuildkite:
     def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
         self.job_list_calls.append(build_number)
         return self.failed_job_lists.pop(0)
+
+    def list_annotations(self, build_number: int) -> list[dict[str, Any]]:
+        self.annotation_calls.append(build_number)
+        if self.annotations is None:
+            raise ApiError(403, "Forbidden")
+        return self.annotations
 
 
 class FakeTransport:
@@ -998,6 +1007,8 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(github.reactions, ["eyes", "-1"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
         self.assertIn("without stable step keys", github.comments[0])
         self.assertIn("Use `/ci run`", github.comments[0])
 
@@ -1035,8 +1046,144 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(github.reactions, ["eyes", "-1"])
+        self.assertTrue(github.comments[0].startswith("❌ "))
         self.assertIn("failed during CI setup", github.comments[0])
+        self.assertIn("this may be infrastructure", github.comments[0])
+
+    def _stale_source_build(self) -> dict[str, Any]:
+        return {
+            "commit": "old-commit",
+            "created_at": "2026-09-03T13:00:00Z",
+            "finished_at": "2026-09-03T13:01:00Z",
+            "number": 87079,
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/87079",
+        }
+
+    def test_ci_retry_new_head_rejects_bootstrap_failure(self) -> None:
+        # A build whose bootstrap failed reports bootstrap as its only failed
+        # job. Forwarding that key to a retry asks the generator for a step
+        # that does not exist, which is what made /ci retry loop.
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        buildkite = FakeBuildkite(
+            [[], [self._stale_source_build()]],
+            [[{"state": "failed", "step_key": "bootstrap", "type": "script"}]],
+            annotations=[],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(github.reactions, ["eyes", "-1"])
+        self.assertIn("failed during CI setup", github.comments[0])
+
+    def test_ci_retry_quotes_the_generator_error(self) -> None:
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        buildkite = FakeBuildkite(
+            [[], [self._stale_source_build()]],
+            [[{"state": "failed", "step_key": "bootstrap", "type": "script"}]],
+            annotations=[
+                {"context": "docs-only", "body_html": "<p>CI skipped</p>"},
+                {
+                    "context": "pipeline-generator-error",
+                    "body_html": (
+                        "<p>Pipeline generation failed: Unknown CI step "
+                        "key(s): removed-test</p>"
+                    ),
+                },
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(buildkite.annotation_calls, [87079])
+        self.assertIn(
+            "Pipeline generation failed: Unknown CI step key(s): removed-test",
+            github.comments[0],
+        )
+        self.assertNotIn("<p>", github.comments[0])
         self.assertIn("Use `/ci run`", github.comments[0])
+
+    def test_ci_retry_reports_infrastructure_without_an_annotation(self) -> None:
+        # A missing annotation (or a token that cannot read them) must degrade
+        # to advice, never to a stack trace or a wrong "fix your config".
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        buildkite = FakeBuildkite(
+            [[], [self._stale_source_build()]],
+            [[{"state": "failed", "step_key": "bootstrap", "type": "script"}]],
+            annotations=None,
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertIn("this may be infrastructure", github.comments[0])
+        self.assertIn("`/ci retry`", github.comments[0])
+        self.assertNotIn("CI setup reported", github.comments[0])
+
+    def test_ci_retry_in_place_refuses_a_wedged_retry_build(self) -> None:
+        # Retrying a filtered retry build in place re-runs bootstrap against
+        # the same pinned VLLM_CI_ONLY_STEP_KEYS, so it can only fail again.
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        buildkite = FakeBuildkite(
+            [
+                [
+                    {
+                        "commit": "abc123",
+                        "created_at": "2026-09-03T14:00:00Z",
+                        "finished_at": "2026-09-03T14:01:00Z",
+                        "meta_data": {"github-retry-source-build": "87079"},
+                        "number": 87081,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87081",
+                    }
+                ]
+            ],
+            [[{"state": "failed", "step_key": "bootstrap", "type": "script"}]],
+            annotations=[
+                {
+                    "context": "pipeline-generator-error",
+                    "body_html": (
+                        "Pipeline generation failed: Unknown CI step key(s): bootstrap"
+                    ),
+                }
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.retry_calls, [])
+        self.assertEqual(github.reactions, ["eyes", "-1"])
+        self.assertIn("Unknown CI step key(s): bootstrap", github.comments[0])
+
+    def test_ci_retry_in_place_still_retries_an_ordinary_build(self) -> None:
+        # An ordinary run pins no step keys, so a flaky bootstrap stays
+        # retryable in place and no annotation lookup happens.
+        github = FakeGitHub(permission="read", pr=make_pr(labels=[{"name": "ready"}]))
+        buildkite = FakeBuildkite(
+            [
+                [
+                    {
+                        "commit": "abc123",
+                        "created_at": "2026-09-03T14:00:00Z",
+                        "finished_at": "2026-09-03T14:01:00Z",
+                        "number": 87082,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87082",
+                    }
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.retry_calls, [(87082, RETRY_STATES)])
+        self.assertEqual(buildkite.annotation_calls, [])
+        self.assertTrue(github.comments[0].startswith("✅ "))
 
     def test_buildkite_retry_uses_retry_failed_jobs_endpoint(self) -> None:
         transport = FakeTransport({"retried_jobs_count": 2})
