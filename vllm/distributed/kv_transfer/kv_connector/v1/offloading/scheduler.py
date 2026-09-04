@@ -482,6 +482,7 @@ def _create_req_context(req: Request) -> ReqContext:
     return ReqContext(
         req_id=req.request_id,
         kv_transfer_params=params,
+        kv_hints=req.kv_hints,
         load_tier_filter=load_filter,
     )
 
