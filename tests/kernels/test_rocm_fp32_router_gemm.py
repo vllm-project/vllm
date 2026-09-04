@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe.router.gate_linear import (
     fp32_router_gemm_dispatch_impl,
 )
 from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (
+    _max_tokens,
     rocm_fp32_router_gemm,
 )
 from vllm.platforms import current_platform
@@ -22,7 +23,8 @@ SHAPES = [
 ]
 MAX_TOKENS = 128
 # Every count the kernel sees at decode is covered exactly up to 32; past that
-# the tuned config changes on power-of-two boundaries, so sample those.
+# the tuned config changes on power-of-two boundaries, so sample those. Shapes
+# with a lower cap skip the counts above it.
 TOKEN_COUNTS = list(range(33)) + [40, 48, 64, 80, 96, 127, 128]
 ATOL = 5e-4
 RTOL = 0.0
@@ -58,6 +60,8 @@ def test_rocm_fp32_router_gemm_matches_reference(
     num_experts: int,
     dtype: torch.dtype,
 ) -> None:
+    if num_tokens > _max_tokens(hidden_size, num_experts):
+        pytest.skip("above this shape's token cap")
     torch.manual_seed(41 + num_tokens + hidden_size + num_experts)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
@@ -78,6 +82,8 @@ def test_rocm_fp32_router_gemm_matches_reference(
 def test_rocm_fp32_router_gemm_preserves_topk(
     num_tokens: int, hidden_size: int, num_experts: int
 ) -> None:
+    if num_tokens > _max_tokens(hidden_size, num_experts):
+        pytest.skip("above this shape's token cap")
     torch.manual_seed(1000 + num_tokens + hidden_size + num_experts)
     device = torch.device("cuda")
     x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)

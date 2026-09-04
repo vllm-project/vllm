@@ -9,6 +9,10 @@ from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 _MAX_TOKENS = 128
+# Shapes whose fp32 weight outgrows one XCD's L2 (4 MiB) lose to F.linear
+# sooner, so they stop earlier; among the supported shapes only (6144, 256).
+_LARGE_WEIGHT_MAX_TOKENS = 64
+_XCD_L2_BYTES = 4 * 1024 * 1024
 _NUM_XCDS = 8
 ROCM_FP32_ROUTER_GEMM_SUPPORTED_SHAPES = frozenset(
     {
@@ -68,6 +72,13 @@ def _rocm_fp32_router_gemm_kernel(
     )
 
 
+def _max_tokens(hidden_size: int, num_experts: int) -> int:
+    """Largest token count where the kernel still beats the F.linear path."""
+    if hidden_size * num_experts * 4 > _XCD_L2_BYTES:
+        return _LARGE_WEIGHT_MAX_TOKENS
+    return _MAX_TOKENS
+
+
 def _launch_config(
     hidden_size: int,
     num_experts: int,
@@ -104,7 +115,7 @@ def _launch_config(
     # BLOCK_M rows share one pass over the weight. Once the weight no longer
     # fits a single XCD's L2 (4 MiB), that pass is the expensive part, so widen
     # the row tile; among the supported shapes only (6144, 256) is that large.
-    if num_tokens > 8 and hidden_size * num_experts * 4 > 4 * 1024 * 1024:
+    if num_tokens > 8 and hidden_size * num_experts * 4 > _XCD_L2_BYTES:
         block_m *= 2
 
     # One program per (expert, row tile), so the grid is num_experts *
@@ -159,8 +170,9 @@ def _validate_inputs(
             "(3072, 256), (4096, 8), (4096, 192), (6144, 128), "
             "and (6144, 256)"
         )
-    if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
-        raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
+    max_tokens = _max_tokens(shape[0], shape[1])
+    if not 0 <= hidden_states.shape[0] <= max_tokens:
+        raise ValueError(f"num_tokens must be in [0, {max_tokens}]")
 
 
 def rocm_fp32_router_gemm(
