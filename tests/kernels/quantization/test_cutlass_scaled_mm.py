@@ -760,7 +760,7 @@ def test_cutlass_fp8_group_gemm(
 
 
 # Weight sizes chosen so the SM 12.x swizzled path (weight > device L2 and an
-# activation slab of >= 12 MiB) is exercised on every part: 5120x5120 FP8 = 25 MiB and 16384x2560 = 42 MB
+# activation slab of >= 14 MiB) is exercised on every part: 5120x5120 FP8 = 25 MiB and 16384x2560 = 42 MB
 # exceed GB10's 24 MiB L2, 57344x2560 = 147 MB exceeds full GB202's 128 MiB L2;
 # 2048x2560 = 5 MB is the default-order control. The assertions hold on either
 # path. The 147 MB weight runs once (baseline cost: 20 x 448 block matmuls).
@@ -822,7 +822,7 @@ def _row_sliced_reference(a, b, scale_a, scale_b) -> torch.Tensor:
 def test_cutlass_fp8_blockwise_large_m(m: int, n: int, k: int):
     """Large-M blockwise GEMM against the dequantized fp32 baseline, and — on
     SM 12.x, where the op switches the tile scheduler to a swizzled CTA order
-    once the weight exceeds the L2 and the activation slab 12 MiB — bit-identical to the same
+    once the weight exceeds the L2 and the activation slab >= 14 MiB — bit-identical to the same
     GEMM issued as row slices in the default order. Other architectures may
     pick different kernel configurations per launch (e.g. the SM90 swap-AB
     dispatch on M % 4), so exact equality is asserted only where the C++ path

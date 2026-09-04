@@ -18,13 +18,14 @@ namespace {
 // The default order stays marginally faster while the activation slab is
 // small enough for the weight tiles to survive in the L2 anyway: 16384x2560
 // at M=4096 (10 MiB of A) is 165-170 vs 149-155 swizzled, 10240x2560 at
-// M=4096 is 157 vs 152, while 5120x5120 at M=4096 (20 MiB of A) is 117 vs
-// 160 and every shape at M=6144 (15 MiB) already gains. The measured crossover
-// is the activation working set, not M alone, so the gate is A's byte count
-// (empirical threshold: 12 MiB). Parts whose L2 holds the weight (RTX PRO 6000
+// M=4096 is 157 vs 152 and 16384x2560 at M=5120 (12.5 MiB) is 166 vs 153,
+// while 5120x5120 at M=4096 (20 MiB of A) is 117 vs 160 and every shape at
+// M=6144 (15 MiB) already gains. The measured crossover is the activation
+// working set, not M alone, so the gate is A's byte count (empirical
+// threshold between the 12.5 MiB loss and the 15 MiB gain: 14 MiB). Parts whose L2 holds the weight (RTX PRO 6000
 // Blackwell / GB202: 96-128 MiB) keep the default order at every M.
 constexpr int kBlockwiseFp8SwizzleSize = 8;
-constexpr int64_t kBlockwiseFp8SwizzleMinActivationBytes = 12ll << 20;
+constexpr int64_t kBlockwiseFp8SwizzleMinActivationBytes = 14ll << 20;
 
 int blockwise_fp8_swizzle_size(int64_t m, int64_t k, int64_t weight_bytes) {
   if (m * k < kBlockwiseFp8SwizzleMinActivationBytes) return 1;  // FP8: 1 B/elem
