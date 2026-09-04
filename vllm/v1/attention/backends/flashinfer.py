@@ -215,6 +215,18 @@ class _FlashInferWorkspaceState:
         wrapper.reset_workspace_buffer(self.buffer, int_workspace)
 
 
+def _workspace_rebindable_wrappers(wrapper: object) -> tuple[object, ...]:
+    """The FlashInfer wrappers whose workspace the state can rebind.
+
+    The DCP prefill wrapper owns no workspace of its own; it holds two real
+    wrappers that captured the arena at construction time. Registering the
+    container would rebind nothing, so its members are registered instead.
+    """
+    if isinstance(wrapper, BatchDCPPrefillWrapper):
+        return (wrapper._context, wrapper._new_tokens)
+    return (wrapper,)
+
+
 def _get_trtllm_workspace_buffer():
     global trtllm_workspace_buffer
     if trtllm_workspace_buffer is None:
@@ -1275,7 +1287,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = workspace_buffer
 
     def _register_workspace_wrapper(self, wrapper: object) -> None:
-        self._workspace_state.register_wrapper(wrapper)
+        for inner in _workspace_rebindable_wrappers(wrapper):
+            self._workspace_state.register_wrapper(inner)
 
     def _normalize_workspace_sizes(
         self, workspace_size: WorkspaceSizes | int | None
@@ -1618,7 +1631,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         get_flashinfer_layout_string(self.kv_cache_layout),
                         backend=backend,
                     )
-                self._register_workspace_wrapper(self._prefill_wrapper)
+            self._register_workspace_wrapper(self._prefill_wrapper)
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 

@@ -792,6 +792,34 @@ def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
         reset_workspace_manager()
 
 
+def test_flashinfer_dcp_prefill_wrapper_rebinds_its_inner_wrappers():
+    """The DCP prefill wrapper is a container with no workspace of its own.
+
+    Registering the container would rebind nothing, so a later arena growth
+    would leave its two inner wrappers on the workspace they captured at
+    construction time.
+    """
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = _make_flashinfer_builder(flashinfer_backend)
+
+    dcp_wrapper = flashinfer_backend.BatchDCPPrefillWrapper.__new__(
+        flashinfer_backend.BatchDCPPrefillWrapper
+    )
+    original = torch.empty(128, dtype=torch.uint8)
+    dcp_wrapper._context = _FakeFlashInferWrapper(original)
+    dcp_wrapper._new_tokens = _FakeFlashInferWrapper(original)
+
+    builder._register_workspace_wrapper(dcp_wrapper)
+    grown = torch.empty(2048, dtype=torch.uint8)
+    builder._workspace_state.set_buffer(grown)
+
+    for inner in (dcp_wrapper._context, dcp_wrapper._new_tokens):
+        assert inner._float_workspace_buffer.data_ptr() == grown.data_ptr()
+        assert inner.reset_calls >= 1
+
+
 def test_flashinfer_int_workspace_is_per_wrapper():
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
