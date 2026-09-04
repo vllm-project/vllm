@@ -1593,13 +1593,6 @@ def compute_result_filename(
     return file_name
 
 
-def _parse_non_negative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
-    return parsed
-
-
 def add_cli_args(parser: FlexibleArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
@@ -1642,7 +1635,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
     )
     parser.add_argument(
         "--max-concurrency",
-        type=_parse_non_negative_int,
+        type=int,
         default=None,
         help="Maximum number of concurrent requests. This can be used "
         "to help simulate an environment where a higher level component "
@@ -2021,6 +2014,9 @@ def main(args: argparse.Namespace) -> dict[str, Any]:
 
 async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
+    if args.max_concurrency is not None and args.max_concurrency <= 0:
+        raise ValueError("--max-concurrency must be greater than 0")
+
     random.seed(args.seed)
     np.random.seed(args.seed)
 
