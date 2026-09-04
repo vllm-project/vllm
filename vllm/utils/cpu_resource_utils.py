@@ -12,7 +12,11 @@ from functools import cache
 import psutil
 import regex as re
 
+from vllm.logger import init_logger
+
 DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -112,10 +116,21 @@ def check_cgroup_memory_available(
         return
 
     cgroup_available = max(0, cgroup_limit - cgroup_usage)
+    mib = 1 << 20
     if required_bytes <= cgroup_available:
+        logger.info(
+            "Cgroup memory preflight passed for %s: %.0f MiB required, %.0f MiB "
+            "current usage, %.0f MiB available under %.0f MiB limit, %.0f MiB "
+            "estimated remaining after allocation.",
+            allocation_name,
+            required_bytes / mib,
+            cgroup_usage / mib,
+            cgroup_available / mib,
+            cgroup_limit / mib,
+            (cgroup_available - required_bytes) / mib,
+        )
         return
 
-    mib = 1 << 20
     raise RuntimeError(
         f"Insufficient cgroup memory for {allocation_name}: "
         f"{required_bytes / mib:.0f} MiB required, "
