@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
+    aiter_moe_intermediate_alignment,
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
@@ -29,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
@@ -53,6 +56,36 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def supports_eplb(self) -> bool:
         return True
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
+            # Some model + TP splits give an unaligned per-partition intermediate
+            # size (e.g. 1792 / TP=8 = 224), which AITER rejects with "device_gemm
+            # ... does not support this GEMM problem".
+            # NOTE: this makes moe_config.intermediate_size_per_partition differ
+            # from ..._unpadded, so a non-zero pad now reaches the
+            # `intermediate_pad` computation in experts/rocm_aiter_moe.py. That
+            # is inert on the unquantized CK path (its stage1/stage2 partials
+            # take no pad argument), but its `2 if tp_size == 1 else 1` factor
+            # does not mirror AITER's `2 if use_g1u1 else 1`, so revisit it
+            # before enabling intermediate padding on a pad-consuming kernel.
+            intermediate_size_per_partition = round_up(
+                intermediate_size_per_partition,
+                aiter_moe_intermediate_alignment(intermediate_size_per_partition),
+            )
+        return hidden_size, intermediate_size_per_partition
+
     def create_weights(
         self,
         layer: "RoutedExperts",
@@ -66,9 +99,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_up_dim = 2 * intermediate_size_per_partition
         else:
             w13_up_dim = intermediate_size_per_partition
+        # maybe_roundup_sizes may pad either dim (hidden by the all2all
+        # backends, intermediate by AITER) and the loader only fills the
+        # unpadded extent, so the pad lanes must start at zero to stay inert
+        # (silu(0) * 0 = 0, matching the zero columns in w2).
+        unpadded_inter = self.moe.intermediate_size_per_partition_unpadded
+        unpadded_hidden = self.moe.hidden_dim_unpadded
+        is_padded = (
+            unpadded_inter is not None
+            and intermediate_size_per_partition != unpadded_inter
+        ) or (unpadded_hidden is not None and hidden_size != unpadded_hidden)
+        alloc = torch.zeros if is_padded else torch.empty
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 w13_up_dim,
                 hidden_size,
@@ -87,7 +131,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             set_weight_attrs(w13_bias, extra_weight_attrs)
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
