@@ -270,6 +270,10 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 
 FROM base AS final
 
+# torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
+# teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
+ENV ROCPROFILER_QUEUE_INTERPOSITION=0
+
 ARG TRITON_VERSION
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl \
