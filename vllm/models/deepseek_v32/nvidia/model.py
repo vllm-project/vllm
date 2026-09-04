@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -8,8 +9,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_embed_norm import (
     fused_embed_norm,
     has_full_vocab_on_rank,
@@ -51,6 +53,24 @@ from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.sequence import IntermediateTensors
 
 from .glm52_low_latency_gemm import enable_glm52_low_latency_gemm
+
+logger = init_logger(__name__)
+
+
+def _debug_finite_tensor(prefix: str, tensor: torch.Tensor) -> None:
+    if os.getenv("MEGAMOE_FINITE_CHECK") != "1":
+        return
+    torch.accelerator.synchronize()
+    finite = torch.isfinite(tensor).all().item()
+    if get_tensor_model_parallel_rank() == 0:
+        logger.warning(
+            "GLM finite check %s: finite=%s max=%g",
+            prefix,
+            finite,
+            tensor.float().abs().max().item(),
+        )
+    if not finite:
+        raise RuntimeError(f"Non-finite GLM tensor at {prefix}")
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
@@ -142,11 +162,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
+        _debug_finite_tensor(f"layer.{self.layer_idx}.attention_input", hidden_states)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         # self_attn's o_proj runs reduce_results=False; reduce before RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        _debug_finite_tensor(f"layer.{self.layer_idx}.attention_output", hidden_states)
         if self.use_sequence_parallel:
             hidden_states = sp_reduce_scatter(hidden_states)
             hidden_states, residual = self.post_attention_layernorm(
@@ -156,11 +178,13 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.post_attention_layernorm
             )
+        _debug_finite_tensor(f"layer.{self.layer_idx}.mlp_input", hidden_states)
 
         if self.use_sequence_parallel and isinstance(self.mlp, DeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, already_sequence_parallel=True)
         else:
             hidden_states = self.mlp(hidden_states)
+        _debug_finite_tensor(f"layer.{self.layer_idx}.mlp_output", hidden_states)
         return hidden_states, residual
 
 
