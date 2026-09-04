@@ -13,8 +13,8 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
+    SamplingMaskLists,
 )
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 DEVICE_TYPE = current_platform.device_type
@@ -63,8 +63,6 @@ def test_logprobs_tensors_tolists_with_tensor_boundaries():
 
 
 def test_sampling_mask_lists_to_nested_list():
-    from vllm.v1.outputs import SamplingMaskLists
-
     mask = SamplingMaskLists(
         token_ids=np.array([10, 11, 12, 20, 21]),
         offsets=np.array([0, 3, 5]),
@@ -74,6 +72,22 @@ def test_sampling_mask_lists_to_nested_list():
 
     assert nested == [[10, 11, 12], [20, 21]]
     assert SamplingMaskLists(np.array([7, 9])).to_nested_list() == [[7, 9]]
+
+
+def test_sampling_mask_lists_slices_multiple_positions_by_request():
+    masks = SamplingMaskLists(
+        token_ids=np.array([10, 11, 20, 30, 31, 32, 40]),
+        offsets=np.array([0, 2, 3, 6, 7]),
+        cu_num_generated_tokens=[0, 1, 3, 4],
+    )
+
+    single = masks.slice_request(0, 1)
+    multi = masks.slice_request(1, 2)
+
+    assert single.to_nested_list() == [[10, 11]]
+    assert single.offsets is None
+    assert multi.to_nested_list() == [[20], [30, 31, 32]]
+    assert multi.cu_num_generated_tokens is None
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
@@ -97,20 +111,64 @@ def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     expected[1] = expected[7] = []
 
     tensors = SamplingMaskTensors.from_logits(
-        logits.to(DEVICE_TYPE), num_sampled_tokens.to(DEVICE_TYPE), max_num_kept
+        logits.to(DEVICE_TYPE),
+        torch.arange(len(sizes) + 1, device=DEVICE_TYPE, dtype=torch.int32),
+        num_sampled_tokens.to(DEVICE_TYPE),
+        max_num_kept,
     )
 
     assert tensors.token_ids.shape[1] == min(max_num_kept, MAX_COMPACT_SUPPORT)
     assert tensors.to_cpu_nonblocking().tolists().to_nested_list() == expected
 
 
+def test_sampling_mask_tensors_uses_request_boundaries():
+    logits = torch.full((6, 8), -float("inf"), device=DEVICE_TYPE)
+    logits[0, [1, 3]] = 0
+    logits[2, [2, 4, 6]] = 0
+    logits[5, [0, 7]] = 0
+    counts = torch.tensor([1, 0, 1], device=DEVICE_TYPE, dtype=torch.int32)
+
+    tensors = SamplingMaskTensors.from_logits(
+        logits,
+        torch.tensor([0, 2, 5, 6], device=DEVICE_TYPE, dtype=torch.int32),
+        counts,
+        max_num_kept=3,
+    )
+
+    assert tensors.tolists().to_nested_list() == [[1, 3], [], [0, 7]]
+
+
+def test_sampling_mask_tensors_multirow_request_layout():
+    rows_per_request = 4
+    counts = np.array([1, 2, 4, 0], dtype=np.int32)
+    logits = torch.full((16, 16), -float("inf"), device=DEVICE_TYPE)
+    expected = []
+    for row in [0, 4, 5, 8, 9, 10, 11]:
+        kept = torch.tensor(
+            [row % 16, (row + 3) % 16, (row + 7) % 16], device=DEVICE_TYPE
+        ).unique(sorted=True)
+        logits[row, kept] = 0
+        expected.append(kept.tolist())
+
+    tensors = SamplingMaskTensors.from_logits(
+        logits,
+        torch.arange(0, 17, 4, device=DEVICE_TYPE, dtype=torch.int32),
+        torch.from_numpy(counts).to(DEVICE_TYPE),
+        max_num_kept=2,
+        rows_per_request=rows_per_request,
+    )
+    result = tensors.to_cpu_nonblocking().tolists(counts)
+
+    assert tensors.token_ids.shape == (16, 2)
+    assert tensors.rows_per_request == rows_per_request
+    assert result.to_nested_list() == expected
+    assert result.cu_num_generated_tokens == [0, 1, 3, 7, 7]
+
+
 def test_sampling_mask_preserves_top_k_boundary_ties():
-    processed_logits = apply_top_k_top_p(
-        logits=torch.tensor(
-            [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
-        ),
-        k=torch.tensor([3], device=DEVICE_TYPE),
-        p=None,
+    processed_logits = torch.tensor(
+        [[6.0, 5.0, 4.0, 4.0, 4.0, -float("inf"), -float("inf")]],
+        device=DEVICE_TYPE,
     )
     expected_token_ids = (
         torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
@@ -119,6 +177,7 @@ def test_sampling_mask_preserves_top_k_boundary_ties():
 
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
+        cu_num_logits=torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE),
         num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
         max_num_kept=3,
     )

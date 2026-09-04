@@ -1925,6 +1925,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            # A mask D2H can otherwise overlap TP collectives in the MTP
+            # proposal and perturb borderline sampling decisions.
+            defer_sampling_mask_copy=self.speculator is not None,
             check_ep_fault=self.check_ep_fault,
             routed_experts=routed_experts,
         )
@@ -1999,6 +2002,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 
+        async_output.copy_deferred_sampling_masks(
+            self.main_stream, self.output_copy_stream
+        )
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
