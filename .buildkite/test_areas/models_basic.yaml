@@ -2,7 +2,7 @@ group: Models - Basic
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Basic Models (Initialization)"
+- label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
   timeout_in_minutes: 25
   device: h200_18gb
@@ -14,11 +14,19 @@ steps:
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  mirror:
+    amd:
+      label: ":amd: (MI355) Basic Models (Initialization)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
 
-- label: ":nvidia: (H200) Basic Models (Extra Initialization) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N"
   device: h200_35gb
   key: basic-models-tests-extra-initialization
-  timeout_in_minutes: 100
+  timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
@@ -28,9 +36,9 @@ steps:
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
     - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 4
+  parallelism: 14
 
-- label: ":nvidia: (H200) Basic Models (Other)"
+- label: ":nvidia: (H200 MIG 35GB) Basic Models (Other)"
   device: h200_35gb
   key: basic-models-tests-other
   timeout_in_minutes: 35
@@ -77,6 +85,43 @@ steps:
   commands:
     # The native NVIDIA Kimi K3 kernels require the SM100 family.
     - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+
+- label: ":nvidia: (H200) Qwen4 Exp"
+  key: qwen4-exp-unit-tests
+  timeout_in_minutes: 40
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/transformers_utils/configs/qwen4_exp.py
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - tests/models/qwen4_exp/
+  commands:
+    - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) Qwen4 Exp"
+      dind: false
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s models/qwen4_exp/test_qsa_amd.py
+
+- label: ":computer: (CPU) Qwen4 Exp"
+  key: qwen4-exp-unit-tests-cpu
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 20
+  device: cpu-small
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/transformers_utils/configs/qwen4_exp.py
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - tests/models/qwen4_exp/
+  commands:
+    - pytest -v -s models/qwen4_exp/test_config.py models/qwen4_exp/test_ple.py
 
 - label: ":computer: (CPU) Basic Models Other"
   key: basic-models-test-other-cpu

@@ -620,14 +620,16 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 max_num_chunks=self.info.get_max_num_tiles(),
                 patch_size=SizeDict(height=tile_size, width=tile_size),
             )
-            best_fit_sizes = [
-                get_best_fit(
-                    (image.size[1], image.size[0]),
-                    torch.tensor(possible_resolutions),
-                    resize_to_max_canvas=image_processor.resize_to_max_canvas,
+            best_fit_sizes = []
+            for image in parsed_images:
+                assert image is not None
+                best_fit_sizes.append(
+                    get_best_fit(
+                        (image.size[1], image.size[0]),
+                        torch.tensor(possible_resolutions),
+                        resize_to_max_canvas=image_processor.resize_to_max_canvas,
+                    )
                 )
-                for image in parsed_images
-            ]
             # TODO tile height/width do not necessarily need to match
             aspect_ratios = [
                 (image_size[0] // tile_size, image_size[1] // tile_size)
@@ -760,6 +762,7 @@ class Llama4ForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.vllm_config = vllm_config
