@@ -1065,6 +1065,17 @@ class ParallelConfig:
                 "Unable to use nsight profiling unless workers run with Ray."
             )
 
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
+            )
+
         return self
 
     def reconfigure_for_independent_dp_rank(self) -> None:
