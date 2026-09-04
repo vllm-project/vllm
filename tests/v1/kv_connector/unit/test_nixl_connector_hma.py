@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -368,7 +369,16 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 
 @pytest.mark.cpu_test
-def test_update_state_after_alloc_tracks_cached_blocks_per_group():
+@pytest.mark.parametrize(
+    "transfer_group_ids,expected_num_computed_blocks",
+    [
+        pytest.param((0, 1), (2, 1), id="all_groups"),
+        pytest.param((1,), (1,), id="nonzero_transfer_group"),
+    ],
+)
+def test_update_state_after_alloc_tracks_cached_blocks_per_group(
+    transfer_group_ids, expected_num_computed_blocks
+):
     """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
     KV cache group. Each group's count must be tracked independently rather
     than collapsed to a single scalar, or DCP read-phase alignment
@@ -387,7 +397,10 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     scheduler.is_bidirectional_kv_xfer_enabled = False
     scheduler._is_hma_required = False
     scheduler.kv_cache_config = MagicMock(
-        select_transfer_block_ids=lambda block_ids: block_ids
+        transfer_group_ids=transfer_group_ids,
+        select_transfer_block_ids=lambda block_ids: tuple(
+            block_ids[group_id] for group_id in transfer_group_ids
+        ),
     )
 
     def cached(block_id):
@@ -834,6 +847,15 @@ def test_apply_prefix_caching_mamba_hybrid(
     "local_block_ids,remote_block_ids,"
     "expected_local,expected_remote",
     [
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), []],
+            [list(range(10)), [42]],
+            [list(range(10)), []],
+            [list(range(10)), []],
+            id="nonterminal_range_skips_ssm_state",
+        ),
         # SSM prefix caching: remote has 3 placeholder + 1 real block,
         # local has only the 1 real block. FA blocks are equal (no trim).
         pytest.param(
@@ -933,6 +955,7 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
+    "load_start_token,load_end_token,"
     "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
     "correct_remote_fa,correct_local_fa",
     [
@@ -942,16 +965,17 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
         # 1st local logical block cached → suffix [6..11]
         # Correct: transfer only uncached suffix tokens (384-639)
         #   = remote [6,7,8,9] → local [6,7,8,9].
-        # Actual (front-trim): remote[:6]=[0..5] → local [6..11]. Wrong.
         pytest.param(
             6,
             10,
+            384,
+            640,
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             [6, 7, 8, 9, 10, 11],
             [42],
             [6, 7, 8, 9],
             [6, 7, 8, 9],
-            id="local6_remote10_fail",
+            id="local6_remote10",
         ),
         # 15 kernel blocks of data (960 tokens).
         # remote physical_per_logical=6  → 3 logical → 18 kernel [0..17]
@@ -959,36 +983,35 @@ def test_apply_prefix_caching_ssm_unpairable_slots_rejected():
         # 1st local logical block cached → suffix [10..19]
         # Correct: transfer only uncached suffix tokens (640-959)
         #   = remote [10,11,12,13,14] → local [10,11,12,13,14].
-        # Actual (front-trim): remote[:10]=[0..9] → local [10..19]. Wrong.
         pytest.param(
             10,
             6,
+            640,
+            960,
             list(range(18)),
             list(range(10, 20)),
             [42],
             [10, 11, 12, 13, 14],
             [10, 11, 12, 13, 14],
-            id="local10_remote6_fail",
+            id="local10_remote6",
         ),
     ],
 )
-def test_mismatched_physical_per_logical_fails_with_prefix_caching(
+def test_mismatched_physical_per_logical_uses_token_window(
     local_physical_per_logical,
     remote_physical_per_logical,
+    load_start_token,
+    load_end_token,
     remote_fa_blocks,
     local_fa_blocks,
     ssm_blocks,
     correct_remote_fa,
     correct_local_fa,
 ):
-    """Demonstrate that _apply_prefix_caching front-trims ([:N])
-    in the Mamba hybrid path, which fails when prefix caching produces
-    suffix-only local blocks.
+    """Token-offset pairing avoids prefix/suffix misalignment.
 
-    Prefix caching operates at logical block granularity. When a logical
-    block is cached locally, the decode side only allocates kernel blocks
-    for the uncached suffix. The front-trim pairs remote prefix blocks
-    with local suffix slots — a silent data corruption.
+    Prefix caching can allocate different numbers of padded kernel blocks on
+    P and D. The explicit token window selects the same semantic suffix.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -1001,6 +1024,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         mamba_enabled=True,
     )
     worker._has_mamba = True
+    worker.block_size = 64
     worker._group_spec_types = tuple(
         type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
     )
@@ -1013,16 +1037,84 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         remote_block_ids,
         local_physical_per_logical,
         remote_physical_per_logical,
+        load_start_token=load_start_token,
+        load_end_token=load_end_token,
     )
 
-    assert (
-        aligned_remote[0] != correct_remote_fa or aligned_local[0] != correct_local_fa
-    ), (
-        f"Prefix caching with mismatched physical_per_logical should not "
-        f"produce correct transfer ids: "
-        f"remote={aligned_remote[0]}, local={aligned_local[0]}, "
-        f"correct_remote={correct_remote_fa}, correct_local={correct_local_fa}"
+    assert aligned_remote[0] == correct_remote_fa
+    assert aligned_local[0] == correct_local_fa
+
+
+@pytest.mark.cpu_test
+def test_full_attention_range_uses_token_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker.block_size = 16
+    worker._group_spec_types = (FullAttentionSpec,)
+
+    local, remote = worker._apply_prefix_caching(
+        ([100, 101],),
+        ([0, 1, 2, 3, 4, 5],),
+        1,
+        1,
+        load_start_token=64,
+        load_end_token=96,
+    )
+
+    assert local == [[100, 101]]
+    assert remote == [[4, 5]]
+
+
+@pytest.mark.cpu_test
+def test_full_attention_range_uses_remote_block_size_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = False
+    worker.block_size = 16
+    worker._group_spec_types = (FullAttentionSpec,)
+
+    local, remote = worker._apply_prefix_caching(
+        ([100, 101],),
+        ([0, 1, 2, 3, 4, 5, 6, 7],),
+        1,
+        1,
+        load_start_token=32,
+        load_end_token=48,
+        block_size_ratio=2,
+    )
+
+    assert local == [[100, 101]]
+    assert remote == [[4, 5]]
+
+
+@pytest.mark.cpu_test
+def test_heterogeneous_hybrid_prefix_cache_rejects_missing_wire_window():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._prefix_caching_enabled = True
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+
+    with pytest.raises(RuntimeError, match="explicit token load range"):
+        worker._apply_prefix_caching(
+            ([10, 11], [20]),
+            ([0, 1, 2], [30]),
+            decode_physical_per_logical=2,
+            prefill_physical_per_logical=3,
+        )
 
 
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])

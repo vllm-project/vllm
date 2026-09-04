@@ -371,6 +371,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                load_start_token=meta.load_start_token,
+                load_end_token=meta.load_end_token,
             ):
                 return
 
@@ -409,6 +411,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
