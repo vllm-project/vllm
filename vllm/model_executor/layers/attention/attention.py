@@ -602,6 +602,7 @@ class Attention(nn.Module, AttentionLayerBase):
             and not self.attn_backend.forward_includes_kv_cache_update
             and self.kv_sharing_target_layer_name is None
             and self.head_size_v == self.head_size
+            and self.kv_cache_torch_dtype == self.dtype
             and self.query_quant is None
             and not self._fuse_attn_quant
             and isinstance(rotary_emb, RotaryEmbedding)
@@ -699,7 +700,7 @@ class Attention(nn.Module, AttentionLayerBase):
         from vllm import _custom_ops
 
         query_out.copy_(query)
-        key_out = key.clone()
+        key_out = key.clone() if layer_slot_mapping is not None else None
         _custom_ops.rotary_embedding(
             positions,
             query_out,
@@ -708,7 +709,8 @@ class Attention(nn.Module, AttentionLayerBase):
             cos_sin_cache,
             is_neox,
         )
-        if layer_slot_mapping is not None:
+        if key_out is not None:
+            assert layer_slot_mapping is not None
             assert hasattr(impl, "do_kv_cache_update"), (
                 f"{impl.__class__.__name__} does not support kv cache update"
             )

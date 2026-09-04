@@ -304,7 +304,7 @@ def test_fused_rope_and_reshape_cache_flash_q_out_matches_unfused(
         )
 
 
-def test_fused_rope_and_reshape_cache_rejects_wrong_storage_dtype() -> None:
+def test_fused_rope_and_reshape_cache_rejects_mismatched_dtypes() -> None:
     device = torch.device("cuda")
     query = torch.zeros(1, 1, 64, dtype=torch.float16, device=device)
     key = torch.zeros_like(query)
@@ -317,6 +317,25 @@ def test_fused_rope_and_reshape_cache_rejects_wrong_storage_dtype() -> None:
     slot_mapping = torch.zeros(1, dtype=torch.long, device=device)
 
     with pytest.raises(RuntimeError, match="cache dtype must match query dtype"):
+        ops.fused_rope_and_reshape_cache_flash_q_out(
+            query,
+            key,
+            value,
+            query_out,
+            positions,
+            cos_sin_cache,
+            True,
+            key_cache,
+            value_cache,
+            slot_mapping,
+        )
+
+    key_cache = torch.zeros(1, 16, 1, 64, dtype=torch.float16, device=device)
+    value_cache = torch.zeros_like(key_cache)
+    cos_sin_cache = cos_sin_cache.float()
+    with pytest.raises(
+        RuntimeError, match="cos_sin_cache dtype must match query dtype"
+    ):
         ops.fused_rope_and_reshape_cache_flash_q_out(
             query,
             key,

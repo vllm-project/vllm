@@ -30,23 +30,58 @@ from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheLayout
 
 _LAYER_NAME = "model.layers.0.self_attn.attn"
 
 
-def test_missing_slot_mapping_falls_back_to_rope_only(
+def test_manual_fusion_requires_matching_activation_and_cache_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config: VllmConfig,
+) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    with vllm.config.set_current_vllm_config(default_vllm_config):
+        rotary_emb = RotaryEmbedding(
+            head_size=64,
+            rotary_dim=64,
+            max_position_embeddings=128,
+            base=10000,
+            is_neox_style=True,
+            dtype=torch.float16,
+        )
+    layer = SimpleNamespace(
+        _rope_kvcache_fusion_enabled=True,
+        _fuse_attn_quant=False,
+        attn_type=AttentionType.DECODER,
+        attn_backend=SimpleNamespace(forward_includes_kv_cache_update=False),
+        kv_sharing_target_layer_name=None,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.float16,
+        kv_cache_torch_dtype=torch.float16,
+        query_quant=None,
+        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: True),
+    )
+
+    assert Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
+    layer.kv_cache_torch_dtype = torch.bfloat16
+    assert not Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
+
+
+def test_missing_slot_mapping_rotates_query_without_materializing_key(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from vllm import _custom_ops
 
-    head_sizes = []
+    calls = []
     monkeypatch.setattr(
         _custom_ops,
         "rotary_embedding",
-        lambda _positions, _query, _key, head_size, *_args, **_kwargs: (
-            head_sizes.append(head_size)
+        lambda _positions, _query, key, head_size, *_args, **_kwargs: (
+            calls.append((key, head_size))
         ),
     )
 
@@ -74,7 +109,7 @@ def test_missing_slot_mapping_falls_back_to_rope_only(
 
     torch.testing.assert_close(query_out, query)
     assert query_out.data_ptr() != query.data_ptr()
-    assert head_sizes == [64]
+    assert calls == [(None, 64)]
 
 
 class _FunctionalRoPEAttention(torch.nn.Module):
@@ -160,7 +195,11 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
         vllm_config.compilation_config.splitting_ops or []
     )
 
-    with torch.device(device), vllm.config.set_current_vllm_config(vllm_config):
+    with (
+        torch.device(device),
+        set_default_torch_dtype(dtype),
+        vllm.config.set_current_vllm_config(vllm_config),
+    ):
         torch.manual_seed(0)
         model = _FunctionalRoPEAttention(vllm_config, device)
         assert model.attn.manual_rope_kvcache_fusion_supported(model.rotary_emb)

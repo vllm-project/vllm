@@ -415,9 +415,9 @@ if __name__ == "__main__":
     parser.add_argument("--rope-style", choices=["neox", "interleaved"], default="neox")
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--num-blocks", type=int, default=256)
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--samples", type=int, default=30)
-    parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=40)
+    parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument("--repeats", type=int, default=200)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument(
         "--raw-json",

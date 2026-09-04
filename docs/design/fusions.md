@@ -180,7 +180,7 @@ Other attention backends do not support fused output quantization yet.
     threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
 
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
-a single kernel, avoiding separate reads and writes of the key and value tensors.
+a single kernel, eliminating one launch and the intermediate write/read of rotated K.
 
 The Llama model definition uses a manual call site on supported NVIDIA
 FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
@@ -188,12 +188,13 @@ K/V directly to the paged cache before attention. The CUDA kernel consumes logic
 cache views and their strides, so it supports every physical KV-cache layout advertised
 by FlashAttention. Unsupported cache formats, attention variants, parallelism, and long
 token ranges retain the ordinary RoPE and cache-update path. Profiling runs without a
-layer slot mapping perform ordinary RoPE and skip the cache write; attention is also
+layer slot mapping rotate Q only and skip the unobserved K/V work; attention is also
 skipped because those runs have no attention metadata. CUDA does not register the
 legacy graph pass for this flag.
 
-The CUDA model path requires unquantized Q/K/V and cache storage and is not
-combined with `fuse_attn_quant`. Those configurations retain the ordinary path.
+The CUDA model path requires matching, unquantized Q/K/V and cache storage and
+is not combined with `fuse_attn_quant`. Other configurations retain the
+ordinary path.
 
 ROCm model definitions continue to use the compiler pass and require the
 `rotary_embedding` and `kv_cache` update ops to be visible in the same graph,

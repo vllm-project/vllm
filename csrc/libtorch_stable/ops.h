@@ -642,8 +642,8 @@ void concat_and_cache_mla_rope_fused(
     torch::stable::Tensor& kv_cache_quant_scale);
 
 #ifndef USE_ROCM
-// Write rotated Q to a caller-owned contiguous output and write rotated K/V
-// to the flash KV cache without modifying or materializing K.
+// Write rotated Q to a caller-owned contiguous output, rotated K to the flash
+// KV cache, and unmodified V to the cache without materializing K.
 void fused_rope_and_reshape_cache_flash_q_out(
     const torch::stable::Tensor& query, const torch::stable::Tensor& key,
     const torch::stable::Tensor& value, torch::stable::Tensor& query_out,

@@ -14,7 +14,7 @@ namespace vllm {
 // materialized outside the cache because ordinary non-DCP decoder attention
 // consumes it from there. Keeping all work for a decode token in one CTA avoids
 // the scheduling overhead of separate per-head tasks at small decode shapes.
-template <typename qk_t, typename cos_sin_t, bool IS_NEOX>
+template <typename qk_t, bool IS_NEOX>
 __global__ void fused_rope_and_reshape_cache_flash_q_out_kernel(
     const int64_t* __restrict__ positions,  // [num_padded_tokens]
     const qk_t* __restrict__ query,         // [num_padded_tokens, num_q_heads,
@@ -24,7 +24,7 @@ __global__ void fused_rope_and_reshape_cache_flash_q_out_kernel(
     const qk_t* __restrict__ value,         // [num_padded_tokens, num_kv_heads,
                                             // head_size]
     qk_t* __restrict__ query_out,  // contiguous, same logical shape as query
-    const cos_sin_t* __restrict__ cos_sin_cache,  // [max_position, rot_dim]
+    const qk_t* __restrict__ cos_sin_cache,  // [max_position, rot_dim]
     qk_t* __restrict__ key_cache,    // [num_blocks, block_size, num_kv_heads,
                                      // head_size]
     qk_t* __restrict__ value_cache,  // same logical shape
@@ -44,7 +44,7 @@ __global__ void fused_rope_and_reshape_cache_flash_q_out_kernel(
     return;
   }
   const int64_t pos = positions[token_idx];
-  const cos_sin_t* cos_sin_ptr = cos_sin_cache + pos * cos_sin_stride_token;
+  const qk_t* cos_sin_ptr = cos_sin_cache + pos * cos_sin_stride_token;
   const int embed_dim = rot_dim / 2;
 
   const int nq = num_q_heads * embed_dim;
@@ -142,60 +142,54 @@ __global__ void fused_rope_and_reshape_cache_flash_q_out_kernel(
 
 #define CALL_FUSED_ROPE_AND_RESHAPE_CACHE_FLASH_Q_OUT()                        \
   do {                                                                         \
-    VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                       \
+    VLLM_STABLE_DISPATCH_HALF_TYPES(                                           \
         query.scalar_type(), "qk_scalar_type", [&] {                           \
           using qk_t = scalar_t;                                               \
-          VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                 \
-              cos_sin_cache.scalar_type(), "cos_sin_cache_scalar_type", [&] {  \
-                using cos_sin_t = scalar_t;                                    \
-                if (is_neox) {                                                 \
-                  vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<       \
-                      qk_t, cos_sin_t, true><<<grid, block, 0, stream>>>(      \
-                      positions.const_data_ptr<int64_t>(),                     \
-                      query.const_data_ptr<qk_t>(),                            \
-                      key.const_data_ptr<qk_t>(),                              \
-                      value.const_data_ptr<qk_t>(),                            \
-                      query_out.mutable_data_ptr<qk_t>(),                      \
-                      cos_sin_cache.const_data_ptr<cos_sin_t>(),               \
-                      key_cache.mutable_data_ptr<qk_t>(),                      \
-                      value_cache.mutable_data_ptr<qk_t>(),                    \
-                      slot_mapping.const_data_ptr<int64_t>(), num_rope_tokens, \
-                      num_cache_tokens, rot_dim, query_stride_token,           \
-                      query_stride_head, key_stride_token, key_stride_head,    \
-                      value_stride_token, value_stride_head,                   \
-                      cos_sin_stride_token, key_cache_stride_block,            \
-                      key_cache_stride_token, key_cache_stride_head,           \
-                      value_cache_stride_block, value_cache_stride_token,      \
-                      value_cache_stride_head, num_q_heads, num_kv_heads,      \
-                      head_size, block_size);                                  \
-                } else {                                                       \
-                  vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<       \
-                      qk_t, cos_sin_t, false><<<grid, block, 0, stream>>>(     \
-                      positions.const_data_ptr<int64_t>(),                     \
-                      query.const_data_ptr<qk_t>(),                            \
-                      key.const_data_ptr<qk_t>(),                              \
-                      value.const_data_ptr<qk_t>(),                            \
-                      query_out.mutable_data_ptr<qk_t>(),                      \
-                      cos_sin_cache.const_data_ptr<cos_sin_t>(),               \
-                      key_cache.mutable_data_ptr<qk_t>(),                      \
-                      value_cache.mutable_data_ptr<qk_t>(),                    \
-                      slot_mapping.const_data_ptr<int64_t>(), num_rope_tokens, \
-                      num_cache_tokens, rot_dim, query_stride_token,           \
-                      query_stride_head, key_stride_token, key_stride_head,    \
-                      value_stride_token, value_stride_head,                   \
-                      cos_sin_stride_token, key_cache_stride_block,            \
-                      key_cache_stride_token, key_cache_stride_head,           \
-                      value_cache_stride_block, value_cache_stride_token,      \
-                      value_cache_stride_head, num_q_heads, num_kv_heads,      \
-                      head_size, block_size);                                  \
-                }                                                              \
-              });                                                              \
+          if (is_neox) {                                                       \
+            vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<qk_t, true>  \
+                <<<grid, block, 0, stream>>>(                                  \
+                    positions.const_data_ptr<int64_t>(),                       \
+                    query.const_data_ptr<qk_t>(), key.const_data_ptr<qk_t>(),  \
+                    value.const_data_ptr<qk_t>(),                              \
+                    query_out.mutable_data_ptr<qk_t>(),                        \
+                    cos_sin_cache.const_data_ptr<qk_t>(),                      \
+                    key_cache.mutable_data_ptr<qk_t>(),                        \
+                    value_cache.mutable_data_ptr<qk_t>(),                      \
+                    slot_mapping.const_data_ptr<int64_t>(), num_rope_tokens,   \
+                    num_cache_tokens, rot_dim, query_stride_token,             \
+                    query_stride_head, key_stride_token, key_stride_head,      \
+                    value_stride_token, value_stride_head,                     \
+                    cos_sin_stride_token, key_cache_stride_block,              \
+                    key_cache_stride_token, key_cache_stride_head,             \
+                    value_cache_stride_block, value_cache_stride_token,        \
+                    value_cache_stride_head, num_q_heads, num_kv_heads,        \
+                    head_size, block_size);                                    \
+          } else {                                                             \
+            vllm::fused_rope_and_reshape_cache_flash_q_out_kernel<qk_t, false> \
+                <<<grid, block, 0, stream>>>(                                  \
+                    positions.const_data_ptr<int64_t>(),                       \
+                    query.const_data_ptr<qk_t>(), key.const_data_ptr<qk_t>(),  \
+                    value.const_data_ptr<qk_t>(),                              \
+                    query_out.mutable_data_ptr<qk_t>(),                        \
+                    cos_sin_cache.const_data_ptr<qk_t>(),                      \
+                    key_cache.mutable_data_ptr<qk_t>(),                        \
+                    value_cache.mutable_data_ptr<qk_t>(),                      \
+                    slot_mapping.const_data_ptr<int64_t>(), num_rope_tokens,   \
+                    num_cache_tokens, rot_dim, query_stride_token,             \
+                    query_stride_head, key_stride_token, key_stride_head,      \
+                    value_stride_token, value_stride_head,                     \
+                    cos_sin_stride_token, key_cache_stride_block,              \
+                    key_cache_stride_token, key_cache_stride_head,             \
+                    value_cache_stride_block, value_cache_stride_token,        \
+                    value_cache_stride_head, num_q_heads, num_kv_heads,        \
+                    head_size, block_size);                                    \
+          }                                                                    \
         });                                                                    \
   } while (false)
 
 // Manual-fusion operator with caller-owned Q storage. Writes rotated Q to the
-// contiguous output and rotated K/V to the paged cache without mutating inputs
-// or materializing K.
+// contiguous output, rotated K to the paged cache, and unmodified V to the
+// cache without mutating inputs or materializing K.
 void fused_rope_and_reshape_cache_flash_q_out(
     const torch::stable::Tensor& query, const torch::stable::Tensor& key,
     const torch::stable::Tensor& value, torch::stable::Tensor& query_out,
@@ -230,6 +224,8 @@ void fused_rope_and_reshape_cache_flash_q_out(
   STD_TORCH_CHECK(key.scalar_type() == query.scalar_type());
   STD_TORCH_CHECK(value.scalar_type() == query.scalar_type());
   STD_TORCH_CHECK(query_out.scalar_type() == query.scalar_type());
+  STD_TORCH_CHECK(cos_sin_cache.scalar_type() == query.scalar_type(),
+                  "cos_sin_cache dtype must match query dtype");
   STD_TORCH_CHECK(query_out.is_contiguous());
   STD_TORCH_CHECK(rot_dim > 0 && rot_dim <= head_size && rot_dim % 2 == 0);
 
