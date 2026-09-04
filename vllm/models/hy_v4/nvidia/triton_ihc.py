@@ -284,9 +284,9 @@ def triton_ihc_post(
     assert x.is_cuda and residual.is_cuda and post.is_cuda
     assert post.dtype == torch.float32
 
-    x = x.contiguous()
-    residual = residual.contiguous()
-    post = post.contiguous()
+    assert x.is_contiguous()
+    assert residual.is_contiguous()
+    assert post.is_contiguous()
     num_tokens, hidden_size = x.shape
     hc_mult = post.shape[-1]
     assert residual.shape == (num_tokens, hc_mult, hidden_size)
