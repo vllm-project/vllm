@@ -9,6 +9,7 @@ from typing import ClassVar, cast
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -340,6 +341,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    @eager_break_during_capture
     def _run_qsa(
         self,
         hidden_states: torch.Tensor,

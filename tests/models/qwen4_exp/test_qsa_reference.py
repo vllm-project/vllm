@@ -7,6 +7,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    triton_scalar_specialization_rep,
+)
 from vllm.models.qwen4_exp.common import qsa_cache
 from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm.models.qwen4_exp.nvidia import indexer_qsa
@@ -22,6 +25,44 @@ requires_qsa_kernels = pytest.mark.skipif(
     not current_platform.is_cuda() or not HAS_TRITON,
     reason="QSA kernels require CUDA and Triton",
 )
+
+
+def test_qsa_sparse_attention_warmup_profiles_cover_dispatches() -> None:
+    max_num_rows = 1024
+    num_kv_heads = 2
+    group_size = 4
+    selection_width = 2048
+    profiles = qsa_ops._qsa_sparse_attention_warmup_profiles(
+        max_num_rows,
+        num_kv_heads,
+        group_size,
+        selection_width,
+    )
+    profile_keys = {
+        (
+            *qsa_ops._qsa_sparse_attention_launch_config(
+                num_rows,
+                num_kv_heads,
+                group_size,
+                selection_width,
+            ),
+            triton_scalar_specialization_rep(num_rows),
+        )
+        for num_rows in profiles
+    }
+
+    for num_rows in range(1, max_num_rows + 1):
+        key = (
+            *qsa_ops._qsa_sparse_attention_launch_config(
+                num_rows,
+                num_kv_heads,
+                group_size,
+                selection_width,
+            ),
+            triton_scalar_specialization_rep(num_rows),
+        )
+        assert key in profile_keys
+    assert len(profiles) < 16
 
 
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(

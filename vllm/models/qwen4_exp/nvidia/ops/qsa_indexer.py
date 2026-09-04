@@ -365,6 +365,68 @@ def warmup_qsa_mqa_paged_decode(
     return profiles
 
 
+def warmup_qsa_mqa_paged_prefill(
+    k_cache: torch.Tensor,
+    page_table: torch.Tensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+) -> None:
+    """Compile the shape-polymorphic QSA prefill scorer without launching it."""
+
+    num_rows = 2
+    columns = page_table.shape[1] * k_cache.shape[1]
+    q_ptr = TritonWarmupTensor(
+        torch.bfloat16,
+        shape=(num_rows, num_heads, head_dim),
+    )
+    k_cache_ptr = TritonWarmupTensor(
+        k_cache.dtype,
+        shape=tuple(k_cache.shape),
+        strides=tuple(k_cache.stride()),
+    )
+    page_table_ptr = TritonWarmupTensor(
+        page_table.dtype,
+        shape=(1, page_table.shape[1]),
+        strides=tuple(page_table.stride()),
+    )
+    # Packed prefill metadata is commonly a slice of a larger backing tensor.
+    query_start_loc_ptr = TritonWarmupTensor(torch.int32, aligned=False, shape=(2,))
+    visible_blocks_ptr = TritonWarmupTensor(
+        torch.int32, aligned=False, shape=(num_rows,)
+    )
+    logits_ptr = TritonWarmupTensor(
+        torch.float32,
+        shape=(num_rows, columns),
+    )
+    _qsa_mqa_paged_prefill_kernel.warmup(
+        q_ptr,
+        k_cache_ptr,
+        page_table_ptr,
+        query_start_loc_ptr,
+        visible_blocks_ptr,
+        logits_ptr,
+        q_ptr.stride(0),
+        q_ptr.stride(1),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        page_table.stride(0),
+        logits_ptr.stride(0),
+        num_rows,
+        0,
+        PAGE_SIZE=k_cache.shape[1],
+        PAGE_TABLE_WIDTH=page_table.shape[1],
+        NUM_HEADS=num_heads,
+        HEAD_DIM=head_dim,
+        TILE_R=64,
+        BLOCK_N=64,
+        K_TILES=16,
+        STAGES=2,
+        num_warps=4,
+        grid=(1,),
+    )
+
+
 def _prefill_logits(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -614,4 +676,5 @@ __all__ = [
     "qsa_select_paged_decode",
     "qsa_select_paged_prefill",
     "warmup_qsa_mqa_paged_decode",
+    "warmup_qsa_mqa_paged_prefill",
 ]

@@ -272,13 +272,31 @@ _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS = 32
 
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
+    token_counts = [max_tokens]
     linear_backend = runner.vllm_config.kernel_config.linear_backend
     if (
         linear_backend == "flashinfer_cutedsl"
         and max_tokens > _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
     ):
-        return max_tokens, _FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS
-    return (max_tokens,)
+        token_counts.append(_FLASHINFER_BF16_AUTOTUNE_MAX_TOKENS)
+
+    deferred_moe_max_tokens = max(
+        (
+            module.moe_config.defer_moe_finalize_max_num_tokens
+            for module in runner.get_model().modules()
+            if getattr(getattr(module, "moe_config", None), "defer_moe_finalize", False)
+        ),
+        default=-1,
+    )
+    if deferred_moe_max_tokens > 0:
+        capture_sizes = (
+            runner.vllm_config.compilation_config.cudagraph_capture_sizes or []
+        )
+        token_counts.extend(
+            size for size in capture_sizes if 0 < size <= deferred_moe_max_tokens
+        )
+
+    return tuple(dict.fromkeys(token_counts))
 
 
 def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:

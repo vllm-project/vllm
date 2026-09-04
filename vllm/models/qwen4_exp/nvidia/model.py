@@ -78,6 +78,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..config import Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .moe import Qwen4ExpMoERunner
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -140,6 +141,7 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
+
 # The checkpoint stores these projections separately; runtime packs each group
 # into adjacent logical shards of a MergedColumnParallelLinear.
 _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
@@ -158,6 +160,39 @@ _EXTRA_WEIGHTS_MAPPER = WeightsMapper(
 )
 
 
+class Qwen4ExpSharedMLP(Qwen3NextMLP):
+    """Shared MLP that can defer its scalar gate to the MoE tail."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._defer_gate_max_num_tokens = 0
+        self._deferred_gate_logits: torch.Tensor | None = None
+
+    def enable_deferred_gate(self, max_num_tokens: int) -> None:
+        self._defer_gate_max_num_tokens = max_num_tokens
+
+    @property
+    def deferred_gate_logits(self) -> torch.Tensor | None:
+        return self._deferred_gate_logits
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up, _ = self.gate_up_proj(x)
+        out = self.act_fn(gate_up)
+        out, _ = self.down_proj(out)
+
+        if self.expert_gate is None:
+            self._deferred_gate_logits = None
+            return out
+
+        gate_logits, _ = self.expert_gate(x)
+        if x.shape[0] <= self._defer_gate_max_num_tokens:
+            self._deferred_gate_logits = gate_logits
+            return out
+
+        self._deferred_gate_logits = None
+        return torch.sigmoid(gate_logits) * out
+
+
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation."""
 
@@ -167,7 +202,12 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
             raise NotImplementedError(
                 "Qwen4Exp HC does not support sequence-parallel MoE"
             )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            runner_cls=Qwen4ExpMoERunner,
+            shared_expert_cls=Qwen4ExpSharedMLP,
+        )
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
@@ -295,7 +335,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = self.ple(
+            hidden_states = hidden_states + self.ple(
                 hidden_states,
                 input_ids,
                 query_start_loc,

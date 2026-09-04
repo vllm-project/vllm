@@ -22,6 +22,7 @@ _QWEN_MODEL_TYPES = frozenset(
         "qwen3_5_text",
         "qwen3_5_moe",
         "qwen3_5_moe_text",
+        "qwen4_exp_text",
     }
 )
 
@@ -215,21 +216,30 @@ def _warm_fused_post_conv_kernel(
         conv_output = torch.empty(
             (length, qkv_dim), dtype=config.conv_dtype, device=device
         )
-        a = torch.empty((length, config.hv), dtype=config.conv_dtype, device=device)
-        b = torch.empty_like(a)
-
-        fused_post_conv_prep(
-            conv_output,
-            a,
-            b,
-            config.a_log,
-            config.dt_bias,
-            config.h,
-            config.k,
-            config.v,
-            apply_l2norm=True,
-            output_g_exp=False,
+        aligned_a = torch.empty(
+            (length, config.hv), dtype=config.conv_dtype, device=device
         )
+        aligned_b = torch.empty_like(aligned_a)
+        a_storage = torch.empty(
+            length * config.hv + 1, dtype=config.conv_dtype, device=device
+        )
+        b_storage = torch.empty_like(a_storage)
+        unaligned_a = a_storage[1:].view(length, config.hv)
+        unaligned_b = b_storage[1:].view(length, config.hv)
+
+        for a, b in ((aligned_a, aligned_b), (unaligned_a, unaligned_b)):
+            fused_post_conv_prep(
+                conv_output,
+                a,
+                b,
+                config.a_log,
+                config.dt_bias,
+                config.h,
+                config.k,
+                config.v,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
 
 
 def _warm_fused_sigmoid_gating_delta_rule_update_kernel(

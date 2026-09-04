@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -874,6 +875,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         return gated_output
 
 
+@eager_break_during_capture
 def qwen4_exp_compute_ple_ngram_ids(
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -901,6 +903,7 @@ def qwen4_exp_compute_ple_ngram_ids_fake(
     return
 
 
+@eager_break_during_capture
 def qwen4_exp_ple_short_conv(
     inputs: torch.Tensor,
     residual_output: torch.Tensor,

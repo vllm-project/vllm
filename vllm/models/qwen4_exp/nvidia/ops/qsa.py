@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_scalar_specialization_rep,
+)
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
@@ -440,6 +444,202 @@ def _compress_qsa_groups_kernel(
     )
 
 
+def _qsa_sparse_attention_launch_config(
+    num_rows: int,
+    num_kv_heads: int,
+    group_size: int,
+    selection_width: int,
+) -> tuple[int, int, int, int, int]:
+    block_m = triton.next_power_of_2(group_size)
+    base_programs = num_rows * num_kv_heads
+    small_profile_limit = 8 if block_m <= 8 else 4
+
+    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
+    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
+    if base_programs <= small_profile_limit:
+        block_n, target_splits, partial_warps = 16, 64, 4
+    elif base_programs < 32:
+        block_n, target_splits, partial_warps = 16, 32, 4
+    elif base_programs <= 256:
+        block_n, target_splits, partial_warps = 64, 8, 2
+    elif base_programs <= 512:
+        block_n, target_splits, partial_warps = 64, 4, 2
+    else:
+        block_n, target_splits, partial_warps = 64, 1, 2
+
+    num_tiles = triton.cdiv(selection_width, block_n)
+    # Avoid empty splits when the selection width is smaller than the profile.
+    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
+    num_splits = min(max_useful_splits, target_splits)
+    return block_m, block_n, num_splits, num_tiles, partial_warps
+
+
+def _qsa_sparse_attention_warmup_profiles(
+    max_num_rows: int,
+    num_kv_heads: int,
+    group_size: int,
+    selection_width: int,
+) -> tuple[int, ...]:
+    """Pick one row count for every reachable Triton cache-key class."""
+
+    profiles: dict[tuple[int, ...], int] = {}
+    for num_rows in range(1, max_num_rows + 1):
+        launch_config = _qsa_sparse_attention_launch_config(
+            num_rows,
+            num_kv_heads,
+            group_size,
+            selection_width,
+        )
+        key = (*launch_config, triton_scalar_specialization_rep(num_rows))
+        profiles.setdefault(key, num_rows)
+    return tuple(profiles.values())
+
+
+def warmup_qsa_sparse_paged_attention(
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    num_query_heads: int,
+    head_dim: int,
+    selection_width: int,
+    max_num_batched_tokens: int,
+    has_output_gate: bool,
+) -> tuple[tuple[int, int], ...]:
+    """Compile every reachable sparse-attention specialization without launch."""
+
+    num_kv_heads = k_cache.shape[2]
+    group_size = num_query_heads // num_kv_heads
+    profiles = _qsa_sparse_attention_warmup_profiles(
+        max_num_batched_tokens,
+        num_kv_heads,
+        group_size,
+        selection_width,
+    )
+    k_cache_ptr = TritonWarmupTensor(
+        k_cache.dtype,
+        shape=tuple(k_cache.shape),
+        strides=tuple(k_cache.stride()),
+    )
+    v_cache_ptr = TritonWarmupTensor(
+        v_cache.dtype,
+        shape=tuple(v_cache.shape),
+        strides=tuple(v_cache.stride()),
+    )
+    num_request_profiles: dict[int, int] = {}
+    for num_requests in range(1, block_table.shape[0] + 1):
+        key = triton_scalar_specialization_rep(num_requests)
+        num_request_profiles.setdefault(key, num_requests)
+
+    compiled_profiles: list[tuple[int, int]] = []
+    for num_rows in profiles:
+        block_m, block_n, num_splits, num_tiles, partial_warps = (
+            _qsa_sparse_attention_launch_config(
+                num_rows,
+                num_kv_heads,
+                group_size,
+                selection_width,
+            )
+        )
+        q_ptr = TritonWarmupTensor(
+            torch.bfloat16,
+            shape=(num_rows, num_query_heads, head_dim),
+        )
+        indices_ptr = TritonWarmupTensor(
+            torch.int32,
+            shape=(num_rows, selection_width),
+        )
+        token_to_req_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows,))
+        output_ptr = TritonWarmupTensor(
+            torch.bfloat16,
+            shape=(num_rows, num_query_heads, head_dim),
+        )
+        output_gate_ptr = output_ptr if has_output_gate else None
+        if num_splits == 1:
+            partial_output_ptr = output_ptr
+            partial_lse_ptr = output_ptr
+        else:
+            partial_output_ptr = TritonWarmupTensor(
+                torch.float32,
+                shape=(num_splits, num_rows, num_query_heads, head_dim),
+            )
+            partial_lse_ptr = TritonWarmupTensor(
+                torch.float32,
+                shape=(num_splits, num_rows, num_query_heads),
+            )
+
+        for num_requests in num_request_profiles.values():
+            block_table_ptr = TritonWarmupTensor(
+                block_table.dtype,
+                shape=(num_requests, block_table.shape[1]),
+                strides=tuple(block_table.stride()),
+            )
+            _qsa_sparse_paged_gqa_splitk_kernel.warmup(
+                q_ptr,
+                k_cache_ptr,
+                v_cache_ptr,
+                indices_ptr,
+                block_table_ptr,
+                token_to_req_ptr,
+                partial_output_ptr,
+                partial_lse_ptr,
+                output_ptr,
+                output_gate_ptr,
+                q_ptr.stride(0),
+                q_ptr.stride(1),
+                k_cache.stride(0),
+                k_cache.stride(1),
+                k_cache.stride(2),
+                v_cache.stride(0),
+                v_cache.stride(1),
+                v_cache.stride(2),
+                indices_ptr.stride(0),
+                block_table.stride(0),
+                output_ptr.stride(0),
+                output_ptr.stride(1),
+                output_ptr.stride(0) if has_output_gate else 0,
+                output_ptr.stride(1) if has_output_gate else 0,
+                num_rows,
+                k_cache.shape[0],
+                num_requests,
+                TOPK=selection_width,
+                PAGE_SIZE=k_cache.shape[1],
+                PAGE_TABLE_WIDTH=block_table.shape[1],
+                GROUP_SIZE=group_size,
+                HEAD_DIM=head_dim,
+                NUM_QUERY_HEADS=num_query_heads,
+                NUM_SPLITS=num_splits,
+                NUM_TILES=num_tiles,
+                BLOCK_M=block_m,
+                BLOCK_N=block_n,
+                num_warps=partial_warps,
+                num_stages=2,
+                grid=(1,),
+            )
+            compiled_profiles.append((num_rows, num_requests))
+        if num_splits == 1:
+            continue
+        _qsa_merge_splitk_kernel.warmup(
+            partial_output_ptr,
+            partial_lse_ptr,
+            output_ptr,
+            output_gate_ptr,
+            output_ptr.stride(0),
+            output_ptr.stride(1),
+            output_ptr.stride(0) if has_output_gate else 0,
+            output_ptr.stride(1) if has_output_gate else 0,
+            num_rows,
+            HEAD_DIM=head_dim,
+            NUM_QUERY_HEADS=num_query_heads,
+            NUM_SPLITS=num_splits,
+            BLOCK_SPLITS=triton.next_power_of_2(num_splits),
+            num_warps=2,
+            num_stages=1,
+            grid=(1,),
+        )
+    return tuple(compiled_profiles)
+
+
 def qsa_sparse_paged_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -488,27 +688,14 @@ def qsa_sparse_paged_attention(
         return out
 
     group_size = q.shape[1] // k_cache.shape[2]
-    block_m = triton.next_power_of_2(group_size)
-    base_programs = q.shape[0] * k_cache.shape[2]
-    small_profile_limit = 8 if block_m <= 8 else 4
-
-    # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
-    # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if base_programs <= small_profile_limit:
-        block_n, target_splits, partial_warps = 16, 64, 4
-    elif base_programs < 32:
-        block_n, target_splits, partial_warps = 16, 32, 4
-    elif base_programs <= 256:
-        block_n, target_splits, partial_warps = 64, 8, 2
-    elif base_programs <= 512:
-        block_n, target_splits, partial_warps = 64, 4, 2
-    else:
-        block_n, target_splits, partial_warps = 64, 1, 2
-
-    num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
-    # Avoid empty splits when the selection width is smaller than the profile.
-    max_useful_splits = 1 << (num_tiles.bit_length() - 1)
-    num_splits = min(max_useful_splits, target_splits)
+    block_m, block_n, num_splits, num_tiles, partial_warps = (
+        _qsa_sparse_attention_launch_config(
+            q.shape[0],
+            k_cache.shape[2],
+            group_size,
+            logical_indices.shape[1],
+        )
+    )
 
     # Split=1 writes output directly and compiles out all workspace accesses.
     if num_splits == 1:

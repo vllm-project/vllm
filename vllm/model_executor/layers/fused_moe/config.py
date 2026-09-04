@@ -1323,6 +1323,9 @@ class FusedMoEConfig:
     defer_moe_finalize: bool = False
     # Optional consumer capacity for deferred finalize. Negative means unbounded.
     defer_moe_finalize_max_num_tokens: int = -1
+    # Expert-parallel consumers must explicitly opt in after handling the local
+    # top-k finalize before the cross-rank reduction.
+    defer_moe_finalize_allow_ep: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
@@ -1453,9 +1456,9 @@ class FusedMoEConfig:
         # combine or reduce-scatter after the experts and cannot defer it.
         return (
             self.defer_moe_finalize
-            and self.tp_size > 1
+            and (self.tp_size > 1 or self.ep_size > 1)
             and self.dp_size == 1
-            and self.ep_size == 1
+            and (self.ep_size == 1 or self.defer_moe_finalize_allow_ep)
             and self.pcp_size == 1
             and not self.is_sequence_parallel
         )

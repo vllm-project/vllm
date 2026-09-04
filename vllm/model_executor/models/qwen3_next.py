@@ -126,7 +126,13 @@ def _should_replicate_misaligned_shared_expert(
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        runner_cls=None,
+        shared_expert_cls=Qwen3NextMLP,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
@@ -200,7 +206,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         ):
             self.shared_expert = None
         else:
-            self.shared_expert = Qwen3NextMLP(
+            self.shared_expert = shared_expert_cls(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
@@ -232,6 +238,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             shared_expert_gate=self.shared_expert_gate
             if self.shared_expert is None
             else None,
+            runner_cls=runner_cls,
         )
 
     def forward(

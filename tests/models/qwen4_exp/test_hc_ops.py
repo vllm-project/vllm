@@ -4,11 +4,15 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.models.qwen4_exp.nvidia.ops.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
     hc_combine_norm,
     hc_gate_mix,
+)
+from vllm.models.qwen4_exp.nvidia.ops.moe import (
+    finalize_moe_with_shared,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -92,3 +96,57 @@ def test_hc_combine_norm() -> None:
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(actual_norm, expected_norm.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("num_tokens", [1, 2, 16])
+@pytest.mark.parametrize("defer_shared_gate", [False, True])
+def test_finalize_moe_with_shared(
+    num_tokens: int,
+    defer_shared_gate: bool,
+) -> None:
+    torch.manual_seed(0)
+    top_k = 10
+    num_permuted = num_tokens * top_k + 7
+    gemm2 = torch.randn(
+        num_permuted,
+        HIDDEN_SIZE,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    weights = torch.rand(
+        num_tokens,
+        top_k,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    indices = torch.randperm(num_permuted, device="cuda")[: num_tokens * top_k]
+    indices = indices.to(torch.int32).view(num_tokens, top_k)
+    indices[:, -1] = -1
+    shared = torch.randn(
+        num_tokens,
+        HIDDEN_SIZE,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    shared_gate_logits = (
+        torch.randn(num_tokens, 1, dtype=torch.bfloat16, device="cuda")
+        if defer_shared_gate
+        else None
+    )
+    routed = UnfinalizedMoEOutput(gemm2, weights, indices)
+
+    actual = finalize_moe_with_shared(routed, shared, shared_gate_logits)
+
+    expected_routed = torch.zeros_like(shared, dtype=torch.float32)
+    for slot in range(top_k):
+        valid = indices[:, slot] >= 0
+        expected_routed[valid] += (
+            gemm2[indices[valid, slot].long()].float()
+            * weights[valid, slot, None].float()
+        )
+    expected_routed = expected_routed.to(torch.bfloat16)
+    expected_shared = shared
+    if shared_gate_logits is not None:
+        expected_shared = torch.sigmoid(shared_gate_logits) * expected_shared
+    expected = (expected_routed.float() + expected_shared.float()).to(torch.bfloat16)
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
