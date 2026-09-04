@@ -37,9 +37,12 @@ if hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
+# ROCm: capability 94 = MI300X (gfx942), 95 = MI325X/MI355X (gfx950)
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
     90: 8192,  # H100: only for models with hidden_size >= 8192
     100: 8192,  # Blackwell family: only for models with hidden_size >= 8192
+    94: 7168,  # MI300X (gfx942)
+    95: 7168,  # MI325X/MI355X (gfx950)
 }
 
 # Min size per GPU per device capability for sequence parallelism
@@ -49,7 +52,14 @@ SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     90: 8,  # 8MB per GPU for H100
     # Use a more conservative threshold on Blackwell so TP8 starts later.
     100: 32,
+    94: 8,  # MI300X (gfx942)
+    95: 8,  # MI325X/MI355X (gfx950)
 }
+
+# ROCm device capabilities that support AITER-fused sequence parallelism
+# (MI3xx only: gfx942 -> 94, gfx950 -> 95). MI250 (gfx90a -> 90) is excluded so
+# it does not alias the CUDA H100 entry in the shared threshold dicts above.
+_ROCM_SP_SUPPORTED_CAPABILITIES = (94, 95)
 
 
 def get_sequence_parallelism_threshold(
@@ -69,6 +79,9 @@ def get_sequence_parallelism_threshold(
 
     Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
              (hidden_size * element_size)
+
+    Supported platforms: CUDA (H100/Blackwell), XPU, and ROCm
+    (MI300X/MI325X/MI355X).
     """
     from vllm.platforms import current_platform
 
@@ -92,6 +105,20 @@ def get_sequence_parallelism_threshold(
         if _hidden is None or _gpu_mb is None:
             return None
         min_hidden_size, min_per_gpu_size_mb = _hidden, _gpu_mb
+    elif current_platform.is_rocm():
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            return None
+        device_capability = capability.to_int()
+
+        # AITER-fused sequence parallelism is only supported on MI3xx
+        # (gfx942 -> 94, gfx950 -> 95). Gate explicitly so MI250 (gfx90a ->
+        # capability 90) is not enabled by aliasing the CUDA H100 entry, which
+        # also lives at capability 90 in the shared threshold dicts.
+        if device_capability not in _ROCM_SP_SUPPORTED_CAPABILITIES:
+            return None
+        min_hidden_size = SP_MIN_HIDDEN_SIZE[device_capability]
+        min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB[device_capability]
     else:
         return None
 
