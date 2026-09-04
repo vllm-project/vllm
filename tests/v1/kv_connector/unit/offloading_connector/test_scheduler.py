@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
+    _create_req_context,
     get_sliding_window_size_in_chunks,
 )
 from vllm.v1.core.block_pool import BlockPool
@@ -59,6 +60,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
@@ -191,6 +193,7 @@ def _make_partial_tail_request(
     request = MagicMock()
     request.request_id = "req"
     request.kv_transfer_params = None
+    request.kv_hints = None
     request.num_prompt_tokens = 30
     request.num_tokens = 30
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(7)]
@@ -199,6 +202,21 @@ def _make_partial_tail_request(
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
     return request
+
+
+def test_create_req_context_preserves_kv_hints():
+    kv_hints = KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="message-1",
+        actions=[],
+    )
+    request = MagicMock(
+        request_id="req",
+        kv_transfer_params=None,
+        kv_hints=kv_hints,
+    )
+
+    assert _create_req_context(request).kv_hints is kv_hints
 
 
 def _reduce_kv_connector_stats(runner):
