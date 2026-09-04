@@ -324,6 +324,7 @@ def is_in_target_modules(
                 prefix = candidate[: -len(packed_parent)]
                 if any(
                     child in target_module_set
+                    or child.rsplit(".", 1)[-1] in target_module_set
                     or f"{prefix}{child}" in target_module_set
                     for child in packed_children
                 ):

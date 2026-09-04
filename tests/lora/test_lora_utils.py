@@ -57,6 +57,23 @@ class TestIsInTargetModules:
             {"experts": ["experts.0.gate_proj", "experts.0.up_proj"]},
         )
 
+    def test_dotted_moe_child_leaf_load_apply_consistency(self):
+        packed_modules_mapping = {
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj"]
+        }
+        target_modules = ["gate_proj"]
+
+        assert is_in_target_modules(
+            "model.layers.0.mlp.experts.0.gate_proj",
+            target_modules,
+            packed_modules_mapping,
+        )
+        assert is_in_target_modules(
+            "model.layers.0.mlp.experts",
+            target_modules,
+            packed_modules_mapping,
+        )
+
     def test_runtime_prefix_missing_from_adapter_module_name(self):
         assert is_in_target_modules(
             "foo.q_proj",
