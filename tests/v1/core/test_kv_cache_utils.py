@@ -3,8 +3,11 @@
 import copy
 import hashlib
 import importlib
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -1462,6 +1465,28 @@ def test_is_kv_cache_spec_uniform():
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
     }
     assert not is_kv_cache_spec_uniform(kv_cache_spec)
+
+    script = """
+import sys
+
+from vllm.v1.core.kv_cache_utils import is_kv_cache_spec_uniform
+from vllm.v1.kv_cache_interface import KVCacheSpec
+
+if sys.flags.optimize < 1:
+    raise RuntimeError("subprocess is not running with optimization enabled")
+specs = {
+    "a": KVCacheSpec(block_size=1),
+    "b": KVCacheSpec(block_size=2),
+}
+if is_kv_cache_spec_uniform(specs):
+    raise RuntimeError("different specs were treated as uniform")
+"""
+    subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        cwd=Path(__file__).resolve().parents[3],
+        check=True,
+        timeout=60,
+    )
 
 
 @pytest.mark.parametrize(
