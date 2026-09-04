@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The draft model must honour ``attention_backend`` from --speculative-config.
+"""The draft must honour ``attention_backend`` from --speculative-config.
 
-The V1 proposer sets the draft's attention backend from the speculative config
-and never inherits the target's, because draft and target attention shapes
-differ and not every backend supports both. On V2 the setting was dropped.
-
-The override has to be applied before ``get_model()``: ``init_attn_backend``
-reads the backend off each constructed layer via ``get_attn_backend()`` rather
-than off the config, so anything applied after construction is inert. These
-tests therefore assert on the config that ``load_eagle_model`` actually hands
-to ``get_model``.
+``init_attn_backend`` reads the backend off each constructed layer, so these
+assert on the config ``load_eagle_model`` hands to ``get_model``.
 """
 
 from dataclasses import dataclass
@@ -62,8 +55,6 @@ def _config(target_backend: str, draft_backend: str | None) -> _VllmConfig:
 
 
 class _Captured(Exception):
-    """Stops load_eagle_model once we hold the config it would have built with."""
-
     def __init__(self, vllm_config):
         self.vllm_config = vllm_config
 
@@ -81,25 +72,19 @@ def _capture_draft_config(cfg):
 
 
 def test_draft_attention_backend_overrides_the_target():
-    """An explicit draft backend must reach the config the draft is built with."""
     used = _capture_draft_config(_config("FLASHINFER", "TRITON_ATTN"))
     assert used.attention_config.backend == "TRITON_ATTN"
 
 
-def test_unset_clears_the_backend_so_the_draft_autoselects():
-    """Unset must clear the target's backend, not inherit it.
-
-    The V1 proposer assigns the draft's backend unconditionally so that a
-    ``None`` erases the target's and the draft autoselects independently. It
-    never inherits, because draft and target attention shapes differ and not
-    every backend serves both.
-    """
-    used = _capture_draft_config(_config("FLASHINFER", None))
-    assert used.attention_config.backend is None
+def test_unset_leaves_the_target_backend_in_place():
+    """Clearing it lets the draft autoselect a KV layout the target lacks."""
+    cfg = _config("FLEX_ATTENTION", None)
+    used = _capture_draft_config(cfg)
+    assert used is cfg
+    assert used.attention_config.backend == "FLEX_ATTENTION"
 
 
 def test_override_does_not_mutate_the_target_config():
-    """The target must keep its own backend after the draft config is derived."""
     cfg = _config("FLASHINFER", "TRITON_ATTN")
     _capture_draft_config(cfg)
     assert cfg.attention_config.backend == "FLASHINFER"
