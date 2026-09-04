@@ -499,7 +499,7 @@ def _get_backend_priorities(
     return backends
 
 
-def _is_turboquant_run(vllm_config: "VllmConfig | None") -> bool:
+def _uses_turboquant(vllm_config: "VllmConfig | None") -> bool:
     """Whether the run's KV cache dtype is one of the turboquant_* presets."""
     cache_config = getattr(vllm_config, "cache_config", None)
     return cache_config is not None and str(cache_config.cache_dtype).startswith(
@@ -649,7 +649,7 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
-        is_turboquant_run = _is_turboquant_run(vllm_config)
+        is_turboquant_run = _uses_turboquant(vllm_config)
         for priority, backend in enumerate(backend_priorities):
             try:
                 invalid_reasons_i = _get_invalid_reasons(
@@ -679,9 +679,10 @@ class RocmPlatform(Platform):
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
+            # Keep lazy: vllm.config imports current_platform during initialization.
             from vllm.config import get_current_vllm_config_or_none
 
-            is_turboquant_run = _is_turboquant_run(get_current_vllm_config_or_none())
+            is_turboquant_run = _uses_turboquant(get_current_vllm_config_or_none())
             try:
                 sel_invalid_reasons = _get_invalid_reasons(
                     selected_backend.get_class(),
