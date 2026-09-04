@@ -603,6 +603,15 @@ steps:
         depends_on: ~
         agents:
           queue: cpu_queue_release
+        timeout_in_minutes: 360
+        retry:
+          automatic:
+            - exit_status: 1  # Transient registry/object-store/build failure
+              limit: 1
+            - exit_status: -1  # Agent was lost
+              limit: 1
+            - exit_status: -10  # Agent was lost
+              limit: 1
         commands:
           - |
             set -euo pipefail
@@ -610,7 +619,7 @@ steps:
             # Resolve the parent once and use the same digest and build inputs
             # for the cache key, final image, and exported wheels.
             export ROCM_BASE_DOCKERFILE=docker/Dockerfile.rocm_base
-            export ROCM_BASE_CONTENT_FILES="docker/Dockerfile.rocm_base .dockerignore requirements/test/rocm.txt"
+            export ROCM_BASE_CONTENT_FILES="docker/Dockerfile.rocm_base .dockerignore requirements/build/rocm-constraints.txt"
             export ROCM_BASE_IMAGE_TARGET=final
             export ROCM_BASE_WHEEL_TARGET=debs_wheel_release
             export ROCM_BASE_PLATFORM=linux/amd64
@@ -618,7 +627,30 @@ steps:
             export SCCACHE_BUCKET_NAME=vllm-build-sccache
             export SCCACHE_REGION_NAME=us-west-2
             export SCCACHE_S3_NO_CREDENTIALS=0
-            unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL SCCACHE_VERSION SCCACHE_DOWNLOAD_SHA256
+            # Custom download URLs can contain credentials. Docker build ARGs
+            # are visible in progress output and OCI image history, so release
+            # builds intentionally use the checksum-pinned public default.
+            unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL
+            if [[ -n "$${ROCM_BASE_PYTORCH_ROCM_ARCH:-}" ]]; then
+              export PYTORCH_ROCM_ARCH="$${ROCM_BASE_PYTORCH_ROCM_ARCH}"
+            elif [[ -z "$${PYTORCH_ROCM_ARCH:-}" ]]; then
+              export PYTORCH_ROCM_ARCH=$$(sed -n -E \
+                's/^ARG PYTORCH_ROCM_ARCH="?([^"[:space:]]+)"?.*/\1/p' \
+                "$${ROCM_BASE_DOCKERFILE}" | head -1)
+            fi
+            export SCCACHE_VERSION="$${SCCACHE_VERSION:-$$(sed -n -E \
+              's/^ARG SCCACHE_VERSION="?([^"[:space:]]+)"?.*/\1/p' \
+              "$${ROCM_BASE_DOCKERFILE}" | head -1)}"
+            export SCCACHE_DOWNLOAD_SHA256="$${SCCACHE_DOWNLOAD_SHA256:-$$(sed -n -E \
+              's/^ARG SCCACHE_DOWNLOAD_SHA256="?([^"[:space:]]+)"?.*/\1/p' \
+              "$${ROCM_BASE_DOCKERFILE}" | head -1)}"
+            ROCM_BASE_CACHE_POLICY_ARGS=()
+            if [[ "$${ROCM_BASE_WHEEL_CACHE_FORCE:-0}" == "1" ]]; then
+              ROCM_BASE_CACHE_POLICY_ARGS+=(--no-cache)
+            elif [[ "$${ROCM_BASE_WHEEL_CACHE_FORCE:-0}" != "0" ]]; then
+              echo "ERROR: ROCM_BASE_WHEEL_CACHE_FORCE must be 0 or 1" >&2
+              exit 1
+            fi
             PINNED_BASE_IMAGE=$$(.buildkite/scripts/cache-rocm-base-wheels.sh parent)
             export ROCM_BASE_PARENT_IMAGE="$${PINNED_BASE_IMAGE%@*}"
             export ROCM_BASE_PARENT_DIGEST="$${PINNED_BASE_IMAGE##*@}"
@@ -690,16 +722,24 @@ steps:
               # Build full base image and push to ECR
               ROCM_BASE_BUILD_METADATA=$$(mktemp)
               DOCKER_BUILDKIT=1 docker buildx build \
+                "$${ROCM_BASE_CACHE_POLICY_ARGS[@]}" \
                 --file docker/Dockerfile.rocm_base \
                 --tag "$${ECR_CACHE_TAG}" \
                 --target "$${ROCM_BASE_IMAGE_TARGET}" \
                 --platform "$${ROCM_BASE_PLATFORM}" \
-                --pull \
                 --build-arg BASE_IMAGE="$${PINNED_BASE_IMAGE}" \
                 --build-arg USE_SCCACHE="$${ROCM_BASE_USE_SCCACHE}" \
+                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+                --build-arg SCCACHE_VERSION="$${SCCACHE_VERSION}" \
+                --build-arg SCCACHE_DOWNLOAD_SHA256="$${SCCACHE_DOWNLOAD_SHA256}" \
+                --build-arg SCCACHE_ENDPOINT="$${SCCACHE_ENDPOINT:-}" \
                 --build-arg SCCACHE_BUCKET_NAME="$${SCCACHE_BUCKET_NAME}" \
                 --build-arg SCCACHE_REGION_NAME="$${SCCACHE_REGION_NAME}" \
                 --build-arg SCCACHE_S3_NO_CREDENTIALS="$${SCCACHE_S3_NO_CREDENTIALS}" \
+                --label vllm.rocm_base.cache_key="$${CACHE_KEY}" \
+                --label vllm.rocm_base.pytorch_rocm_arch="$${PYTORCH_ROCM_ARCH}" \
+                --label vllm.rocm_base.sccache_version="$${SCCACHE_VERSION}" \
+                --label vllm.rocm_base.sccache_sha256="$${SCCACHE_DOWNLOAD_SHA256}" \
                 --metadata-file "$${ROCM_BASE_BUILD_METADATA}" \
                 --push \
                 .
@@ -717,9 +757,12 @@ steps:
                 --tag rocm-base-debs:$${BUILDKITE_BUILD_NUMBER} \
                 --target "$${ROCM_BASE_WHEEL_TARGET}" \
                 --platform "$${ROCM_BASE_PLATFORM}" \
-                --pull \
                 --build-arg BASE_IMAGE="$${PINNED_BASE_IMAGE}" \
                 --build-arg USE_SCCACHE="$${ROCM_BASE_USE_SCCACHE}" \
+                --build-arg PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+                --build-arg SCCACHE_VERSION="$${SCCACHE_VERSION}" \
+                --build-arg SCCACHE_DOWNLOAD_SHA256="$${SCCACHE_DOWNLOAD_SHA256}" \
+                --build-arg SCCACHE_ENDPOINT="$${SCCACHE_ENDPOINT:-}" \
                 --build-arg SCCACHE_BUCKET_NAME="$${SCCACHE_BUCKET_NAME}" \
                 --build-arg SCCACHE_REGION_NAME="$${SCCACHE_REGION_NAME}" \
                 --build-arg SCCACHE_S3_NO_CREDENTIALS="$${SCCACHE_S3_NO_CREDENTIALS}" \
@@ -728,8 +771,7 @@ steps:
               
               # Extract and upload wheels
               mkdir -p artifacts/rocm-base-wheels
-              find artifacts/rocm-base-wheels -maxdepth 1 -type f \
-                -name '*.whl' -delete
+              find artifacts/rocm-base-wheels -mindepth 1 -depth -delete
               cid=$(docker create rocm-base-debs:$${BUILDKITE_BUILD_NUMBER})
               docker cp $${cid}:/app/debs/. artifacts/rocm-base-wheels/
               docker rm $${cid}
@@ -740,13 +782,22 @@ steps:
               echo " Build complete - Image and wheels cached"
             fi
 
+            if [[ ! "$${ECR_IMAGE_REF}" =~ ^public\.ecr\.aws/q9t5s3a7/vllm-release-repo@sha256:[0-9a-f]{64}$$ ]]; then
+              echo "ERROR: refusing unexpected ROCm base image ref: $${ECR_IMAGE_REF}" >&2
+              exit 1
+            fi
             buildkite-agent meta-data set "rocm-base-image-tag" "$${ECR_IMAGE_REF}"
 
         artifact_paths:
           - "artifacts/rocm-base-wheels/*.whl"
         env:
           DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
           S3_BUCKET: "vllm-wheels"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
 
       # ROCm Job 2: Build vLLM ROCm Wheel
       - label: ":python: Build vLLM ROCm Wheel - x86_64"
@@ -790,6 +841,10 @@ steps:
             if [ -z "$${ECR_IMAGE_TAG}" ]; then
               echo "ERROR: rocm-base-image-tag metadata not found"
               echo "This should have been set by the build-rocm-base-wheels job"
+              exit 1
+            fi
+            if [[ ! "$${ECR_IMAGE_TAG}" =~ ^public\.ecr\.aws/q9t5s3a7/vllm-release-repo@sha256:[0-9a-f]{64}$$ ]]; then
+              echo "ERROR: refusing unexpected ROCm base image ref: $${ECR_IMAGE_TAG}" >&2
               exit 1
             fi
             
@@ -923,6 +978,10 @@ steps:
             if [ -z "$${ECR_IMAGE_TAG}" ]; then
               echo "ERROR: rocm-base-image-tag metadata not found"
               echo "This should have been set by the build-rocm-base-wheels job"
+              exit 1
+            fi
+            if [[ ! "$${ECR_IMAGE_TAG}" =~ ^public\.ecr\.aws/q9t5s3a7/vllm-release-repo@sha256:[0-9a-f]{64}$$ ]]; then
+              echo "ERROR: refusing unexpected ROCm base image ref: $${ECR_IMAGE_TAG}" >&2
               exit 1
             fi
             

@@ -243,6 +243,8 @@ steps:
   - .buildkite/scripts/cache-rocm-base-wheels.sh
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
+  - .buildkite/scripts/rocm/refresh-base-image.sh
+  - .buildkite/scripts/rocm/smoke-test-image.sh
   - .buildkite/release-pipeline.yaml
   - docker/Dockerfile
   - docker/Dockerfile.cpu
@@ -252,6 +254,8 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - requirements/common.txt
+  - requirements/build/rocm-constraints.in
+  - requirements/build/rocm-constraints.txt
   - requirements/rocm.txt
   - requirements/test/rocm.in
   - requirements/test/rocm.txt

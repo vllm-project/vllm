@@ -143,6 +143,10 @@ if target_enabled rocm; then
     echo "ERROR: rocm-base-image-tag metadata not found" >&2
     exit 1
   fi
+  if [[ ! "${ROCM_BASE_IMAGE_TAG}" =~ ^public\.ecr\.aws/q9t5s3a7/vllm-release-repo@sha256:[0-9a-f]{64}$ ]]; then
+    echo "ERROR: refusing unexpected ROCm base image ref: ${ROCM_BASE_IMAGE_TAG}" >&2
+    exit 1
+  fi
   echo "ROCm base image: ${ROCM_BASE_IMAGE_TAG}"
 
   docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-rocm"

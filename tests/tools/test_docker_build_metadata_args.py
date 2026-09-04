@@ -17,6 +17,13 @@ ROCM_IMAGE_SMOKE = REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "smoke-test-i
 ROCM_BASE_WHEEL_CACHE = (
     REPO_ROOT / ".buildkite" / "scripts" / "cache-rocm-base-wheels.sh"
 )
+ROCM_REFRESH_BASE = (
+    REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "refresh-base-image.sh"
+)
+ROCM_RELEASE_PIPELINE = REPO_ROOT / ".buildkite" / "release-pipeline.yaml"
+ROCM_BUILD_CONSTRAINTS = REPO_ROOT / "requirements" / "build" / "rocm-constraints.txt"
+ROCM_TEST_INPUT = REPO_ROOT / "requirements" / "test" / "rocm.in"
+TORCHCODEC_INSTALLER = REPO_ROOT / "tools" / "install_torchcodec_rocm.sh"
 
 
 def run_helper(
@@ -206,23 +213,23 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         assert expected in ci_bake
 
 
-def test_rocm_ci_base_stage_hash_covers_dependency_graph() -> None:
-    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
-    ci_bake = ROCM_CI_BAKE.read_text()
+def dockerfile_stage_dependencies(dockerfile: str) -> dict[str, set[str]]:
     global_args: dict[str, str] = {}
     stage_dependencies: dict[str, set[str]] = {}
     current_stage: str | None = None
 
     def expand_args(value: str) -> str:
         return re.sub(
-            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
-            lambda match: global_args.get(match.group(1), match.group(0)),
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+            lambda match: global_args.get(
+                match.group(1) or match.group(2), match.group(0)
+            ),
             value,
         )
 
     for raw_line in dockerfile.splitlines():
         line = raw_line.split("#", maxsplit=1)[0].strip()
-        arg_match = re.match(r"ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line)
+        arg_match = re.match(r"ARG\s+([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?$", line, re.I)
         if arg_match and current_stage is None and arg_match.group(2) is not None:
             global_args[arg_match.group(1)] = arg_match.group(2).strip().strip('"')
 
@@ -235,27 +242,89 @@ def test_rocm_ci_base_stage_hash_covers_dependency_graph() -> None:
             continue
 
         if current_stage is not None:
-            for dependency in re.findall(r"(?:--from=|,from=)([^,\s\\]+)", line):
+            for dependency in re.findall(r"(?:--from=|,from=)([^,\s\\]+)", line, re.I):
                 stage_dependencies[current_stage].add(expand_args(dependency))
 
     stage_names = set(stage_dependencies)
     for dependencies in stage_dependencies.values():
         dependencies.intersection_update(stage_names)
+    return stage_dependencies
 
-    ci_base_closure: set[str] = set()
-    pending = ["ci_base"]
+
+def dockerfile_stage_closure(
+    stage_dependencies: dict[str, set[str]], root: str
+) -> set[str]:
+    closure: set[str] = set()
+    pending = [root]
     while pending:
         stage = pending.pop()
-        if stage in ci_base_closure:
+        if stage in closure:
             continue
-        ci_base_closure.add(stage)
+        closure.add(stage)
         pending.extend(stage_dependencies[stage])
+    return closure
 
-    configured_stages = re.search(
-        r'^DEFAULT_CI_BASE_DOCKERFILE_STAGES="([^"]+)"$', ci_bake, re.M
+
+def test_rocm_stage_hashes_cover_dependency_graphs() -> None:
+    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    ci_bake = ROCM_CI_BAKE.read_text()
+    stage_dependencies = dockerfile_stage_dependencies(dockerfile)
+
+    for variable, root in (
+        ("DEFAULT_CI_BASE_DOCKERFILE_STAGES", "ci_base"),
+        ("DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES", "csrc-build"),
+        ("DEFAULT_ROCM_RUST_DOCKERFILE_STAGES", "rust-build"),
+    ):
+        configured_stages = re.search(rf'^{variable}="([^"]+)"$', ci_bake, re.M)
+        assert configured_stages is not None
+        assert set(configured_stages.group(1).split()) == dockerfile_stage_closure(
+            stage_dependencies, root
+        )
+
+
+def test_dockerfile_stage_parser_expands_both_arg_forms() -> None:
+    dockerfile = """\
+ARG ROOT=scratch
+ARG SHARED=shared
+from ${ROOT} AS shared
+RUN echo shared
+FROM scratch AS braced
+COPY --from=${SHARED} /in /out
+FROM scratch AS unbraced
+RUN --mount=type=bind,from=$SHARED,target=/in echo unbraced
+"""
+    dependencies = dockerfile_stage_dependencies(dockerfile)
+
+    assert dependencies["braced"] == {"shared"}
+    assert dependencies["unbraced"] == {"shared"}
+
+
+def test_rocm_stage_hasher_treats_from_case_insensitively(tmp_path: Path) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "from scratch AS first\n"
+        "RUN echo first\n"
+        "FrOm scratch as second\n"
+        "RUN echo second\n"
     )
-    assert configured_stages is not None
-    assert set(configured_stages.group(1).split()) == ci_base_closure
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; hash_dockerfile_stages "$2" first',
+            "bash",
+            str(ROCM_CI_BAKE),
+            str(dockerfile),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == [
+        "from scratch AS first",
+        "RUN echo first",
+    ]
 
 
 def requirement_names(path: Path, seen: set[Path] | None = None) -> set[str]:
@@ -279,20 +348,42 @@ def requirement_names(path: Path, seen: set[Path] | None = None) -> set[str]:
     return names
 
 
-def test_rocm_test_lock_covers_runtime_requirements() -> None:
-    requirements = REPO_ROOT / "requirements"
-    lock = requirements / "test" / "rocm.txt"
-
-    assert requirement_names(requirements / "rocm.txt") <= requirement_names(lock)
-    locked_requirements = (
+def locked_requirements(path: Path) -> dict[str, Requirement]:
+    requirements = (
         Requirement(line)
-        for line in lock.read_text().splitlines()
+        for line in path.read_text().splitlines()
         if line and not line.startswith((" ", "#", "-"))
     )
-    assert all(
-        str(requirement.specifier).startswith("==")
-        for requirement in locked_requirements
-    )
+    return {
+        canonicalize_name(requirement.name): requirement for requirement in requirements
+    }
+
+
+def test_rocm_constraints_locks_cover_their_inputs() -> None:
+    requirements = REPO_ROOT / "requirements"
+    build_input = requirements / "build" / "rocm-constraints.in"
+    build_lock = requirements / "build" / "rocm-constraints.txt"
+    test_input = requirements / "test" / "rocm.in"
+    test_lock = requirements / "test" / "rocm.txt"
+
+    assert requirement_names(build_input) <= requirement_names(build_lock)
+    assert requirement_names(test_input) <= requirement_names(test_lock)
+    build_requirements = locked_requirements(build_lock)
+    test_requirements = locked_requirements(test_lock)
+    for runtime_or_test_only in ("datasets", "peft", "pytest", "pytest-asyncio"):
+        assert runtime_or_test_only not in build_requirements
+    # TorchAudio's pinned requirements.txt installs SoundFile while building.
+    assert "soundfile" in build_requirements
+    assert str(test_requirements["datasets"].specifier) == "==3.6.0"
+    assert str(build_requirements["numpy"].specifier) == "==2.2.6"
+    assert build_requirements.keys() <= test_requirements.keys()
+    for name, build_requirement in build_requirements.items():
+        assert build_requirement == test_requirements[name]
+    for lock in (build_lock, test_lock):
+        assert all(
+            str(requirement.specifier).startswith("==")
+            for requirement in locked_requirements(lock).values()
+        )
 
 
 def test_rocm_base_wheel_cache_key_covers_declared_inputs(tmp_path: Path) -> None:
@@ -309,6 +400,8 @@ def test_rocm_base_wheel_cache_key_covers_declared_inputs(tmp_path: Path) -> Non
             "ROCM_BASE_CONTENT_FILES": " ".join(map(str, inputs)),
             "ROCM_BASE_PARENT_IMAGE": "rocm/example:mutable",
             "ROCM_BASE_PARENT_DIGEST": f"sha256:{'1' * 64}",
+            "ROCM_BASE_PYTORCH_ROCM_ARCH": "gfx90a",
+            "ROCM_BASE_USE_SCCACHE": "1",
         }
     )
 
@@ -324,18 +417,329 @@ def test_rocm_base_wheel_cache_key_covers_declared_inputs(tmp_path: Path) -> Non
         ).stdout.strip()
 
     baseline = cache_key()
+    assert cache_key() == baseline
+    assert cache_key(SCCACHE_ENDPOINT="https://cache.example.invalid") == baseline
     for path in inputs:
         original = path.read_text()
         path.write_text(f"{original}changed\n")
         assert cache_key() != baseline
         path.write_text(original)
     for overrides in (
+        {"ROCM_BASE_PARENT_IMAGE": "rocm/example:other"},
         {"ROCM_BASE_PARENT_DIGEST": f"sha256:{'2' * 64}"},
         {"ROCM_BASE_PLATFORM": "linux/arm64"},
+        {"ROCM_BASE_IMAGE_TARGET": "different-image-target"},
+        {"ROCM_BASE_WHEEL_TARGET": "different-wheel-target"},
+        {"ROCM_BASE_USE_SCCACHE": "0"},
+        {"SCCACHE_DOWNLOAD_URL": "https://example.invalid/sccache.tar.gz"},
+        {"SCCACHE_VERSION": "v9.9.9"},
+        {"SCCACHE_DOWNLOAD_SHA256": "2" * 64},
         {"SCCACHE_BUCKET_NAME": "different-bucket"},
-        {"ROCM_BASE_WHEEL_TARGET": "different-target"},
+        {"SCCACHE_REGION_NAME": "different-region"},
+        {"SCCACHE_S3_NO_CREDENTIALS": "1"},
+        {"ROCM_BASE_PYTORCH_ROCM_ARCH": "gfx942"},
     ):
         assert cache_key(**overrides) != baseline
+
+
+def test_rocm_base_cache_omitted_sccache_matches_disabled(tmp_path: Path) -> None:
+    dockerfile = tmp_path / "Dockerfile.rocm_base"
+    dockerfile.write_text(
+        "ARG BASE_IMAGE=rocm/example:base\n"
+        "ARG USE_SCCACHE\n"
+        "ARG PYTORCH_ROCM_ARCH=gfx90a\n"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROCM_BASE_DOCKERFILE": str(dockerfile),
+            "ROCM_BASE_CONTENT_FILES": str(dockerfile),
+            "ROCM_BASE_PARENT_DIGEST": f"sha256:{'1' * 64}",
+        }
+    )
+
+    def cache_key(**overrides: str) -> str:
+        return subprocess.run(
+            ["bash", str(ROCM_BASE_WHEEL_CACHE), "key"],
+            check=True,
+            cwd=REPO_ROOT,
+            env=env | overrides,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+
+    omitted = cache_key()
+    assert cache_key(ROCM_BASE_USE_SCCACHE="0") == omitted
+    assert cache_key(ROCM_BASE_USE_SCCACHE="1") != omitted
+
+
+def shell_words_assignment(path: Path, name: str) -> list[str]:
+    match = re.search(rf'^{name}="([^"]*)"$', path.read_text(), re.M)
+    assert match is not None
+    value = match.group(1).replace("${DOCKERFILE}", "docker/Dockerfile.rocm_base")
+    return shlex.split(value)
+
+
+def test_rocm_base_cache_production_content_lists_are_synchronized() -> None:
+    expected = [
+        "docker/Dockerfile.rocm_base",
+        ".dockerignore",
+        "requirements/build/rocm-constraints.txt",
+    ]
+    release_match = re.search(
+        r'export ROCM_BASE_CONTENT_FILES="([^"]+)"',
+        ROCM_RELEASE_PIPELINE.read_text(),
+    )
+    assert release_match is not None
+
+    assert shell_words_assignment(ROCM_BASE_WHEEL_CACHE, "DEFAULT_CONTENT_FILES") == (
+        expected
+    )
+    assert (
+        shell_words_assignment(ROCM_REFRESH_BASE, "DEFAULT_ROCM_BASE_CONTENT_FILES")
+        == expected
+    )
+    assert shlex.split(release_match.group(1)) == expected
+
+
+def test_rocm_release_does_not_expose_sccache_download_url_as_build_arg() -> None:
+    release_pipeline = ROCM_RELEASE_PIPELINE.read_text()
+
+    assert "unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL" in release_pipeline
+    assert "--build-arg SCCACHE_DOWNLOAD_URL" not in release_pipeline
+
+
+def test_rocm_native_cache_inputs_use_narrow_build_lock() -> None:
+    ci_bake = ROCM_CI_BAKE.read_text()
+    ci_base_files = shell_words_assignment(
+        ROCM_CI_BAKE, "DEFAULT_CI_BASE_CONTENT_FILES"
+    )
+    csrc_files = shell_words_assignment(ROCM_CI_BAKE, "DEFAULT_ROCM_CSRC_CONTENT_FILES")
+    rust_files = shell_words_assignment(ROCM_CI_BAKE, "DEFAULT_ROCM_RUST_CONTENT_FILES")
+
+    assert "requirements/build/rocm-constraints.txt" in ci_base_files
+    assert "requirements/test/rocm.txt" in ci_base_files
+    for content_files in (csrc_files, rust_files):
+        assert "requirements/build/rocm-constraints.txt" in content_files
+        assert "requirements/test/rocm.txt" not in content_files
+    for runtime_requirements in (
+        "requirements/common.txt",
+        "requirements/rocm.txt",
+    ):
+        assert runtime_requirements not in csrc_files
+    assert "requirements/build/rocm-constraints.txt" in ci_bake
+
+
+def test_rocm_metadata_changes_trigger_the_relevant_ci_lanes() -> None:
+    docker_area = (REPO_ROOT / ".buildkite" / "test_areas" / "docker.yaml").read_text()
+    cpu_sources, amd_mirror_sources = docker_area.split(
+        "  mirror:\n    amd:", maxsplit=1
+    )
+    amd_pipeline = (REPO_ROOT / ".buildkite" / "test-amd.yaml").read_text()
+    rocm_config = (REPO_ROOT / ".buildkite" / "ci_config_rocm.yaml").read_text()
+    required_sources = (
+        ".buildkite/scripts/rocm/refresh-base-image.sh",
+        ".buildkite/scripts/rocm/smoke-test-image.sh",
+        "docker/ci-rocm.hcl",
+        "docker/docker-bake-rocm.hcl",
+        "requirements/build/rocm-constraints.in",
+        "requirements/build/rocm-constraints.txt",
+    )
+
+    for source in required_sources:
+        assert source in cpu_sources
+        assert source in amd_mirror_sources
+        assert source in amd_pipeline
+    for source in required_sources[-2:]:
+        assert source in rocm_config
+
+
+def test_rocm_cache_helpers_reject_empty_content_lists(tmp_path: Path) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("ARG BASE_IMAGE=rocm/example:base\nARG USE_SCCACHE=0\n")
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROCM_BASE_DOCKERFILE": str(dockerfile),
+            "ROCM_BASE_CONTENT_FILES": "   ",
+            "ROCM_BASE_PARENT_DIGEST": f"sha256:{'1' * 64}",
+            "ROCM_BASE_PYTORCH_ROCM_ARCH": "gfx90a",
+        }
+    )
+    cache_result = subprocess.run(
+        ["bash", str(ROCM_BASE_WHEEL_CACHE), "key"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    refresh_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; compute_base_content_hash 0 "$2" gfx90a linux/amd64',
+            "bash",
+            str(ROCM_REFRESH_BASE),
+            f"sha256:{'1' * 64}",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert cache_result.returncode != 0
+    assert "content" in cache_result.stderr.lower()
+    assert refresh_result.returncode != 0
+    assert "content" in refresh_result.stderr.lower()
+
+
+def test_rocm_forced_base_refresh_still_exports_layer_cache() -> None:
+    env = os.environ.copy()
+    env["ROCM_BASE_REFRESH_FORCE"] = "1"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; configure_rocm_base_layer_cache; '
+            'printf "%s\\n" "${ROCM_BASE_CACHE_ARGS[@]}"',
+            "bash",
+            str(ROCM_REFRESH_BASE),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    args = result.stdout.splitlines()
+
+    assert "--no-cache" in args
+    assert "--cache-to" in args
+    assert "--cache-from" not in args
+
+
+def test_rocm_base_preview_image_refs_are_source_scoped() -> None:
+    def preview_ref(repo: str) -> str:
+        env = os.environ.copy()
+        env.update(
+            {
+                "BUILDKITE": "false",
+                "BUILDKITE_BRANCH": "feature",
+                "BUILDKITE_REPO": repo,
+            }
+        )
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; scoped_base_content_ref "$2" 3',
+                "bash",
+                str(ROCM_REFRESH_BASE),
+                "a" * 64,
+            ],
+            check=True,
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+
+    first = preview_ref("https://github.com/example/one.git")
+    second = preview_ref("https://github.com/example/two.git")
+    assert first != second
+    assert first.endswith("a" * 64)
+    assert second.endswith("a" * 64)
+
+
+def test_rocm_dependency_cache_writes_are_source_scoped() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1"
+DOCKERHUB_CACHE_REPO=example/cache
+NIXL_CACHE_KEY=key
+CI_BASE_WRITE_SCOPE=preview-owner
+BUILDKITE_BUILD_ID=build-one
+trusted_dependency_cache_ref_for_target nixl-rocm-ci
+dependency_cache_ref_for_target nixl-rocm-ci
+BUILDKITE_BUILD_ID=build-two
+dependency_cache_ref_for_target nixl-rocm-ci
+CI_BASE_WRITE_SCOPE=
+dependency_cache_ref_for_target nixl-rocm-ci
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    trusted, first_write, second_write, trusted_write = result.stdout.splitlines()
+
+    assert trusted == "example/cache:nixl-rocm-key"
+    assert first_write.startswith("example/cache:nixl-rocm-preview-owner-")
+    assert second_write.startswith("example/cache:nixl-rocm-preview-owner-")
+    assert first_write != second_write
+    assert trusted_write == trusted
+
+
+def test_rocm_commit_image_without_revision_is_rebuilt() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1"
+TARGET=test-rocm-ci
+IMAGE_TAG=example/image:commit
+BUILDKITE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+remote_image_exists() { return 0; }
+get_remote_image_label() { return 0; }
+maybe_skip_existing_image
+echo continued-to-build
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert "found revision: <missing>" in result.stdout
+    assert result.stdout.splitlines()[-1] == "continued-to-build"
+
+
+def test_rocm_force_disables_layers_for_non_base_targets() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1"
+TARGET=test-rocm-ci
+FORCE_BUILD=1
+BAKE_TARGETS=(test-rocm-ci)
+BAKE_ALLOW_ARGS=()
+BAKE_FILES=()
+docker() { printf '%s\\n' "$*"; }
+run_bake
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        check=True,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert "buildx bake --no-cache" in result.stdout
 
 
 def docker_arg_value(dockerfile: str, name: str) -> str:
@@ -344,10 +748,9 @@ def docker_arg_value(dockerfile: str, name: str) -> str:
     return line.removeprefix(prefix).split("#", maxsplit=1)[0].strip().strip('"')
 
 
-def test_rocm_image_dependency_inputs_are_closed() -> None:
+def test_rocm_image_dependency_inputs_are_immutable() -> None:
     rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
     rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
-    torchcodec = (REPO_ROOT / "tools" / "install_torchcodec_rocm.sh").read_text()
 
     for dockerfile, commit_arg_names in (
         (
@@ -374,6 +777,7 @@ def test_rocm_image_dependency_inputs_are_closed() -> None:
                 "ROCSHMEM_BRANCH",
                 "DEEPEP_BRANCH",
                 "RDMA_CORE_COMMIT",
+                "DECORD_COMMIT",
             ),
         ),
     ):
@@ -392,15 +796,41 @@ def test_rocm_image_dependency_inputs_are_closed() -> None:
                 "ROCPROFILER_SDK_PR_7924_SHA256",
             ),
         ),
-        (rocm_ci, ("UV_DOWNLOAD_SHA256", "RUSTUP_INIT_SHA256")),
+        (
+            rocm_ci,
+            (
+                "UV_DOWNLOAD_SHA256",
+                "RUSTUP_INIT_SHA256",
+                "ROCM_TRITON_KERNELS_SHA256",
+            ),
+        ),
     ):
         for name in checksum_arg_names:
             value = docker_arg_value(dockerfile, name)
             assert len(value) == 64
             int(value, 16)
 
+
+def test_rocm_source_builds_use_the_narrow_constraints() -> None:
+    rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+
+    assert "source=requirements/test/rocm.txt" not in rocm_base
+    assert "source=requirements/build/rocm-constraints.txt" in rocm_base
+    assert "COPY requirements/build/rocm-constraints.txt" in rocm_ci
+    build_dependencies = rocm_ci.split(
+        "FROM base AS build_vllm_dependencies", maxsplit=1
+    )[1].split("FROM base AS rocm-triton-kernels", maxsplit=1)[0]
+    assert "--requirement /tmp/rocm-build-constraints.txt" in build_dependencies
+    assert "-r requirements/rocm.txt" not in build_dependencies
+    assert "/requirements/common.txt" not in build_dependencies
+    assert "/requirements/rocm.txt" not in build_dependencies
+    assert "# Native-extension-only build." in build_dependencies
+    assert "'-r common.txt' > requirements/rocm.txt" in build_dependencies
+    assert (
+        "COPY --from=export_vllm /requirements/test/rocm.txt /tmp/rocm-constraints.txt"
+    ) in rocm_ci
     for expected in (
-        "source=requirements/test/rocm.txt",
         "pip wheel --no-build-isolation --no-deps",
         "TRITON_OFFLINE_BUILD=1 TRITON_BUILD_PROTON=OFF",
         "FLASH_ATTENTION_FORCE_BUILD=TRUE",
@@ -408,17 +838,110 @@ def test_rocm_image_dependency_inputs_are_closed() -> None:
         "pip check",
     ):
         assert expected in rocm_base
+
+    # These two ABI-sensitive extensions must independently opt out of binary
+    # wheels; combining their flags would allow one regression to mask another.
+    assert "--no-binary arctic-inference" in rocm_ci
+    assert "--no-binary fastsafetensors" in rocm_ci
+    assert "--build-constraints /tmp/lmcache-build-constraints.txt" in rocm_ci
+
+
+def test_rocm_native_build_graph_only_serializes_aiter_on_triton() -> None:
+    rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
+    dependencies = dockerfile_stage_dependencies(rocm_base)
+
+    assert dependencies["build_pytorch_runtime"] == {"base", "build_pytorch"}
+    assert dependencies["build_pytorch_triton_runtime"] == {
+        "build_pytorch_runtime",
+        "build_triton",
+    }
+    for stage in (
+        "build_torchvision",
+        "build_torchaudio",
+        "build_mori",
+        "build_fa",
+    ):
+        assert dependencies[stage] == {"build_pytorch_runtime"}
+    assert dependencies["build_aiter"] == {"build_pytorch_triton_runtime"}
+
+
+def test_rocm_runtime_dependency_guards_are_enforced() -> None:
+    rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+
+    for dockerfile in (rocm_base, rocm_ci):
+        assert "ARG USE_SCCACHE\n" in dockerfile.split("FROM ", maxsplit=1)[0]
+
+    assert (
+        "apt-get purge -y software-properties-common "
+        "python3-software-properties python3-gi"
+    ) in rocm_base
+    assert "PyGObject==" not in rocm_base
+    assert "python3 -m pip check" in rocm_base
+    assert "&& pip check" in rocm_base
+
+    assert (
+        'test "$(rustc --version | awk \'{print $2}\')" = "${RUST_TOOLCHAIN_VERSION}"'
+    ) in rocm_ci
+    assert "revision = e5fada43131d251e9c4786b04263ce98b6767ba5" in rocm_ci
+    assert "uv pip check --system" in rocm_ci
+
+
+def test_rocm_decord_and_numpy_runtime_match_the_source_builds() -> None:
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    numpy_pin = str(
+        locked_requirements(ROCM_BUILD_CONSTRAINTS)["numpy"].specifier
+    ).removeprefix("==")
+
     for expected in (
-        "--build-constraints /tmp/rocm-test-reqs.txt",
-        "--no-build-isolation",
-        "uv pip install --system --no-cache --no-deps --no-build-isolation",
+        "FROM ci_base_system AS build_decord",
+        "git -C /tmp/decord checkout -q --detach FETCH_HEAD",
+        'test "$(git -C /tmp/decord rev-parse HEAD)" = "${DECORD_COMMIT}"',
+        "git -C /tmp/decord submodule update --init --recursive --depth 1",
+        "-DUSE_CUDA=OFF",
+        "python3 -m pip wheel --no-cache-dir --no-build-isolation --no-deps",
         "python3 -m pip install --no-cache-dir --force-reinstall --no-deps",
-        "uv pip install --system --no-deps /lmcache_install/*.whl",
-        "uv pip check --system",
+        "python3 -c \"import decord; print('decord', decord.__version__)\"",
     ):
         assert expected in rocm_ci
-    assert "revision = e5fada43131d251e9c4786b04263ce98b6767ba5" in rocm_ci
-    assert docker_arg_value(rocm_ci, "RUST_TOOLCHAIN_VERSION") == "1.95.0"
+
+    assert numpy_pin == "2.2.6"
+    assert 'grep -Fxc "numpy<=${NUMPY_VERSION}"' in rocm_ci
+    assert f"numpy=={numpy_pin}" not in rocm_ci
+    assert '-e "s/^numpy' not in rocm_ci
+    assert "import numpy; print(numpy.__version__)" in rocm_ci
+    assert '"${NUMPY_VERSION}"' in rocm_ci
+
+
+def test_rocm_release_lmcache_installs_its_runtime_extras() -> None:
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    rocm_test_roots = {
+        line.split("#", maxsplit=1)[0].strip()
+        for line in ROCM_TEST_INPUT.read_text().splitlines()
+    }
+    final_lmcache = rocm_ci.split(
+        "FROM final_common AS final_lmcache_true", maxsplit=1
+    )[1].split("FROM final_lmcache_${INSTALL_LMCACHE} AS final", maxsplit=1)[0]
+
+    assert "--constraint /tmp/rocm-constraints.txt" in final_lmcache
+    for dependency in (
+        "aiofile",
+        "aiofiles",
+        "awscrt",
+        "cupy-rocm-7-0",
+        "google-cloud-bigtable",
+        "opentelemetry-exporter-prometheus",
+        "sortedcontainers",
+    ):
+        assert dependency in final_lmcache
+        assert dependency in rocm_test_roots
+    assert "uv pip check --system" in final_lmcache
+
+
+def test_torchcodec_build_contract_is_abi_safe() -> None:
+    rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    torchcodec = TORCHCODEC_INSTALLER.read_text()
+
     torchcodec_commit = (
         next(
             line
@@ -432,6 +955,60 @@ def test_rocm_image_dependency_inputs_are_closed() -> None:
     int(torchcodec_commit, 16)
     assert "TORCHCODEC_WHEEL_CACHE" not in torchcodec
     assert "pip wheel . --no-cache-dir --no-build-isolation --no-deps" in torchcodec
+    assert 'TORCHCODEC_FORCE_REBUILD="${TORCHCODEC_FORCE_REBUILD:-0}"' in torchcodec
+    assert 'case "$TORCHCODEC_FORCE_REBUILD" in' in torchcodec
+    assert '--force-reinstall --no-deps "$BUILT_WHEEL"' in torchcodec
+    assert "TORCHCODEC_FORCE_REBUILD=1" in rocm_ci
+    assert "TORCHCODEC_CONSTRAINTS=/tmp/rocm-build-constraints.txt" in rocm_ci
+
+
+def test_torchcodec_working_install_skips_before_any_build(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    python_calls = tmp_path / "python-calls"
+    python = fake_bin / "python3"
+    python.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$FAKE_PYTHON_CALLS"\n'
+        'test "$1" = "-c"\n'
+        'test "$2" = "from torchcodec.decoders import VideoDecoder"\n'
+    )
+    python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "FAKE_PYTHON_CALLS": str(python_calls),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TORCHCODEC_FORCE_REBUILD": "0",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(TORCHCODEC_INSTALLER)],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert "already installed and working" in result.stdout
+    assert python_calls.read_text().splitlines() == [
+        "-c from torchcodec.decoders import VideoDecoder"
+    ]
+
+
+def test_torchcodec_force_rebuild_rejects_invalid_values() -> None:
+    env = os.environ.copy()
+    env["TORCHCODEC_FORCE_REBUILD"] = "sometimes"
+    result = subprocess.run(
+        ["bash", str(TORCHCODEC_INSTALLER)],
+        env=env,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "must be 0 or 1" in result.stdout
 
 
 def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:

@@ -12,8 +12,23 @@ TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
 # v0.10.0, pinned to the immutable commit for reproducibility.
 TORCHCODEC_COMMIT="${TORCHCODEC_COMMIT:-0b261b98080925f2b709712a5491a1e8dd817065}"
 TORCHCODEC_CONSTRAINTS="${TORCHCODEC_CONSTRAINTS:-}"
+TORCHCODEC_FORCE_REBUILD="${TORCHCODEC_FORCE_REBUILD:-0}"
 
 echo "=== TorchCodec Installation Script ==="
+
+case "$TORCHCODEC_FORCE_REBUILD" in
+    0 | 1) ;;
+    *)
+        echo "Error: TORCHCODEC_FORCE_REBUILD must be 0 or 1"
+        exit 2
+        ;;
+esac
+
+if [ "$TORCHCODEC_FORCE_REBUILD" = "0" ] \
+    && python3 -c "from torchcodec.decoders import VideoDecoder" 2>/dev/null; then
+    echo "TorchCodec is already installed and working. Skipping."
+    exit 0
+fi
 
 echo "Building TorchCodec from source..."
 
@@ -123,7 +138,7 @@ if [ -z "$BUILT_WHEEL" ]; then
     exit 1
 fi
 
-python3 -m pip install --no-deps "$BUILT_WHEEL"
+python3 -m pip install --force-reinstall --no-deps "$BUILT_WHEEL"
 
 # Verify installation
 echo "Verifying installation..."

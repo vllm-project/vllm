@@ -6,6 +6,7 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
+ARG ROCM_TRITON_KERNELS_SHA256=3bf25681b3e22ce9eb8160e5161fc3d18a6a58e7c9c1ac806d55dc0b786ed3b3
 ARG RUST_TOOLCHAIN_VERSION=1.95.0
 ARG INSTALL_LMCACHE=false
 # NIC backend for MoRI RDMA support.
@@ -154,7 +155,7 @@ ARG COMMON_WORKDIR
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/vllm \
     && uv pip install --system \
-        --constraint requirements/test/rocm.txt \
+        --constraint requirements/build/rocm-constraints.txt \
         -r requirements/build/rust.txt \
     && python3 -c \
         "from setuptools_scm import get_version; print(get_version())" \
@@ -188,7 +189,7 @@ FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
 # REMOTE_VLLM=1: fetch only those same files from the requested remote ref.
 FROM scratch AS rust_input_0
 COPY requirements/build/rust.txt /rust-input/vllm/requirements/build/rust.txt
-COPY requirements/test/rocm.txt /rust-input/vllm/requirements/test/rocm.txt
+COPY requirements/build/rocm-constraints.txt /rust-input/vllm/requirements/build/rocm-constraints.txt
 COPY rust/Cargo.lock rust/Cargo.toml /rust-input/vllm/rust/
 COPY rust/proto /rust-input/vllm/rust/proto
 COPY rust/src /rust-input/vllm/rust/src
@@ -205,7 +206,7 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
     && git sparse-checkout init --no-cone \
     && git sparse-checkout set \
         requirements/build/rust.txt \
-        requirements/test/rocm.txt \
+        requirements/build/rocm-constraints.txt \
         rust/Cargo.lock \
         rust/Cargo.toml \
         rust/proto/** \
@@ -250,7 +251,7 @@ RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"
     && test "$(rustup --version | sed -n '1s/^rustup \([^ ]*\).*/\1/p')" = "${RUSTUP_VERSION}" \
     && rustup toolchain install "${RUST_TOOLCHAIN_VERSION}" \
     && rustup default "${RUST_TOOLCHAIN_VERSION}" \
-    && rustc --version | grep -E '^rustc 1\.95\.0 ' \
+    && test "$(rustc --version | awk '{print $2}')" = "${RUST_TOOLCHAIN_VERSION}" \
     && cargo --version
 
 # -----------------------
@@ -271,7 +272,7 @@ ENV RUSTUP_MAX_RETRIES=10
 WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY --from=rust-input /rust-input/vllm/requirements/build/rust.txt requirements/build/rust.txt
-COPY --from=rust-input /rust-input/vllm/requirements/test/rocm.txt requirements/test/rocm.txt
+COPY --from=rust-input /rust-input/vllm/requirements/build/rocm-constraints.txt requirements/build/rocm-constraints.txt
 
 # BuildKit can run this stage in parallel with ROCm native builds. Keep Rust on
 # a separate local sccache daemon while sharing the same remote cache backend.
@@ -279,7 +280,7 @@ ENV SCCACHE_SERVER_PORT=4227
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system \
-        --constraint requirements/test/rocm.txt \
+        --constraint requirements/build/rocm-constraints.txt \
         -r requirements/build/rust.txt
 
 COPY --from=rust-input /rust-input/vllm/rust rust
@@ -324,24 +325,27 @@ ENV VLLM_TARGET_DEVICE=rocm
 WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY --from=fetch_vllm \
-    ${COMMON_WORKDIR}/vllm/requirements/common.txt \
-    ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
-    requirements/
-COPY --from=fetch_vllm \
-    ${COMMON_WORKDIR}/vllm/requirements/test/rocm.txt \
-    /tmp/rocm-test-constraints.txt
+    ${COMMON_WORKDIR}/vllm/requirements/build/rocm-constraints.txt \
+    /tmp/rocm-build-constraints.txt
 
+# setup.py reads the target requirements while creating the intermediate csrc
+# wheel. Use deterministic placeholders here so runtime/test requirement churn
+# cannot invalidate native compilation. build_vllm overlays the real source and
+# requirements before it creates the wheel that is actually published.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system \
-        --constraint /tmp/rocm-test-constraints.txt \
-        --build-constraints /tmp/rocm-test-constraints.txt \
-        -r requirements/rocm.txt
+    mkdir -p requirements \
+    && printf '%s\n' '# Native-extension-only build.' > requirements/common.txt \
+    && printf '%s\n' '-r common.txt' > requirements/rocm.txt \
+    && uv pip install --system \
+        --requirement /tmp/rocm-build-constraints.txt
 
 # Fetch only the pinned ROCm Triton kernels package. Keeping this before the
 # vLLM source COPYs makes the download reusable when native sources change.
 FROM base AS rocm-triton-kernels
 ARG ROCM_TRITON_KERNELS_COMMIT
-ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
+ARG ROCM_TRITON_KERNELS_SHA256
+ADD --checksum=sha256:${ROCM_TRITON_KERNELS_SHA256} \
+    https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
     && tar --extract --gzip --file /tmp/rocm-triton.tar.gz \
@@ -552,26 +556,31 @@ FROM base AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
+COPY requirements/build/rocm-constraints.txt /tmp/rocm-build-constraints.txt
 
-# Remove NVIDIA-only dependencies and accept the release image's NumPy version.
+# Remove NVIDIA-only dependencies and verify that LMCache accepts the NumPy
+# version selected by the shared ROCm build constraints.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
     && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
     && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
-    && test "$(grep -Fxc 'numpy<=2.2.6' \
+    && test "$(grep -Ec '^numpy==[^ ;]+([ ;]|$)' \
+        /tmp/rocm-build-constraints.txt)" -eq 1 \
+    && NUMPY_VERSION="$(sed -nE 's/^numpy==([^ ;]+).*$/\1/p' \
+        /tmp/rocm-build-constraints.txt)" \
+    && test "$(grep -Fxc "numpy<=${NUMPY_VERSION}" \
         /app/lmcache/requirements/common.txt)" -eq 1 \
     && sed -i -E \
         -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
-        -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
 FROM base AS build_lmcache
 COPY --from=lmcache_source \
     /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
-COPY requirements/test/rocm.txt /tmp/lmcache-build-constraints.txt
+COPY requirements/build/rocm-constraints.txt /tmp/lmcache-build-constraints.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system \
         --constraint /tmp/lmcache-build-constraints.txt \
@@ -722,7 +731,7 @@ RUN /bin/bash -lc 'set -euo pipefail; \
    *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
  esac'
 
-COPY requirements/test/rocm.txt /tmp/mori-constraints.txt
+COPY requirements/build/rocm-constraints.txt /tmp/mori-constraints.txt
 RUN python3 -m pip install --quiet \
         --constraint /tmp/mori-constraints.txt --ignore-installed blinker \
     && python3 -m pip install --quiet \
@@ -857,7 +866,46 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 # CI base image (Tier 1) - stable, rarely changing CI dependencies.
 # Per-PR test builds pull this as CI_BASE_IMAGE so the test stage only layers
 # in the vLLM artifacts for the current commit.
-FROM mori_base AS ci_base
+FROM mori_base AS ci_base_system
+
+# RDMA userspace libraries plus FFmpeg development libraries shared by the
+# Decord and TorchCodec source builds.
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    util-linux \
+    unzip \
+    pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
+    libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# PyPI's Decord 0.6.0 wheel has contradictory compatibility metadata and an
+# invalid RECORD. Build the same release from its immutable source commit so
+# package validation and the installed native library are both trustworthy.
+FROM ci_base_system AS build_decord
+ARG DECORD_REPO="https://github.com/dmlc/decord.git"
+ARG DECORD_COMMIT="6a3617cef035535193f390f86399dde139fa2a53" # v0.6.0
+RUN set -eux; \
+    printf '%s\n' "${DECORD_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; \
+    git init -q /tmp/decord; \
+    git -C /tmp/decord remote add origin "${DECORD_REPO}"; \
+    git -C /tmp/decord fetch --depth 1 origin "${DECORD_COMMIT}"; \
+    git -C /tmp/decord checkout -q --detach FETCH_HEAD; \
+    test "$(git -C /tmp/decord rev-parse HEAD)" = "${DECORD_COMMIT}"; \
+    git -C /tmp/decord submodule update --init --recursive --depth 1; \
+    cmake -S /tmp/decord -B /tmp/decord/build -GNinja \
+        -DUSE_CUDA=OFF -DCMAKE_BUILD_TYPE=Release; \
+    cmake --build /tmp/decord/build --parallel "$(nproc)"; \
+    mkdir -p /app/decord_install; \
+    cd /tmp/decord/python; \
+    python3 -m pip wheel --no-cache-dir --no-build-isolation --no-deps \
+        --wheel-dir /app/decord_install .; \
+    test "$(find /app/decord_install -maxdepth 1 -name 'decord-*.whl' | wc -l)" -eq 1; \
+    rm -rf /tmp/decord
+
+FROM ci_base_system AS ci_base
 ARG COMMON_WORKDIR
 ARG RUST_TOOLCHAIN_VERSION
 
@@ -870,18 +918,6 @@ ENV RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN_VERSION}
 # need to fetch it on each per-commit image build.
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
-
-# RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
-RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-    librdmacm1 \
-    libibverbs1 \
-    ibverbs-providers \
-    ibverbs-utils \
-    util-linux \
-    unzip \
-    pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
-    libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
-    && rm -rf /var/lib/apt/lists/*
 
 # Update rdma-core to support the pinned ROCShmem revision without resolving a
 # mutable release tag. Install it after apt so packages cannot overwrite it.
@@ -911,6 +947,7 @@ COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 # ROCm PyTorch instead of its isolated torch==2.7.0 build requirement. Bypass
 # uv's wheel cache so a wheel built for an older parent Torch ABI is never reused.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
+COPY requirements/build/rocm-constraints.txt /tmp/rocm-build-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps \
         grpcio==1.78.0 grpcio-tools==1.71.2 \
@@ -925,6 +962,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --build-constraints /tmp/rocm-test-reqs.txt \
         -r /tmp/rocm-test-reqs.txt
 
+RUN --mount=type=bind,from=build_decord,src=/app/decord_install,target=/decord_install,ro \
+    python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+        /decord_install/*.whl \
+    && python3 -c "import decord; print('decord', decord.__version__)"
+
 # Install NIXL + DeepEP wheels without independently resolving dependencies.
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
@@ -936,7 +978,8 @@ COPY tools/install_torchcodec_rocm.sh /tmp/install_torchcodec.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
-    TORCHCODEC_CONSTRAINTS=/tmp/rocm-test-reqs.txt \
+    TORCHCODEC_FORCE_REBUILD=1 \
+    TORCHCODEC_CONSTRAINTS=/tmp/rocm-build-constraints.txt \
         bash /tmp/install_torchcodec.sh \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -956,7 +999,7 @@ RUN FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /tmp/rocm-test-req
     && python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
         --no-build-isolation --no-binary fastsafetensors \
         "${FASTSAFETENSORS_REQ}" \
-    && rm /tmp/rocm-test-reqs.txt
+    && rm /tmp/rocm-test-reqs.txt /tmp/rocm-build-constraints.txt
 
 # Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel.
 # See: https://github.com/pytorch/pytorch/issues/169857
@@ -1116,8 +1159,16 @@ FROM final_common AS final_lmcache_false
 FROM final_common AS final_lmcache_true
 RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-deps /lmcache_install/*.whl \
-    && test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "2.3.5" \
+    uv pip install --system \
+        --constraint /tmp/rocm-constraints.txt \
+        aiofile aiofiles awscrt cupy-rocm-7-0 google-cloud-bigtable \
+        opentelemetry-exporter-prometheus sortedcontainers \
+    && uv pip install --system --no-deps /lmcache_install/*.whl \
+    && test "$(grep -Ec '^numpy==[^ ;]+([ ;]|$)' \
+        /tmp/rocm-constraints.txt)" -eq 1 \
+    && NUMPY_VERSION="$(sed -nE 's/^numpy==([^ ;]+).*$/\1/p' \
+        /tmp/rocm-constraints.txt)" \
+    && test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "${NUMPY_VERSION}" \
     && uv pip check --system \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 

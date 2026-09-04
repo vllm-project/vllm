@@ -9,7 +9,7 @@ BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="3"
-DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/test/rocm.txt"
+DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/build/rocm-constraints.txt"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
@@ -111,29 +111,31 @@ rocm_base_layer_cache_scope() {
 
 configure_rocm_base_layer_cache() {
     local scope=""
+    local cache_to=""
 
     ROCM_BASE_CACHE_ARGS=()
+    scope=$(rocm_base_layer_cache_scope)
+    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-${scope}"
     if [[ "${ROCM_BASE_NO_CACHE:-0}" == "1" \
         || "${ROCM_BASE_REFRESH_FORCE:-0}" == "1" ]]; then
         ROCM_BASE_CACHE_ARGS+=(--no-cache)
-        ROCM_BASE_LAYER_CACHE_REF="disabled"
-        return 0
-    fi
-
-    scope=$(rocm_base_layer_cache_scope)
-    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-${scope}"
-    ROCM_BASE_CACHE_ARGS+=(
-        --cache-from "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF}"
-    )
-    if [[ "${ROCM_BASE_LAYER_CACHE_REF}" != \
-        "${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}" ]]; then
+        # A forced solve must replace the selected cache or fail visibly;
+        # otherwise a poisoned cache would survive a purported refresh.
+        cache_to="type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF},mode=max"
+    else
         ROCM_BASE_CACHE_ARGS+=(
-            --cache-from "type=registry,ref=${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}"
+            --cache-from "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF}"
         )
+        if [[ "${ROCM_BASE_LAYER_CACHE_REF}" != \
+            "${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}" ]]; then
+            ROCM_BASE_CACHE_ARGS+=(
+                --cache-from "type=registry,ref=${ROCM_BASE_TRUSTED_LAYER_CACHE_REF}"
+            )
+        fi
+        cache_to="type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF},mode=max,ignore-error=true"
     fi
     ROCM_BASE_CACHE_ARGS+=(
-        --cache-to \
-        "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF},mode=max,ignore-error=true"
+        --cache-to "${cache_to}"
     )
 }
 
@@ -194,9 +196,11 @@ trusted_base_content_ref() {
 scoped_base_content_ref() {
     local base_hash="$1"
     local metadata_version="$2"
+    local scope=""
 
-    printf '%s:base-v%s-preview-%s\n' \
-        "${BASE_REPO}" "${metadata_version}" "${base_hash}"
+    scope=$(rocm_base_layer_cache_scope)
+    printf '%s:base-v%s-%s-%s\n' \
+        "${BASE_REPO}" "${metadata_version}" "${scope}" "${base_hash}"
 }
 
 find_matching_base_content_ref() {
@@ -333,17 +337,32 @@ setup_builder() {
 compute_base_content_hash() {
     local use_sccache="$1"
     local base_image_digest="$2"
+    local pytorch_rocm_arch="$3"
+    local platform="$4"
     local content_files="${ROCM_BASE_CONTENT_FILES:-${DEFAULT_ROCM_BASE_CONTENT_FILES}}"
     local sccache_arg=""
     local sccache_value=""
+    local path=""
     local -a content_paths=()
 
     read -r -a content_paths <<< "${content_files}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "ROCM_BASE_CONTENT_FILES must name at least one file" >&2
+        return 1
+    fi
+    for path in "${content_paths[@]}"; do
+        if [[ ! -e "${path}" ]]; then
+            echo "ROCm base content input not found: ${path}" >&2
+            return 1
+        fi
+    done
 
     {
         printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
         printf 'base-image-digest:%s\n' "${base_image_digest}"
+        printf 'platform:%s\n' "${platform}"
+        printf 'pytorch-rocm-arch:%s\n' "${pytorch_rocm_arch}"
         printf 'use-sccache:%s\n' "${use_sccache}"
         if [[ "${use_sccache}" == "1" ]]; then
             # These values can change the installed binary or final image
@@ -351,6 +370,8 @@ compute_base_content_hash() {
             # deliberately excluded from image identity.
             for sccache_arg in \
                 SCCACHE_DOWNLOAD_URL \
+                SCCACHE_VERSION \
+                SCCACHE_DOWNLOAD_SHA256 \
                 SCCACHE_BUCKET_NAME \
                 SCCACHE_REGION_NAME \
                 SCCACHE_S3_NO_CREDENTIALS; do
@@ -367,6 +388,7 @@ compute_base_content_hash() {
 
 build_base_image() {
     local use_sccache="${ROCM_BASE_USE_SCCACHE:-${USE_SCCACHE:-0}}"
+    local use_sccache_build_arg=""
     local base_hash=""
     local base_image_arg=""
     local base_image_digest=""
@@ -381,6 +403,11 @@ build_base_image() {
     local mori_arg=""
     local python_version_arg=""
     local pytorch_rocm_arch_arg=""
+    local platform="${ROCM_BASE_PLATFORM:-linux/amd64}"
+    local sccache_version_arg="disabled"
+    local sccache_sha256_arg="disabled"
+    local env_name=""
+    local path=""
     local dependency_summary=""
     local stable_tag="${BASE_REPO}:base"
     local trusted_content_tag=""
@@ -409,6 +436,9 @@ build_base_image() {
         echo "ROCm base USE_SCCACHE must be 0 or 1: ${use_sccache}" >&2
         return 1
     fi
+    if [[ "${use_sccache}" == "1" ]]; then
+        use_sccache_build_arg="1"
+    fi
 
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
     if ! base_image_digest=$(resolve_image_digest "${base_image_arg}"); then
@@ -417,8 +447,17 @@ build_base_image() {
     fi
     pinned_base_image="${base_image_arg%@*}@${base_image_digest}"
     read -r -a content_paths <<< "${content_files}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "ROCM_BASE_CONTENT_FILES must name at least one file" >&2
+        return 1
+    fi
+    for path in "${content_paths[@]}"; do
+        if [[ ! -e "${path}" ]]; then
+            echo "ROCm base content input not found: ${path}" >&2
+            return 1
+        fi
+    done
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
-    base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
     rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
     triton_arg="$(extract_arg_default TRITON_BRANCH)"
     pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
@@ -428,12 +467,26 @@ build_base_image() {
     aiter_arg="$(extract_arg_default AITER_BRANCH)"
     mori_arg="$(extract_arg_default MORI_BRANCH)"
     python_version_arg="$(extract_arg_default PYTHON_VERSION)"
-    pytorch_rocm_arch_arg="$(extract_arg_default PYTORCH_ROCM_ARCH)"
+    pytorch_rocm_arch_arg="${ROCM_BASE_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH:-}}"
+    if [[ -z "${pytorch_rocm_arch_arg}" ]]; then
+        pytorch_rocm_arch_arg="$(extract_arg_default PYTORCH_ROCM_ARCH)"
+    fi
+    if [[ -z "${pytorch_rocm_arch_arg}" ]]; then
+        echo "PYTORCH_ROCM_ARCH has no effective value" >&2
+        return 1
+    fi
+    if [[ "${use_sccache}" == "1" ]]; then
+        sccache_version_arg="${SCCACHE_VERSION:-$(extract_arg_default SCCACHE_VERSION)}"
+        sccache_sha256_arg="${SCCACHE_DOWNLOAD_SHA256:-$(extract_arg_default SCCACHE_DOWNLOAD_SHA256)}"
+    fi
+    base_hash=$(compute_base_content_hash \
+        "${use_sccache}" "${base_image_digest}" \
+        "${pytorch_rocm_arch_arg}" "${platform}")
     dependency_summary="base=${base_image_arg},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
     trusted_content_tag=$(trusted_base_content_ref "${base_hash}" "${metadata_version}")
     scoped_content_tag=$(scoped_base_content_ref "${base_hash}" "${metadata_version}")
-    # Preview writes share an exact-content namespace so stacked PRs can reuse
-    # identical images. They may import the trusted ref, but never overwrite it.
+    # Preview writes stay source-scoped. They may import the trusted ref, but
+    # never overwrite it or another source's preview image.
     if is_trusted_main_build; then
         scoped_content_tag="${trusted_content_tag}"
         writable_content_tag="${trusted_content_tag}"
@@ -446,6 +499,8 @@ build_base_image() {
     if [[ "${use_sccache}" == "1" ]]; then
         for env_name in \
             SCCACHE_DOWNLOAD_URL \
+            SCCACHE_VERSION \
+            SCCACHE_DOWNLOAD_SHA256 \
             SCCACHE_ENDPOINT \
             SCCACHE_BUCKET_NAME \
             SCCACHE_REGION_NAME \
@@ -463,6 +518,7 @@ build_base_image() {
     echo "Stable tag: ${stable_tag} ($(should_push_stable_tag && echo enabled || echo disabled))"
     echo "Content hash: ${base_hash}"
     echo "Dependency summary: ${dependency_summary}"
+    echo "Platform: ${platform}"
     echo "USE_SCCACHE: ${use_sccache}"
     echo "BuildKit layer cache: ${ROCM_BASE_LAYER_CACHE_REF}"
 
@@ -513,8 +569,10 @@ build_base_image() {
             --provenance=false \
             --progress "${BUILDKIT_PROGRESS:-plain}" \
             --file "${DOCKERFILE}" \
+            --platform "${platform}" \
             --build-arg "BASE_IMAGE=${pinned_base_image}" \
-            --build-arg "USE_SCCACHE=${use_sccache}" \
+            --build-arg "USE_SCCACHE=${use_sccache_build_arg}" \
+            --build-arg "PYTORCH_ROCM_ARCH=${pytorch_rocm_arch_arg}" \
             "${sccache_args[@]}" \
             --label "org.opencontainers.image.source=https://github.com/vllm-project/vllm" \
             --label "org.opencontainers.image.vendor=vLLM" \
@@ -536,6 +594,9 @@ build_base_image() {
             --label "vllm.rocm_base.dependency.aiter=${aiter_arg}" \
             --label "vllm.rocm_base.dependency.mori=${mori_arg}" \
             --label "vllm.rocm_base.pytorch_rocm_arch=${pytorch_rocm_arch_arg}" \
+            --label "vllm.rocm_base.platform=${platform}" \
+            --label "vllm.rocm_base.sccache_version=${sccache_version_arg}" \
+            --label "vllm.rocm_base.sccache_sha256=${sccache_sha256_arg}" \
             -t "${build_ref}" \
             --push \
             .

@@ -133,6 +133,8 @@ WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies (plus gcc-13, selected later in build_pytorch).
+# add-apt-repository is build-only. Its distro Python bindings target the
+# Ubuntu Python ABI and are unusable after python3 switches to 3.12.
 RUN apt-get update -y \
     && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
     && for i in 1 2 3; do \
@@ -142,6 +144,7 @@ RUN apt-get update -y \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
        python${PYTHON_VERSION}-lib2to3 python-is-python3 gcc-13 g++-13 \
+    && apt-get purge -y software-properties-common python3-software-properties python3-gi \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -149,10 +152,12 @@ RUN apt-get update -y \
     && printf '%s  %s\n' "${GET_PIP_SHA256}" /tmp/get-pip.py | sha256sum --check - \
     && python${PYTHON_VERSION} /tmp/get-pip.py "pip==${PIP_VERSION}" \
     && rm -f /tmp/get-pip.py \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install packaging==26.2 cmake==3.31.10 ninja==1.13.0 \
-    wheel==0.46.3 setuptools==79.0.1 pybind11==3.0.4 Cython==3.3.0
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+    pip install --constraint /tmp/rocm-constraints.txt \
+        packaging cmake==3.31.10 ninja wheel setuptools pybind11 Cython==3.3.0
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -255,8 +260,8 @@ RUN git clone ${PYTORCH_REPO} pytorch \
     && git checkout --detach ${PYTORCH_BRANCH} \
     && test "$(git rev-parse HEAD)" = "${PYTORCH_BRANCH}"
 # The pinned PyTorch requirements fix every root. Pin their build-only
-# transitive closure here because the runtime lock intentionally uses newer,
-# incompatible versions of several packages.
+# transitive closure here because several versions intentionally differ from
+# the shared ROCm build constraints.
 RUN cd pytorch \
     && pip install --no-deps \
         attrs==26.1.0 certifi==2026.7.22 charset-normalizer==3.5.1 \
@@ -264,6 +269,7 @@ RUN cd pytorch \
         markupsafe==3.0.3 mpmath==1.3.0 pyproject-hooks==1.2.0 \
         sortedcontainers==2.4.0 urllib3==2.7.0 uv==0.12.9 zipp==4.1.0 \
     && pip install --no-deps -r requirements.txt \
+    && python3 -m pip check \
     && git submodule update --init --recursive
 RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
@@ -282,11 +288,19 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
 ###
 FROM base AS build_pytorch_runtime
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
-    --mount=type=bind,from=build_triton,src=/app/install/,target=/install/triton,ro \
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install/pytorch,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
-        /install/triton/*.whl /install/pytorch/*.whl
+        /install/pytorch/*.whl
+
+# Only AITER consumes the source-built Triton wheel. Keeping it out of the
+# shared PyTorch runtime lets the other native wheel builds remain parallel
+# when the Triton source changes.
+FROM build_pytorch_runtime AS build_pytorch_triton_runtime
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+    --mount=type=bind,from=build_triton,src=/app/install/,target=/install/triton,ro \
+    pip install --constraint /tmp/rocm-constraints.txt \
+        /install/triton/*.whl
 
 
 ###
@@ -325,7 +339,7 @@ RUN git clone ${PYTORCH_AUDIO_REPO} audio \
     && git checkout --detach ${PYTORCH_AUDIO_BRANCH} \
     && test "$(git rev-parse HEAD)" = "${PYTORCH_AUDIO_BRANCH}" \
     && git submodule update --init --recursive
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     cd audio \
     && pip install --constraint /tmp/rocm-constraints.txt -r requirements.txt
 RUN cd audio \
@@ -361,7 +375,7 @@ FROM build_pytorch_runtime AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     pip install --constraint /tmp/rocm-constraints.txt psutil \
     && git clone ${FA_REPO} flash-attention \
     && cd flash-attention \
@@ -382,7 +396,7 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 ###
 ### AITER Build
 ###
-FROM build_pytorch_runtime AS build_aiter
+FROM build_pytorch_triton_runtime AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
@@ -391,7 +405,7 @@ RUN git clone --no-checkout ${AITER_REPO} aiter \
     && git checkout --detach ${AITER_BRANCH} \
     && test "$(git rev-parse HEAD)" = "${AITER_BRANCH}" \
     && git submodule update --init --recursive
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
         pandas psutil pyyaml einops pybind11 ninja flydsl \
         setuptools-scm vcs-versioning
@@ -501,7 +515,7 @@ RUN cd /src/projects/rocprofiler-sdk \
     && cmake --install build --prefix /staging --strip
 
 FROM base AS final
-RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install --constraint /tmp/rocm-constraints.txt /install/*.whl \
     && pip check
