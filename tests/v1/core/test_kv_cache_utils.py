@@ -3982,13 +3982,92 @@ def test_deepseek_v4_draft_group_annotated_on_packed_path():
     assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
 
 
-def test_deepseek_v4_annotation_requires_model_type():
-    # The positional rule is only sound for DeepseekV4, where the draft layer
-    # is known to be registered last. Without that model gate nothing may be
-    # flagged, however the grouping happens to fall out.
+def test_trailing_layer_fallback_applies_to_any_mtp_model():
+    # The positional rule is sound for every MTP drafter, not just DeepseekV4:
+    # MTP blocks reuse the target's decoder layer (no spec marker) and always
+    # register after every target layer. The model_type must not gate it.
     groups = get_kv_cache_groups(
         _spec_decode_grouping_config(method="mtp", model_type="other"),
         _deepseek_v4_specs(),
     )
 
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "model.layers.3.self_attn.attn" in flagged[0].layer_names
+
+
+def _qwen3_5_hybrid_specs(with_mtp_layer: bool):
+    """Qwen3.5-shaped hybrid: repeating [GDN x3, full-attn x1] blocks, with
+    the MTP drafter's full-attn layer (spec-identical to the target's)
+    registered last."""
+    specs = {}
+    idx = 0
+    for _ in range(2):
+        for _ in range(3):
+            specs[f"model.layers.{idx}.linear_attn"] = new_mamba_spec(
+                mamba_cache_mode="align"
+            )
+            idx += 1
+        specs[f"model.layers.{idx}.self_attn.attn"] = new_kv_cache_spec()
+        idx += 1
+    if with_mtp_layer:
+        specs["mtp.layers.0.self_attn.attn"] = new_kv_cache_spec()
+    return specs
+
+
+def test_qwen3_5_mtp_draft_group_annotated_on_hybrid_path(caplog_vllm):
+    # A hybrid mamba + full-attention model with an MTP drafter that is
+    # spec-indistinguishable from the target reaches the general multi-group
+    # path. The trailing-layer rule must locate the draft group there so the
+    # Mamba groups are not swept up by the flag-all consumer fallback.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="mtp", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
+    flagged = [g for g in groups if g.is_eagle_group]
+    assert len(flagged) == 1
+    assert "mtp.layers.0.self_attn.attn" in flagged[0].layer_names
+    for group in groups:
+        if any(
+            isinstance(spec, MambaSpec)
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ):
+            assert not group.is_eagle_group
+    assert "could be identified as the draft model's" not in caplog_vllm.text
+
+
+def test_non_mtp_eagle_hybrid_still_warns(caplog_vllm):
+    # eagle/eagle3 drafters are not covered by the trailing-layer rule (kept
+    # conservative), so an unidentifiable hybrid draft must still warn.
+    groups = get_kv_cache_groups(
+        _spec_decode_grouping_config(method="eagle3", model_type="qwen3_5"),
+        _qwen3_5_hybrid_specs(with_mtp_layer=True),
+    )
+
     assert not any(g.is_eagle_group for g in groups)
+    assert "could be identified as the draft model's" in caplog_vllm.text
+
+
+def test_trailing_layer_fallback_requires_exact_partition():
+    # If the groups do not partition the layers exactly (e.g. a caller that
+    # dropped or duplicated layers), the positional rule is meaningless and
+    # must not fire.
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    specs = _qwen3_5_hybrid_specs(with_mtp_layer=True)
+    config = _spec_decode_grouping_config(method="mtp", model_type="qwen3_5")
+    groups = get_kv_cache_groups(config, specs)
+    for g in groups:
+        g.is_eagle_group = False
+    # Remove one layer from its group: no longer an exact partition.
+    trimmed = [
+        KVCacheGroupSpec(
+            [n for n in g.layer_names if n != "model.layers.0.linear_attn"],
+            g.kv_cache_spec,
+        )
+        for g in groups
+    ]
+    _annotate_eagle_groups(config, specs, trimmed, use_trailing_layer_fallback=True)
+
+    assert not any(g.is_eagle_group for g in trimmed)
