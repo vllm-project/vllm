@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp6E2M3Static,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -37,10 +38,18 @@ from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
 
+_LINEAR_ACTIVATION_QUANT_KEY_MAP = {
+    **_ACTIVATION_QUANT_KEY_MAP,
+    "mxfp8_e4m3": kMxfp8Dynamic,
+}
+
 
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
-    supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
+    supported_activation_quant_keys = [
+        *_LINEAR_ACTIVATION_QUANT_KEY_MAP.values(),
+        None,
+    ]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
     def __init__(
@@ -59,7 +68,7 @@ class QuarkOCP_MX(QuarkScheme):
         self.input_dtype = (
             next(
                 dtype
-                for dtype, quant_key in _ACTIVATION_QUANT_KEY_MAP.items()
+                for dtype, quant_key in _LINEAR_ACTIVATION_QUANT_KEY_MAP.items()
                 if quant_key == activation_quant_key
             )
             if activation_quant_key is not None

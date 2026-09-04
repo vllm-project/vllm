@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Static,
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
-    kMxfp8Dynamic,
 )
 
 logger = init_logger(__name__)
@@ -28,7 +27,6 @@ _ACTIVATION_QUANT_KEY_MAP: dict[str, QuantKey] = {
     "mxfp4": kMxfp4Dynamic,
     "mxfp6_e3m2": kMxfp6E3M2Dynamic,
     "mxfp6_e2m3": kMxfp6E2M3Dynamic,
-    "mxfp8_e4m3": kMxfp8Dynamic,
 }
 
 OCP_MX_DTYPES = {
