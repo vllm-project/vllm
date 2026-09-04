@@ -67,3 +67,40 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
 
     owner("runtime", 2, runtime_launcher)
     assert runtime_calls == [(owner.kernel, (2,), ("runtime", 2), {"CONST": 7})]
+
+
+def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
+    from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+    from vllm.v1.worker.block_table import ComputeSlotMappingKernel
+
+    owner = ComputeSlotMappingKernel()
+    compile_key = owner.CompileKey(
+        kv_cache_block_size=16,
+        blocks_per_kv_block=1,
+        total_cp_world_size=2,
+        total_cp_rank=1,
+        cp_kv_cache_interleave_size=1,
+        block_table_stride=128,
+        block_size=16,
+    )
+    launches: list[tuple[Any, ...]] = []
+
+    def launch(grid: Any, inputs: Any, **kwargs: Any) -> None:
+        launches.append((grid, inputs, kwargs))
+
+    monkeypatch.setattr(owner, "launch", launch)
+    owner.compile(compile_key)
+
+    grid, inputs, kwargs = launches[0]
+    assert grid == (2,)
+    assert inputs["num_tokens"] == 2
+    assert inputs["block_table_stride"] == 128
+    assert kwargs == {
+        "KV_CACHE_BLOCK_SIZE": 16,
+        "BLOCKS_PER_KV_BLOCK": 1,
+        "TOTAL_CP_WORLD_SIZE": 2,
+        "TOTAL_CP_RANK": 1,
+        "CP_KV_CACHE_INTERLEAVE_SIZE": 1,
+        "PAD_ID": PAD_SLOT_ID,
+        "BLOCK_SIZE": owner.triton_block_size,
+    }

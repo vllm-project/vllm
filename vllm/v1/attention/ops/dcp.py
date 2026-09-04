@@ -194,37 +194,17 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
         n_rounded: int,
         lse_idx: int,
         is_base_e: bool,
-        runtime_outputs_stride_b: int | None = None,
-        runtime_outputs_stride_h: int | None = None,
-        runtime_outputs_stride_d: int | None = None,
-        runtime_lses_stride_n: int | None = None,
-        runtime_lses_stride_b: int | None = None,
-        runtime_lses_stride_h: int | None = None,
     ) -> CompileKey:
-        outputs_stride_d = (
-            runtime_outputs_stride_d if runtime_outputs_stride_d is not None else 1
-        )
-        outputs_stride_h = (
-            runtime_outputs_stride_h
-            if runtime_outputs_stride_h is not None
-            else head_dim
-        )
-        outputs_stride_b = (
-            runtime_outputs_stride_b
-            if runtime_outputs_stride_b is not None
-            else num_heads * head_dim
-        )
-        lses_stride_h = (
-            runtime_lses_stride_h if runtime_lses_stride_h is not None else 1
-        )
-        lses_stride_b = (
-            runtime_lses_stride_b if runtime_lses_stride_b is not None else num_heads
-        )
-        lses_stride_n = (
-            runtime_lses_stride_n
-            if runtime_lses_stride_n is not None
-            else num_tokens * num_heads
-        )
+        # Contiguous [B, H, D] output and [N, B, H] lse strides. dispatch is
+        # only invoked by get_warmup_keys -- the Triton runtime path launches
+        # via __call__ -> ctx.call_kernel and never re-derives a compile key --
+        # so these are always their contiguous defaults.
+        outputs_stride_d = 1
+        outputs_stride_h = head_dim
+        outputs_stride_b = num_heads * head_dim
+        lses_stride_h = 1
+        lses_stride_b = num_heads
+        lses_stride_n = num_tokens * num_heads
         return self.CompileKey(
             output_dtype=output_dtype,
             lse_dtype=lse_dtype,
@@ -338,8 +318,11 @@ class CorrectAttnCPOutKernel(VllmTritonJitKernel["CorrectAttnCPOutKernel.Compile
             N_ROUNDED=n_rounded,
             IS_BASE_E=is_base_e,
             _runtime_launcher=None if self._warming else ctx.call_kernel,
-            # CPTritonContext caches the non-constexpr positional prefix.
-            _runtime_launcher_arg_count=11,
+            # CPTritonContext caches the non-constexpr positional prefix; derive
+            # its length so adding/reordering a kernel arg cannot silently
+            # misalign the cached replay path.
+            _runtime_launcher_arg_count=len(self.kernel.arg_names)
+            - len(self.kernel.constexprs),
         )
 
 
