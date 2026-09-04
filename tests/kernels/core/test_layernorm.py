@@ -269,7 +269,7 @@ def test_gemma_rms_norm(
     else:
         ref_out = layer.forward_native(x)
         out = layer(x)
-        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-3)
 
 
 @torch.inference_mode()
