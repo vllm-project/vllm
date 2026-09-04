@@ -38,6 +38,42 @@ do not need a transformers dependency for output parsing.
 import regex as re
 
 _TOOL_RESPONSE_START_TAG = "<|tool_response>"
+_STRING_DELIM = '<|"|>'
+_DELIM_LEN = len(_STRING_DELIM)
+
+
+def _scan_balanced_braces(text: str, start: int) -> str:
+    """Extract a brace-balanced argument span starting just past ``{``.
+
+    Tracks nesting depth and skips over ``<|"|>``-quoted spans so braces
+    inside quoted values don't affect the count, e.g.
+    ``config:{"mode":"x"}}`` closes on the *second* ``}``.
+
+    Args:
+        text: Full text being scanned.
+        start: Index just past the opening ``{``.
+
+    Returns:
+        The argument string up to (but excluding) the matching closing
+        ``}``. If the text ends before the braces balance, returns
+        everything from ``start`` to the end of ``text``.
+    """
+    depth = 1
+    i = start
+    n = len(text)
+    while i < n and depth > 0:
+        if text[i : i + _DELIM_LEN] == _STRING_DELIM:
+            i += _DELIM_LEN
+            next_delim = text.find(_STRING_DELIM, i)
+            i = n if next_delim == -1 else next_delim + _DELIM_LEN
+            continue
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    end = i - 1 if depth == 0 else i
+    return text[start:end]
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
@@ -115,10 +151,14 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         return results
 
     # Tier 2: Fallback for known Gemma4 output variations.
-    # Matches: <call>name{args}, call:name{args}, <channel|>call:name{args}, or bare call:name{args}<eos>
-    fallback_pattern = r"(?:<call>|(?:^|\s|<channel\|>|:)call:)([\w\-\.]+)\{(.*?)\}"
-    for match in re.finditer(fallback_pattern, text, re.DOTALL):
-        name, args_str = match.group(1), match.group(2)
+    # Matches: <call>name{, call:name{, <channel|>call:name{, or bare call:name{
+    # The closing `}` is found by balanced-brace scanning (not the regex)
+    # so nested objects like config:{"mode":"x"} aren't truncated at the
+    # first `}`.
+    fallback_open_pattern = r"(?:<call>|(?:^|\s|<channel\|>|:)call:)([\w\-\.]+)\{"
+    for match in re.finditer(fallback_open_pattern, text, re.DOTALL):
+        name = match.group(1)
+        args_str = _scan_balanced_braces(text, match.end())
         results.append(
             {
                 "name": name,

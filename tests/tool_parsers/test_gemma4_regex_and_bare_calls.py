@@ -135,6 +135,18 @@ class TestGemma4FallbackFormats:
 
         assert parse_tool_calls(text) == []
 
+    def test_nested_object_argument_not_truncated(self):
+        """A nested ``{...}`` argument must not stop at its own closing brace."""
+        text = 'call:tool{config:{mode:<|"|>x<|"|>}}'
+
+        tool_calls = parse_tool_calls(text)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "tool"
+        # _parse_tool_arguments stringifies nested values; the important
+        # thing is "mode" survives instead of being truncated to "{}".
+        assert tool_calls[0]["arguments"] == {"config": "{'mode': 'x'}"}
+
 
 class TestGemma4EngineBareCallIntegration:
     """Validate that the engine and offline utils properly extract bare tool calls."""
