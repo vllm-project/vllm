@@ -1747,7 +1747,6 @@ def _make_hisparse_runtime(
         config=ResolvedHiSparseConfig(
             top_k=top_k,
             device_buffer_size=device_buffer_size,
-            host_pool_gib=1.0,
         ),
         max_num_reqs=max_num_reqs,
         row_width=row_width,
@@ -2567,7 +2566,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     )
     vllm_config.attention_config.hisparse_config = HiSparseConfig(
         device_buffer_size=2 * topk_tokens,
-        host_pool_gib=1.0,
     )
     vllm_config.speculative_config = SpeculativeConfig(
         method="ngram", num_speculative_tokens=1

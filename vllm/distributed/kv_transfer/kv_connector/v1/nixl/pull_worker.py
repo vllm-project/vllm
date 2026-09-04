@@ -162,17 +162,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        if meta.hisparse_host_block_ids is not None:
-            if self._nixl_adapter is None:
-                raise RuntimeError("HiSparse NIXL metadata requires its adapter")
-            self._nixl_adapter.read_host_blocks(
-                self,
-                req_id,
-                meta,
-                plan,
-                remote_region_groups,
-            )
-            return
         groups_differ = local_region_groups != remote_region_groups
         if groups_differ:
             if not self.use_mla or self._has_mamba:
@@ -442,7 +431,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 self._read_blocks_mixed(
                     request_id=request_id,
                     local_block_size_key=remote_info.remote_block_size,
-                    local_vram_handle=local_xfer_side_handle,
+                    local_device_handle=local_xfer_side_handle,
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
@@ -482,14 +471,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         self,
         request_id: str,
         local_block_size_key: int,
-        local_vram_handle: int,
+        local_device_handle: int,
         remote_xfer_side_handle: int,
         local_block_descs_ids: np.ndarray,
         remote_block_descs_ids: np.ndarray,
         notif_agent: str,
         notif_id: bytes,
     ) -> None:
-        """Split a READ across DRAM and VRAM descriptor lists."""
+        """Split a READ across the local DRAM and device descriptor lists."""
         desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
         desc_pos = self._desc_pos_by_block_size[local_block_size_key]
         dram_handle = self._dram_src_handles_by_block_size[local_block_size_key]
@@ -498,21 +487,23 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        handles = []
+        reads = (
+            (is_dram, dram_handle),
+            (~is_dram, local_device_handle),
+        )
+        handles: list[int] = []
         try:
-            for type_mask, local_handle in (
-                (is_dram, dram_handle),
-                (~is_dram, local_vram_handle),
-            ):
-                handles.append(
-                    self.nixl_wrapper.make_prepped_xfer(
-                        "READ",
-                        local_handle,
-                        desc_pos[local_ids[type_mask]],
-                        remote_xfer_side_handle,
-                        remote_ids[type_mask],
+            for mask, local_handle in reads:
+                if mask.any():
+                    handles.append(
+                        self.nixl_wrapper.make_prepped_xfer(
+                            "READ",
+                            local_handle,
+                            desc_pos[local_ids[mask]],
+                            remote_xfer_side_handle,
+                            remote_ids[mask],
+                        )
                     )
-                )
         except Exception:
             for handle in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)

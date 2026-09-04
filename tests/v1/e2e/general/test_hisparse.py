@@ -5,7 +5,7 @@ import prometheus_client
 import pytest
 
 from tests.conftest import VllmRunner
-from vllm.config import AttentionConfig, HiSparseConfig
+from vllm.config import AttentionConfig, HiSparseConfig, KVTransferConfig
 from vllm.platforms import current_platform
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
@@ -74,9 +74,13 @@ def test_hisparse_spill_and_prefix_restore(
         hf_overrides=_shrink_config,
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(
-                host_pool_gib=1,
                 device_buffer_size=512,
             )
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1},
         ),
         block_size=64,
         max_model_len=320,

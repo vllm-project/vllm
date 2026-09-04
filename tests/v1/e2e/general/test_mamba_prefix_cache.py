@@ -191,7 +191,6 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         reserved_blocks: int | Sequence[int] = 0,
         reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
-        allow_hisparse_host_import: bool = False,
     ):
         ret = original_allocate_slots_fn(
             self=self,
@@ -207,7 +206,6 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             reserved_blocks=reserved_blocks,
             reserved_host_blocks=reserved_host_blocks,
             has_scheduled_reqs=has_scheduled_reqs,
-            allow_hisparse_host_import=allow_hisparse_host_import,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[

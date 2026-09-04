@@ -242,9 +242,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 def test_hisparse_requires_v2_model_runner():
     config = object.__new__(VllmConfig)
-    config.attention_config = AttentionConfig(
-        hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-    )
+    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
 
     with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
         assert config.use_v2_model_runner
@@ -260,9 +258,7 @@ def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="decode context parallelism"):
         VllmConfig(
-            attention_config=AttentionConfig(
-                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-            ),
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
             parallel_config=ParallelConfig(
                 tensor_parallel_size=2,
                 decode_context_parallel_size=2,
@@ -275,9 +271,7 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
     with pytest.raises(ValueError, match="pipeline parallelism"):
         VllmConfig(
-            attention_config=AttentionConfig(
-                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-            ),
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
             parallel_config=ParallelConfig(pipeline_parallel_size=2),
         )
 
@@ -285,11 +279,7 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 def test_hisparse_rejects_non_cuda(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
     with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
-        VllmConfig(
-            attention_config=AttentionConfig(
-                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-            )
-        )
+        VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):

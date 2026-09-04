@@ -13,6 +13,40 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
+def hisparse_host_pool_gib(
+    kv_transfer_config: "KVTransferConfig | None",
+) -> float | None:
+    if kv_transfer_config is None:
+        return None
+    if kv_transfer_config.kv_connector == "MultiConnector":
+        connectors = kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+    else:
+        connectors = [
+            {
+                "kv_connector": kv_transfer_config.kv_connector,
+                "kv_connector_extra_config": (
+                    kv_transfer_config.kv_connector_extra_config
+                ),
+            }
+        ]
+    entries = [
+        connector.get("kv_connector_extra_config", {})
+        for connector in connectors
+        if connector.get("kv_connector") == "HiSparseConnector"
+    ]
+    if len(entries) > 1:
+        raise ValueError("Only one HiSparseConnector may be configured")
+    if not entries:
+        return None
+    host_pool_gib = entries[0].get("host_pool_gib")
+    if host_pool_gib is None:
+        raise ValueError("HiSparseConnector requires host_pool_gib")
+    host_pool_gib = float(host_pool_gib)
+    if host_pool_gib <= 0:
+        raise ValueError("HiSparseConnector host_pool_gib must be positive")
+    return host_pool_gib
+
+
 def kv_buffer_device_default_factory() -> str:
     from vllm.platforms import current_platform
 

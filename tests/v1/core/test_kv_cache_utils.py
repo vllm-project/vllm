@@ -116,9 +116,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     assert group_spec is not None
     group = KVCacheGroupSpec(list(specs), group_spec)
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-        ),
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(index_topk=128),
             max_model_len=block_size,
@@ -140,13 +138,14 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     )
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
-    assert host_group.kv_cache_spec.block_size == block_size
+    assert host_group.kv_cache_spec.block_size == gpu_block_size
     assert indexer_group.kv_cache_spec.block_size == gpu_block_size
     host_specs = host_group.kv_cache_spec.kv_cache_specs
     gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
     assert set(host_specs) == {"model.layers.0.self_attn"}
     assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
     assert indexer_group.enable_prefix_caching
+    assert host_group.enable_kv_transfer
     auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
     assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
     assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
@@ -171,9 +170,7 @@ def test_hisparse_rejects_deepseek_v4():
     assert full_uniform is not None
     group = KVCacheGroupSpec(list(full_specs), full_uniform)
     config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-        ),
+        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
     )

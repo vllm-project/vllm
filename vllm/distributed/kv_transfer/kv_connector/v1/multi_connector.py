@@ -21,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
-    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -211,29 +210,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
-    @classmethod
-    def from_connectors(
-        cls,
-        vllm_config: "VllmConfig",
-        role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig",
-        connectors: list[KVConnectorBase_V1],
-    ) -> "MultiConnector":
-        """Compose already-created connectors without changing user config."""
-        connector = cls.__new__(cls)
-        KVConnectorBase_V1.__init__(connector, vllm_config, role, kv_cache_config)
-        connector._connectors = connectors
-        connector._ktc_kv_transfer_config = [
-            child._kv_transfer_config for child in connectors
-        ]
-        connector._all_support_hma = all(supports_hma(child) for child in connectors)
-        assert (
-            vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            or connector._all_support_hma
-        ), "HMA should not be enabled unless all sub-connectors support it"
-        connector._requests_to_connector = {}
-        connector._extra_async_saves = {}
-        return connector
+    @property
+    def sub_connectors(self) -> list[KVConnectorBase_V1]:
+        return list(self._connectors)
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:

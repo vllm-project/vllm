@@ -54,7 +54,7 @@ class _ShadowEntry:
     """
 
     host_hash: object
-    pages: tuple[tuple[KVCacheBlock, ...] | None, ...]
+    resident_blocks: tuple[KVCacheBlock, ...]
 
 
 @dataclass
@@ -135,7 +135,6 @@ class HiSparseCoordinator:
         )
         self.host_manager: SingleTypeKVCacheManager | None = None
         self.host_group_id: int | None = None
-        self.pages_per_host_block = 0
         self.max_spill_pages = 0
         if kv_cache_config.hisparse_host_num_blocks is not None:
             host_group_id = get_unique_kv_cache_group_id(
@@ -154,13 +153,8 @@ class HiSparseCoordinator:
                     "HiSparse resident cache groups must use one block size."
                 )
             resident_block_size = resident_block_sizes.pop()
-            if self.host_manager.block_size % resident_block_size != 0:
-                raise ValueError(
-                    "HiSparse host and resident block sizes are incompatible."
-                )
-            self.pages_per_host_block = (
-                self.host_manager.block_size // resident_block_size
-            )
+            if self.host_manager.block_size != resident_block_size:
+                raise ValueError("HiSparse host and resident block sizes must match.")
             self.max_spill_pages = max_model_len // resident_block_size
 
         self.block_table_updates: set[str] = set()
@@ -168,7 +162,6 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
-        self.external_import_populates_resident_cache = True
         # host block id -> pinned GPU copies of its pages; lets a prefix hit on
         # host blocks come back GPU-resident instead of null (FIFO-evicted
         # first under pool pressure, so pinning never causes an OOM the
@@ -201,9 +194,8 @@ class HiSparseCoordinator:
             assert self.host_group_id is not None and self.host_manager is not None
             host_blocks = new_computed_blocks[self.host_group_id]
             num_host_blocks = len(host_blocks)
-            num_pages = num_host_blocks * self.pages_per_host_block
-            state.valid_pages.update(range(num_pages))
-            state.ready_prefix_pages = max(num_pages, state.ready_prefix_pages)
+            state.valid_pages.update(range(num_host_blocks))
+            state.ready_prefix_pages = max(num_host_blocks, state.ready_prefix_pages)
             self._adopt_shadow_pages(request_id, host_blocks)
             state.shadow_recorded_blocks = max(
                 state.shadow_recorded_blocks, num_host_blocks
@@ -230,13 +222,9 @@ class HiSparseCoordinator:
             entry = self.shadow_pages.get(host_block.block_id)
             if entry is None or entry.host_hash != host_block.block_hash:
                 continue
-            for page_offset, page_blocks in enumerate(entry.pages):
-                if page_blocks is None:
-                    continue
-                page_idx = host_idx * self.pages_per_host_block + page_offset
-                for manager, block in zip(self.resident_managers, page_blocks):
-                    if manager.adopt_resident_page(request_id, page_idx, block):
-                        manager.block_pool.touch([block])
+            for manager, block in zip(self.resident_managers, entry.resident_blocks):
+                if manager.adopt_resident_page(request_id, host_idx, block):
+                    manager.block_pool.touch([block])
 
     def _record_shadow_pages(self, request_id: str, num_computed_tokens: int) -> None:
         """Pin the GPU copies of just-published host blocks for later hits."""
@@ -259,31 +247,20 @@ class HiSparseCoordinator:
                 if existing.host_hash == host_block.block_hash:
                     continue
                 self._drop_shadow_entry(host_block.block_id)
-            pages: list[tuple[KVCacheBlock, ...] | None] = []
-            for page_offset in range(self.pages_per_host_block):
-                page_idx = host_idx * self.pages_per_host_block + page_offset
-                page_blocks = []
-                for manager in self.resident_managers:
-                    block = manager.get_resident_page(request_id, page_idx)
-                    if block is None:
-                        break
-                    page_blocks.append(block)
-                pages.append(
-                    tuple(page_blocks)
-                    if len(page_blocks) == len(self.resident_managers)
-                    else None
-                )
-            if all(recorded is None for recorded in pages):
+            resident_blocks = []
+            for manager in self.resident_managers:
+                block = manager.get_resident_page(request_id, host_idx)
+                if block is None:
+                    break
+                resident_blocks.append(block)
+            if len(resident_blocks) != len(self.resident_managers):
                 continue
-            for recorded in pages:
-                if recorded is None:
-                    continue
-                for manager, block in zip(self.resident_managers, recorded):
-                    manager.block_pool.touch([block])
-                    self._shadow_gpu_to_host[block.block_id] = host_block.block_id
+            for manager, block in zip(self.resident_managers, resident_blocks):
+                manager.block_pool.touch([block])
+                self._shadow_gpu_to_host[block.block_id] = host_block.block_id
             self.shadow_pages[host_block.block_id] = _ShadowEntry(
                 host_hash=host_block.block_hash,
-                pages=tuple(pages),
+                resident_blocks=tuple(resident_blocks),
             )
         state.shadow_recorded_blocks = max(
             state.shadow_recorded_blocks, num_host_blocks
@@ -295,14 +272,11 @@ class HiSparseCoordinator:
         if entry is None:
             return 0
         freed = 0
-        for page_blocks in entry.pages:
-            if page_blocks is None:
-                continue
-            for manager, block in zip(self.resident_managers, page_blocks):
-                self._shadow_gpu_to_host.pop(block.block_id, None)
-                manager.block_pool.free_blocks([block])
-                if block.ref_cnt == 0:
-                    freed += 1
+        for manager, block in zip(self.resident_managers, entry.resident_blocks):
+            self._shadow_gpu_to_host.pop(block.block_id, None)
+            manager.block_pool.free_blocks([block])
+            if block.ref_cnt == 0:
+                freed += 1
         return freed
 
     def _purge_shadow_for_gpu_block(self, gpu_block_id: int) -> None:
@@ -510,7 +484,7 @@ class HiSparseCoordinator:
             return
         assert self.host_manager is not None
         host_block_size = self.host_manager.block_size
-        num_pages = num_computed_tokens // host_block_size * self.pages_per_host_block
+        num_pages = num_computed_tokens // host_block_size
         state = self._get_request_state(request_id)
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
         for page_idx in range(num_pages):
@@ -543,9 +517,7 @@ class HiSparseCoordinator:
         manager = self.host_manager
         if manager is None:
             return
-        num_pages = (
-            num_computed_tokens // manager.block_size * self.pages_per_host_block
-        )
+        num_pages = num_computed_tokens // manager.block_size
         request_id = request.request_id
         state = self._get_request_state(request_id)
         if state.ready_prefix_pages >= num_pages:
@@ -601,7 +573,7 @@ class HiSparseCoordinator:
     ) -> bool:
         assert self.host_manager is not None
         state = self._get_request_state(request_id)
-        host_block_idx = page_idx // self.pages_per_host_block
+        host_block_idx = page_idx
         host_blocks = self.host_manager.req_to_blocks.get(request_id)
         if host_blocks is None or host_block_idx >= len(host_blocks):
             return False
@@ -624,7 +596,6 @@ class HiSparseCoordinator:
         plan = SparseKVPageTransfer(
             transfer_id=spill_id,
             destination_block_id=host_block.block_id,
-            destination_page_offset=page_idx % self.pages_per_host_block,
             source_block_ids=tuple(block.block_id for block in blocks),
             after_forward=after_forward,
         )
@@ -678,9 +649,7 @@ class HiSparseCoordinator:
                 if len(source_starts) != len(resident_blocks):
                     token_position += num_rows
                     continue
-                host_block_idx, destination_page_offset = divmod(
-                    page_idx, self.pages_per_host_block
-                )
+                host_block_idx = page_idx
                 if host_block_idx >= len(host_blocks):
                     token_position += num_rows
                     continue
@@ -688,14 +657,12 @@ class HiSparseCoordinator:
                 if host_block.is_null:
                     token_position += num_rows
                     continue
-                destination_page = (
-                    host_block.block_id * self.pages_per_host_block
-                    + destination_page_offset
-                )
                 mirrors.append(
                     SparseKVRowMirror(
                         source_starts=tuple(source_starts),
-                        destination_start=destination_page * block_size + row_offset,
+                        destination_start=(
+                            host_block.block_id * block_size + row_offset
+                        ),
                         num_rows=num_rows,
                     )
                 )
