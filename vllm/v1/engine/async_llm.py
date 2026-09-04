@@ -582,8 +582,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
 
         Note:
-            Passing a raw prompt string directly to this method is deprecated. 
-            Advanced power-users can manually bypass the raw-prompt fallback 
+            Passing a raw prompt string directly to this method is deprecated.
+            Advanced power-users can manually bypass the raw-prompt fallback
             path using the Engine's underlying Renderer pipeline:
 
             >>> from vllm.inputs import parse_model_prompt
