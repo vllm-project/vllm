@@ -264,6 +264,8 @@ def rocm_aiter_fused_experts(
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
     elif activation == MoEActivation.GELU_TANH:
+        if not rocm_aiter_ops.fused_moe_supports_gelu_tanh():
+            raise ValueError("AITER GELU_TANH fused MoE needs aiter >= v0.1.21")
         activation_method = ActivationMethod.GELU_TANH
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
@@ -491,10 +493,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        if activation == MoEActivation.GELU_TANH:
+            # Needs aiter >= v0.1.21 (ActivationType.GeluTanh); otherwise fall back
+            # to the non-AITER experts instead of failing at dispatch time.
+            return rocm_aiter_ops.fused_moe_supports_gelu_tanh()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,

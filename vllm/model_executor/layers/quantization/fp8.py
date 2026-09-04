@@ -542,15 +542,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> tuple[int, int]:
+        original = (hidden_size, intermediate_size_per_partition)
         hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
             hidden_size=hidden_size,
             intermediate_size_per_partition=intermediate_size_per_partition,
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        return fp8_round_up_hidden_size_and_intermediate_size(
+        rounded = fp8_round_up_hidden_size_and_intermediate_size(
             self.fp8_backend, hidden_size, intermediate_size_per_partition
         )
+        # The loader only narrow-copies the checkpoint into padded parameters, so
+        # padded expert weights (either dimension rounded up, by this method or by
+        # the base class) must be allocated zeroed; see create_weights.
+        self._pad_expert_weights = rounded != original
+        return rounded
 
     def create_weights(
         self,
@@ -603,8 +609,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_n, block_k = moe_block_shape
 
         # WEIGHTS
+        # Padded (rounded-up) expert weights must start zeroed: the loader only writes
+        # the checkpoint's real rows/columns and an uninitialized tail is live weight.
+        alloc = (
+            torch.zeros if getattr(self, "_pad_expert_weights", False) else torch.empty
+        )
         w13_weight = torch.nn.Parameter(
-            torch.zeros(
+            alloc(
                 num_experts,
                 self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
@@ -616,7 +627,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.zeros(
+            alloc(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,

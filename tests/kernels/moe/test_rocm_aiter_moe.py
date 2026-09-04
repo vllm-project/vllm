@@ -896,6 +896,26 @@ def test_aiter_fused_moe_gelu_tanh_accuracy():
         atol=0.05,
         rtol=0.0,
     )
+    # The tolerance above cannot tell tanh-GELU from exact GELU on its own: make
+    # sure the kernel actually applied the tanh variant by checking it sits closer
+    # to the tanh reference than to the exact-GELU reference on inputs where the
+    # two references measurably differ.
+    ref_exact = ref_moe_forward(
+        case["hidden_states"],
+        case["w1"],
+        case["w2"],
+        case["topk_weights"],
+        case["topk_ids"],
+        activation="gelu",
+    )
+    ref_gap = (ref_out - ref_exact).abs().mean().item()
+    assert ref_gap > 1e-4, f"references indistinguishable (gap={ref_gap:.2e})"
+    err_tanh = (out.float() - ref_out).abs().mean().item()
+    err_exact = (out.float() - ref_exact).abs().mean().item()
+    assert err_tanh < err_exact, (
+        f"kernel closer to exact GELU ({err_exact:.3e}) "
+        f"than to tanh GELU ({err_tanh:.3e})"
+    )
 
 
 def test_aiter_fused_moe_determinism():

@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+
 import torch
 from torch._ops import OpOverload
 
@@ -1907,6 +1908,18 @@ class rocm_aiter_ops:
         # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
         return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def fused_moe_supports_gelu_tanh() -> bool:
+        """aiter >= v0.1.21 (ROCm/aiter#4620) exposes ActivationType.GeluTanh for the
+        CK 2-stage fused MoE; older releases have no such enum member and the FP8
+        tkw1 path would reject the wire value."""
+        try:
+            from aiter import ActivationType
+        except ImportError:
+            return False
+        return hasattr(ActivationType, "GeluTanh")
 
     @classmethod
     @if_aiter_supported
