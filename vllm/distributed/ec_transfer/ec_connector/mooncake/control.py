@@ -228,7 +228,13 @@ class ConsumerControlServer:
             def queue_event(event: dict[str, Any]) -> None:
                 event["shard"] = self.port
                 if len(pending_events) >= _MAX_PENDING_EVENTS:
-                    pending_events.popleft()
+                    dropped = pending_events.popleft()
+                    logger.warning(
+                        "EC Mooncake event backlog full on port %d; dropping "
+                        "readiness for transfer_id=%s",
+                        self.port,
+                        dropped.get("transfer_id"),
+                    )
                 pending_events.append(event)
 
             def queue_ready(transfer_id: str) -> None:
@@ -266,6 +272,18 @@ class ConsumerControlServer:
                     try:
                         request = socket.recv_json()
                     except zmq.Again:
+                        continue
+                    except Exception:
+                        # The frame arrived but did not decode. REP still owes a
+                        # reply, so answer before returning to the loop.
+                        logger.exception(
+                            "EC Mooncake control channel on port %d received an "
+                            "undecodable request",
+                            self.port,
+                        )
+                        socket.send_json(
+                            {"ok": False, "error": "malformed control request"}
+                        )
                         continue
                     try:
                         op = request.get("op")
@@ -320,6 +338,15 @@ class ConsumerControlServer:
                         socket.send_json({"ok": True, "result": result})
                     except Exception as e:
                         socket.send_json({"ok": False, "error": str(e)})
+            except Exception:
+                # `finally` closes the sockets and the thread ends, so without
+                # this every later reserve against this shard would surface
+                # only as a control timeout with nothing to attribute it to.
+                logger.exception(
+                    "EC Mooncake control channel on port %d stopped serving",
+                    self.port,
+                )
+                raise
             finally:
                 socket.close(linger=0)
                 event_socket.close(linger=0)

@@ -435,6 +435,48 @@ class TestECMooncakeControlPlane:
         assert completed == [("transfer", "r0"), ("transfer", "r0")]
         assert cancelled == [("transfer", "r0", True, False)]
 
+    def test_server_keeps_serving_after_an_undecodable_request(self):
+        """One bad frame must not take the shard's control channel down.
+
+        The loop's `finally` closes both sockets, so an escaping exception ends
+        the thread silently and every later reserve against this shard surfaces
+        only as a control timeout.
+        """
+        port = _find_free_port()
+        server = ConsumerControlServer(
+            "127.0.0.1",
+            port,
+            reserve=lambda request: {"nbytes": request["nbytes"], "ready": False},
+            status=lambda transfer_id: None,
+            complete=lambda transfer_id, reservation_id: (True, True),
+            cancel=lambda transfer_id, reservation_id, abandon, refresh: True,
+            reap=lambda: 0,
+            peer_ports=[port],
+        )
+        server.start()
+        addr = f"tcp://127.0.0.1:{port}"
+        context = zmq.Context()
+        raw = context.socket(zmq.REQ)
+        raw.setsockopt(zmq.RCVTIMEO, 2000)
+        raw.setsockopt(zmq.LINGER, 0)
+        raw.connect(addr)
+        client = ControlClient(2000)
+        try:
+            raw.send(b"{not json")
+            assert raw.recv_json()["ok"] is False
+
+            # An unknown op raises inside the handler; both paths must leave
+            # the channel able to answer the next caller.
+            with pytest.raises(RuntimeError):
+                client.request(addr, {"op": "nonsense"})
+
+            assert client.request(addr, {"op": "peers"}) == {"ports": [port]}
+        finally:
+            raw.close(linger=0)
+            context.term()
+            client.close()
+            server.close()
+
 
 @pytest.fixture
 def mock_vllm_config_producer():

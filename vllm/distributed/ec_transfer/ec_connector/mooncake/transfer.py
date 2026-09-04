@@ -88,16 +88,17 @@ class MooncakeTransfer:
         engine = self._ensure_engine()
         address = tensor.data_ptr()
         ret = engine.unregister_memory(address)
-        if ret != 0:
-            logger.error(
-                "Mooncake EC memory unregistration failed for address %d: %d",
-                address,
-                ret,
-            )
-            self._pending_unregister[address] = tensor
-            return False
-        self._pending_unregister.pop(address, None)
-        return True
+        with self._registration_lock:
+            if ret != 0:
+                logger.error(
+                    "Mooncake EC memory unregistration failed for address %d: %d",
+                    address,
+                    ret,
+                )
+                self._pending_unregister[address] = tensor
+                return False
+            self._pending_unregister.pop(address, None)
+            return True
 
     @staticmethod
     def _source_range(tensor: torch.Tensor) -> tuple[int, int]:

@@ -187,7 +187,7 @@ class ECMooncakeWorker:
         shape = tuple(int(value) for value in payload["shape"])
         dtype_name = str(payload["dtype"])
         dtype = getattr(torch, dtype_name, None)
-        if dtype is None:
+        if not isinstance(dtype, torch.dtype):
             raise ValueError(f"Unsupported torch dtype string: {dtype_name!r}")
         expected_nbytes = math.prod(shape) * dtype.itemsize
         if expected_nbytes != nbytes:

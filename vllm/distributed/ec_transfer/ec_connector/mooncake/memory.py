@@ -361,10 +361,14 @@ class ConsumerMemoryPool:
             return True
 
         while self._residents.evict_lru(evict) is not None:
+            # Eviction defers any free whose CUDA event is still pending, so
+            # those bytes reach the allocator only once the event is polled.
+            self._poll_frees_locked()
             region = self._allocator.allocate(nbytes)
             if region is not None:
                 return region
-        return None
+        self._poll_frees_locked()
+        return self._allocator.allocate(nbytes)
 
     def _make_allocation(
         self,

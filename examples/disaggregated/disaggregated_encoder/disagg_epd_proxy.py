@@ -395,8 +395,11 @@ async def maybe_prefill(
 ) -> dict:
     """
     - Do prefill-only task if p_url exist;
-    - Return modified request data with kv transfer params (for nixl connector)
+    - Return a new body carrying kv transfer params (for nixl connector)
     - Else, skip and return the original request data for decode
+
+    `req_data` is never mutated: a decode retry re-enters this function with the
+    same body, and one attempt's `remote_block_ids` must not reach the next.
     """
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
@@ -406,11 +409,9 @@ async def maybe_prefill(
         prefill_response_json = await prefill_response.json()
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
+            return {**req_data, "kv_transfer_params": kv_transfer_params}
 
-        return req_data
-    else:
-        return req_data
+    return req_data
 
 
 async def process_prefill_stage(
