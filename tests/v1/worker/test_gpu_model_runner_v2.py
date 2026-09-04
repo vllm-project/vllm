@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -213,3 +214,84 @@ def test_append_block_ids_rejects_write_past_row_capacity():
         )
 
     assert block_tables.num_blocks.np[0, 1] == 3
+
+
+def _make_capture_runner(captured: bool) -> GPUModelRunner:
+    """Minimal V2 runner for capture_model: fakes everything except the
+    cudagraph_manager's needs_capture decision."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.cudagraph_manager = SimpleNamespace(
+        needs_capture=lambda: captured,
+        capture=lambda *args, **kwargs: None,
+    )
+    runner.lora_config = None
+    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    runner.speculator = None
+    runner.adaptive_verification = None
+    runner.model = None
+    runner.input_buffers = None
+    runner.pcp_manager = None
+    runner.intermediate_tensors = None
+    runner.block_tables = None
+    runner.attn_groups = None
+    runner.kv_cache_config = None
+    runner.use_aux_hidden_state_outputs = False
+    return runner
+
+
+def test_capture_model_locks_workspace_after_capture(monkeypatch):
+    """A workspace resize after capture frees the buffer the captured graphs
+    baked in, so capture_model must lock the workspace before returning
+    (https://github.com/vllm-project/vllm/issues/55336)."""
+    runner = _make_capture_runner(captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    runner.capture_model()
+
+    assert lock_calls == ["lock"]
+
+
+def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
+    """With no graphs to capture (e.g. enforce_eager) there is nothing baked
+    into the workspace, so the early return must not lock it."""
+    runner = _make_capture_runner(captured=False)
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    assert runner.capture_model() == 0
+    assert lock_calls == []
+
+
+def test_capture_model_profile_only_skips_lock(monkeypatch):
+    """The memory-profiling capture pass runs before kernel warmup and the
+    real capture; locking there would stop the warmup from growing the
+    workspace to its scheduler-realistic size."""
+    runner = _make_capture_runner(captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    lock_calls = []
+    monkeypatch.setattr(
+        model_runner_module, "lock_workspace", lambda: lock_calls.append("lock")
+    )
+
+    runner.capture_model(profile_only=True)
+
+    assert lock_calls == []
