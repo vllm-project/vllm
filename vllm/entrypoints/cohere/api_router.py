@@ -17,9 +17,9 @@ log) and vLLM continues to boot normally.
 
 Even when the SDK is installed, :func:`attach_router` also requires
 ``VLLM_ENABLE_COHERE_API=1`` in the environment before it will expose
-the routes. This keeps non-Cohere deployments that pull in the SDK for
-unrelated reasons (e.g. test dependencies) from accidentally exposing
-the api.
+the chat route. The render route additionally requires
+``VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1``. These gates keep unrelated
+deployments from accidentally exposing the APIs.
 
 Note: the handlers must live at module scope (not inside
 ``attach_router``) so that FastAPI's ``typing.get_type_hints`` resolves
@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -71,6 +71,7 @@ if _SDK_AVAILABLE:
     from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 
     router = APIRouter()
+    render_router = APIRouter()
 
     def _serving(request: Request) -> CohereServingChatV2 | None:
         return getattr(request.app.state, "cohere_serving_chat_v2", None)
@@ -154,7 +155,7 @@ if _SDK_AVAILABLE:
             case _:
                 return StreamingResponse(content=result, media_type="text/event-stream")
 
-    @router.post(
+    @render_router.post(
         "/cohere/v2/chat/render",
         dependencies=[Depends(validate_json_request)],
         response_model=GenerateRequest,
@@ -273,7 +274,7 @@ if _SDK_AVAILABLE:
 
 
 def attach_router(app: FastAPI) -> None:
-    """Register the ``/cohere/v2/chat`` routes on ``app``.
+    """Register the enabled ``/cohere/v2/chat`` routes on ``app``.
 
     No-op when either:
 
@@ -305,4 +306,6 @@ def attach_router(app: FastAPI) -> None:
         )
         return
     app.include_router(router)
+    if envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS:
+        app.include_router(render_router)
     app.add_middleware(CohereErrorEnvelopeMiddleware)

@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -310,7 +311,7 @@ def build_c128a_topk_metadata(
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
     Writes into pre-allocated buffers for CUDA graph address stability.
-    Returns slices of the buffers.
+    Returns views of the buffers.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
@@ -322,7 +323,13 @@ def build_c128a_topk_metadata(
     )
     assert global_decode_buffer.stride(-1) == prefill_buffer.stride(-1) == 1
 
-    global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
+    # TODO: support adaptive-width decode on SM120 (needs the FlashInfer
+    # SM120 kernel to accept a real row stride for eidx).
+    capability = current_platform.get_device_capability()
+    if capability is not None and capability.major == 12:
+        global_decode = global_decode_buffer[:num_decode_tokens]
+    else:
+        global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
     prefill_local = prefill_buffer[:num_prefill_tokens, :max_compressed_tokens]
     assert global_decode.stride(0) == global_decode_buffer.stride(0)

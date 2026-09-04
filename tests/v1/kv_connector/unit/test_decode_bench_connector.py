@@ -20,13 +20,29 @@ from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import 
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    KVCacheBlock,
+    get_request_block_hasher,
+    init_none_hash,
+    make_block_hash_with_group_id,
+)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request
 
 from .utils import (
     EOS_TOKEN_ID,
     create_model_runner_output,
+    create_request,
     create_scheduler,
     create_vllm_config,
 )
@@ -65,11 +81,10 @@ class DecodeBenchTestRunner:
         # Using simplified shape for testing
         num_heads = 4
         head_dim = 64
+        layer_names = self.scheduler.kv_cache_config.kv_cache_groups[0].layer_names
         self.kv_caches = {
-            f"layer_{i}": torch.zeros(
-                num_gpu_blocks, 2, num_heads, block_size, head_dim
-            )
-            for i in range(2)  # 2 layers for testing
+            layer_name: torch.zeros(num_gpu_blocks, 2, num_heads, block_size, head_dim)
+            for layer_name in layer_names
         }
 
         # Register KV caches with worker connector
@@ -177,6 +192,360 @@ def test_decode_bench_connector_basic():
             block_data = kv_cache[block_id]
             # Should be filled with constant value 0.015
             assert torch.allclose(block_data, torch.tensor(0.015))
+
+
+def test_decode_bench_connector_prefix_hit_fills_only_suffix_blocks():
+    """A local prefix-cache hit shifts the fill to the suffix blocks."""
+    block_size = 16
+    runner = DecodeBenchTestRunner(block_size=block_size, num_gpu_blocks=100)
+
+    prefix = list(range(1, 1 + block_size * 3))
+    req1 = runner.new_request(prefix)
+    _, metadata = runner.run_single_step()
+    (prefix_block_ids,), _ = metadata.reqs_to_fill[req1.request_id]
+    assert len(prefix_block_ids) == 3
+
+    scheduler_output = runner.scheduler.schedule()
+    runner.scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            reqs=runner.scheduler.running,
+            token_id=EOS_TOKEN_ID,
+            use_eos=True,
+        ),
+    )
+    assert not runner.scheduler.running
+
+    suffix = list(range(1000, 1000 + block_size * 2))
+    req2 = runner.new_request(prefix + suffix)
+    _, metadata = runner.run_single_step()
+    (fill_block_ids,), num_tokens_to_fill = metadata.reqs_to_fill[req2.request_id]
+
+    req2_block_ids = runner.scheduler.kv_cache_manager.get_block_ids(req2.request_id)[0]
+    assert req2_block_ids[:3] == prefix_block_ids
+    assert num_tokens_to_fill == len(suffix) - 1
+    assert fill_block_ids == req2_block_ids[3:5]
+    assert set(fill_block_ids).isdisjoint(prefix_block_ids)
+    for kv_cache in runner.kv_caches.values():
+        for block_id in fill_block_ids:
+            assert torch.allclose(kv_cache[block_id], torch.tensor(0.015))
+
+
+def test_decode_bench_connector_fills_each_hma_group():
+    """Each cache group is filled using its own block IDs."""
+    block_size = 16
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["group_0_layer"], kv_cache_spec),
+            KVCacheGroupSpec(["group_1_layer"], kv_cache_spec),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    group_0_cache = torch.zeros(num_gpu_blocks, 2)
+    group_1_cache = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches(
+        {
+            "group_0_layer": group_0_cache,
+            "group_1_layer": group_1_cache,
+        }
+    )
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([1], [5]), block_size)})
+    )
+
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    assert torch.allclose(group_0_cache[1], torch.tensor(0.015))
+    assert torch.count_nonzero(group_0_cache[5]) == 0
+    assert torch.count_nonzero(group_1_cache[1]) == 0
+    assert torch.allclose(group_1_cache[5], torch.tensor(0.015))
+
+
+def test_decode_bench_connector_zero_fills_circular_buffer_groups():
+    """Circular buffers are zeroed to preserve packed non-floating metadata."""
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["circular_layer"],
+                CircularBufferSpec(
+                    block_size=2,
+                    num_kv_heads=1,
+                    head_size=16,
+                    head_size_v=0,
+                    dtype=torch.bfloat16,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    circular_cache = torch.ones(num_gpu_blocks, 16, dtype=torch.bfloat16)
+    connector.register_kv_caches({"circular_layer": circular_cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([5],), 1)})
+    )
+
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
+
+    expected_circular = torch.ones_like(circular_cache)
+    expected_circular[5] = 0
+    assert torch.equal(circular_cache, expected_circular)
+
+
+def test_decode_bench_connector_selects_external_blocks_per_group():
+    """External fills follow the local prefix using each group's block size."""
+    vllm_config = create_vllm_config(
+        block_size=16,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["full_attention"],
+            FullAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["compressor_ring"],
+            CircularBufferSpec(
+                block_size=32,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+        ),
+    ]
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=kv_cache_groups,
+        ),
+    )
+    num_local_tokens = 32
+    num_external_tokens = 17
+    request = create_request(
+        request_id=1,
+        num_tokens=num_local_tokens + num_external_tokens + 1,
+        block_size=16,
+    )
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=0),
+                KVCacheBlock(block_id=1),
+                # Full external blocks may already be hashed by allocate_slots().
+                KVCacheBlock(
+                    block_id=2,
+                    _block_hash=make_block_hash_with_group_id(
+                        BlockHash(b"external-full-block"), 0
+                    ),
+                    _block_hash_num_tokens=48,
+                ),
+                KVCacheBlock(block_id=3),
+            ],
+            [KVCacheBlock(block_id=4)],
+        )
+    )
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    block_ids_per_group, num_tokens = metadata.reqs_to_fill[request.request_id]
+    assert block_ids_per_group == ([2, 3], [4])
+    assert num_tokens == num_external_tokens
+
+
+def test_decode_bench_connector_selects_unaligned_external_block():
+    """An external interval includes the block containing its first token."""
+    block_size = 32
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        ),
+    )
+    num_local_tokens = 23
+    num_external_tokens = 17
+    request = create_request(
+        request_id=1,
+        num_tokens=num_local_tokens + num_external_tokens + 1,
+        block_size=block_size,
+    )
+    blocks = KVCacheBlocks(([KVCacheBlock(block_id=1), KVCacheBlock(block_id=2)],))
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill[request.request_id] == (
+        ([1, 2],),
+        num_external_tokens,
+    )
+
+
+def test_decode_bench_connector_skips_null_padding():
+    """External fills exclude null padding from a sliding-window group."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=2 * block_size,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        ),
+    )
+    num_external_tokens = 4 * block_size
+    request = create_request(
+        request_id=1,
+        num_tokens=num_external_tokens + 1,
+        block_size=block_size,
+    )
+    null_block = KVCacheBlock(block_id=0, is_null=True)
+    blocks = KVCacheBlocks(
+        (
+            [
+                null_block,
+                null_block,
+                KVCacheBlock(block_id=1),
+                KVCacheBlock(block_id=2),
+                KVCacheBlock(block_id=3),
+            ],
+        )
+    )
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill[request.request_id] == (
+        ([1, 2],),
+        num_external_tokens,
+    )
+
+
+def test_decode_bench_connector_uses_per_group_dcp_block_sizes():
+    """DCP scales full-attention blocks but not sliding-window blocks."""
+    block_size = 16
+    dcp_world_size = 2
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        kv_connector="DecodeBenchConnector",
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    full_attention = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    sliding_window = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=2 * block_size,
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.SCHEDULER,
+        KVCacheConfig(
+            num_blocks=8,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(["full_attention"], full_attention),
+                KVCacheGroupSpec(["sliding_window"], sliding_window),
+            ],
+        ),
+    )
+    num_external_tokens = block_size * dcp_world_size + 1
+    request = create_request(
+        request_id=1,
+        num_tokens=num_external_tokens + 1,
+        block_size=block_size,
+    )
+    blocks = KVCacheBlocks(
+        (
+            [KVCacheBlock(block_id=i) for i in (1, 2, 3)],
+            [KVCacheBlock(block_id=i) for i in (5, 6, 7, 8)],
+        )
+    )
+
+    connector.update_state_after_alloc(request, blocks, num_external_tokens)
+    metadata = connector.build_connector_meta(SchedulerOutput.make_empty())
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert metadata.reqs_to_fill[request.request_id] == (
+        ([1, 2], [5, 6, 7]),
+        num_external_tokens,
+    )
 
 
 def test_decode_bench_connector_no_refill():

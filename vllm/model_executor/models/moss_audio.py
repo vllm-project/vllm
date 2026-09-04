@@ -5,6 +5,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Annotated, Any
 
 import numpy as np
@@ -14,10 +15,11 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, Qwen3Config
 from transformers.models.whisper import WhisperFeatureExtractor
+from typing_extensions import TypedDict
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -89,6 +91,16 @@ DEFAULT_MOSS_AUDIO_MEL_CONFIG = {
     "mel_hop_length": 160,
     "mel_n_fft": 400,
 }
+
+
+class MossAudioProcessorKwargs(TypedDict):
+    audio_token_id: int
+    audio_start_id: int
+    audio_end_id: int
+    enable_time_marker: bool
+    mel_config: dict[str, int]
+
+
 MOSS_AUDIO_PLACEHOLDER = (
     f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
 )
@@ -170,7 +182,9 @@ def _extract_moss_audio_mel_config(
     for target_key, source_keys in aliases.items():
         for source_key in source_keys:
             if source_key in mel_config:
-                config[target_key] = int(mel_config[source_key])
+                value = mel_config[source_key]
+                assert isinstance(value, int)
+                config[target_key] = value
                 break
 
     return config
@@ -963,6 +977,9 @@ class MossAudioProcessor:
         enable_time_marker: bool = False,
         mel_config: Mapping[str, object] | None = None,
     ) -> None:
+        assert hasattr(tokenizer, "encode")
+        assert hasattr(tokenizer, "decode")
+        assert hasattr(tokenizer, "batch_decode")
         self.tokenizer = tokenizer
         self.audio_token_id = int(audio_token_id)
         self.audio_start_id = int(audio_start_id)
@@ -1229,15 +1246,19 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
 
     @staticmethod
     def _get_processor_cache_key(kwargs: Mapping[str, object]) -> tuple[object, ...]:
-        mel_config = _normalize_moss_audio_mel_config(
-            kwargs.get("mel_config")
-            if isinstance(kwargs.get("mel_config"), Mapping)
-            else None
-        )
+        mel_config_arg = kwargs.get("mel_config")
+        assert mel_config_arg is None or isinstance(mel_config_arg, Mapping)
+        mel_config = _normalize_moss_audio_mel_config(mel_config_arg)
+        audio_token_id = kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)
+        audio_start_id = kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)
+        audio_end_id = kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)
+        assert isinstance(audio_token_id, int)
+        assert isinstance(audio_start_id, int)
+        assert isinstance(audio_end_id, int)
         return (
-            int(kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)),
-            int(kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)),
-            int(kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)),
+            audio_token_id,
+            audio_start_id,
+            audio_end_id,
             bool(kwargs.get("enable_time_marker", False)),
             tuple(sorted(mel_config.items())),
         )
@@ -1248,21 +1269,19 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
             self.ctx.get_merged_mm_kwargs({}),
             kwargs,
         )
-        mel_config = _normalize_moss_audio_mel_config(
-            merged_kwargs.get("mel_config")
-            if isinstance(merged_kwargs.get("mel_config"), Mapping)
-            else None
-        )
-        processor_kwargs = {
-            "audio_token_id": int(
-                merged_kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)
-            ),
-            "audio_start_id": int(
-                merged_kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)
-            ),
-            "audio_end_id": int(
-                merged_kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)
-            ),
+        mel_config_arg = merged_kwargs.get("mel_config")
+        assert mel_config_arg is None or isinstance(mel_config_arg, Mapping)
+        mel_config = _normalize_moss_audio_mel_config(mel_config_arg)
+        audio_token_id = merged_kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)
+        audio_start_id = merged_kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)
+        audio_end_id = merged_kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)
+        assert isinstance(audio_token_id, int)
+        assert isinstance(audio_start_id, int)
+        assert isinstance(audio_end_id, int)
+        processor_kwargs: MossAudioProcessorKwargs = {
+            "audio_token_id": audio_token_id,
+            "audio_start_id": audio_start_id,
+            "audio_end_id": audio_end_id,
             "enable_time_marker": bool(merged_kwargs.get("enable_time_marker", False)),
             "mel_config": mel_config,
         }
@@ -1326,6 +1345,7 @@ class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=16000,
@@ -1423,7 +1443,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                 ),
             )
 
-        prompt_update_specs = [
+        prompt_update_specs: list[tuple[list[int], list[int]]] = [
             (
                 [
                     processor.audio_start_id,
@@ -1452,12 +1472,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
             PromptReplacement(
                 modality="audio",
                 target=target,
-                replacement=(
-                    lambda item_idx, suffix_token_ids=suffix_token_ids: get_replacement(
-                        item_idx,
-                        suffix_token_ids,
-                    )
-                ),
+                replacement=partial(get_replacement, suffix_token_ids=suffix_token_ids),
             )
             for target, suffix_token_ids in prompt_update_specs
         ]

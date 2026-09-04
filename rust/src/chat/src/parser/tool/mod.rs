@@ -29,6 +29,7 @@ pub mod names {
     pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
     pub const HY_V3: &str = "hy_v3";
+    pub const HY_V4: &str = "hy_v4";
     // Matches the Python CLI name `--tool-call-parser internlm`, which Python
     // also routes to `Internlm2ToolParser` despite the version-agnostic name.
     pub const INTERNLM: &str = "internlm";
@@ -77,6 +78,7 @@ impl ToolParserFactory {
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_unified_dummy(names::HY_V3)
+            .register_unified_dummy(names::HY_V4)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
@@ -100,6 +102,7 @@ impl ToolParserFactory {
             .register_pattern("qwen3", names::QWEN3_XML)
             .register_pattern("hermes", names::HERMES)
             .register_pattern("hy3", names::HY_V3)
+            .register_pattern("hy4", names::HY_V4)
             // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
             // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
             // routes to Llama), `internlm3-*` (also Llama-architecture per

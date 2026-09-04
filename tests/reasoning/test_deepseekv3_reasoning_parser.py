@@ -4,8 +4,8 @@
 import pytest
 from transformers import AutoTokenizer
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser

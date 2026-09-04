@@ -465,6 +465,7 @@ def make_kv_cache_config(
     mamba_enabled: bool = False,
     sw_size: int = 128,
     num_blocks: int = 100,
+    mamba_cache_mode: Literal["all", "align", "none"] = "none",
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
@@ -498,6 +499,7 @@ def make_kv_cache_config(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
+                    mamba_cache_mode=mamba_cache_mode,
                 ),
             )
         )
@@ -524,6 +526,10 @@ def make_nixl_scheduler(
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
 
     if heartbeat:
         sched._heartbeat_by_engine = {}
@@ -582,6 +588,10 @@ def make_nixl_push_scheduler(
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
     sched._has_mamba = has_mamba
+    sched.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=has_mamba,
+    )
 
     # vllm_config is consulted for parallel_config.tensor_parallel_size.
     vllm_config = MagicMock()

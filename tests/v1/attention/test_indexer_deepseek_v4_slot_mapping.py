@@ -8,9 +8,15 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    CompressedSlotMappingKernel,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
     DeepseekV32IndexerMetadataBuilder,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    ConvertReqIndexToGlobalIndexKernel,
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.worker.block_table import get_block_table_width
@@ -20,7 +26,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0], index_kpool=32)
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
@@ -30,7 +36,42 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
-    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
+    assert {key.compress_ratio for key in keys} == {1, 4, 32, 128}
+    assert {(key.query_slice_start, key.query_slice_stop) for key in keys} == {
+        (query_slice_start, query_slice_stop)
+        for query_slice_start in (1, 2, 16)
+        for query_slice_stop in (1, 2, 16)
+    }
+
+
+def test_compressed_slot_mapping_warmup_includes_index_kpool():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_kpool=32)),
+    )
+
+    keys = CompressedSlotMappingKernel().get_warmup_keys(config)
+    assert {(key.compress_ratio, key.block_size) for key in keys} == {(32, 2)}
+
+
+def test_index_conversion_warmup_uses_physical_block_stride():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64),
+        model_config=SimpleNamespace(
+            max_model_len=1024,
+            hf_config=SimpleNamespace(index_topk=2048),
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = ConvertReqIndexToGlobalIndexKernel().get_warmup_keys(
+        config,
+        block_stride_rows=4096,
+    )
+    assert {key.block_stride_rows for key in keys} == {4096}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

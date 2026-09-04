@@ -289,8 +289,8 @@ class KVConnectorBase_V1(ABC):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
-        KV buffer. This is called from the forward context before the
-        forward pass to enable async loading during model execution.
+        KV buffer. Loads required by the current forward start before it;
+        independent asynchronous loads may start after it is submitted.
 
         Args:
             forward_context (ForwardContext): the forward context.
@@ -560,6 +560,19 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Register finish-time partial-tail sources before block cleanup.
+
+        Returns True when the connector accepts responsibility for the sources
+        and the request's blocks must remain alive until ``get_finished()``.
+        """
+        return False
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """

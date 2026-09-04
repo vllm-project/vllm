@@ -32,6 +32,11 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,13 +44,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    PromptTokenUsageInfo,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )

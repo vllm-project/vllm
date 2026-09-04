@@ -144,6 +144,7 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create a mock context
     mock_ctx = Mock(spec=InputProcessingContext)
+    mock_ctx.tokenizer = mock_tokenizer
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)

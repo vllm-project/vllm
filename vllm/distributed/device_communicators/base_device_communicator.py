@@ -226,6 +226,12 @@ class DeviceCommunicatorBase:
     def checkpoint_restore(self) -> None:
         """Restore communicator state after checkpoint (default: no-op)."""
 
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
             # Convert negative dim to positive.

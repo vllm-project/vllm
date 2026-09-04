@@ -35,7 +35,7 @@ if is_aiter_found_and_supported():
     ) -> torch.Tensor:
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
-            gemm_afp4wfp4_preshuffled_weight_scales,
+            gemm_afp4wfp4_preshuffle,
         )
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -63,7 +63,7 @@ if is_aiter_found_and_supported():
                     x_s = x_s[:M, ...].view(torch.uint8)
 
                 y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
-                gemm_afp4wfp4_preshuffled_weight_scales(
+                gemm_afp4wfp4_preshuffle(
                     x_q.view(torch.uint8),
                     weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
                     x_s,

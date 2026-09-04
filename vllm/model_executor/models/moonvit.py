@@ -551,9 +551,11 @@ class MoonVitEncoder(nn.Module):
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if rope_freqs_cis is None:
+            assert grid_hw is not None
             rope_freqs_cis = self.rope_2d.get_freqs_cis_by_seqlens(grid_hws=grid_hw)
 
         if cu_seqlens is None:
+            assert grid_hw is not None
             lengths = torch.cat(
                 (
                     torch.zeros(1, device=hidden_states.device, dtype=grid_hw.dtype),
@@ -578,7 +580,7 @@ class MoonVitEncoder(nn.Module):
 def patch_merger(
     x: torch.Tensor,
     grid_hw: torch.Tensor,
-    merge_kernel_size: list[int, int] = (2, 2),
+    merge_kernel_size: tuple[int, int] = (2, 2),
 ) -> list[torch.Tensor]:
     d_model = x.size(-1)
 

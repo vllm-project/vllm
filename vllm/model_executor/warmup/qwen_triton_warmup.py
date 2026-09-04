@@ -10,6 +10,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -37,6 +38,9 @@ class _QwenGDNWarmupConfig:
     conv_kernel_size: int
     conv_state: torch.Tensor
     conv_dtype: torch.dtype
+    norm_weight_dtype: torch.dtype
+    norm_before_gate: bool
+    norm_activation: str
     a_log: torch.Tensor
     dt_bias: torch.Tensor
     state_stride_token: int
@@ -62,6 +66,7 @@ def _is_qwen_gdn_layer(module: object) -> bool:
             "conv_kernel_size",
             "tp_size",
             "kv_cache",
+            "norm",
             "A_log",
             "dt_bias",
         )
@@ -112,6 +117,7 @@ def _qwen_gdn_warmup_config(
         tp_size = int(layer.tp_size)
         h = int(layer.num_k_heads) // tp_size
         hv = int(layer.num_v_heads) // tp_size
+        norm = layer.norm
 
         return _QwenGDNWarmupConfig(
             h=h,
@@ -121,6 +127,9 @@ def _qwen_gdn_warmup_config(
             conv_kernel_size=int(layer.conv_kernel_size),
             conv_state=conv_state,
             conv_dtype=conv_state.dtype,
+            norm_weight_dtype=norm.weight.dtype,
+            norm_before_gate=bool(norm.norm_before_gate),
+            norm_activation=str(norm.activation),
             a_log=layer.A_log,
             dt_bias=layer.dt_bias,
             state_stride_token=int(ssm_state.stride(0)),
@@ -132,6 +141,29 @@ def _qwen_gdn_warmup_config(
     else:
         logger.info("Skipping Qwen GDN Triton warmup: no Qwen GDN layer found.")
     return None
+
+
+def _warm_gated_rms_norm_kernel(
+    device: torch.device,
+    config: _QwenGDNWarmupConfig,
+    max_num_tokens: int,
+    x_dtype: torch.dtype,
+) -> None:
+    from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+        warmup_layer_norm_fwd,
+    )
+
+    warmup_layer_norm_fwd(
+        max_num_tokens=max_num_tokens,
+        rows_per_token=config.hv,
+        group_size=config.v,
+        x_dtype=x_dtype,
+        weight_dtype=config.norm_weight_dtype,
+        device=device,
+        norm_before_gate=config.norm_before_gate,
+        is_rms_norm=True,
+        activation=config.norm_activation,
+    )
 
 
 def _warm_causal_conv1d_fwd_kernel(
@@ -249,7 +281,7 @@ def _synchronize_device(device: torch.device) -> None:
 @torch.inference_mode()
 def qwen_triton_warmup(
     runner: "GPUModelRunner",
-    model_config: object,
+    model_config: "ModelConfig",
 ) -> None:
     """Warm Qwen Triton kernels reported by the JIT monitor."""
     if runner.is_pooling_model:
@@ -275,6 +307,8 @@ def qwen_triton_warmup(
     if gdn_config is None:
         return
 
+    max_num_tokens = max(1, int(getattr(runner, "max_num_tokens", 1)))
+    _warm_gated_rms_norm_kernel(device, gdn_config, max_num_tokens, model_config.dtype)
     _warm_causal_conv1d_fwd_kernel(device, gdn_config)
     _warm_fused_post_conv_kernel(device, gdn_config)
     _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, gdn_config)

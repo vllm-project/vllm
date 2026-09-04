@@ -45,6 +45,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "nvfp4_ds_mla": torch.uint8,
     "turboquant_k8v4": torch.uint8,
     "turboquant_4bit_nc": torch.uint8,
     "turboquant_k3v4_nc": torch.uint8,
@@ -163,8 +164,10 @@ def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
-    yield
-    torch.set_default_dtype(old_dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(old_dtype)
 
 
 def _cgroup_cpu_limit() -> float | None:

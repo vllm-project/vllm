@@ -6,9 +6,10 @@ use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
-use crate::error::ApiError;
+use crate::error::{ApiError, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
+use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
@@ -40,7 +41,7 @@ pub(super) struct ResponseOptions {
     /// Prompt text that should be echoed back northbound when `echo=true`.
     pub echo: Option<String>,
     /// Whether the caller requested output logprobs on completion choices.
-    pub requested_logprobs: Option<u32>,
+    pub requested_logprobs: Option<i32>,
     /// Whether the caller requested choice-level prompt logprobs.
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
@@ -62,6 +63,12 @@ pub(super) fn prepare_completion_request(
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
+    let prompt_truncation = resolve_generation_prompt_truncation(
+        request.truncate_prompt_tokens,
+        request.truncation_side,
+    )
+    .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
+
     let request_id = format!("cmpl-{}", ctx.request_id);
     let response_model = lora_resolution
         .lora_request
@@ -69,15 +76,7 @@ pub(super) fn prepare_completion_request(
         .map(|request| request.lora_name.clone())
         .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
 
-    let logprobs = match request.logprobs {
-        Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
-            ApiError::invalid_request(
-                "`logprobs` must fit within a signed 32-bit integer.".to_string(),
-                Some("logprobs"),
-            )
-        })?),
-        None => None,
-    };
+    let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
     let prompt_logprobs =
         request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
@@ -149,6 +148,7 @@ pub(super) fn prepare_completion_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
+        prompt_truncation,
         priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
@@ -207,7 +207,8 @@ fn completion_echo_text(
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
-    use vllm_text::Prompt;
+    use validator::Validate;
+    use vllm_text::{Prompt, PromptTruncation, PromptTruncationLimit, TruncationSide};
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
@@ -245,7 +246,35 @@ mod tests {
             serde_json::from_value(base_request_json()).expect("parse request");
 
         assert_eq!(request.prompt, Prompt::Text("hello".to_string()));
-        assert_eq!(request.model, "Qwen/Qwen1.5-0.5B-Chat");
+        assert_eq!(request.model.as_deref(), Some("Qwen/Qwen1.5-0.5B-Chat"));
+    }
+
+    #[test]
+    fn completion_http_request_defaults_missing_or_null_model() {
+        for model in [None, Some(serde_json::Value::Null)] {
+            let mut value = base_request_json();
+            let object = value.as_object_mut().expect("request object");
+            match model {
+                Some(model) => {
+                    object.insert("model".to_string(), model);
+                }
+                None => {
+                    object.remove("model");
+                }
+            }
+
+            let request: CompletionRequest =
+                serde_json::from_value(value).expect("parse request without model");
+            assert!(request.model.is_none());
+        }
+
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("model".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse empty model");
+        assert_eq!(request.model.as_deref(), Some(""));
     }
 
     #[test]
@@ -262,6 +291,69 @@ mod tests {
         assert_eq!(request.prompt, Prompt::TokenIds(vec![11, 22, 33]));
         assert_eq!(request.max_tokens, Some(7));
         assert!(request.ignore_eos);
+    }
+
+    #[test]
+    fn completion_http_request_rejects_empty_cache_salt() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("cache_salt".to_string(), json!(""));
+        let request: CompletionRequest = serde_json::from_value(value).expect("parse cache_salt");
+
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn prepare_completion_request_normalizes_top_k_sentinels() {
+        for (top_k, expected) in [
+            (serde_json::Value::Null, None),
+            (json!(-1), Some(0)),
+            (json!(0), Some(0)),
+            (json!(20), Some(20)),
+        ] {
+            let mut value = base_request_json();
+            value
+                .as_object_mut()
+                .expect("request object")
+                .insert("top_k".to_string(), top_k);
+            let request: CompletionRequest = serde_json::from_value(value).expect("parse top_k");
+            let prepared = prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_tokenizer(),
+            )
+            .expect("prepare top_k");
+
+            assert_eq!(prepared.text_request.sampling_params.top_k, expected);
+        }
+    }
+
+    #[test]
+    fn prepare_completion_request_uses_left_when_side_is_omitted() {
+        let mut value = base_request_json();
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert("truncate_prompt_tokens".to_string(), json!(-1));
+        let request = serde_json::from_value(value).expect("parse truncation");
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare truncation");
+
+        assert_eq!(
+            prepared.text_request.prompt_truncation,
+            Some(PromptTruncation {
+                limit: PromptTruncationLimit::InputBudget,
+                side: TruncationSide::Left,
+            })
+        );
     }
 
     #[test]
@@ -570,6 +662,28 @@ mod tests {
             prepared.text_request.sampling_params.prompt_logprobs,
             Some(2)
         );
+    }
+
+    #[test]
+    fn prepare_completion_request_accepts_full_vocab_logprobs() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "logprobs": -1
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare full-vocabulary logprobs");
+
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(-1));
+        assert_eq!(prepared.options.requested_logprobs, Some(-1));
     }
 
     #[test]

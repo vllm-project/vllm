@@ -11,9 +11,14 @@ See https://github.com/vllm-project/vllm/issues/49224.
 """
 
 import contextlib
+import gc
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+import torch
+
+from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu import cudagraph_utils as cgu
@@ -335,3 +340,101 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
     assert runner.speculator.cudagraph_manager is None
     # The real global pool is restored afterwards.
     assert _FakePlatform._global_graph_pool == GLOBAL_POOL
+
+
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(not cgu.current_platform.is_cuda(), reason="requires CUDA")
+def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
+    """Profiling graph memory must be freed before teardown completes."""
+
+    @contextlib.contextmanager
+    def _fake_set_current_vllm_config(_cfg):
+        yield
+
+    runner = _make_profiling_runner(CUDAGraphMode.FULL_AND_PIECEWISE)
+    runner.compilation_config.static_forward_context = {}
+    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+    allocation_bytes = 64 << 20
+    memory: dict[str, int] = {}
+
+    torch.accelerator.synchronize()
+    gc.collect()
+    torch.accelerator.empty_cache()
+    memory["before"] = torch.accelerator.memory_reserved()
+
+    def _init(r):
+        r.events.append("init")
+        kv_cache = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
+        r.kv_caches = [kv_cache]
+        r.compilation_config.static_forward_context = {
+            "layer": SimpleNamespace(kv_cache=kv_cache)
+        }
+        manager = cgu.CudaGraphManager.__new__(cgu.CudaGraphManager)
+        manager.pool = cgu.current_platform.get_global_graph_pool()
+        r.speculator = SimpleNamespace(cudagraph_manager=manager)
+
+    def _capture_model() -> int:
+        for owner in (
+            runner.cudagraph_manager,
+            runner.speculator.cudagraph_manager,
+        ):
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=owner.pool):
+                output = torch.empty(allocation_bytes, dtype=torch.uint8, device="cuda")
+                output.fill_(1)
+            owner.profiling_resources = (graph, output)
+        torch.accelerator.synchronize()
+        memory["captured"] = torch.accelerator.memory_reserved()
+        return memory["captured"] - memory["before"]
+
+    monkeypatch.setattr(cgu, "set_current_vllm_config", _fake_set_current_vllm_config)
+    monkeypatch.setattr(cgu, "_init_minimal_kv_cache_for_profiling", _init)
+    runner.capture_model = _capture_model
+
+    cgu.profile_cudagraph_memory(runner)
+    memory["after"] = torch.accelerator.memory_reserved()
+
+    assert memory["captured"] - memory["before"] >= 3 * allocation_bytes
+    assert memory["after"] == memory["before"]
+
+
+def test_teardown_profiling_state_clears_mamba_align_metadata(monkeypatch):
+    """Profiling-cached Mamba align metadata must be invalidated at teardown.
+
+    ``MambaHybridModelState`` lazily caches ``_mamba_group_ids`` and
+    ``_mamba_spec`` from whichever KVCacheConfig it first sees. When the
+    profiling config's group layout differs from the real (e.g. PP-projected)
+    config, reusing the stale metadata mismatches the real block tables
+    ("expected 3 block tables, got 4" at
+    ``MambaSpecDecodeGPUContext.initialize_from_forward_context``).
+    """
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=False,
+        _mamba_ctx=object(),
+        _mamba_group_ids=[0, 1],
+        _mamba_spec=object(),
+    )
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=1)
+    runner.kv_caches = []
+    runner.attn_groups = []
+    runner.kv_cache_config = SimpleNamespace()
+    runner.cudagraph_manager = object()
+    runner.lora_config = None
+    runner.maybe_remove_all_loras = lambda _: None
+
+    monkeypatch.setattr(cgu.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(cgu.torch.accelerator, "empty_cache", lambda: None)
+
+    cgu._teardown_profiling_state(runner)
+
+    assert runner.model_state._mamba_ctx is None
+    assert runner.model_state._mamba_group_ids == []
+    assert runner.model_state._mamba_spec is None
