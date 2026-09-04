@@ -43,6 +43,12 @@ class ConchLinearKernel(MPLinearKernel):
             )
             return False, error_msg
 
+        if c.has_g_idx:
+            return (
+                False,
+                "Activation reordering (g_idx) is not supported by ConchLinearKernel",
+            )
+
         if find_spec("conch") is None:
             error_msg = (
                 "conch-triton-kernels is not installed, please "
@@ -134,8 +140,11 @@ class ConchLinearKernel(MPLinearKernel):
         if group_size == -1:
             group_size = x.shape[-1]
 
+        x_2d = x.reshape(-1, x.shape[-1])
+        out_shape = x.shape[:-1] + (self.config.partition_weight_shape[1],)
+
         output = mixed_precision_gemm(
-            x=x,
+            x=x_2d,
             w_q_packed=w_q.data,
             w_s=w_s.data,
             w_zp=w_zp.data if w_zp is not None else None,
@@ -147,4 +156,4 @@ class ConchLinearKernel(MPLinearKernel):
         if bias is not None:
             output.add_(bias)  # In-place add
 
-        return output
+        return output.reshape(out_shape)

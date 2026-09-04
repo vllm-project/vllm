@@ -3,4 +3,4 @@
 model_name: openai/gpt-oss-20b
 metric_threshold: 0.568
 reasoning_effort: low
-server_args: "--attention-backend ROCM_AITER_UNIFIED_ATTN"
+server_args: "--attention-backend ROCM_AITER_UNIFIED_ATTN --tensor-parallel-size 2"

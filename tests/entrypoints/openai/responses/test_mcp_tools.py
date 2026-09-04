@@ -7,10 +7,13 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from openai import OpenAI
-from openai_harmony import ToolDescription, ToolNamespaceConfig
+from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.mcp.tool_server import MCPToolServer
+from vllm.entrypoints.mcp.tool_server import (
+    MCPToolServer,
+    post_process_tools_description,
+)
 
 from .conftest import (
     BASE_TEST_ENV,
@@ -36,8 +39,9 @@ _PYTHON_TOOL_INSTRUCTION = (
 )
 
 
+@pytest.mark.skip_global_cleanup
 class TestMCPToolServerUnit:
-    """Test MCPToolServer.get_tool_description filtering logic.
+    """Test MCP tool description processing and filtering.
 
     Note: The wildcard "*" is normalized to None by
     _extract_allowed_tools_from_mcp_requests before reaching this layer,
@@ -95,6 +99,41 @@ class TestMCPToolServerUnit:
 
         # Empty list - returns None
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
+
+    def test_post_process_tools_description_uses_trim_schema_result(self, monkeypatch):
+        mcp_types = pytest.importorskip("mcp.types")
+        tool = mcp_types.Tool(
+            name="tool",
+            input_schema={"type": "object"},
+        )
+        result = mcp_types.ListToolsResult(tools=[tool])
+        trimmed_schema = {"type": "object", "properties": {}}
+
+        monkeypatch.setattr(
+            "vllm.entrypoints.mcp.tool_server.trim_schema",
+            lambda _schema: trimmed_schema,
+        )
+
+        post_process_tools_description(result)
+
+        assert tool.input_schema is trimmed_schema
+
+    def test_post_process_tools_description_honors_meta_opt_out(self):
+        mcp_types = pytest.importorskip("mcp.types")
+        included = mcp_types.Tool(
+            name="included",
+            input_schema={"type": "object"},
+        )
+        excluded = mcp_types.Tool(
+            name="excluded",
+            input_schema={"type": "object"},
+            meta={"include_in_prompt": False},
+        )
+        result = mcp_types.ListToolsResult(tools=[included, excluded])
+
+        post_process_tools_description(result)
+
+        assert result.tools == [included]
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
@@ -173,10 +212,10 @@ class TestMCPEnabled:
             if recipient and recipient.startswith("python"):
                 tool_call_found = True
                 assert message.get("channel") == "commentary"
-            author = message.get("author", {})
-            if author.get("role") == "tool" and (author.get("name") or "").startswith(
-                "python"
-            ):
+            parsed_message = Message.from_dict(message)
+            if parsed_message.author.role == "tool" and (
+                parsed_message.author.name or ""
+            ).startswith("python"):
                 tool_response_found = True
                 assert message.get("channel") == "commentary"
 
@@ -188,7 +227,7 @@ class TestMCPEnabled:
         assert tool_response_found, "No Python tool response found"
 
         for message in response.input_messages:
-            assert message.get("author", {}).get("role") != "developer"
+            assert Message.from_dict(message).author.role != "developer"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])

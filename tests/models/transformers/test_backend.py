@@ -1,0 +1,727 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Test the functionality of the Transformers modeling backend."""
+
+import ast
+import contextlib
+import os
+import tempfile
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import torch
+import torch.nn as nn
+from transformers import AutoConfig, AutoModel, PretrainedConfig
+
+from vllm.config import ModelConfig, VllmConfig
+from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.fusers import AttentionFuser
+from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
+from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
+from vllm.model_executor.models.utils import StageMissingLayer
+
+from ...conftest import HfRunner, VllmRunner
+from ...utils import multi_gpu_test, prep_prompts
+from ..registry import HF_EXAMPLE_MODELS
+from ..utils import check_embeddings_close, check_logprobs_close
+
+
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def get_model(arch: str) -> str:
+    model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
+    model_info.check_transformers_version(on_fail="skip")
+    return model_info.default
+
+
+def get_num_fused(model) -> tuple[int, int]:
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+    )
+
+    glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
+    qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
+    return glu, qkv
+
+
+def count_mla_layers(model) -> int:
+    from vllm.model_executor.layers.attention import MLAAttention
+
+    return sum(isinstance(m, MLAAttention) for m in model.attention_instances.values())
+
+
+def check_implementation(
+    runner_ref: type[HfRunner | VllmRunner],
+    runner_test: type[VllmRunner],
+    example_prompts: list[str],
+    model: str,
+    kwargs_ref: dict[str, Any] | None = None,
+    kwargs_test: dict[str, Any] | None = None,
+    num_fused: tuple[int, int] = (1, 1),
+    **kwargs,
+):
+    if kwargs_ref is None:
+        kwargs_ref = {}
+    if kwargs_test is None:
+        kwargs_test = {}
+
+    max_tokens = 32
+    num_logprobs = 5
+
+    args = (example_prompts, max_tokens, num_logprobs)
+
+    with runner_test(model, **kwargs_test, **kwargs) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+        num_layers = model_config.hf_config.get_text_config().num_hidden_layers
+        expected_glu, expected_qkv = num_fused
+        for num_glu, num_qkv in model_test.apply_model(get_num_fused):
+            assert num_glu == expected_glu * num_layers
+            assert num_qkv == expected_qkv * num_layers
+
+        outputs_test = model_test.generate_greedy_logprobs(*args)
+
+    with runner_ref(model, **kwargs_ref) as model_ref:
+        if isinstance(model_ref, VllmRunner):
+            outputs_ref = model_ref.generate_greedy_logprobs(*args)
+        else:
+            outputs_ref = model_ref.generate_greedy_logprobs_limit(*args)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_ref,
+        outputs_1_lst=outputs_test,
+        name_0="ref",
+        name_1="test",
+    )
+
+
+@pytest.mark.parametrize(
+    "model,model_impl,num_fused",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1)),
+        ("hmellor/Ilama-3.2-1B", "auto", (1, 1)),  # CUSTOM CODE
+        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1)),  # MoE
+    ],
+)  # trust_remote_code=True by default
+def test_models(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: str,
+    model_impl: str,
+    num_fused: tuple[int, int],
+) -> None:
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        num_fused=num_fused,
+        model_impl=model_impl,
+    )
+
+
+def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
+    prompts, _, _ = prep_prompts(4, (800, 801))
+    kwargs_ref = {"max_model_len": 8192, "enforce_eager": True}
+    kwargs_test = {"model_impl": "transformers", **kwargs_ref}
+    check_implementation(
+        vllm_runner,
+        vllm_runner,
+        prompts,
+        model="hmellor/tiny-random-Gemma2ForCausalLM",
+        kwargs_ref=kwargs_ref,
+        kwargs_test=kwargs_test,
+    )
+
+
+def test_mla(vllm_runner: type[VllmRunner], example_prompts: list[str]) -> None:
+    import transformers
+    from packaging.version import Version
+
+    installed = Version(transformers.__version__)
+    required = Version("5.15.0.dev0")
+    if installed < required:
+        pytest.skip(
+            "MLA models with the Transformers modeling backend require "
+            f"transformers>={required}, but got {installed}"
+        )
+
+    model = "hmellor/tiny-random-DeepseekV2ForCausalLM"
+    args = (example_prompts, 32, 5)
+    kwargs: dict[str, Any] = {"max_model_len": 2048, "enforce_eager": True}
+
+    with vllm_runner(
+        model, model_impl="transformers", trust_remote_code=False, **kwargs
+    ) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+        num_layers = model_config.hf_config.get_text_config().num_hidden_layers
+        assert model_test.apply_model(count_mla_layers) == [num_layers]
+        outputs_test = model_test.generate_greedy_logprobs(*args)
+
+    with vllm_runner(model, model_impl="auto") as model_ref:
+        outputs_ref = model_ref.generate_greedy_logprobs(*args)
+
+    check_logprobs_close(
+        outputs_0_lst=outputs_ref,
+        outputs_1_lst=outputs_test,
+        name_0="native",
+        name_1="transformers",
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_distributed(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    example_prompts,
+):
+    kwargs = {"model_impl": "transformers", "tensor_parallel_size": 2}
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        "meta-llama/Llama-3.2-1B-Instruct",
+        kwargs_test=kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "model, quantization_kwargs",
+    [
+        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {}),
+        ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {}),
+    ],
+)
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [5])
+def test_quantization(
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
+    model: str,
+    quantization_kwargs: dict[str, str],
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    with vllm_runner(
+        model,
+        model_impl="auto",
+        enforce_eager=True,
+        **quantization_kwargs,  # type: ignore[arg-type]
+    ) as vllm_model:
+        vllm_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
+        )
+
+    with vllm_runner(
+        model,
+        model_impl="transformers",
+        enforce_eager=True,
+        **quantization_kwargs,  # type: ignore[arg-type]
+    ) as vllm_model:
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+        transformers_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=transformers_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="transformers",
+        name_1="vllm",
+    )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Layers live in `layers`
+        "Qwen/Qwen3-Embedding-0.6B",
+        # Layers live in `model.layers`
+        "meta-llama/Llama-3.2-1B-Instruct",
+    ],
+)
+def test_embed_loading(vllm_runner, model):
+    with vllm_runner(
+        model,
+        max_model_len=1024,
+        enforce_eager=True,
+        runner="pooling",
+        model_impl="transformers",
+    ) as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+
+@pytest.mark.parametrize(
+    "arch", ["TransformersEmbeddingModel", "TransformersForSequenceClassification"]
+)
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_pooling(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    arch,
+    monkeypatch,
+    use_v2_model_runner,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+    model = get_model(arch)
+
+    vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
+
+    hf_kwargs = dict()
+    if arch == "TransformersEmbeddingModel":
+        hf_kwargs["is_sentence_transformer"] = True
+    elif arch == "TransformersForSequenceClassification":
+        from transformers import AutoModelForSequenceClassification
+
+        hf_kwargs["auto_cls"] = AutoModelForSequenceClassification
+
+    # The example_prompts has ending "\n", for example:
+    # "Write a short story about a robot that dreams for the first time.\n"
+    # sentence_transformers will strip the input texts, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
+    # This makes the input_ids different between hf_model and vllm_model.
+    # So we need to strip the input texts to avoid test failing.
+    example_prompts = [str(s).strip() for s in example_prompts]
+
+    with (
+        vllm_runner(model, **vllm_kwargs) as vllm_model,
+        hf_runner(model, **hf_kwargs) as hf_model,
+    ):
+        model_config = vllm_model.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
+
+        if arch == "TransformersEmbeddingModel":
+            vllm_outputs = vllm_model.embed(example_prompts)
+            hf_outputs = hf_model.encode(example_prompts)
+        elif arch == "TransformersForSequenceClassification":
+            vllm_outputs = vllm_model.classify(example_prompts)
+            hf_outputs = hf_model.classify(example_prompts)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
+
+
+VOCAB_SIZE = 64
+PER_LAYER_VOCAB_SIZE = 32
+NUM_POSITIONS = 16
+HIDDEN_SIZE = 8
+EMBED_SCALE = 3.0
+
+
+class ScaledWordEmbedding(nn.Embedding):
+    """Mirrors Transformers' `*ScaledWordEmbedding` classes."""
+
+    def __init__(
+        self, num_embeddings, embedding_dim, padding_idx=None, embed_scale=1.0
+    ):
+        super().__init__(num_embeddings, embedding_dim, padding_idx)
+        self.scalar_embed_scale = embed_scale
+        self.register_buffer("embed_scale", torch.tensor(embed_scale), persistent=False)
+
+    def forward(self, input_ids):
+        return super().forward(input_ids) * self.embed_scale.to(self.weight.dtype)
+
+
+class ComposedWordEmbedding(nn.Module):
+    """Scales embeddings, but wraps `nn.Embedding` instead of inheriting from it."""
+
+    def __init__(self, num_embeddings, embedding_dim, embed_scale=1.0):
+        super().__init__()
+        self.embed = nn.Embedding(num_embeddings, embedding_dim)
+        self.embed_scale = embed_scale
+
+    def forward(self, input_ids):
+        return self.embed(input_ids) * self.embed_scale
+
+
+@pytest.fixture
+def tp_init():
+    """Single rank tensor parallel state, so vLLM layers can be constructed."""
+    from vllm.distributed import (
+        cleanup_dist_env_and_memory,
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+    from vllm.platforms import current_platform
+
+    from ...utils import ensure_current_vllm_config
+
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend=current_platform.dist_backend,
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
+
+
+@pytest.fixture
+def vpe(tp_init):
+    """`VocabParallelEmbedding`, imported late so collection does not import vLLM."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    return VocabParallelEmbedding
+
+
+def replace(embedding):
+    """Replace `embedding` and fill the new weights with recognisable values."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
+
+    new_embedding = replace_embedding_class(embedding)
+    for _, param in new_embedding.named_parameters():
+        param.data = torch.arange(param.numel(), dtype=param.dtype).view(param.shape)
+    return new_embedding
+
+
+def assert_scaled(vpe, module):
+    """`module`'s output is its own unscaled output times `EMBED_SCALE`."""
+    input_ids = torch.arange(VOCAB_SIZE)
+    unscaled = vpe.forward(module, input_ids)
+    torch.testing.assert_close(module(input_ids), unscaled * EMBED_SCALE)
+
+
+def test_replace_plain_embedding(vpe):
+    """A plain `nn.Embedding` is replaced outright, leaving no subclass behind."""
+    assert type(replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))) is vpe
+
+
+def test_replace_infers_shape_and_dtype(tp_init):
+    """Shape and dtype come from the replaced module, not from the config."""
+    embedding = nn.Embedding(VOCAB_SIZE * 2, HIDDEN_SIZE + 1, dtype=torch.float16)
+    new_embedding = replace(embedding)
+
+    assert new_embedding.num_embeddings == VOCAB_SIZE * 2
+    assert new_embedding.org_vocab_size == VOCAB_SIZE * 2
+    assert new_embedding.embedding_dim == HIDDEN_SIZE + 1
+    assert new_embedding.weight.dtype == torch.float16
+
+
+def test_replace_inherited_embedding(vpe):
+    """Subclasses keep their extra state and their scaled `forward`."""
+    new_embedding = replace(
+        ScaledWordEmbedding(
+            VOCAB_SIZE, HIDDEN_SIZE, padding_idx=0, embed_scale=EMBED_SCALE
+        )
+    )
+
+    assert isinstance(new_embedding, vpe)
+    assert new_embedding.scalar_embed_scale == EMBED_SCALE
+    assert "embed_scale" in new_embedding._non_persistent_buffers_set
+    assert_scaled(vpe, new_embedding)
+
+
+def test_replace_is_idempotent(tp_init):
+    """A tied table is reached twice by the recursion, and must not be rebased twice."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
+
+    new_embedding = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=2))
+    again = replace_embedding_class(new_embedding)
+
+    assert again is new_embedding
+    assert type(again) is type(new_embedding)
+
+
+class FakeVocabModel(nn.Module):
+    """The embedding tables a model can hold, only one of which is a vocab table.
+
+    `embed_tokens_per_layer` mirrors Gemma 3n, whose per-layer table is sized by
+    `vocab_size_per_layer_input` rather than `vocab_size`.
+    """
+
+    def __init__(self, per_layer: bool = False, composed: bool = False):
+        super().__init__()
+        embed_cls = ComposedWordEmbedding if composed else ScaledWordEmbedding
+        self.embed_tokens = embed_cls(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+        if per_layer:
+            self.embed_tokens_per_layer = ScaledWordEmbedding(
+                PER_LAYER_VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+            )
+        # Not a vocab table: indexed by position, and read as a whole by models
+        # which interpolate it (e.g. `SiglipVisionEmbeddings`)
+        self.position_embedding = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
+def replace_vocab_embeddings(model, **config_kwargs):
+    """Replace `model`'s vocab tables as `recursive_replace` would, and return them."""
+    from vllm.model_executor.models.transformers.utils import attrsetter
+
+    stub = nn.Module()
+    stub.model = model
+    stub.config = PretrainedConfig(
+        vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
+    )
+    embeddings = Base._vocab_embeddings(stub)
+
+    replaced = []
+    for name, module in list(model.named_modules()):
+        if module in embeddings:
+            replaced.append(replace(module))
+            attrsetter(name)(model, replaced[-1])
+    return replaced
+
+
+def test_only_vocab_tables_are_replaced(vpe):
+    """Position embeddings share the `nn.Embedding` type, but not the treatment."""
+    model = FakeVocabModel()
+
+    assert replace_vocab_embeddings(model) == [model.embed_tokens]
+    assert isinstance(model.embed_tokens, vpe)
+    assert type(model.position_embedding) is nn.Embedding
+
+
+def test_per_layer_vocab_table_is_replaced(vpe):
+    """A second vocab table is found by its size, without a bespoke accessor."""
+    model = FakeVocabModel(per_layer=True)
+    replaced = replace_vocab_embeddings(
+        model, vocab_size_per_layer_input=PER_LAYER_VOCAB_SIZE
+    )
+
+    assert replaced == [model.embed_tokens, model.embed_tokens_per_layer]
+    assert all(isinstance(module, vpe) for module in replaced)
+
+
+def test_composed_input_embeddings_are_replaced(vpe):
+    """A wrapper is left alone; only the `nn.Embedding` it composes is replaced.
+
+    `CausalMixin` ties `lm_head` to whichever `VocabParallelEmbedding` it finds under
+    `get_input_embeddings()`, reading a `.weight` the wrapper does not have.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    model = FakeVocabModel(composed=True)
+    wrapper = model.embed_tokens
+    replaced = replace_vocab_embeddings(model)
+
+    assert model.embed_tokens is wrapper
+    assert replaced == [m for m in wrapper.modules() if isinstance(m, vpe)]
+
+    lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
+    assert lm_head.tie_weights(replaced[0]).weight is replaced[0].weight
+
+
+def test_missing_input_embeddings_are_skipped(tp_init):
+    """Pipeline ranks without the embeddings have a `PPMissingLayer` in their place."""
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    model = FakeVocabModel()
+    model.embed_tokens = PPMissingLayer()
+
+    assert replace_vocab_embeddings(model) == []
+
+
+MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+
+
+class MarkingStub(SupportsMultiModal, nn.Module):
+    """Just enough of the backend to exercise component marking."""
+
+    _mark_model_components = MultiModalMixin._mark_model_components
+    _find_encoder_classes = MultiModalMixin._find_encoder_classes
+    _from_config_kwargs = Base._from_config_kwargs
+    _pre_trained_model_classes = Base._pre_trained_model_classes
+
+
+def build_marked_model(image_limit: int, skip_tokenizer_init: bool = False):
+    """Build the HF model inside the marking context and return it."""
+    model_config = ModelConfig(
+        model=MULTIMODAL_MODEL,
+        model_impl="transformers",
+        limit_mm_per_prompt={"image": image_limit},
+    )
+    # Set after construction: building the config itself needs the tokenizer
+    model_config.skip_tokenizer_init = skip_tokenizer_init
+    stub = MarkingStub()
+    stub.config = AutoConfig.from_pretrained(MULTIMODAL_MODEL)
+    stub.model_config = model_config
+
+    vllm_config = VllmConfig(model_config=model_config)
+    with stub._mark_model_components(vllm_config), torch.device("meta"):
+        stub.model = AutoModel.from_config(**stub._from_config_kwargs)
+    return stub.model
+
+
+@pytest.mark.parametrize(("image_limit", "skipped"), [(0, True), (4, False)])
+def test_tower_weights_skipped_when_modality_disabled(image_limit, skipped):
+    """`--limit-mm-per-prompt image=0` should drop the vision tower's weights."""
+    vision_tower = build_marked_model(image_limit).vision_tower
+    assert isinstance(vision_tower, StageMissingLayer) is skipped
+
+
+def test_marking_skipped_without_tokenizer():
+    """Marking needs the HF processor, which needs a tokenizer, so it is skipped.
+
+    The tower is built as normal rather than the model failing to load.
+    """
+    vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
+    assert not isinstance(vision_tower, StageMissingLayer)
+
+
+NUM_LAYERS = 4
+
+
+def build_model(model_type: str, **overrides) -> nn.Module:
+    """A tiny HF model of `NUM_LAYERS` layers, built on the meta device."""
+    try:
+        config = AutoConfig.for_model(
+            model_type,
+            num_hidden_layers=NUM_LAYERS,
+            hidden_size=64,
+            intermediate_size=128,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            vocab_size=VOCAB_SIZE,
+            **overrides,
+        )
+    except ValueError:
+        pytest.skip(f"The installed transformers has no {model_type!r} model")
+    with torch.device("meta"):
+        return AutoModel.from_config(config)
+
+
+ATTENTION_MODEL_TYPES = [
+    # The default `head_size**-0.5` happens to be right here
+    "llama",
+    # Scales the query by a learnable per-dim weight, so it declares 1.0
+    "gemma4_text",
+    # MLA, and declares yarn's `mscale`
+    "deepseek_v3",
+]
+
+
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_dispatch_is_matched(model_type: str):
+    """Exactly the decoder layers' attention modules match an `AttentionFuser`.
+
+    That match is what `recursive_replace` records, and so what
+    `create_attention_instances` attaches vLLM's attention layer to.
+    """
+    model = build_model(model_type)
+    matched = {
+        name
+        for name, module in model.named_modules()
+        if AttentionFuser.match(None, module) is not None
+    }
+    assert matched == {f"layers.{i}.self_attn" for i in range(NUM_LAYERS)}
+
+
+def test_attention_layer_index_is_the_modules_own():
+    """The layer served comes from the module, not from its position in the stack.
+
+    LongCat Flash gives each decoder layer two attention sublayers numbered
+    `2i` and `2i + 1`, so `num_hidden_layers` is twice the length of the stack
+    and the enclosing layer's position is not the index the KV cache is keyed by.
+    A vision tower is excluded separately, by `validate`: only the text config is
+    patched to dispatch to vLLM, so a tower's attention is left to Transformers.
+    """
+    model = build_model("longcat_flash", num_layers=2)
+    text_config = model.config.get_text_config()
+    assert len(model.layers) * 2 == text_config.num_hidden_layers
+
+    attentions = [
+        model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
+    ]
+    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
+    assert all(fuser is not None for fuser in fusers)
+    assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
+
+    # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
+    # config is not consulted, only the one the module was built with.
+    assert not any(f.validate(a, None) for f, a in zip(fusers, attentions))
+    text_config._attn_implementation = VLLM_ATTN_IMPL
+    assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
+
+
+def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+    """Models selected by the permissive registry fail clearly without dispatch."""
+    monkeypatch.setattr(
+        "vllm.model_executor.models.transformers.base.get_pp_indices",
+        lambda *_: (0, 1),
+    )
+    model = SimpleNamespace(
+        text_config=SimpleNamespace(num_hidden_layers=1),
+        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
+        attention_fusers={},
+        _get_attn_cls=lambda: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Layer 0 does not dispatch through the Transformers attention interface",
+    ):
+        Base.create_attention_instances(model)
+
+
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_scale_is_the_declared_one(model_type: str):
+    """The scale comes off the module, not from the `head_size**-0.5` default.
+
+    Two of the three model types declare something the default would silently
+    replace, so they are what makes this more than a tautology.
+    """
+    attention = build_model(model_type).layers[0].self_attn
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == attention.scaling
+
+
+def test_attention_scale_is_the_argument_not_the_attribute():
+    """OPT applies the scale to the query itself, then declares a literal 1.0.
+
+    Its `self.scaling` is the `head_size**-0.5` it has already applied, so
+    reading the attribute rather than the argument the module hands the
+    interface would scale twice.
+    """
+    model = build_model("opt", ffn_dim=128, word_embed_proj_dim=64)
+    attention = model.get_submodule("decoder.layers.0.self_attn")
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == 1.0 != attention.scaling
+
+
+def test_attention_scale_rejects_unresolvable_expression():
+    """Unresolvable declared scales must not silently use the Llama default."""
+
+    class Attention(nn.Module):
+        head_dim = 16
+
+    fuser = AttentionFuser(
+        source_cls="Attention",
+        scale_expr=ast.parse("self.head_dim**-0.5 * self.factor", mode="eval").body,
+    )
+
+    with pytest.raises(ValueError, match="Cannot resolve attention scaling expression"):
+        fuser.scale(Attention())

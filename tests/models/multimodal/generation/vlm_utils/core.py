@@ -38,6 +38,7 @@ def run_test(
     limit_mm_per_prompt: dict[str, int],
     vllm_runner_kwargs: dict[str, Any] | None,
     hf_model_kwargs: dict[str, Any] | None,
+    hf_processor: Callable[[str], Any] | None,
     patch_hf_runner: Callable[[HfRunner], HfRunner] | None,
     runner: RunnerOption = "auto",
     distributed_executor_backend: str | None = None,
@@ -80,6 +81,11 @@ def run_test(
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)
 
+    # Avoid passing limit_mm_per_prompt twice when vllm_runner_kwargs
+    # already contains it (e.g. gemma4 sets it via vllm_runner_kwargs).
+    if "limit_mm_per_prompt" in vllm_runner_kwargs_:
+        limit_mm_per_prompt = vllm_runner_kwargs_.pop("limit_mm_per_prompt")
+
     with vllm_runner(
         model,
         max_model_len=max_model_len,
@@ -111,8 +117,18 @@ def run_test(
             )
             vllm_outputs_per_mm.append(vllm_output)
 
+    hf_runner_kwargs: dict[str, Any] = {}
+    if model_info.tokenizer:
+        hf_runner_kwargs["tokenizer_name"] = model_info.tokenizer
+    if hf_processor is not None:
+        hf_runner_kwargs["processor"] = hf_processor(model)
+
     hf_model = hf_runner(
-        model, dtype=dtype, auto_cls=auto_cls, model_kwargs=hf_model_kwargs
+        model,
+        dtype=dtype,
+        auto_cls=auto_cls,
+        model_kwargs=hf_model_kwargs,
+        **hf_runner_kwargs,
     )
 
     # Some models need to patch things like the model processor, e.g., internvl

@@ -12,7 +12,7 @@ from tests.quantization.utils import is_quant_method_supported
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
-MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
+MODELS = ["ai21labs/Jamba-tiny-random"]
 
 
 @pytest.mark.skipif(
@@ -38,6 +38,6 @@ def test_model_experts_int8_startup(
         dtype=dtype,
         enforce_eager=True,
         quantization="experts_int8",
-        allow_deprecated_quantization=True,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

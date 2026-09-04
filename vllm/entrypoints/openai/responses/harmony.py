@@ -27,11 +27,14 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from openai_harmony import Author, Message, Role, StreamableParser, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
-    flatten_chat_text_content,
+    extract_function_from_recipient,
+    flatten_input_text_content,
+    get_system_or_developer_message,
+    is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -64,7 +67,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
         contents = [TextContent(text="")]
 
     if name:
-        msg = Message.from_author_and_contents(Author.new(Role(role), name), contents)
+        msg = Message(author=Author.new(Role(role), name), content=contents)
     else:
         msg = Message.from_role_and_contents(Role(role), contents)
 
@@ -107,8 +110,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         name = chat_msg.get("name", "")
         if name and not name.startswith("functions."):
             name = f"functions.{name}"
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
+        content = flatten_input_text_content(chat_msg.get("content")) or ""
         # NOTE: .with_recipient("assistant") is required on tool messages
         # to match parse_chat_input_to_harmony_message behavior and ensure
         # proper routing in the Harmony protocol.
@@ -119,7 +121,15 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         )
         return [msg]
 
-    # Default: user/assistant/system messages
+    # System/developer messages into proper DeveloperContent
+    if role in ("system", "developer"):
+        text = flatten_input_text_content(chat_msg.get("content"))
+        if text:
+            msg = get_system_or_developer_message(role, text)
+            return [msg]
+        return []
+
+    # Default: user/assistant messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
@@ -149,13 +159,17 @@ def response_input_to_harmony(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        # Add prefix for developer messages.
-        # <|start|>developer<|message|># Instructions {instructions}<|end|>
-        text_prefix = "Instructions:\n" if role == "developer" else ""
-        if isinstance(content, str):
-            msg = Message.from_role_and_content(role, text_prefix + content)
+        if role in ("system", "developer"):
+            text = flatten_input_text_content(content)
+            if text:
+                msg = get_system_or_developer_message(role, text)
+            else:
+                # Empty content — skip, no message emitted.
+                return None
+        elif isinstance(content, str):
+            msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            contents = [TextContent(text=c.get("text", "")) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
@@ -175,6 +189,8 @@ def response_input_to_harmony(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
+        msg = msg.with_channel("commentary")
+        msg = msg.with_recipient("assistant")
     elif response_msg["type"] == "reasoning":
         content = response_msg.get("content")
         if content and len(content) >= 1:
@@ -290,9 +306,11 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
     )
 
 
-def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+def _parse_function_call(
+    message: Message, recipient: str, incomplete: bool = False
+) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
+    function_name = extract_function_from_recipient(recipient)
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -302,6 +320,7 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
             type="function_call",
             name=function_name,
             id=f"fc_{random_id}",
+            status="incomplete" if incomplete else "completed",
         )
         output_items.append(response_item)
     return output_items
@@ -324,7 +343,9 @@ def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     return output_items
 
 
-def _parse_final_message(message: Message) -> ResponseOutputItem:
+def _parse_final_message(
+    message: Message, incomplete: bool = False
+) -> ResponseOutputItem:
     """Parse final channel messages into output message items."""
     contents = []
     for content in message.content:
@@ -339,7 +360,7 @@ def _parse_final_message(message: Message) -> ResponseOutputItem:
         id=f"msg_{random_uuid()}",
         content=contents,
         role=message.author.role,
-        status="completed",
+        status="incomplete" if incomplete else "completed",
         type="message",
     )
 
@@ -364,7 +385,9 @@ def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
     return server_label, tool_name
 
 
-def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+def _parse_mcp_call(
+    message: Message, recipient: str, incomplete: bool = False
+) -> list[ResponseOutputItem]:
     """Parse MCP calls into MCP call items."""
     # Handle built-in tools that need server_label mapping
     if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
@@ -381,7 +404,7 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
             name=tool_name,
             server_label=server_label,
             id=f"mcp_{random_uuid()}",
-            status="completed",
+            status="incomplete" if incomplete else "completed",
         )
         output_items.append(response_item)
     return output_items
@@ -389,6 +412,7 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
 
 def _parse_message_no_recipient(
     message: Message,
+    incomplete: bool = False,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message with no recipient based on its channel."""
     if message.channel == "analysis":
@@ -398,7 +422,7 @@ def _parse_message_no_recipient(
         # Per Harmony format, preambles (commentary with no recipient) and
         # final channel content are both intended to be shown to end-users.
         # See: https://cookbook.openai.com/articles/openai-harmony
-        return [_parse_final_message(message)]
+        return [_parse_final_message(message, incomplete=incomplete)]
 
     raise ValueError(f"Unknown channel: {message.channel}")
 
@@ -408,7 +432,11 @@ def _parse_message_no_recipient(
 # ---------------------------------------------------------------------------
 
 
-def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
+def harmony_to_response_output(
+    message: Message,
+    function_tool_names: frozenset[str],
+    incomplete: bool = False,
+) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
     This is the main dispatcher that routes based on channel and recipient.
@@ -425,11 +453,14 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
     if recipient is not None:
         # Browser tool calls (browser.search, browser.open, browser.find)
         if recipient.startswith("browser."):
-            output_items.append(_parse_browser_tool_call(message, recipient))
+            if not incomplete:
+                output_items.append(_parse_browser_tool_call(message, recipient))
 
-        # Function calls (should only happen on commentary channel)
-        elif message.channel == "commentary" and recipient.startswith("functions."):
-            output_items.extend(_parse_function_call(message, recipient))
+        # Function calls (with or without "functions." prefix)
+        elif is_function_recipient(recipient, function_tool_names):
+            output_items.extend(
+                _parse_function_call(message, recipient, incomplete=incomplete)
+            )
 
         # Built-in MCP tools (python, browser, container)
         elif recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
@@ -437,124 +468,12 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
 
         # All other recipients are MCP calls
         else:
-            output_items.extend(_parse_mcp_call(message, recipient))
+            output_items.extend(
+                _parse_mcp_call(message, recipient, incomplete=incomplete)
+            )
 
     # No recipient - handle based on channel for non-tool messages
     else:
-        output_items.extend(_parse_message_no_recipient(message))
+        output_items.extend(_parse_message_no_recipient(message, incomplete=incomplete))
 
     return output_items
-
-
-def parser_state_to_response_output(
-    parser: StreamableParser,
-) -> list[ResponseOutputItem]:
-    """Extract in-progress response items from incomplete parser state.
-
-    Called when the parser has buffered content that hasn't formed a
-    complete message yet (e.g., generation was cut short).
-    """
-    if not parser.current_content:
-        return []
-    if parser.current_role != Role.ASSISTANT:
-        return []
-    current_recipient = parser.current_recipient
-    if current_recipient is not None and current_recipient.startswith("browser."):
-        return []
-
-    if current_recipient and parser.current_channel in ("commentary", "analysis"):
-        if current_recipient.startswith("functions."):
-            rid = random_uuid()
-            return [
-                ResponseFunctionToolCall(
-                    arguments=parser.current_content,
-                    call_id=f"call_{rid}",
-                    type="function_call",
-                    name=current_recipient.split(".")[-1],
-                    id=f"fc_{rid}",
-                    status="in_progress",
-                )
-            ]
-        # Built-in MCP tools (python, browser, container)
-        elif current_recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-            return [
-                ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(
-                            text=parser.current_content, type="reasoning_text"
-                        )
-                    ],
-                    status=None,
-                )
-            ]
-        # All other recipients are MCP calls
-        else:
-            rid = random_uuid()
-            server_label, tool_name = _parse_mcp_recipient(current_recipient)
-            return [
-                McpCall(
-                    arguments=parser.current_content,
-                    type="mcp_call",
-                    name=tool_name,
-                    server_label=server_label,
-                    id=f"mcp_{rid}",
-                    status="in_progress",
-                )
-            ]
-
-    if parser.current_channel == "commentary":
-        # Per Harmony format, preambles (commentary with no recipient) are
-        # intended to be shown to end-users, unlike analysis channel content.
-        output_text = ResponseOutputText(
-            text=parser.current_content,
-            annotations=[],
-            type="output_text",
-            logprobs=None,
-        )
-        return [
-            ResponseOutputMessage(
-                id=f"msg_{random_uuid()}",
-                content=[output_text],
-                role="assistant",
-                status="incomplete",
-                type="message",
-            )
-        ]
-
-    if parser.current_channel == "analysis":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "final":
-        output_text = ResponseOutputText(
-            text=parser.current_content,
-            annotations=[],  # TODO
-            type="output_text",
-            logprobs=None,  # TODO
-        )
-        text_item = ResponseOutputMessage(
-            id=f"msg_{random_uuid()}",
-            content=[output_text],
-            role="assistant",
-            # if the parser still has messages (ie if the generator got cut
-            # abruptly), this should be incomplete
-            status="incomplete",
-            type="message",
-        )
-        return [text_item]
-
-    return []

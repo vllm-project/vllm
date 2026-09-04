@@ -4,16 +4,20 @@ set -ex
 
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
 # This script uses DockerHub API to list and delete old tags with specified prefix
-# Usage: cleanup-nightly-builds.sh [TAG_PREFIX]
-# Example: cleanup-nightly-builds.sh "nightly-" or cleanup-nightly-builds.sh "cu130-nightly-"
+# Tags starting with "nightly-dev" are always excluded from deletion
+# Usage: cleanup-nightly-builds.sh [TAG_PREFIX] [REPO]
+# Example: cleanup-nightly-builds.sh "nightly-"
+# Example: cleanup-nightly-builds.sh "cu130-nightly-"
+# Example: cleanup-nightly-builds.sh "nightly-" "vllm/vllm-openai-rocm"
 
-# Get tag prefix from argument, default to "nightly-" if not provided
+# Get tag prefix and repo from arguments
 TAG_PREFIX="${1:-nightly-}"
+REPO="${2:-vllm/vllm-openai}"
 
-echo "Cleaning up tags with prefix: $TAG_PREFIX"
+echo "Cleaning up tags with prefix: $TAG_PREFIX in repository: $REPO"
 
-# DockerHub API endpoint for vllm/vllm-openai repository
-REPO_API_URL="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags"
+# DockerHub API endpoint for the repository
+REPO_API_URL="https://hub.docker.com/v2/repositories/${REPO}/tags"
 
 # Get DockerHub credentials from environment
 if [ -z "$DOCKERHUB_TOKEN" ]; then
@@ -52,7 +56,8 @@ get_all_tags() {
         set -x
         
         # Get both last_updated timestamp and tag name, separated by |
-        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | "\(.last_updated)|\(.name)"')
+        # Exclude nightly-dev tags from cleanup
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | select(.name | startswith("nightly-dev") | not) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break
@@ -70,7 +75,7 @@ delete_tag() {
     local tag_name="$1"
     echo "Deleting tag: $tag_name"
     
-    local delete_url="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/$tag_name"
+    local delete_url="https://hub.docker.com/v2/repositories/${REPO}/tags/$tag_name"
     set +x
     local response=$(curl -s -X DELETE -H "Authorization: Bearer $BEARER_TOKEN" "$delete_url")
     set -x

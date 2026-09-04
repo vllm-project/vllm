@@ -18,7 +18,7 @@ SEED = 42
 @pytest.fixture
 def test_prompts():
     """
-    Adapted from tests/v1/e2e/spec_decode/test_spec_decode.py
+    Adapted from tests/v1/e2e/spec_decode/utils.py
     """
     prompt_types = ["repeat", "sentence"]
     # Setting higher num prompts increases the chance of numerics mismatch
@@ -45,7 +45,9 @@ def test_prompts():
 
 
 use_fork_for_test = (
-    fork_new_process_for_each_test if not current_platform.is_rocm() else lambda x: x
+    fork_new_process_for_each_test
+    if not (current_platform.is_rocm() or current_platform.is_xpu())
+    else lambda x: x
 )
 
 

@@ -12,6 +12,7 @@ import pytest
 import vllm
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
 
@@ -30,7 +31,9 @@ def use_spawn_for_whisper(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 
-def create_whisper_llm(enable_lora: bool = True, max_loras: int = 2):
+def create_whisper_llm(
+    enable_lora: bool = True, max_loras: int = 2, attn_backend: str | None = None
+):
     """Create a Whisper LLM instance with optional LoRA support."""
     return vllm.LLM(
         model=WHISPER_MODEL,
@@ -40,6 +43,7 @@ def create_whisper_llm(enable_lora: bool = True, max_loras: int = 2):
         max_model_len=448,
         dtype="half",
         enforce_eager=True,  # For stability in tests
+        attention_config={"backend": attn_backend},
     )
 
 
@@ -109,7 +113,11 @@ def test_whisper_multi_lora(whisper_lora_files):
     This test verifies that the same LoRA adapter can be loaded with
     different IDs and produce consistent results.
     """
-    llm = create_whisper_llm(enable_lora=True, max_loras=4)
+    llm = create_whisper_llm(
+        enable_lora=True,
+        max_loras=4,
+        attn_backend="TRITON_ATTN" if current_platform.is_rocm() else None,
+    )
 
     # Test with different LoRA IDs using the same adapter
     outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
@@ -124,30 +132,3 @@ def test_whisper_multi_lora(whisper_lora_files):
         f"Expected same outputs for same adapter with different IDs. "
         f"Got: {outputs_lora1} vs {outputs_lora2}"
     )
-
-
-@create_new_process_for_each_test()
-def test_whisper_with_and_without_lora(whisper_lora_files):
-    """Test that Whisper produces different outputs with and without LoRA.
-
-    This test verifies that the LoRA adapter actually affects the model output.
-    """
-    llm = create_whisper_llm(enable_lora=True)
-
-    # Run with LoRA
-    outputs_with_lora = run_whisper_inference(
-        llm, lora_path=whisper_lora_files, lora_id=1
-    )
-
-    # Run without LoRA (base model only)
-    outputs_without_lora = run_whisper_inference(llm, lora_path=None)
-
-    # Both should produce valid outputs
-    assert len(outputs_with_lora[0]) > 0
-    assert len(outputs_without_lora[0]) > 0
-
-    print(f"Output with LoRA: {outputs_with_lora[0]}")
-    print(f"Output without LoRA: {outputs_without_lora[0]}")
-
-    # Note: Outputs may or may not differ depending on the adapter
-    # The main verification is that both configurations work

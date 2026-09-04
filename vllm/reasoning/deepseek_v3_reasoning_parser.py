@@ -6,18 +6,15 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.generate.base.protocol import DeltaMessage
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class DeepSeekV3ReasoningParser(ReasoningParser):
@@ -39,6 +36,14 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
         else:
             self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
+
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return self._parser.reasoning_start_str
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return self._parser.reasoning_end_str
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)

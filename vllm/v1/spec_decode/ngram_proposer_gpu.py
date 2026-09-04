@@ -18,6 +18,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -90,7 +91,8 @@ class NgramGPUKernel(nn.Module):
             suffix_indices = suffix_starts.unsqueeze(1) + torch.arange(
                 ngram_len, device=device
             )
-            suffix = torch.gather(token_ids, 1, suffix_indices.clamp(min=0))
+            suffix_indices.clamp_(min=0)
+            suffix = torch.gather(token_ids, 1, suffix_indices)
 
             # Window matches for each sequence.
             matches = (search_windows == suffix.unsqueeze(1)).all(dim=-1)
@@ -133,7 +135,7 @@ class NgramGPUKernel(nn.Module):
         draft_indices = draft_start.unsqueeze(1) + torch.arange(
             num_draft_tokens, device=device
         )
-        draft_indices = draft_indices.clamp(min=0, max=max_seq_len - 1)
+        draft_indices.clamp_(min=0, max=max_seq_len - 1)
 
         # Extract draft tokens; gather always runs.
         draft_tokens = torch.gather(token_ids, 1, draft_indices)
@@ -313,6 +315,7 @@ class NgramProposerGPU:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         num_tokens_no_spec: torch.Tensor,  # [batch_size]
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
@@ -325,6 +328,7 @@ class NgramProposerGPU:
         updated lengths, then run the kernel.
 
         Args:
+            num_speculative_tokens: Number of speculative tokens to propose.
             num_tokens_no_spec: Number of tokens per sequence (read-only)
             token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
             valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
@@ -335,6 +339,7 @@ class NgramProposerGPU:
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
         """
+        assert num_speculative_tokens == self.k
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 
@@ -353,7 +358,8 @@ class NgramProposerGPU:
             valid_write_mask & (valid_sampled_token_ids_gpu != -1) & in_bounds
         )
 
-        write_positions_long = write_positions.clamp(max=max_seq_len - 1).long()
+        write_positions.clamp_(max=max_seq_len - 1)
+        write_positions_long = write_positions.long()
         existing_values = token_ids_gpu.gather(1, write_positions_long)
 
         tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
@@ -423,7 +429,9 @@ class NgramProposerGPU:
         )
 
         # Backup last valid token before speculative tokens.
-        backup_indices = (num_tokens_no_spec[:num_reqs] - 1).clamp(min=0).long()
+        backup_indices = num_tokens_no_spec[:num_reqs] - 1
+        backup_indices.clamp_(min=0)
+        backup_indices = backup_indices.long()
         backup_next_token_ids = torch.gather(
             token_ids_gpu[:num_reqs], dim=1, index=backup_indices.unsqueeze(1)
         ).squeeze(1)
@@ -443,16 +451,17 @@ class NgramProposerGPU:
 
         # Rightmost valid index per row.
         last_valid_indices = valid_sampled_tokens_count - 1
-        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
+        has_valid_sample = last_valid_indices >= 0
+        last_valid_indices.clamp_(min=0)
 
         # Last valid token from each row; undefined if none.
         selected_tokens = torch.gather(
-            valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
+            valid_sampled_token_ids_gpu, 1, last_valid_indices.unsqueeze(1)
         ).squeeze(1)
 
         # Use last token if valid; otherwise fallback to backup.
         next_token_ids = torch.where(
-            last_valid_indices != -1,
+            has_valid_sample,
             selected_tokens,
             backup_next_token_ids,
         )
@@ -541,7 +550,7 @@ def update_ngram_gpu_tensors_incremental(
             num_tokens = input_batch.num_tokens_no_spec[idx]
             if num_tokens > 0:
                 token_ids_gpu_tensor[idx, :num_tokens].copy_(
-                    input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                    input_batch.token_ids_cpu_tensor[idx, :num_tokens].pin_memory(),
                     non_blocking=True,
                 )
 
@@ -569,8 +578,8 @@ def update_ngram_gpu_tensors_incremental(
             reorder_dst.append(curr_idx)
 
     if reorder_src:
-        src_tensor = torch.tensor(reorder_src, dtype=torch.long, device=device)
-        dst_tensor = torch.tensor(reorder_dst, dtype=torch.long, device=device)
+        src_tensor = async_tensor_h2d(reorder_src, dtype=torch.long, device=device)
+        dst_tensor = async_tensor_h2d(reorder_dst, dtype=torch.long, device=device)
 
         temp_token_ids = token_ids_gpu_tensor[src_tensor].clone()
         temp_num_tokens = num_tokens_no_spec_gpu[src_tensor].clone()
@@ -587,7 +596,7 @@ def update_ngram_gpu_tensors_incremental(
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
-                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
+                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens].pin_memory(),
                 non_blocking=True,
             )
 

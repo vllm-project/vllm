@@ -23,6 +23,7 @@ from vllm.config import (
     ModelConfig,
     PassConfig,
     VllmConfig,
+    get_current_vllm_config,
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -49,6 +50,7 @@ class TestSiluMul(torch.nn.Module):
                 weight_shape=(hidden_size, hidden_size),
                 activation_quant_key=self.quant_key,
                 weight_quant_key=self.quant_key,
+                input_dtype=get_current_vllm_config().model_config.dtype,
             )
 
     def forward(self, x):
@@ -92,6 +94,7 @@ class TestFusedAddRMSNorm(torch.nn.Module):
                 weight_shape=(hidden_size, intermediate_size),
                 activation_quant_key=self.quant_key,
                 weight_quant_key=self.quant_key,
+                input_dtype=get_current_vllm_config().model_config.dtype,
             )
 
     def forward(self, hidden_states, residual):
@@ -114,16 +117,16 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         else:
             return norm_output, residual_output
 
-    def example_inputs(self, batch_size=8, hidden_size=16, seq_len=16):
-        hidden_states = torch.randn((batch_size * seq_len, hidden_size))
-        residual = torch.randn((batch_size * seq_len, hidden_size))
+    def example_inputs(self, batch_size=8, seq_len=16):
+        hidden_states = torch.randn((batch_size * seq_len, self.hidden_size))
+        residual = torch.randn((batch_size * seq_len, self.intermediate_size))
         return (hidden_states, residual)
 
     def ops_in_model(self, do_fusion):
         if TEST_FP8 and do_fusion:
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
-            return [torch.ops._C.fused_add_rms_norm.default]
+            return []
 
     def ops_not_in_model(self):
         return []

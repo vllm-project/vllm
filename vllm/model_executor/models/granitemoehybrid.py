@@ -30,7 +30,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_moe_expert_param_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .granitemoe import GraniteMoeMoE
@@ -270,6 +273,7 @@ class GraniteMoeHybridAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        self.rotary_emb: nn.Module | None
         if config.position_embedding_type == "rope":
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -316,8 +320,12 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
+    # Transformers < 5.13.0
     "attention": GraniteMoeHybridAttentionDecoderLayer,
     "mamba": GraniteMoeHybridMambaDecoderLayer,
+    # Transformers >= 5.13.0
+    "full_attention": GraniteMoeHybridAttentionDecoderLayer,
+    "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
 
 
@@ -450,13 +458,19 @@ class GraniteMoeHybridModel(nn.Module):
             # Skip layers on other devices.
             if not is_pp_missing_parameter(n, self):
                 param = params_dict[n]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", None)
+                if not callable(weight_loader):
+                    raise TypeError(f"{n} requires a shard-aware weight loader")
                 weight_loader(param, p, shard_id)
                 loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
+            if n not in params_dict:
+                return
             param = params_dict[n]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader = getattr(param, "weight_loader", None)
+            if not callable(weight_loader):
+                raise TypeError(f"{n} requires an expert-aware weight loader")
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
             loaded_params.add(n)
 
@@ -468,6 +482,9 @@ class GraniteMoeHybridModel(nn.Module):
                     continue
 
                 name_mapped = name.replace(weight_name, param_name)
+                name_mapped = maybe_remap_moe_expert_param_name(
+                    name_mapped, params_dict
+                )
 
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name_mapped, self):
@@ -495,18 +512,6 @@ class GraniteMoeHybridModel(nn.Module):
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(n)
-            ):
-                # Loading kv cache quantization scales
-                loaded_weight = p
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                _load(scale_name, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if _load_quant_expert(n, p):
                 continue
 
@@ -530,14 +535,14 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w1_param,
                         w1_name,
                         shard_id="w1",
                         expert_id=e,
                     )
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w3_param,
                         w3_name,
                         shard_id="w3",
@@ -553,7 +558,7 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w2_param = p[e]
                     _load_expert(
-                        n.replace(".output_linear.", ".experts.w2_"),
+                        n.replace(".output_linear.", ".experts.routed_experts.w2_"),
                         w2_param,
                         w2_name,
                         shard_id="w2",
@@ -588,7 +593,7 @@ class GraniteMoeHybridForCausalLM(
     SupportsQuant,
     SupportsMambaPrefixCaching,
 ):
-    packed_modules_mapping = {
+    packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
             "q_proj",
             "k_proj",
@@ -669,7 +674,7 @@ class GraniteMoeHybridForCausalLM(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
             config.vocab_size,

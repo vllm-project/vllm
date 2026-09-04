@@ -145,7 +145,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             max_num_batched_tokens, dtype=torch.long, device=device
         )
         self._embeddings_indices = torch.empty(
-            2, max_num_batched_tokens, dtype=torch.long, device=device
+            max_num_batched_tokens, dtype=torch.long, device=device
         )
 
         # 4 is the number of indices tensors.
@@ -172,10 +172,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
-        # NOTE We have remove lora extra vocab support for now. So we set
-        # extra_vocab_size always to 0, and extra_vocab_size will be removed.
-
-        extra_vocab_size = 0
         (
             base_indices,
             sampler_indices,
@@ -187,7 +183,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            extra_vocab_size,
             self.device,
         )
         self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
@@ -195,9 +190,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded
         )
-        self._embeddings_indices[
-            : embeddings_indices.shape[0], : embeddings_indices.shape[1]
-        ].copy_(embeddings_indices)
+        self._embeddings_indices[: embeddings_indices.shape[0]].copy_(
+            embeddings_indices
+        )
 
         self.indices_len[:] = indices_len
 
@@ -271,15 +266,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         """
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
-
-    @property
-    def embeddings_indices(self) -> torch.Tensor:
-        """
-        This property provides access to the indices used for lora embeddings,
-        specifically for VocabParallelEmbeddingWithLoRA.
-        """
-        embeddings_indices_len = self.indices_len[3]
-        return self._embeddings_indices[:, :embeddings_indices_len]
 
     def update_metadata(
         self,
@@ -492,4 +478,73 @@ class PunicaWrapperBase(PunicaWrapperABC):
         Mixture-of-Experts (MoE) layer.
         """
         # TODO: implement it based on torch ops
+        raise NotImplementedError
+
+    def add_lora_w13(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        num_tokens: int,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        local_num_experts: int,
+        top_k: int,
+        num_slices: int,
+        fully_sharded: bool,
+        use_tuned_config: bool,
+        add_inputs: bool = True,
+        token_lora_mapping: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        """Apply w13 LoRA to y (intermediate_cache1) in-place before activation.
+
+        When `token_lora_mapping` is provided it overrides the punica_wrapper's
+        global mapping — used by EP+LoRA to pass the per-rank-local mapping
+        after all-to-all dispatch.
+
+        Returns (sorted_token_ids_lora, expert_ids_lora,
+                 num_tokens_post_padded_lora, token_lora_mapping)
+        for reuse by add_lora_w2.
+        """
+        raise NotImplementedError
+
+    def add_lora_w2(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        topk_weights: torch.Tensor,
+        sorted_token_ids_lora: torch.Tensor | None,
+        expert_ids_lora: torch.Tensor | None,
+        num_tokens_post_padded_lora: torch.Tensor | None,
+        token_lora_mapping: torch.Tensor | None,
+        num_tokens: int,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        top_k_num: int,
+        max_loras: int,
+        adapter_enabled: torch.Tensor,
+        top_k: int,
+        fully_sharded: bool,
+        tp_rank: int,
+        use_tuned_config: bool,
+        add_inputs: bool = True,
+    ) -> None:
+        """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
+
+        Reuses routing tensors returned by add_lora_w13.
+        """
         raise NotImplementedError

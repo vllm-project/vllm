@@ -10,9 +10,9 @@ from torch.func import functional_call
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 from vllm.utils.mem_utils import format_gib
-from vllm.utils.platform_utils import is_pin_memory_available, is_uva_available
+from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
@@ -34,6 +34,8 @@ class UVAOffloader(BaseOffloader):
             offload. If empty, all parameters are eligible up to the byte limit.
     """
 
+    supports_tower_offload = True
+
     def __init__(
         self,
         cpu_offload_max_bytes: int,
@@ -43,10 +45,7 @@ class UVAOffloader(BaseOffloader):
         self.cpu_offload_bytes = 0
         self.cpu_offload_params = cpu_offload_params or set()
 
-        self.pin_memory = (
-            is_pin_memory_available()
-            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
-        )
+        self.pin_memory = should_pin_memory()
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
@@ -54,9 +53,14 @@ class UVAOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with UVA offloading."""
-        modules = [self._maybe_offload_to_cpu(module) for module in modules_generator]
+        if prefix:
+            prefix = f"{prefix}."
+        modules = [
+            self._maybe_offload_to_cpu(module, prefix) for module in modules_generator
+        ]
         if self.cpu_offload_bytes > 0:
             logger.info(
                 "Total CPU offloaded parameters: %s",
@@ -64,7 +68,7 @@ class UVAOffloader(BaseOffloader):
             )
         return modules
 
-    def _maybe_offload_to_cpu(self, module: nn.Module) -> nn.Module:
+    def _maybe_offload_to_cpu(self, module: nn.Module, prefix: str = "") -> nn.Module:
         """Offload module parameters to CPU using UVA if budget allows."""
         if (params := next(module.parameters(), None)) is None:
             return module
@@ -86,13 +90,20 @@ class UVAOffloader(BaseOffloader):
                 # one module might have some parameters offloaded and some not
                 break
 
+            # Skip parameters an earlier wrap_modules call already offloaded.
+            # The UVA path leaves p.device as the accelerator (a view of CPU
+            # memory), so the marker is the only way to recognize those.
+            if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
+                continue
+
             if self.cpu_offload_params:
                 # Check if parameter belongs to the offloading set
                 # Add dots here to ensure we match full segments only
                 # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
                 # but not "mlp.experts.w2_weight_scale"
                 should_offload = any(
-                    f".{param}." in f".{name}." for param in self.cpu_offload_params
+                    f".{param}." in f".{prefix}{name}."
+                    for param in self.cpu_offload_params
                 )
                 if not should_offload:
                     continue

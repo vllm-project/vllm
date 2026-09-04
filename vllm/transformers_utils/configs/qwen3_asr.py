@@ -342,12 +342,14 @@ class Qwen3ASRThinkerConfig(PretrainedConfig):
         audio_start_token_id=151647,
         user_token_id=872,
         initializer_range=0.02,
+        classify_num=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.user_token_id = user_token_id
         self.audio_start_token_id = audio_start_token_id
         self.initializer_range = initializer_range
+        self.classify_num = classify_num
 
         if isinstance(audio_config, dict):
             audio_config = Qwen3ASRAudioEncoderConfig(**audio_config)
@@ -405,17 +407,34 @@ class Qwen3ASRConfig(PretrainedConfig):
     def __init__(
         self,
         thinker_config=None,
+        audio_config=None,
+        text_config=None,
+        audio_token_id=None,
         support_languages=None,
+        timestamp_token_id=None,
+        timestamp_segment_time=None,
         **kwargs,
     ):
         if thinker_config is None:
-            thinker_config = {}
-            logger.info(
-                "thinker_config is None. Initializing thinker model with default values"
-            )
+            thinker_config = {
+                key: value
+                for key, value in (
+                    ("audio_config", audio_config),
+                    ("text_config", text_config),
+                    ("audio_token_id", audio_token_id),
+                )
+                if value is not None
+            }
+            if not thinker_config:
+                logger.info(
+                    "thinker_config is None. Initializing thinker model with "
+                    "default values"
+                )
 
         self.thinker_config = Qwen3ASRThinkerConfig(**thinker_config)
         self.support_languages = support_languages
+        self.timestamp_token_id = timestamp_token_id
+        self.timestamp_segment_time = timestamp_segment_time
         super().__init__(**kwargs)
 
     def get_text_config(self, decoder=False) -> "PretrainedConfig":

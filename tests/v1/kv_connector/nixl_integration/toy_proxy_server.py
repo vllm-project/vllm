@@ -173,6 +173,9 @@ async def send_request_to_service(
         req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
+    # These args are not supported for P
+    min_tokens = req_data.pop("min_tokens", None)
+    min_completion_tokens = req_data.pop("min_completion_tokens", None)
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
@@ -186,6 +189,10 @@ async def send_request_to_service(
     # read/consume the response body to release the connection
     # otherwise, it would http.ReadError
     await response.aread()
+
+    # Add back the min_tokens and min_completion_tokens so D can use them
+    req_data["min_tokens"] = min_tokens
+    req_data["min_completion_tokens"] = min_completion_tokens
 
     return response
 

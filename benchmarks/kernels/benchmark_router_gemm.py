@@ -10,13 +10,14 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-# Dimensions supported by the DSV3 specialized kernel
-DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
-
 # Dimensions supported by the gpt-oss specialized kernel
 GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
 GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
+
+# Dimensions supported by the fp32 specialized kernel (MiniMax-M2)
+FP32_SUPPORTED_NUM_EXPERTS = [256]
+FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+FP32_MAX_TOKENS = 32
 
 
 def get_batch_size_range(max_batch_size):
@@ -31,7 +32,9 @@ def get_model_params(config):
     ):
         num_experts = config.n_routed_experts
         hidden_size = config.hidden_size
-    elif config.architectures[0] in ("GptOssForCausalLM",):
+    elif config.architectures[0] in ("GptOssForCausalLM",) or config.architectures[
+        0
+    ] in ("MiniMaxM2ForCausalLM",):
         num_experts = config.num_local_experts
         hidden_size = config.hidden_size
     else:
@@ -61,52 +64,58 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
         config = get_config(model=model, trust_remote_code=trust_remote_code)
         num_experts, hidden_size = get_model_params(config)
 
-        mat_a = torch.randn(
-            (batch_size, hidden_size), dtype=torch.bfloat16, device="cuda"
-        ).contiguous()
-        mat_b = torch.randn(
-            (num_experts, hidden_size), dtype=torch.bfloat16, device="cuda"
-        ).contiguous()
-        bias = torch.randn(
-            num_experts, dtype=torch.bfloat16, device="cuda"
-        ).contiguous()
-
         is_hopper_or_blackwell = current_platform.is_device_capability(
             90
         ) or current_platform.is_device_capability_family(100)
-        allow_dsv3_router_gemm = (
-            is_hopper_or_blackwell
-            and num_experts in DSV3_SUPPORTED_NUM_EXPERTS
-            and hidden_size in DSV3_SUPPORTED_HIDDEN_SIZES
-        )
         allow_gpt_oss_router_gemm = (
             is_hopper_or_blackwell
             and num_experts in GPT_OSS_SUPPORTED_NUM_EXPERTS
             and hidden_size in GPT_OSS_SUPPORTED_HIDDEN_SIZES
         )
+        is_fp32_router_model = (
+            is_hopper_or_blackwell
+            and num_experts in FP32_SUPPORTED_NUM_EXPERTS
+            and hidden_size in FP32_SUPPORTED_HIDDEN_SIZES
+        )
+        allow_fp32_router_gemm = is_fp32_router_model and batch_size <= FP32_MAX_TOKENS
 
-        has_bias = False
-        if allow_gpt_oss_router_gemm:
-            has_bias = True
+        # Weight dtype: fp32 kernel requires fp32 weights; others use bf16.
+        weight_dtype = torch.float32 if is_fp32_router_model else torch.bfloat16
+        mat_a = torch.randn(
+            (batch_size, hidden_size), dtype=torch.bfloat16, device="cuda"
+        ).contiguous()
+        mat_b = torch.randn(
+            (num_experts, hidden_size), dtype=weight_dtype, device="cuda"
+        ).contiguous()
+        bias = torch.randn(
+            num_experts, dtype=torch.bfloat16, device="cuda"
+        ).contiguous()
+
+        has_bias = allow_gpt_oss_router_gemm
 
         quantiles = [0.5, 0.2, 0.8]
 
         if provider == "torch":
 
             def runner():
-                if has_bias:
+                if allow_fp32_router_gemm:
+                    F.linear(mat_a.float(), mat_b)
+                elif has_bias:
                     F.linear(mat_a, mat_b, bias)
                 else:
                     F.linear(mat_a, mat_b)
         elif provider == "vllm":
 
             def runner():
-                if allow_dsv3_router_gemm:
-                    ops.dsv3_router_gemm(mat_a, mat_b, torch.bfloat16)
+                if allow_fp32_router_gemm:
+                    ops.fp32_router_gemm(mat_a, mat_b)
                 elif allow_gpt_oss_router_gemm:
                     ops.gpt_oss_router_gemm(mat_a, mat_b, bias)
+                elif is_fp32_router_model:
+                    # batch_size > FP32_MAX_TOKENS: fall back to F.linear
+                    F.linear(mat_a.float(), mat_b)
                 else:
-                    raise ValueError("Unsupported router gemm")
+                    F.linear(mat_a, mat_b)
 
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             runner, quantiles=quantiles

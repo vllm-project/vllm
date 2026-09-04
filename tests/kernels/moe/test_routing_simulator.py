@@ -6,7 +6,7 @@ Test script for the token-to-expert routing simulator.
 
 This script demonstrates how to use the routing simulator to test
 different routing strategies and analyze their performance, including
-integration tests with FusedMoE layer.
+integration tests with FusedMoEFactory layer.
 """
 
 import tempfile
@@ -77,11 +77,11 @@ def test_basic_functionality(
 
 def test_routing_strategy_integration(monkeypatch, device):
     """Test that the routing strategy environment variable works with
-    FusedMoE."""
+    FusedMoEFactory."""
     pytest.importorskip("vllm.model_executor.layers.fused_moe.layer")
 
     import vllm.envs as envs
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
 
     # Test parameters
     num_tokens = 32
@@ -111,7 +111,7 @@ def test_routing_strategy_integration(monkeypatch, device):
         )
 
         for strategy in strategies:
-            fused_moe = FusedMoE(
+            fused_moe = FusedMoEFactory(
                 num_experts=num_experts,
                 top_k=top_k,
                 hidden_size=hidden_size,
@@ -125,8 +125,15 @@ def test_routing_strategy_integration(monkeypatch, device):
             env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
             monkeypatch.setenv(env_name, strategy)
 
-            # Force reload of environment variable
-            envs.environment_variables[env_name] = lambda s=strategy: s
+            # Temporarily override the envs lookup so the router factory
+            # reads the monkeypatched value instead of the module-load-time
+            # default. Use monkeypatch.setitem so the original lambda is
+            # restored automatically at teardown.
+            monkeypatch.setitem(
+                envs.environment_variables,
+                env_name,
+                lambda s=strategy: s,
+            )
 
             # Test the select_experts method
             topk_weights, topk_ids = fused_moe.router.select_experts(

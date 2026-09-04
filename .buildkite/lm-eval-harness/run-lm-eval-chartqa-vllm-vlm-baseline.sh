@@ -2,7 +2,7 @@
 # We can use this script to compute baseline accuracy on chartqa for vllm.
 #
 # Make sure you have lm-eval-harness installed:
-#   pip install "lm-eval[api]>=0.4.11"
+#   pip install "lm-eval[api]>=0.4.12"
 
 usage() {
     echo``

@@ -8,15 +8,16 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import (
@@ -49,8 +50,12 @@ class PythonicToolParser(ToolParser):
         re.DOTALL,
     )
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        tools: list[Tool] | None = None,
+    ):
+        super().__init__(tokenizer, tools)
 
     # Rename for readability. This is NOT a tool id.
     @property

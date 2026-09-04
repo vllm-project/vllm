@@ -79,6 +79,7 @@ union BufferResource {
   };
 };
 
+#if !defined(__gfx1250__)
 __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
     int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.load.v4i32");
@@ -86,6 +87,16 @@ __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
 __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
+#else
+__quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
+    int32x4_t srsrc, int32_t voffset, int32_t soffset, int32_t aux) {}
+
+__quickreduce_device_inline__ static void buffer_store_dwordx4(int32x4_t data,
+                                                               int32x4_t srsrc,
+                                                               int32_t voffset,
+                                                               int32_t soffset,
+                                                               int32_t aux) {}
+#endif
 
 __quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
 #if defined(__gfx942__)
@@ -281,6 +292,29 @@ __quickreduce_device_inline__ int packed_rcp<nv_bfloat16>(int a) {
   A.i = a;
   R.bf2 = h2rcp(A.bf2);
   return R.i;
+}
+
+template <typename T>
+__quickreduce_device_inline__ int packed_from_int16_pair(int16_t low,
+                                                         int16_t high);
+
+template <>
+__quickreduce_device_inline__ int packed_from_int16_pair<half>(int16_t low,
+                                                               int16_t high) {
+  // Convert two signed integers to one fp16x2 packed 32-bit lane.
+  half2 h = __halves2half2(__int2half_rn(static_cast<int>(low)),
+                           __int2half_rn(static_cast<int>(high)));
+  return __builtin_bit_cast(int, h);
+}
+
+template <>
+__quickreduce_device_inline__ int packed_from_int16_pair<nv_bfloat16>(
+    int16_t low, int16_t high) {
+  // Convert two signed integers to one bf16x2 packed 32-bit lane.
+  nv_bfloat16 bf_low = __float2bfloat16(static_cast<float>(low));
+  nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
+  nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
+  return *reinterpret_cast<int*>(&bf2);
 }
 
 // changes dtype

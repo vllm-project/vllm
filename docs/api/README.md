@@ -27,11 +27,9 @@ LLM Class.
 
 - [vllm.LLM][]
 
-LLM Inputs.
+Prompt schema for LLM APIs.
 
-- [vllm.inputs.PromptType][]
-- [vllm.inputs.TextPrompt][]
-- [vllm.inputs.TokensPrompt][]
+- [vllm.inputs.llm][]
 
 ## vLLM Engines
 
@@ -58,13 +56,7 @@ Looking to add your own multi-modal model? Please follow the instructions listed
 
 - [vllm.multimodal.MULTIMODAL_REGISTRY][]
 
-### Inputs
-
-User-facing inputs.
-
-- [vllm.multimodal.inputs.MultiModalDataDict][]
-
-Internal data structures.
+### Internal data structures
 
 - [vllm.multimodal.inputs.PlaceholderRange][]
 - [vllm.multimodal.inputs.NestedTensors][]
@@ -72,7 +64,6 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
 - [vllm.multimodal.inputs.MultiModalKwargsItems][]
-- [vllm.multimodal.inputs.MultiModalInputs][]
 
 ### Data Parsing
 

@@ -37,7 +37,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from ....utils import create_new_process_for_each_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
-from .test_common import get_model_ids_to_test, get_text_token_prompts
+from .test_common import get_model_ids_to_test, get_token_prompt
 
 ImageInput = list[Image.Image]
 VideoInput: TypeAlias = (
@@ -107,10 +107,10 @@ def create_batched_mm_kwargs(
     }
 
     # video metadata will be added back to the resized video data here.
-    text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
+    token_prompt = get_token_prompt(processor, resized_mm_data)
 
     mm_kwargs = processor(
-        prompt=token_prompt if text_prompt is None else text_prompt,
+        prompt=token_prompt,
         mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
     )["mm_kwargs"].require_data()
@@ -164,6 +164,14 @@ def test_model_tensor_schema(model_id: str):
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
+    if model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Deepseek V4 is only supported on CUDA")
+
+    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
+        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
@@ -180,6 +188,7 @@ def test_model_tensor_schema(model_id: str):
         dummy_hf_overrides,
         model_arch=model_arch,
         exist_overrides=model_info.hf_overrides,
+        use_original_num_layers=getattr(model_info, "use_original_num_layers", False),
     )
 
     # ROCm: Detect if model uses AWQ quantization and set appropriate dtype

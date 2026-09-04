@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,15 +10,15 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -32,14 +31,56 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
+    from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
     ModelConfig = object
+    TokenizeParams = object
 
 logger = init_logger(__name__)
+
+# HuggingFace processors accept nested ``images_kwargs`` / ``videos_kwargs`` /
+# ``audio_kwargs`` in addition to a shared flat namespace. vLLM's token-budget
+# and dummy-input code only reads the flat keys, so scoped overrides have to
+# be overlaid per modality.
+_HF_MODALITY_PROCESSOR_KWARGS = {
+    "image": "images_kwargs",
+    "video": "videos_kwargs",
+    "audio": "audio_kwargs",
+}
+
+
+def overlay_modality_mm_kwargs(
+    kwargs: Mapping[str, object],
+    modality: str | None,
+) -> dict[str, Any]:
+    """Overlay HF-style nested processor kwargs onto the flat namespace.
+
+    Overlay only the requested modality so a video ``size`` bump does not leak
+    into the image budget. Flat keys keep their current shared-namespace
+    behavior when no scoped dict is present.
+
+    Args:
+        kwargs: Merged multi-modal processor kwargs.
+        modality: Target modality (``image``, ``video``, or ``audio``).
+            When ``None``, ``kwargs`` is copied without overlay.
+
+    Returns:
+        A new dict with the modality-scoped keys overlaid when present.
+    """
+    merged = dict(kwargs)
+    if modality is None:
+        return merged
+    scoped_key = _HF_MODALITY_PROCESSOR_KWARGS.get(modality)
+    if scoped_key is None:
+        return merged
+    scoped = merged.get(scoped_key)
+    if not isinstance(scoped, Mapping):
+        return merged
+    return merged | dict(scoped)
 
 
 @dataclass
@@ -195,7 +236,7 @@ class InputProcessingContext:
 
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
-            tokenizer = tokenizer.transformers_tokenizer
+            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
@@ -225,28 +266,56 @@ class InputProcessingContext:
         self,
         output: JSONTree,
     ) -> JSONTree:
-        def _postprocess_one(x: object):
-            if isinstance(x, torch.Tensor):  # noqa: SIM102
-                # This mimics the behavior of transformers.BatchFeature
-                if x.is_floating_point():
-                    x = x.to(dtype=self.model_config.dtype)
+        # "torch_shm" puts tensors on a torch.multiprocessing queue, which
+        # shares device tensors by CUDA IPC handle, so a device-side processor
+        # can hand `pixel_values` straight to the worker. Every other transport
+        # serializes host bytes, so the result has to be copied back first.
+        keep_on_device = (
+            self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
+        )
 
-            return x
+        def _postprocess_one(x: object):
+            if not isinstance(x, torch.Tensor):
+                return x
+
+            # Bind to a Tensor-typed local: reassigning the `object`-typed
+            # parameter would discard the isinstance narrowing.
+            tensor = x
+
+            # This mimics the behavior of transformers.BatchFeature
+            if tensor.is_floating_point():
+                tensor = tensor.to(dtype=self.model_config.dtype)
+
+            if not tensor.is_cpu and not keep_on_device:
+                tensor = tensor.cpu()
+
+            return tensor
 
         return json_map_leaves(_postprocess_one, output)
 
-    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+    def get_merged_mm_kwargs(
+        self,
+        kwargs: Mapping[str, object],
+        *,
+        modality: str | None = None,
+    ) -> dict[str, Any]:
+        """Merge configured and request ``mm_processor_kwargs``.
+
+        When ``modality`` is set, HF-style nested
+        ``images_kwargs`` / ``videos_kwargs`` / ``audio_kwargs`` are overlaid
+        onto the flat namespace for vLLM-side reads (token budgets, dummy
+        inputs). Processor construction and HF ``__call__`` should omit
+        ``modality`` so the nested dicts still reach the HF processor.
+        """
         mm_config = self.model_config.get_multimodal_config()
-        return mm_config.merge_mm_processor_kwargs(kwargs)
+        merged = mm_config.merge_mm_processor_kwargs(kwargs)
+        return overlay_modality_mm_kwargs(merged, modality)
 
     def call_hf_processor(
         self,
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-        *,
-        num_tries: int = 1,
-        max_tries: int = 5,
     ) -> BatchFeature:
         """
         Call `hf_processor` on the prompt `data`
@@ -256,38 +325,23 @@ class InputProcessingContext:
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
+        # vLLM needs the full untruncated sequence to keep multi-modal
+        # placeholder tokens aligned; note that the text inputs in
+        # call_hf_processor are just dummy text, not the original prompt.
+        # The original prompt is already tokenized by the renderer.
+        merged_kwargs.setdefault("truncation", False)
+
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
             merged_kwargs,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
-            # See https://github.com/huggingface/tokenizers/issues/537
-            if (
-                isinstance(exc, RuntimeError)
-                and exc
-                and exc.args[0] == "Already borrowed"
-                and num_tries < max_tries
-            ):
-                logger.warning(
-                    "Failed to acquire tokenizer in current thread. "
-                    "Retrying (%d/%d)...",
-                    num_tries,
-                    max_tries,
-                )
-                time.sleep(0.5)
-                return self.call_hf_processor(
-                    hf_processor,
-                    data,
-                    kwargs,
-                    num_tries=num_tries + 1,
-                    max_tries=max_tries,
-                )
-
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
                 f"on data={data} with kwargs={allowed_kwargs}"
@@ -339,6 +393,8 @@ class BaseProcessingInfo:
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
+        from vllm.renderers import TokenizeParams
+
         model_config = self.ctx.model_config
         encoder_config = model_config.encoder_config or {}
 
@@ -367,6 +423,12 @@ class BaseProcessingInfo:
 
         return None
 
+    @property
+    def allow_missing_mm_embeddings(self) -> bool:
+        """Whether pre-computed embedding tensors may be omitted."""
+        mm_config = self.ctx.model_config.multimodal_config
+        return mm_config is not None and mm_config.allow_missing_mm_embeddings
+
     def get_data_parser(self) -> MultiModalDataParser:
         """
         Constructs a parser to preprocess multi-modal data items
@@ -379,6 +441,7 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     @cached_property
@@ -389,7 +452,6 @@ class BaseProcessingInfo:
     def skip_prompt_length_check(self) -> bool:
         return False
 
-    @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
         Return the maximum supported number of items for each modality.
@@ -442,7 +504,7 @@ class BaseProcessingInfo:
             if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
-            raise ValueError(msg)
+            raise VLLMValidationError(msg, parameter=modality)
 
     def parse_mm_data(
         self,
@@ -451,8 +513,7 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].

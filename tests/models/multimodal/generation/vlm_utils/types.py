@@ -133,6 +133,7 @@ class VLMTestInfo(NamedTuple):
 
     # Exposed options for HF runner
     hf_model_kwargs: dict[str, Any] | None = None
+    hf_processor: Callable[[str], Any] | None = None
     # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
     auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM
@@ -157,11 +158,9 @@ class VLMTestInfo(NamedTuple):
     num_video_frames: int | tuple[int] = 16
     needs_video_metadata: bool = False
 
-    # Fixed image sizes / image size factors; most tests use image_size_factors
-    # The values provided for these two fields will be stacked and expanded
-    # such that each model will consider each image size factor / image size
-    # once per tests (much like concatenating and wrapping in one parametrize
-    # call)
+    # Fixed image sizes / image size factors; most tests use image_size_factors.
+    # Each inner iterable defines one request batch. All batches are run against
+    # the same model instance.
     image_size_factors: Iterable[Iterable[float]] = IMAGE_SIZE_FACTORS
     image_sizes: Iterable[Iterable[tuple[int, int]]] | None = None
 
@@ -196,6 +195,7 @@ class VLMTestInfo(NamedTuple):
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
             "hf_model_kwargs": self.hf_model_kwargs,
+            "hf_processor": self.hf_processor,
             "stop_str": self.stop_str,
             "patch_hf_runner": self.patch_hf_runner,
         }
@@ -209,8 +209,8 @@ class ExpandableVLMTestArgs(NamedTuple):
     num_logprobs: int
     dtype: str
     distributed_executor_backend: str | None
-    # Sizes are used for everything except for custom input tests
-    size_wrapper: ImageSizeWrapper | None = None
+    # Sizes are used for everything except audio and custom input tests.
+    size_wrappers: tuple[ImageSizeWrapper, ...] = ()
     # Video only
     num_video_frames: int | None = None
     needs_video_metadata: bool = False

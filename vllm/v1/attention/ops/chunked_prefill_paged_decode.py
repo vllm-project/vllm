@@ -10,12 +10,31 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
+logger = init_logger(__name__)
+
 float8_info = torch.finfo(current_platform.fp8_dtype())
+
+
+def has_native_kv_cache_layout(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+) -> bool:
+    """Return whether KV cache blocks can use the native ROCm pairing.
+
+    The native reshape_and_cache writer assumes packed blocks. If cache update
+    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
+    should use the matching Triton path too.
+    """
+    return (
+        key_cache.stride(0) == key_cache.shape[1:].numel()
+        and value_cache.stride(0) == value_cache.shape[1:].numel()
+    )
 
 
 @triton.jit
@@ -159,26 +178,45 @@ def kernel_paged_attention_2d(
             + internal_offsets[:, None] * stride_v_cache_3
         )
 
-        # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
+        # Only the final tile can straddle seq_len. Slots >= seq_len are
+        # unwritten KV cache that may hold NaN/garbage; they are score-masked
+        # below, but 0 * NaN = NaN would still poison the output, so mask them
+        # out of the K/V loads too. Earlier tiles are fully written, so they
+        # use the cheaper token-uniform dim_mask (matching the pre-0.25.0 fast
+        # path) and skip the per-token predicate entirely.
+        # K : (HEAD_SIZE, BLOCK_SIZE), V : (BLOCK_SIZE, HEAD_SIZE)
+        if j == num_blocks - 1:
+            kv_load_mask = abs_token_idx < seq_len
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & kv_load_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & kv_load_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+        else:
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
-
-        # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -266,6 +304,7 @@ def chunked_prefill_paged_decode(
     # Optional tensor for sinks
     sinks=None,
     is_block_table_ptr: bool = False,
+    causal: bool = True,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -297,6 +336,7 @@ def chunked_prefill_paged_decode(
             skip_decode=True,
             fp8_out_scale=output_scale,
             sinks=sinks,
+            causal=causal,
         )
 
     block_size = value_cache.shape[3]
@@ -341,14 +381,12 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
-    # Triton is only forced when encountering a non-standard block
-    # like Qwen3 with a size of 544.
-    # 1. Check if block_size is a power of 2 (16, 32, 64...)
-    # 2. If it's a power of 2, we trust the vLLM's native use_custom decision.
-    # 3. If it's not a power of 2 (such as Qwen3's 544),
-    # then our Triton path is forced.
+    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
+    # Force Triton for non-standard blocks like Qwen3's 544 and for
+    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
+    # during cache update, so keep decode on the matching stride-aware path.
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2:
+    if not is_pow2 or not has_native_layout:
         use_custom = False
 
     if use_custom:
@@ -392,10 +430,19 @@ def chunked_prefill_paged_decode(
             fp8_out_scale=output_scale,
         )
     else:
+        logger.warning_once(
+            "Cannot use ROCm custom paged attention kernel,"
+            " falling back to Triton implementation."
+        )
         real_block_size = value_cache.shape[3]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
-        TRITON_BLOCK_SIZE = block_size if is_pow2 else 32
+        # Cap at 128 to avoid exceeding GPU shared memory limits
+        # (e.g. hybrid Mamba models inflate block_size to 2048).
+        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
+        # via the l_block_idx/internal_offsets addressing logic.
+        MAX_TRITON_BLOCK_SIZE = 128
+        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()

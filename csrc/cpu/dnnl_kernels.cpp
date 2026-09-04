@@ -202,7 +202,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
   using cvt_vec_t = typename KernelVecType<scalar_t>::cvt_vec_type;
   constexpr int vec_elem_num = load_vec_t::VEC_ELEM_NUM;
 
-  const int64_t thread_num = omp_get_max_threads();
+  const int64_t thread_num = cpu_utils::get_max_threads();
   if (num_tokens > thread_num) {
 #pragma omp parallel for
     for (int64_t i = 0; i < num_tokens; ++i) {
@@ -215,7 +215,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
         float zp_scale_val = a_scale[i] * static_cast<float>(azp[i]);
         token_zp_scale_vec = cvt_vec_t(zp_scale_val);
       }
-      for (; j < hidden_size - vec_elem_num; ++j) {
+      for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
         cvt_vec_t elems_fp32(input_ptr + j);
         elems_fp32 = elems_fp32 * token_scale_vec;
         if constexpr (AZP) {

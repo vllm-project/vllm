@@ -23,6 +23,7 @@
 # variable in the code.
 
 import ctypes
+import functools
 import platform
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +49,42 @@ ncclWindow_t = ctypes.c_void_p
 
 class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
+
+
+NCCL_UNIQUE_ID_BYTES = ctypes.sizeof(ncclUniqueId)
+
+
+# Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
+# v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
+# version the caller declares in props.version, not by props.size, so never
+# declare a version newer than this layout: clamp to
+# NCCL_COMM_PROPERTIES_LAYOUT_VERSION. To use fields added in a newer NCCL,
+# extend the layout and bump the constant.
+NCCL_COMM_PROPERTIES_LAYOUT_VERSION = 23102  # NCCL_VERSION(2, 31, 2)
+
+
+class ncclCommProperties(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("rank", ctypes.c_int),
+        ("nRanks", ctypes.c_int),
+        ("cudaDev", ctypes.c_int),
+        ("nvmlDev", ctypes.c_int),
+        ("deviceApiSupport", ctypes.c_bool),
+        ("multimemSupport", ctypes.c_bool),
+        ("ginType", ctypes.c_int),
+        ("nLsaTeams", ctypes.c_int),
+        ("hostRmaSupport", ctypes.c_bool),
+        ("railedGinType", ctypes.c_int),
+        # Filled only when the declared version is >= NCCL_VERSION(2, 31, 0).
+        ("commHash", ctypes.c_uint64),
+        ("ginMinStride", ctypes.c_int),
+        ("ginConnectionType", ctypes.c_int),
+        ("ginSupport", ctypes.c_bool * 64),
+        ("devCommRuntimeVersionSize", ctypes.c_size_t),
+    ]
 
 
 cudaStream_t = ctypes.c_void_p
@@ -76,25 +113,33 @@ class ncclDataTypeEnum:
     ncclNumTypes = 11
 
     @classmethod
+    @functools.lru_cache(maxsize=1)
+    def _torch_to_nccl_map(cls) -> dict[torch.dtype, int]:
+        return {
+            torch.int8: cls.ncclInt8,
+            torch.uint8: cls.ncclUint8,
+            torch.int32: cls.ncclInt32,
+            torch.int64: cls.ncclInt64,
+            torch.float16: cls.ncclFloat16,
+            torch.float32: cls.ncclFloat32,
+            torch.float64: cls.ncclFloat64,
+            torch.bfloat16: cls.ncclBfloat16,
+            current_platform.fp8_dtype(): cls.ncclFloat8e4m3,
+        }
+
+    @classmethod
+    def supports_torch_dtype(cls, dtype: torch.dtype) -> bool:
+        return dtype in cls._torch_to_nccl_map()
+
+    @classmethod
+    def try_from_torch(cls, dtype: torch.dtype) -> int | None:
+        return cls._torch_to_nccl_map().get(dtype)
+
+    @classmethod
     def from_torch(cls, dtype: torch.dtype) -> int:
-        if dtype == torch.int8:
-            return cls.ncclInt8
-        if dtype == torch.uint8:
-            return cls.ncclUint8
-        if dtype == torch.int32:
-            return cls.ncclInt32
-        if dtype == torch.int64:
-            return cls.ncclInt64
-        if dtype == torch.float16:
-            return cls.ncclFloat16
-        if dtype == torch.float32:
-            return cls.ncclFloat32
-        if dtype == torch.float64:
-            return cls.ncclFloat64
-        if dtype == torch.bfloat16:
-            return cls.ncclBfloat16
-        if dtype == current_platform.fp8_dtype():
-            return cls.ncclFloat8e4m3
+        nccl_dtype = cls.try_from_torch(dtype)
+        if nccl_dtype is not None:
+            return nccl_dtype
         raise ValueError(
             f"Unsupported dtype {dtype}: should be one of "
             f"int8, uint8, int32, int64, float16, float32, float64, bfloat16,"
@@ -281,6 +326,16 @@ class NCCLLibrary:
         # it is better not to call it at all.
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
+        # ncclCommAbort frees resources associated with the communicator
+        # without requiring a collective synchronization. Unlike
+        # ncclCommDestroy, it is safe to call during an uncoordinated
+        # shutdown when peer ranks may already be gone.
+        # ncclResult_t  ncclCommAbort(ncclComm_t comm);
+        Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
+        # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
+        Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
+        # ncclResult_t ncclCommResume(ncclComm_t comm);
+        Function("ncclCommResume", ncclResult_t, [ncclComm_t]),
         # ncclResult_t ncclGroupStart();
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
@@ -302,6 +357,12 @@ class NCCLLibrary:
         # ncclResult_t ncclCommWindowDeregister(
         #   ncclComm_t comm, ncclWindow_t win);
         Function("ncclCommWindowDeregister", ncclResult_t, [ncclComm_t, ncclWindow_t]),
+        # Query runtime properties of a specific initialized communicator.
+        Function(
+            "ncclCommQueryProperties",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclCommProperties)],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -360,9 +421,23 @@ class NCCLLibrary:
                             # Having an exception here on ROCm platform is
                             # not allowed during graph capturing
                             continue
+                    elif func.name == "ncclCommQueryProperties":
+                        # Optional on NCCL versions older than 2.29.
+                        continue
+                    elif func.name in ("ncclCommSuspend", "ncclCommResume"):
+                        # RCCL doesn't export these; NCCL >= 2.29.7 does, and
+                        # vLLM's CUDA path already requires that version.
+                        # PyNcclCommunicator checks has_symbol() before
+                        # calling either.
+                        if current_platform.is_rocm():
+                            continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
+
+    def has_symbol(self, name: str) -> bool:
+        """Whether the loaded NCCL/RCCL library exports the given symbol."""
+        return name in self._funcs
 
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
@@ -538,6 +613,15 @@ class NCCLLibrary:
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
+
+    def ncclCommAbort(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
+
+    def ncclCommSuspend(self, comm: ncclComm_t, flags: int) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))
+
+    def ncclCommResume(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommResume"](comm))
 
     def ncclGroupStart(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupStart"]())

@@ -20,7 +20,7 @@ pip install vllm streamlit openai
     vllm serve Qwen/Qwen1.5-0.5B-Chat
     ```
 
-1. Use the script: [examples/online_serving/streamlit_openai_chatbot_webserver.py](../../../examples/online_serving/streamlit_openai_chatbot_webserver.py)
+1. Use the script: [examples/applications/chatbot/streamlit_openai_chatbot_webserver.py](../../../examples/applications/chatbot/streamlit_openai_chatbot_webserver.py)
 
 1. Start the streamlit web UI and start to chat:
 

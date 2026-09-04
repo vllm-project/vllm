@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
-import librosa
 import numpy as np
 import pybase64 as base64
 import pytest
+import soundfile as sf
 
 from vllm.multimodal.media import AudioMediaIO
+from vllm.multimodal.media import audio as audio_module
+from vllm.multimodal.media.audio import (
+    load_audio,
+    load_audio_soundfile,
+    load_audio_torchcodec,
+)
 
 from ...conftest import AudioTestAssets
 
@@ -44,6 +51,18 @@ def test_audio_media_io_load_base64(dummy_audio_bytes):
     assert out[1] == 16000
 
 
+def test_audio_media_io_load_base64_rejects_malformed(dummy_audio_bytes):
+    """Malformed base64 must surface as a ValueError so the server answers 400.
+    Without strict decoding the bad characters are dropped, the garbage reaches
+    libsndfile, and the client gets a 500 instead."""
+    encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
+    malformed = encoded[:8] + "!!!@@@###" + encoded[8:]
+
+    audio_io = AudioMediaIO()
+    with pytest.raises(ValueError):
+        audio_io.load_base64("audio/wav", malformed)
+
+
 def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     audio_io = AudioMediaIO()
     path = audio_assets[0].get_local_path()
@@ -68,11 +87,185 @@ def test_audio_media_io_encode_base64(dummy_audio):
         mock_write.assert_called_once()
 
 
+def test_load_audio_max_duration_respected(dummy_audio_bytes):
+    """Valid audio within the duration limit should load successfully."""
+    y, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=3600)
+    assert isinstance(y, np.ndarray)
+    assert len(y) > 0
+
+
+def test_load_audio_max_duration_rejected(dummy_audio_bytes):
+    """Audio exceeding the duration limit must be rejected during decode."""
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
+
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
     with open(video_path, "rb") as f:
         audio, sr = audio_io.load_bytes(f.read())
-    audio_ref, sr_ref = librosa.load(video_path, sr=None)
+    audio_ref, sr_ref = load_audio(video_path, sr=None)
     assert sr == sr_ref
     np.testing.assert_allclose(audio_ref, audio, atol=1e-4)
+
+
+def _make_flac_bytes(frames: int, channels: int, samplerate: int) -> bytes:
+    """Create a minimal FLAC file in memory for testing."""
+    data = np.zeros((frames, channels), dtype=np.int16)
+    buf = BytesIO()
+    sf.write(buf, data, samplerate, format="FLAC")
+    return buf.getvalue()
+
+
+def test_small_file_passes_memory_guard():
+    """A small valid file should pass both duration and memory guards."""
+    payload = _make_flac_bytes(frames=16000, channels=1, samplerate=16000)
+    y, sr = load_audio_soundfile(
+        BytesIO(payload),
+        sr=None,
+        max_duration_s=600,
+        max_decode_bytes=256 * 1024 * 1024,
+    )
+    assert isinstance(y, np.ndarray)
+    assert len(y) == 16000
+
+
+def test_memory_guard_rejects_large_allocation():
+    """A file whose frames*channels*4 exceeds the byte limit must be
+    rejected before allocating the buffer."""
+    # 100_000 frames * 8 channels * 4 bytes = 3.2 MB
+    payload = _make_flac_bytes(frames=100_000, channels=8, samplerate=48000)
+    # Set limit to 1 MiB — should reject
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio_soundfile(
+            BytesIO(payload),
+            sr=None,
+            max_duration_s=600,
+            max_decode_bytes=1 * 1024 * 1024,
+        )
+
+
+def test_forged_samplerate_rejected_by_memory_guard():
+    """The PoC scenario: high sample rate fools the duration guard but
+    the memory guard catches the large frame*channel allocation."""
+    # Forged high sample rate: 655350 Hz, 8 channels, 1M frames
+    # Duration guard sees: 1_000_000 / 655_350 = 1.5s → passes
+    # Memory: 1_000_000 * 8 * 4 = 32 MB
+    payload = _make_flac_bytes(frames=1_000_000, channels=8, samplerate=655350)
+    # Set memory limit to 16 MiB — below the 32 MB allocation
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio_soundfile(
+            BytesIO(payload),
+            sr=None,
+            max_duration_s=600,
+            max_decode_bytes=16 * 1024 * 1024,
+        )
+
+
+def test_load_audio_threads_max_decode_bytes():
+    """Verify load_audio passes max_decode_bytes through to backend."""
+    # 50_000 frames * 4 channels * 4 bytes = 800 KB
+    payload = _make_flac_bytes(frames=50_000, channels=4, samplerate=44100)
+    # Limit of 512 KB should reject
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio(
+            BytesIO(payload),
+            sr=None,
+            max_duration_s=600,
+            max_decode_bytes=512 * 1024,
+        )
+
+
+@pytest.mark.parametrize("backend", ["soundfile", "pyav", "torchcodec"])
+def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
+    """Every explicit backend must decode to the same samples as `auto`."""
+    if backend == "torchcodec":
+        pytest.importorskip("torchcodec")
+    ref_audio, ref_sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend=backend)
+    assert sr == ref_sr
+    # Decoders disagree only on codec encoder-delay/padding, so torchcodec may
+    # emit a few extra trailing samples (e.g. ~192 for Ogg Vorbis). Compare the
+    # overlapping region, which must agree to float32 precision.
+    n = min(ref_audio.shape[-1], audio.shape[-1])
+    assert n > 0
+    np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
+
+
+def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
+    """An unknown backend must fail loudly instead of silently degrading."""
+    with pytest.raises(ValueError, match="Unknown audio backend"):
+        load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="not_a_backend")
+
+
+def test_load_audio_auto_falls_back_without_torchcodec(dummy_audio_bytes):
+    """`auto` must fall back to the soundfile → PyAV chain when torchcodec
+    is not importable."""
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    with patch.object(audio_module, "load_audio_torchcodec", side_effect=ImportError):
+        audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_load_audio_auto_falls_back_without_ffmpeg(dummy_audio_bytes):
+    """torchcodec installed but system ffmpeg missing (`AudioDecoder is None`)
+    must surface as ImportError so `auto` falls back to soundfile → PyAV."""
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    with patch.object(audio_module, "AudioDecoder", None):
+        with pytest.raises(ImportError, match="torchcodec audio backend"):
+            load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+        audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_load_audio_auto_falls_back_when_libtorchcodec_unloadable(
+    dummy_audio_bytes,
+):
+    """torchcodec loads its ffmpeg-backed core lazily at decoder construction;
+    a "Could not load libtorchcodec" RuntimeError there (no system ffmpeg)
+    must also surface as ImportError so `auto` falls back."""
+
+    class _UnloadableDecoder:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("Could not load libtorchcodec. Likely causes: ...")
+
+    ref_audio, ref_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    with patch.object(audio_module, "AudioDecoder", _UnloadableDecoder):
+        with pytest.raises(ImportError, match="torchcodec audio backend"):
+            load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+        audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, backend="auto")
+    assert sr == ref_sr
+    np.testing.assert_array_equal(ref_audio, audio)
+
+
+def test_audio_media_io_audio_backend_kwarg(dummy_audio_bytes):
+    """`audio_backend` selects the backend; unknown values fail at init."""
+    audio, sr = AudioMediaIO(audio_backend="pyav").load_bytes(dummy_audio_bytes)
+    assert isinstance(audio, np.ndarray)
+    assert sr == 16000
+    with pytest.raises(ValueError, match="Unknown audio_backend"):
+        AudioMediaIO(audio_backend="not_a_backend")
+
+
+def test_torchcodec_max_duration_rejected(dummy_audio_bytes):
+    """The decompression-bomb duration guard must hold for torchcodec too."""
+    pytest.importorskip("torchcodec")
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio_torchcodec(
+            BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001
+        )
+
+
+def test_torchcodec_max_decode_bytes_rejected(dummy_audio_bytes):
+    """The decompression-bomb memory guard must hold for torchcodec too."""
+    pytest.importorskip("torchcodec")
+    audio, _ = load_audio_torchcodec(BytesIO(dummy_audio_bytes), sr=None)
+    with pytest.raises(ValueError, match="VLLM_MAX_AUDIO_DECODE_BYTES"):
+        load_audio_torchcodec(
+            BytesIO(dummy_audio_bytes),
+            sr=None,
+            max_decode_bytes=audio.nbytes - 1,
+        )

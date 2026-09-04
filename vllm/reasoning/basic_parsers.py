@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from itertools import islice
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 
@@ -38,6 +38,14 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def end_token(self) -> str:
         """The token that ends reasoning content."""
         raise NotImplementedError
+
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.start_token
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.end_token
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)

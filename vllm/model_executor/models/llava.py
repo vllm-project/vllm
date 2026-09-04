@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
+from typing import Annotated, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -20,17 +20,15 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -43,11 +41,9 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
-    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
-    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -163,14 +159,14 @@ class LlavaMultiModalProjector(nn.Module):
 
 
 class LlavaLikeConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
-    image_token_index: Final[int]
-    vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[int | list[int]]
+    vision_config: PretrainedConfig
+    image_token_index: int
+    vision_feature_select_strategy: str
+    vision_feature_layer: int | list[int]
 
 
 class LlavaLikeProcessor(Protocol):
-    image_token: Final[str]
+    image_token: str
 
 
 class BaseLlavaProcessingInfo(BaseProcessingInfo):
@@ -290,6 +286,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -325,32 +322,30 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
 
 class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        pixel_values = processed_outputs.get("pixel_values")
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
+        if not mm_data:
+            return processed_data
+
+        pixel_values = processed_data.get("pixel_values")
         if pixel_values is not None:
             # Avoid padding since we need the output for each image to be
             # independent of other images for the cache to work correctly
-            image_sizes = processed_outputs["image_sizes"]
+            image_sizes = processed_data["image_sizes"]
             assert len(pixel_values) == len(image_sizes)
 
-            processed_outputs["pixel_values"] = [
+            processed_data["pixel_values"] = [
                 p[:, :h, :w] for p, (h, w) in zip(pixel_values, image_sizes)
             ]
 
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -378,6 +373,7 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        assert isinstance(hf_config, LlavaConfig)
         encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
@@ -526,6 +522,8 @@ class LlavaForConditionalGeneration(
         }
     )
 
+    supports_tower_connector_lora = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -646,7 +644,7 @@ class LlavaForConditionalGeneration(
         self,
         image_input: LlavaImageInputs,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaImageEmbeddingInputs):
             return image_input["data"]
 
         image_features = self._process_image_pixels(image_input)
@@ -756,97 +754,3 @@ class LlavaForConditionalGeneration(
         # LLaVA's MLP projector outputs the same number of tokens
         # as it receives from the vision encoder (1:1 mapping)
         return num_vision_tokens
-
-
-class MantisProcessingInfo(LlavaProcessingInfo):
-    def get_hf_processor(self, **kwargs: object):
-        hf_config = self.get_hf_config()
-        vision_info = self.get_vision_encoder_info()
-
-        kwargs.setdefault("patch_size", vision_info.get_patch_size())
-        kwargs.setdefault(
-            "vision_feature_select_strategy",
-            hf_config.vision_feature_select_strategy,
-        )
-
-        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
-
-
-class MantisMultiModalProcessor(LlavaMultiModalProcessor):
-    def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
-        hf_config = self.info.get_hf_config()
-        image_token_id = hf_config.image_token_index
-
-        # Assume that it doesn't depend on the image size
-        num_image_tokens = self.info.get_num_image_tokens(
-            image_width=-1,
-            image_height=-1,
-        )
-
-        result = super().apply(inputs, timing_ctx)
-
-        mm_item_counts = inputs.mm_data_items.get_all_counts()
-        mm_kwargs = result["mm_kwargs"]
-        mm_hashes = result["mm_hashes"]
-
-        # We reimplement the functionality of MLlavaProcessor from
-        # https://github.com/TIGER-AI-Lab/Mantis.git
-        def get_replacement_mantis(item_idx: int):
-            return "".join(
-                [
-                    f"(image {item_idx + 1}: <Image>",  # 7 tokens
-                    "<image>" * num_image_tokens,
-                    "</Image>)",  # 3 tokens
-                ]
-            )
-
-        mantis_mm_repls = self._bind_and_group_updates(
-            [
-                PromptReplacement(
-                    modality="image",
-                    target=[image_token_id] * num_image_tokens,
-                    replacement=get_replacement_mantis,
-                )
-            ],
-            mm_item_counts,
-        )
-
-        prompt_ids, _ = self._apply_prompt_updates(
-            result["prompt_token_ids"],
-            mantis_mm_repls,
-        )
-
-        orig_repls = self._get_mm_prompt_updates(
-            inputs.mm_data_items,
-            inputs.hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
-
-        return mm_inputs(
-            prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholder_ranges,
-        )
-
-
-# To use this model, please use
-# `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
-@MULTIMODAL_REGISTRY.register_processor(
-    MantisMultiModalProcessor,
-    info=MantisProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
-class MantisForConditionalGeneration(LlavaForConditionalGeneration):
-    pass

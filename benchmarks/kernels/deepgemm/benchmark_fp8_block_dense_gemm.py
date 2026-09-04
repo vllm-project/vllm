@@ -16,6 +16,7 @@ from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     per_block_cast_to_fp8,
 )
+from vllm.utils.torch_utils import set_random_seed
 
 
 def benchmark_shape(
@@ -235,9 +236,7 @@ def run_benchmarks(verbose: bool = False):
     torch.backends.cudnn.allow_tf32 = True
 
     # Set seeds for reproducibility
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
-
+    set_random_seed(42)
     # Define benchmark shapes (m, n, k)
     shapes = [
         (8, 4096, 7168),

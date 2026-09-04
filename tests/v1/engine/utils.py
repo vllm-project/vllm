@@ -7,13 +7,14 @@ from typing import TypeAlias
 
 import numpy as np
 import torch
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import PythonBackend, TokenizersBackend
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.engine import EngineCoreOutput, FinishReason
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
-GeneralTokenizerType: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+GeneralTokenizerType: TypeAlias = PythonBackend | TokenizersBackend
 
 # Number of sample logprobs to request when testing sample logprobs
 NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5
@@ -129,9 +130,11 @@ def _create_random_top_token_test_vector(
 
     # Check if the sampled_token_id occurs in choice_tensor[1:]
     if sampled_token_id in choice_tensor[1:]:
-        sampled_token_rank = (
-            (choice_tensor[1:] == sampled_token_id).nonzero(as_tuple=True)[0].item()
-        )
+        # Use 1-based rank to match the top-k rank convention used by the
+        # consumer (logprobs.py assigns ranks starting from 1).
+        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
+            as_tuple=True
+        )[0].item() + 1
     else:
         # If not found, assign a random int between num_logprobs and 50700
         sampled_token_rank = random.randint(num_logprobs, 50700)
@@ -183,7 +186,7 @@ def _create_random_top_token_test_matrix(
         row = matrix[rdx, 1:]  # Skip the first column as it contains the token list
         token_index = (row == tokens_list[rdx]).nonzero(as_tuple=True)[0]
         if token_index.numel() > 0:
-            prompt_token_ranks[rdx] = token_index.item()
+            prompt_token_ranks[rdx] = token_index.item() + 1
         else:
             prompt_token_ranks[rdx] = random.randint(shape[1], 50700)
 
@@ -192,7 +195,7 @@ def _create_random_top_token_test_matrix(
 
 def decode_token(
     tok_id: int,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: PythonBackend,
 ) -> str:
     """Reproduce the process of detokenizing a token for testing purposes.
 
@@ -209,7 +212,7 @@ def decode_token(
 def generate_dummy_sample_logprobs(
     sampled_tokens_list: list,
     num_logprobs: int,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: PythonBackend,
 ) -> list[tuple[list[int], list[float], int]]:
     """Generate dummy sample logprobs
 
@@ -258,7 +261,7 @@ def generate_dummy_sample_logprobs(
 def generate_dummy_prompt_logprobs_tensors(
     prompt_tokens_list: list,
     num_logprobs: int,
-    tokenizer: PreTrainedTokenizer,
+    tokenizer: PythonBackend,
 ) -> LogprobsTensors:
     """Generate dummy prompt logprobs tensors
 
@@ -330,6 +333,7 @@ class MockEngineCore:
     def __init__(
         self,
         tokens_list: list[list[int]],
+        prompts_list: list[list[int]],
         # For each request, for each sampled token offset,
         # a tuple of
         # (list of topk token ids, list of sample logprob vals, rank)
@@ -346,12 +350,13 @@ class MockEngineCore:
     ) -> None:
         self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
-        self.current_idx = 0
+        self.prompts_list = prompts_list
         self.generated_logprobs_raw = generated_logprobs_raw
         self.do_logprobs = generated_logprobs_raw is not None
         self.prompt_logprobs_raw = prompt_logprobs_raw
         self.do_prompt_logprobs = prompt_logprobs_raw is not None
         self.request_finished = [False for _ in range(self.num_requests)]
+        self.request_token_idx = [0 for _ in range(self.num_requests)]
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
         self.request_ids = (
@@ -360,14 +365,18 @@ class MockEngineCore:
             else [f"request-{i}" for i in range(self.num_requests)]
         )
 
-    def get_outputs(self) -> list[EngineCoreOutput]:
+    def get_outputs(self, num_active: int = -1) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
         do_prompt_logprobs = self.do_prompt_logprobs
-        token_idx = self.current_idx
 
         outputs = []
-        for req_idx, token_ids in enumerate(self.tokens_list):
+        for req_idx, (token_ids, prompt_token_ids) in enumerate(
+            zip(self.tokens_list, self.prompts_list)
+        ):
+            if num_active != -1 and req_idx >= num_active:
+                break
             if not self.request_finished[req_idx]:
+                token_idx = self.request_token_idx[req_idx]
                 if do_logprobs:
                     assert self.generated_logprobs_raw is not None
                     (logprobs_token_ids_, logprobs_, sampled_token_ranks_) = (
@@ -381,19 +390,32 @@ class MockEngineCore:
                 else:
                     logprobs = None
                 if do_prompt_logprobs:
-                    if self.current_idx == 0:
+                    if token_idx == 0:
                         assert self.prompt_logprobs_raw is not None
                         prompt_logprobs = self.prompt_logprobs_raw[req_idx]
                     else:
                         prompt_logprobs = None
                 else:
                     prompt_logprobs = None
+
+                # Add prefill_stats on first output (prefill) for this request
+                if token_idx == 0:
+                    prefill_stats = PrefillStats()
+                    prefill_stats.set(
+                        num_prompt_tokens=len(prompt_token_ids),
+                        num_local_cached_tokens=0,
+                        num_external_cached_tokens=0,
+                    )
+                else:
+                    prefill_stats = None
+
                 new_token_id = token_ids[token_idx]
                 output = EngineCoreOutput(
                     request_id=self.request_ids[req_idx],
                     new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
+                    prefill_stats=prefill_stats,
                 )
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = FinishReason.LENGTH
@@ -407,5 +429,6 @@ class MockEngineCore:
                     self.request_finished[req_idx] = True
                 outputs.append(output)
 
-        self.current_idx += 1
+                self.request_token_idx[req_idx] += 1
+
         return outputs

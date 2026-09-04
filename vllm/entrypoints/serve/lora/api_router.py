@@ -7,16 +7,14 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.api_router import models
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -37,6 +35,7 @@ def attach_router(app: FastAPI):
             "lora_name": "body.name",
             "lora_path": "body.src",
             "load_inplace": "body.load_inplace || `false`",
+            "is_3d_lora_weight": "body.is_3d_lora_weight || `false`",
         },
     )
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])

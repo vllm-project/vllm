@@ -13,7 +13,11 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.pooler.activations import LambdaPoolerActivation
 from vllm.model_executor.layers.pooler.seqwise import (
@@ -22,6 +26,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
     get_seq_pooling_method,
 )
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -63,7 +68,12 @@ class ModernBertEmbeddings(nn.Module):
 
 class ModernBertAttention(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, layer_id: int | None = None, prefix: str = ""
+        self,
+        config: ModernBertConfig,
+        layer_id: int | None = None,
+        prefix: str = "",
+        dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -81,6 +91,7 @@ class ModernBertAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             bias=config.attention_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wqkv",
         )
 
@@ -90,11 +101,13 @@ class ModernBertAttention(nn.Module):
             rope_parameters = config.rope_parameters[layer_type]
             sliding_window: int | None = None
             if layer_type == "sliding_attention":
-                sliding_window = config.local_attention // 2
+                # Treats the local attention boundary as inclusive
+                sliding_window = config.sliding_window + 1
         else:
             # Transformers v4
             sliding_window = None
             if layer_id % config.global_attn_every_n_layers != 0:
+                # ModernBertConfig does not expose sliding_window
                 sliding_window = config.local_attention // 2
                 rope_theta = (
                     config.local_rope_theta
@@ -109,7 +122,7 @@ class ModernBertAttention(nn.Module):
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=rope_parameters,
-            dtype=torch.float16,
+            dtype=dtype,
         )
         self.attn = EncoderOnlyAttention(
             self.num_heads,
@@ -122,6 +135,7 @@ class ModernBertAttention(nn.Module):
             config.hidden_size,
             config.hidden_size,
             bias=config.attention_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wo",
         )
 
@@ -140,28 +154,44 @@ class ModernBertAttention(nn.Module):
 
 
 class ModernBertMLP(nn.Module):
-    def __init__(self, config: ModernBertConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: ModernBertConfig,
+        prefix: str = "",
+        quant_config: QuantizationConfig | None = None,
+    ):
         super().__init__()
         self.config = config
-        self.Wi = nn.Linear(
-            config.hidden_size, int(config.intermediate_size) * 2, bias=config.mlp_bias
+        self.Wi = MergedColumnParallelLinear(
+            config.hidden_size,
+            [int(config.intermediate_size)] * 2,
+            bias=config.mlp_bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.Wi",
         )
-        self.act = nn.GELU()
+        self.act = ACT2FN[config.hidden_activation]
         self.Wo = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=config.mlp_bias,
+            quant_config=quant_config,
             prefix=f"{prefix}.Wo",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input, gate = self.Wi(hidden_states).chunk(2, dim=-1)
+        input_gate, _ = self.Wi(hidden_states)
+        input, gate = input_gate.chunk(2, dim=-1)
         return self.Wo(self.act(input) * gate)[0]
 
 
 class ModernBertLayer(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, prefix: str = "", layer_id: int | None = None
+        self,
+        config: ModernBertConfig,
+        prefix: str = "",
+        layer_id: int | None = None,
+        dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -172,12 +202,20 @@ class ModernBertLayer(nn.Module):
                 config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
             )
         self.attn = ModernBertAttention(
-            config=config, layer_id=layer_id, prefix=f"{prefix}.attn"
+            config=config,
+            layer_id=layer_id,
+            prefix=f"{prefix}.attn",
+            dtype=dtype,
+            quant_config=quant_config,
         )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
-        self.mlp = ModernBertMLP(config, prefix=f"{prefix}.mlp")
+        self.mlp = ModernBertMLP(
+            config,
+            prefix=f"{prefix}.mlp",
+            quant_config=quant_config,
+        )
 
     def forward(
         self,
@@ -197,12 +235,16 @@ class ModernBertEncoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        dtype = vllm_config.model_config.dtype
+        quant_config = vllm_config.quant_config
         self.layers = nn.ModuleList(
             [
                 ModernBertLayer(
                     config=config,
                     layer_id=layer_id,
                     prefix=f"{prefix}.layers.{layer_id}",
+                    dtype=dtype,
+                    quant_config=quant_config,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -222,7 +264,11 @@ class ModernBertEncoderLayer(nn.Module):
 @default_pooling_type(seq_pooling_type="CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={"layers.": "encoder_layer.layers."}
+        orig_to_new_prefix={
+            "model.layers.": "encoder_layer.layers.",
+            "layers.": "encoder_layer.layers.",
+            "model.": "",
+        }
     )
 
     def __init__(
@@ -250,6 +296,8 @@ class ModernBertModel(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if name not in params_dict:
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -413,6 +461,8 @@ class ModernBertPredictionHead(nn.Module):
 class ModernBertForTokenClassification(nn.Module):
     is_pooling_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"drop": None})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -435,8 +485,8 @@ class ModernBertForTokenClassification(nn.Module):
         return self.model.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self, skip_prefixes=["drop"])
-        loaded_params = loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return loaded_params
 
     def forward(

@@ -79,12 +79,18 @@ setup_buildx_builder() {
     docker buildx ls | grep -E '^\*|^NAME' || docker buildx ls
 }
 
+annotate_image_tags() {
+    .buildkite/scripts/annotate-image-build.sh \
+        "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
+}
+
 check_and_skip_if_image_exists() {
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "--- :mag: Checking if image exists"
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
+            annotate_image_tags
             exit 0
         fi
         echo "Image not found, proceeding with build"
@@ -92,8 +98,8 @@ check_and_skip_if_image_exists() {
 }
 
 ecr_login() {
-    aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
-    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+    aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com || true
 }
 
 prepare_cache_tags() {
@@ -154,6 +160,42 @@ print_bake_config() {
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
 }
 
+record_buildkit_trace() (
+    local metadata_file="$1"
+    local helper=".buildkite/scripts/ci-otel/ci_otel.py"
+    local trace_file="${BUILD_TMP_DIR}/buildkit-trace.json"
+    local build_ref record_id
+
+    if [[ "${BUILDKITE:-}" != "true" || ! -f "${helper}" ]] ||
+        ! command -v timeout >/dev/null 2>&1 ||
+        ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    build_ref="$(timeout 3s python3 "${helper}" build-ref "${metadata_file}" "${TARGET}" 2>/dev/null)" || {
+        echo "vLLM CI OTel: BuildKit metadata unavailable; trace skipped" >&2
+        return 0
+    }
+    record_id="${build_ref##*/}"
+    if [[ -z "${record_id}" ]]; then
+        return 0
+    fi
+
+    echo "--- :mag: Recording BuildKit trace"
+    if ! timeout 20s docker buildx history trace "${record_id}" >"${trace_file}"; then
+        echo "vLLM CI OTel: BuildKit history trace unavailable; upload skipped" >&2
+        return 0
+    fi
+
+    export CI_INFRA_BUILDX_REF="${build_ref}"
+    export CI_INFRA_OTEL_SPOOL_DIR="${BUILD_TMP_DIR}/otel-spans"
+    timeout 5s python3 "${helper}" record-buildkit "${trace_file}" || {
+        echo "vLLM CI OTel: BuildKit trace conversion skipped" >&2
+        return 0
+    }
+    timeout 5s python3 "${helper}" flush ||
+        echo "vLLM CI OTel: BuildKit trace upload skipped" >&2
+)
+
 #################################
 #         Main Script           #
 #################################
@@ -170,6 +212,18 @@ BUILDKITE_COMMIT=$3
 BRANCH=$4
 IMAGE_TAG=$5
 IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
+
+# When TORCH_NIGHTLY=1, build the base CI image against PyTorch nightly so the
+# entire existing pipeline runs on nightly torch (CUDA/GPU lane only). Delegate
+# to the dedicated nightly build (PYTORCH_NIGHTLY=1, CUDA 13.0) and tag it at the
+# normal IMAGE_TAG that every test step already pulls -- no separate image tag,
+# no duplicate "vLLM Against PyTorch Nightly" pipeline section.
+if [[ "${TORCH_NIGHTLY:-0}" == "1" ]]; then
+    echo "--- :warning: TORCH_NIGHTLY=1 -- building base image on PyTorch nightly"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    exec "${SCRIPT_DIR}/image_build_torch_nightly.sh" \
+        "${REGISTRY}" "${REPO}" "${BUILDKITE_COMMIT}" "${BRANCH}" "${IMAGE_TAG}"
+fi
 
 # build config
 TARGET="test-ci"
@@ -192,6 +246,7 @@ export BUILDKITE_COMMIT
 export PARENT_COMMIT
 export IMAGE_TAG
 export IMAGE_TAG_LATEST
+export COMMIT="${COMMIT:-${BUILDKITE_COMMIT}}"
 export CACHE_FROM
 export CACHE_FROM_BASE_BRANCH
 export CACHE_FROM_MAIN
@@ -250,6 +305,19 @@ export PARENT_COMMIT
 print_bake_config
 
 echo "--- :docker: Building ${TARGET}"
-docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
+BUILD_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
+BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
+BUILD_STATUS=0
+docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" \
+    --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
+
+record_buildkit_trace "${BUILD_METADATA_FILE}" || true
+
+if [[ "${BUILD_STATUS}" -ne 0 ]]; then
+    exit "${BUILD_STATUS}"
+fi
 
 echo "--- :white_check_mark: Build complete"
+
+annotate_image_tags

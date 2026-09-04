@@ -12,11 +12,15 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -31,9 +35,11 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
+
+        kwargs["window_size"] = (-1, -1)
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
@@ -45,7 +51,12 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `flash_attn_varlen_func` needs a Python int for kernel launch bounds.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
@@ -110,6 +121,34 @@ def vit_flash_attn_wrapper(
     )
 
 
+def vit_aiter_fp8_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return rocm_aiter_ops.fp8_attn_wrapper(
+        q,
+        k,
+        v,
+        q_descale,
+        k_descale,
+        v_descale,
+        batch_size,
+        output_dtype,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )
+
+
 def triton_attn_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -126,7 +165,12 @@ def triton_attn_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `context_attention_fwd` needs a Python int.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = torch.empty_like(q)
@@ -228,7 +272,9 @@ def torch_sdpa_wrapper(
 
     outputs = []
 
-    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    # `torch.split` needs Python int sizes.
+    with gpu_sync_allowed():
+        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
@@ -279,6 +325,10 @@ def flashinfer_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
@@ -292,12 +342,18 @@ def flashinfer_wrapper(
     # RoPE has already made q and k contiguous.
     q, k = q.contiguous(), k.contiguous()
 
+    assert cu_seqlens is not None
+    assert max_seqlen is not None
+    assert sequence_lengths is not None
     assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
     cu_seqlength = len(cu_seqlens) // 2
     batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
     batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
-    max_seqlen = max_seqlen.item()
+    # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
+    # max-token-per-seq bounds.
+    with gpu_sync_allowed():
+        max_seqlen = max_seqlen.item()
 
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,
@@ -315,6 +371,10 @@ def flashinfer_wrapper(
         batch_offsets_k=batch_offsets_qko,
         batch_offsets_v=batch_offsets_v,
         batch_offsets_o=batch_offsets_qko,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        o_data_type=o_data_type,
     )
 
     if is_reshaped:
@@ -332,8 +392,12 @@ def vit_flashinfer_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, dtype=o_data_type or q.dtype)
 
 
 direct_register_custom_op(
@@ -352,7 +416,22 @@ def vit_flashinfer_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flashinfer_wrapper(
-        q, k, v, scale, workspace_buffer, cu_seqlens, max_seqlen, sequence_lengths
+        q,
+        k,
+        v,
+        scale,
+        workspace_buffer,
+        cu_seqlens,
+        max_seqlen,
+        sequence_lengths,
+        q_scale,
+        k_scale,
+        v_scale,
+        o_data_type,
     )

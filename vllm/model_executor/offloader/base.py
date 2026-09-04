@@ -10,12 +10,26 @@ from typing import TYPE_CHECKING
 
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import OffloadConfig
 
 logger = init_logger(__name__)
+
+
+def should_pin_memory() -> bool:
+    """Check if pinned memory should be used for weight offloading.
+
+    Combines the platform capability check with the user override env var.
+    On unified-memory systems (e.g. GH200) pinned memory eats into GPU
+    memory, so users can disable it via VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY.
+    """
+    return (
+        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
+    )
 
 
 """
@@ -37,15 +51,29 @@ class BaseOffloader(ABC):
     inference. Different strategies trade memory for compute/transfer time.
     """
 
+    supports_tower_offload: bool = False
+    """Whether `wrap_modules` also accepts modules routed by
+    `SupportsMultiModal._mark_tower_model`, outside the `make_layers` call.
+
+    Offloaders whose `wrap_modules` may only be called on the decoder layer
+    stack (e.g. `PrefetchOffloader`, which schedules prefetches over a
+    circular layer stack) must keep this `False`.
+    """
+
     @abstractmethod
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with offloading logic.
 
         Args:
             modules_generator: Generator yielding modules to potentially offload.
+            prefix: Name prefix prepended to parameter names before matching
+                them against the offloading parameter set. Used when the
+                modules are not the full model, so that name segments stay
+                fully qualified (e.g. `visual` for a tower module).
 
         Returns:
             List of modules, potentially with offloading hooks installed.
@@ -85,6 +113,7 @@ class NoopOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Return modules unchanged."""
         return list(modules_generator)
@@ -104,11 +133,9 @@ def set_offloader(instance: BaseOffloader) -> None:
     global _instance
     _instance = instance
     if isinstance(instance, NoopOffloader):
-        logger.debug_once(
-            "Offloader set to NoopOffloader (no offloading).", scope="local"
-        )
+        logger.debug_once("Offloader set to NoopOffloader (no offloading).")
     else:
-        logger.info_once("Offloader set to %s", type(instance).__name__, scope="local")
+        logger.info_once("Offloader set to %s", type(instance).__name__)
 
 
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
