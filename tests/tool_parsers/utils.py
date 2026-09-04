@@ -243,6 +243,15 @@ def run_tool_extraction_streaming_batched(
             reconstructor.append_delta(delta_message)
         previous_text = current_text
         previous_tokens = current_tokens
+    # The serving layer finalizes generation by appending whatever the parser
+    # parsed but never streamed to the last tool call. A parser that sends the
+    # name before its buffered arguments relies on that flush, so a replay
+    # that stops at the last delta would report empty arguments the client
+    # never sees. Mirror the flush so only client-visible loss counts.
+    if reconstructor.tool_calls:
+        tail = tool_parser.get_remaining_unstreamed_args()
+        if tail:
+            reconstructor.tool_calls[-1].function.arguments += tail
     return reconstructor
 
 

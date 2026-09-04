@@ -376,11 +376,13 @@ class ToolParserTests:
             assert tools_non[0].function.name == tools_stream[0].function.name
             assert tools_non[0].function.arguments == tools_stream[0].function.arguments
 
+    @pytest.mark.parametrize("label", ["single", "parallel"])
     def test_streaming_split_invariance(
         self,
         request: pytest.FixtureRequest,
         tool_parser: Any,
         test_config: ToolParserTestConfig,
+        label: str,
     ):
         """Verify the streamed result does not depend on token batching.
 
@@ -395,50 +397,64 @@ class ToolParserTests:
         parsers whose non-streaming path is separately known to be
         broken (see ``xfail_nonstreaming``).
         """
-        test_name = "test_streaming_split_invariance"
+        # Single and parallel are separate cases on purpose: sharing one loop
+        # meant a parser marked xfail on the single call never had its parallel
+        # batching exercised at all, so a parallel-only regression could hide
+        # behind the known single-call failure.
+        test_name = f"test_streaming_split_invariance[{label}]"
+        if test_name not in test_config.xfail_streaming:
+            test_name = "test_streaming_split_invariance"
         self.apply_xfail_mark(request, test_config, test_name, True)
 
-        for label, output in (
-            ("single", test_config.single_tool_call_output),
-            ("parallel", test_config.parallel_tool_calls_output),
-        ):
-            token_texts, token_ids = split_string_into_token_stream(
-                tool_parser.model_tokenizer, output
-            )
-            baseline = self.stream_with_batching(
-                test_config,
-                tool_parser.model_tokenizer,
-                token_texts,
-                token_ids,
-                [1] * len(token_texts),
-            )
-            batchings = two_chunk_groupings(len(token_texts)) + random_groupings(
+        output = (
+            test_config.single_tool_call_output
+            if label == "single"
+            else test_config.parallel_tool_calls_output
+        )
+        token_texts, token_ids = split_string_into_token_stream(
+            tool_parser.model_tokenizer, output
+        )
+        baseline = self.stream_with_batching(
+            test_config,
+            tool_parser.model_tokenizer,
+            token_texts,
+            token_ids,
+            [1] * len(token_texts),
+        )
+        # The whole stream in one delta is its own partition and the one
+        # several known failures trigger on; neither generator produces it
+        # for streams longer than the random chunk cap, so add it explicitly.
+        batchings = (
+            [[len(token_texts)]]
+            + two_chunk_groupings(len(token_texts))
+            + random_groupings(
                 len(token_texts),
                 count=RANDOM_GROUPING_COUNT,
                 seed=RANDOM_GROUPING_SEED,
             )
-            failures: list[tuple[list[int], str]] = []
-            for lengths in batchings:
-                try:
-                    actual = self.stream_with_batching(
-                        test_config,
-                        tool_parser.model_tokenizer,
-                        token_texts,
-                        token_ids,
-                        lengths,
-                    )
-                    assert actual == baseline, f"expected {baseline}, got {actual}"
-                except AssertionError as exc:
-                    failures.append((lengths, str(exc)))
-
-            if failures:
-                lengths, err = min(failures, key=lambda item: len(item[0]))
-                raise AssertionError(
-                    f"{len(failures)}/{len(batchings)} token batchings changed "
-                    f"the {label} tool-call parse for "
-                    f"{test_config.parser_name!r}. Minimal failing batching "
-                    f"(tokens per delta) {lengths}:\n{err}"
+        )
+        failures: list[tuple[list[int], str]] = []
+        for lengths in batchings:
+            try:
+                actual = self.stream_with_batching(
+                    test_config,
+                    tool_parser.model_tokenizer,
+                    token_texts,
+                    token_ids,
+                    lengths,
                 )
+                assert actual == baseline, f"expected {baseline}, got {actual}"
+            except AssertionError as exc:
+                failures.append((lengths, str(exc)))
+
+        if failures:
+            lengths, err = min(failures, key=lambda item: len(item[0]))
+            raise AssertionError(
+                f"{len(failures)}/{len(batchings)} token batchings changed "
+                f"the {label} tool-call parse for "
+                f"{test_config.parser_name!r}. Minimal failing batching "
+                f"(tokens per delta) {lengths}:\n{err}"
+            )
 
     @staticmethod
     def stream_with_batching(
