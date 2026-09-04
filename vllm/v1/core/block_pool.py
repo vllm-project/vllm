@@ -368,6 +368,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            session_id=request.session_id,
         )
 
     def emit_cached_block_events(
@@ -539,6 +540,7 @@ class BlockPool:
                     else None,
                     extra_keys=[extra_keys],
                     group_idx=kv_cache_group_id,
+                    session_id=request.session_id,
                 )
             )
         return block_hash_with_group_id
