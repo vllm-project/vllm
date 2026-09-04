@@ -351,6 +351,7 @@ class ThinkingBudgetStateHolder:
                 max(
                     len(self.think_start_token_ids),
                     len(self.think_end_token_ids),
+                    len(self.natural_think_end_token_ids),
                     1,
                 )
                 - 1
@@ -367,10 +368,24 @@ class ThinkingBudgetStateHolder:
                 if found >= 0:
                     state["start_thinking"] = window_begin + found
             if state["end_thinking"] == -1:
-                found = self._find_last_sequence_index(window, self.think_end_token_ids)
+                found = self._find_last_end_index(window)
                 if found >= 0:
                     state["end_thinking"] = window_begin + found
         state["marker_scan_pos"] = len(output)
+
+    def _find_last_end_index(self, target_list: list[int]) -> int:
+        """Start of the last reasoning end, whether forced or natural.
+
+        ``reasoning_end_str`` may carry a transition phrase before the parser's
+        own marker, so a section the model closed itself ends with the shorter
+        natural sequence and a search for the forced one alone misses it.
+        """
+        return max(
+            self._find_last_sequence_index(target_list, self.think_end_token_ids),
+            self._find_last_sequence_index(
+                target_list, self.natural_think_end_token_ids
+            ),
+        )
 
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
@@ -401,9 +416,7 @@ class ThinkingBudgetStateHolder:
             last_start = self._find_last_sequence_index(
                 prompt_tok_ids, self.think_start_token_ids
             )
-            last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
-            )
+            last_end = self._find_last_end_index(prompt_tok_ids)
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
             # if request is in thinking mode, already

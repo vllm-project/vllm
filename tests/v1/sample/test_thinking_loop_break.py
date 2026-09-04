@@ -194,6 +194,67 @@ def test_natural_section_end_stops_loop_tracking():
     assert state["in_end"] is False
 
 
+def _add_request_with_prompt(
+    holder: ThinkingBudgetStateHolder,
+    params: SamplingParams,
+    prompt: list[int],
+) -> list[int]:
+    output: list[int] = []
+    holder.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, params, prompt, output)],
+            moved=(),
+        )
+    )
+    return output
+
+
+def test_prompt_closed_by_natural_end_is_not_in_think():
+    """A prior turn that ended with the parser's own marker, without the
+    transition phrase forcing writes, must not classify the next request as
+    still reasoning: that would charge answer tokens to the budget and scope
+    loop detection over them."""
+    h = _make_holder(_TransitionEndReasoningConfig())
+    prompt = [THINK_START] + _non_periodic(10) + [THINK_END] + [7, 8, 9]
+    _add_request_with_prompt(h, SamplingParams(thinking_token_budget=5), prompt)
+    state = h._state[0]
+    assert state["in_think"] is False
+    assert state["think_count"] == 0
+    assert state["check_count_down"] == 5
+
+
+def test_prompt_closed_by_forced_end_is_not_in_think():
+    h = _make_holder(_TransitionEndReasoningConfig())
+    prompt = [THINK_START] + _non_periodic(10) + [TRANSITION, THINK_END] + [7]
+    _add_request_with_prompt(h, SamplingParams(thinking_token_budget=5), prompt)
+    assert h._state[0]["in_think"] is False
+
+
+def test_prompt_still_open_after_natural_end_is_in_think():
+    h = _make_holder(_TransitionEndReasoningConfig())
+    prompt = [THINK_START, 1, THINK_END, 2, THINK_START] + _non_periodic(3)
+    _add_request_with_prompt(h, SamplingParams(thinking_token_budget=5), prompt)
+    state = h._state[0]
+    assert state["in_think"] is True
+    assert state["think_count"] == 3
+
+
+def test_budget_path_sees_a_natural_section_end():
+    """The budget tracker's marker scan must also recognise the parser's own
+    end marker, or a section the model closed itself stays open and answer
+    tokens keep drawing down the budget."""
+    h = _make_holder(_TransitionEndReasoningConfig())
+    output = _add_request(h, SamplingParams(thinking_token_budget=64))
+    _feed(h, output, [THINK_START] + _non_periodic(12) + [THINK_END])
+    state = h._state[0]
+    assert state["in_think"] is False
+    _feed(h, output, _non_periodic(16, base=500))
+    assert state["in_think"] is False
+    assert state["check_count_down"] == 64
+
+
 def test_budget_and_loop_break_coexist():
     h = _make_holder()
     output = _add_request(h, SamplingParams(thinking_token_budget=5))
