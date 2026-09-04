@@ -151,12 +151,17 @@ def response_input_to_harmony(
 ) -> Message | None:
     """Convert a single ResponseInputOutputItem into a Harmony Message.
 
-    Returns None for reasoning items with empty or absent content so
-    the caller can skip them.
+    Returns None for system/developer messages with empty content so
+    the caller can skip them. Reasoning items with empty or absent
+    content (e.g. placeholders from history replay) are converted to
+    empty assistant messages to preserve the conversation structure.
     """
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
-    if "type" not in response_msg or response_msg["type"] == "message":
+
+    item_type = response_msg.get("type")
+
+    if item_type == "message" or (item_type is None and "role" in response_msg):
         role = response_msg["role"]
         content = response_msg["content"]
         if role in ("system", "developer"):
@@ -173,7 +178,7 @@ def response_input_to_harmony(
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
-    elif response_msg["type"] == "function_call_output":
+    elif item_type == "function_call_output":
         call_id = response_msg["call_id"]
         call_response: ResponseFunctionToolCall | None = None
         for prev_response in reversed(prev_responses):
@@ -191,21 +196,24 @@ def response_input_to_harmony(
         )
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient("assistant")
-    elif response_msg["type"] == "reasoning":
+    elif item_type == "reasoning" or (item_type is None and "summary" in response_msg):
         content = response_msg.get("content")
         if content and len(content) >= 1:
             reasoning_text = "\n".join(item["text"] for item in content)
             msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_text)
             msg = msg.with_channel("analysis")
         else:
-            return None
-    elif response_msg["type"] == "function_call":
+            # Reasoning item without content (e.g. placeholder from history
+            # replay) — emit an empty assistant message so the conversation
+            # structure is preserved.
+            msg = Message.from_role_and_content(Role.ASSISTANT, "")
+    elif item_type == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient(f"functions.{response_msg['name']}")
         msg = msg.with_content_type("json")
     else:
-        raise ValueError(f"Unknown input type: {response_msg['type']}")
+        raise ValueError(f"Unknown input type: {item_type}")
     return msg
 
 
