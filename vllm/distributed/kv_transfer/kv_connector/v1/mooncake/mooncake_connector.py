@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorTransferResults,
+    KVLoadRange,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -83,6 +84,7 @@ from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.utils.vmm_driver import CudaVmmDriver, get_vmm_driver
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import (
     CircularBufferManager,
@@ -95,6 +97,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    iter_layer_specs,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -886,6 +891,23 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, num_external_tokens
         )
 
+    @property
+    def supports_load_range(self) -> bool:
+        return bool(
+            self.connector_scheduler and self.connector_scheduler.supports_load_range
+        )
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_alloc_for_range(
+            request, blocks, load_range
+        )
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -1024,6 +1046,16 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods."""
 
+    _REMOTE_PREFILL_FIELDS = (
+        "remote_engine_id",
+        "remote_bootstrap_addr",
+        "transfer_id",
+    )
+
+    @classmethod
+    def _missing_remote_prefill_fields(cls, params: dict[str, Any]) -> list[str]:
+        return [field for field in cls._REMOTE_PREFILL_FIELDS if field not in params]
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1033,6 +1065,9 @@ class MooncakeConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_config = kv_cache_config
+        self._scheduler_block_size, _ = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -1050,11 +1085,23 @@ class MooncakeConnectorScheduler:
                 for g in kv_cache_config.transfer_groups
             )
         )
+        transfer_groups = kv_cache_config.transfer_groups
         # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
         # path is currently tested with GDN; Mamba2 is not validated yet.
         self._has_mamba = kv_cache_config.has_mamba_layers
         self._bounded_replay = any(
             g.prefix_replay_tokens > 0 for g in kv_cache_config.kv_cache_groups
+        )
+        specs = [group.kv_cache_spec for group in transfer_groups]
+        # Attention pages are independently addressable. Recurrent-state pages
+        # cannot be safely composed from concurrent prefix sources.
+        self.supports_load_range = bool(specs) and all(
+            all(isinstance(inner, AttentionSpec) for inner in iter_layer_specs(spec))
+            for spec in specs
+        )
+        dcp = vllm_config.parallel_config.decode_context_parallel_size
+        self._piecewise_group_block_sizes = tuple(
+            spec.block_size * dcp for spec in specs
         )
 
         # Requests that need to start recv/send.
@@ -1207,6 +1254,14 @@ class MooncakeConnectorScheduler:
         if params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
+            missing = self._missing_remote_prefill_fields(params)
+            if missing:
+                logger.warning(
+                    "Ignoring remote prefill for request %s: missing %s",
+                    request.request_id,
+                    ", ".join(missing),
+                )
+                return 0, False
             token_ids = request.prompt_token_ids or []
             count = self._get_remote_prefill_token_count(len(token_ids)) - (
                 num_computed_tokens
@@ -1234,15 +1289,14 @@ class MooncakeConnectorScheduler:
 
         if params.get("do_remote_prefill"):
             assert not self.is_kv_producer
-            if all(
-                p in params
-                for p in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
-            ):
+            if not self._missing_remote_prefill_fields(params):
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
                 unhashed_block_ids = (
-                    blocks.get_unhashed_block_ids_all_groups()
+                    self.kv_cache_config.select_transfer_block_ids(
+                        blocks.get_unhashed_block_ids_all_groups()
+                    )
                     if num_external_tokens > 0
                     else ()
                 )
@@ -1269,6 +1323,68 @@ class MooncakeConnectorScheduler:
             else:
                 # Add an empty list to worker to create event.
                 self._reqs_need_send[request.request_id] = (request, [])
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
+        """Receive destination blocks for the terminal prompt suffix."""
+        assert self.supports_load_range
+        if not load_range.is_terminal:
+            raise ValueError(
+                "MooncakeConnector only supports a terminal piecewise load range"
+            )
+        if load_range.start_token % self._scheduler_block_size:
+            raise ValueError(
+                f"Piecewise range start {load_range.start_token} is not aligned "
+                f"to scheduler block size {self._scheduler_block_size}"
+            )
+        logger.debug(
+            "MooncakeConnector range load: req_id=%s range=[%d, %d)",
+            request.request_id,
+            load_range.start_token,
+            load_range.end_token,
+        )
+
+        params = request.kv_transfer_params
+        assert params and params.get("do_remote_prefill")
+        assert not self.is_kv_producer
+        missing = self._missing_remote_prefill_fields(params)
+        if missing:
+            raise ValueError(f"Missing remote prefill fields: {', '.join(missing)}")
+        unhashed_block_ids = self.kv_cache_config.select_transfer_block_ids(
+            blocks.get_unhashed_block_ids_all_groups()
+        )
+        assert len(unhashed_block_ids) == len(self._piecewise_group_block_sizes)
+        range_blocks = [
+            cdiv(load_range.num_tokens, block_size)
+            for block_size in self._piecewise_group_block_sizes
+        ]
+        needed_blocks = []
+        for i, (group, needed) in enumerate(zip(unhashed_block_ids, range_blocks)):
+            if self._is_hma_required and self.blocks_per_sw[i]:
+                # Sliding-window groups may contain fewer real blocks than the
+                # window cap because padding/null blocks are omitted.
+                needed = min(needed, self.blocks_per_sw[i], len(group))
+            needed_blocks.append(needed)
+        if any(
+            len(group) < needed
+            for group, needed in zip(unhashed_block_ids, needed_blocks)
+        ):
+            raise ValueError(
+                "Piecewise suffix requires more unhashed blocks than allocated: "
+                f"needed={needed_blocks}, "
+                f"available={[len(group) for group in unhashed_block_ids]}"
+            )
+        local_block_ids = [
+            group[-needed:] if needed else []
+            for group, needed in zip(unhashed_block_ids, needed_blocks)
+        ]
+        local_block_ids = self.get_sw_clipped_blocks(local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        params["do_remote_prefill"] = False
 
     def build_connector_meta(
         self,
@@ -1364,12 +1480,13 @@ class MooncakeConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
-        delay_free_blocks = any(len(group) > 0 for group in block_ids)
+        transfer_block_ids = self.kv_cache_config.select_transfer_block_ids(block_ids)
+        delay_free_blocks = any(len(group) > 0 for group in transfer_block_ids)
 
         if delay_free_blocks:
             self._reqs_need_send[request.request_id] = (
                 request,
-                self.get_sw_clipped_blocks(block_ids),
+                self.get_sw_clipped_blocks(transfer_block_ids),
             )
 
         return delay_free_blocks, None
@@ -1579,13 +1696,18 @@ class MooncakeConnectorWorker:
             for group in kv_cache_config.transfer_groups
             for name, spec in group.kv_cache_specs.items()
         }
+        self._layer_group_indices = kv_cache_config.transfer_group_index_by_layer
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            is_mamba=kv_cache_config.has_mamba_layers,
+            is_mamba=any(
+                isinstance(inner, MambaSpec)
+                for group in kv_cache_config.transfer_groups
+                for inner in iter_layer_specs(group.kv_cache_spec)
+            ),
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
         )
