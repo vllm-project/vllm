@@ -163,6 +163,8 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    supports_pre_processed_weights = True
+
     def __init__(self) -> None:
         config = get_current_vllm_config_or_none()
         linear_backend = (
