@@ -41,7 +41,7 @@ mod structural_tag;
 pub use structural_tag::KimiK3StructuralTagBuilder;
 
 use serde_json::{Map, Value};
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
 use winnow::combinator::{alt, delimited, eof, preceded, repeat, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
@@ -95,12 +95,8 @@ type KimiK3Input<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum KimiK3Event {
-    Text {
-        len: usize,
-    },
-    Reasoning {
-        len: usize,
-    },
+    Text,
+    Reasoning,
     /// Structural noise consumed without emitting anything.
     Skip,
     ThinkOpen,
@@ -147,7 +143,7 @@ enum KimiK3Mode {
 
 /// Unified parser for Kimi K3 XTML think / response / tools channels.
 pub struct KimiK3UnifiedParser {
-    buffer: String,
+    buffer: DecodedText,
     mode: KimiK3Mode,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
@@ -163,7 +159,7 @@ impl KimiK3UnifiedParser {
         let sep_token_id = token_id(tokenizer.as_ref(), SEP)?;
 
         Ok(Self {
-            buffer: String::new(),
+            buffer: DecodedText::default(),
             mode: KimiK3Mode::default(),
             emitted_call_count: 0,
             tokenizer,
@@ -203,12 +199,16 @@ impl KimiK3UnifiedParser {
         };
     }
 
-    fn apply_event(&mut self, event: KimiK3Event, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn apply_event(
+        &mut self,
+        event: KimiK3Event,
+        piece: DecodedText,
+        output: &mut UnifiedParserOutput,
+    ) -> Result<()> {
         match event {
-            KimiK3Event::Text { len } => output.push_text(self.buffer[..len].to_string()),
-            KimiK3Event::Reasoning { len } => {
-                output.push_reasoning(self.buffer[..len].to_string());
-            }
+            KimiK3Event::Text => output.push_text(piece.text),
+            KimiK3Event::Reasoning => output.push_reasoning(piece),
+            // Marker and noise spans are drained and dropped with their tokens.
             KimiK3Event::Skip => {}
             KimiK3Event::ThinkOpen => self.mode = KimiK3Mode::Reasoning,
             KimiK3Event::ThinkClose => self.mode = KimiK3Mode::Idle,
@@ -252,7 +252,7 @@ impl KimiK3UnifiedParser {
     fn reset_state(&mut self) -> String {
         self.mode = KimiK3Mode::Idle;
         self.emitted_call_count = 0;
-        std::mem::take(&mut self.buffer)
+        self.buffer.take().text
     }
 }
 
@@ -279,14 +279,14 @@ impl UnifiedParser for KimiK3UnifiedParser {
         Some(&KIMI_K3_STRUCTURAL_TAG_BUILDER)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut UnifiedParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
+        self.buffer.append(delta);
 
-        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
+        while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer.text, |input| {
             parse_next_kimi_k3_event(input, &mut self.mode)
         })? {
-            self.apply_event(event, output)?;
-            self.buffer.drain(..consumed_len);
+            let piece = self.buffer.drain_prefix(consumed_len);
+            self.apply_event(event, piece, output)?;
         }
 
         Ok(())
@@ -297,13 +297,15 @@ impl UnifiedParser for KimiK3UnifiedParser {
 
         match &self.mode {
             KimiK3Mode::Idle | KimiK3Mode::Response => {
-                output.push_text(std::mem::take(&mut self.buffer));
+                output.push_text(self.buffer.take().text);
             }
-            KimiK3Mode::Reasoning => output.push_reasoning(std::mem::take(&mut self.buffer)),
+            KimiK3Mode::Reasoning => {
+                output.push_reasoning(self.buffer.take());
+            }
             KimiK3Mode::Epilogue | KimiK3Mode::Done => self.buffer.clear(),
             // A tools channel truncated between complete calls loses only its
             // closing markers; keep the calls already emitted.
-            KimiK3Mode::Tools if self.buffer.is_empty() => {}
+            KimiK3Mode::Tools if self.buffer.text.is_empty() => {}
             KimiK3Mode::Tools | KimiK3Mode::Call { .. } => {
                 return Err(parsing_failed!("incomplete Kimi K3 tool call"));
             }
@@ -406,17 +408,17 @@ fn parse_done_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
 
 /// Parse safe text while waiting for the next channel marker.
 fn safe_idle_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, IDLE_MARKERS).map(|len| KimiK3Event::Text { len })
+    safe_text_len_mul(input, IDLE_MARKERS).map(|_| KimiK3Event::Text)
 }
 
 /// Parse safe reasoning before the think close marker.
 fn safe_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, REASONING_MARKERS).map(|len| KimiK3Event::Reasoning { len })
+    safe_text_len_mul(input, REASONING_MARKERS).map(|_| KimiK3Event::Reasoning)
 }
 
 /// Parse safe response text before the next channel marker.
 fn safe_response_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
-    safe_text_len_mul(input, RESPONSE_MARKERS).map(|len| KimiK3Event::Text { len })
+    safe_text_len_mul(input, RESPONSE_MARKERS).map(|_| KimiK3Event::Text)
 }
 
 /// Skip non-content noise after the response channel closed.
@@ -571,6 +573,7 @@ mod tests {
 
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
+    use vllm_tokenizer::DecodedText;
     use vllm_tokenizer::Tokenizer as _;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
@@ -604,7 +607,7 @@ mod tests {
     impl UnifiedParserTestExt for KimiK3UnifiedParser {
         fn parse_chunk(&mut self, chunk: &str) -> super::Result<UnifiedParserOutput> {
             let mut output = UnifiedParserOutput::default();
-            self.parse_into(chunk, &mut output)?;
+            self.parse_into(DecodedText::unattributed(chunk), &mut output)?;
             Ok(output)
         }
 
@@ -636,7 +639,7 @@ mod tests {
             self.events
                 .iter()
                 .filter_map(|event| match event {
-                    UnifiedParserEvent::Reasoning(text) => Some(text.as_str()),
+                    UnifiedParserEvent::Reasoning(text) => Some(text.text.as_str()),
                     _ => None,
                 })
                 .collect()
