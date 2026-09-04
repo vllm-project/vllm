@@ -57,8 +57,7 @@ pub(crate) fn content_str(delta: &ReasoningDelta) -> Option<&str> {
 #[test]
 fn delimited_content_only_stream() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let delta = parser.push(DecodedText::unattributed("plain content"));
     assert_eq!(content_str(&delta), Some("plain content"));
@@ -67,8 +66,7 @@ fn delimited_content_only_stream() {
 #[test]
 fn delimited_single_chunk_with_reasoning_and_content() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let delta = parser.push(DecodedText::unattributed("<think>reason</think>answer"));
     assert_eq!(reasoning_str(&delta), Some("reason"));
@@ -78,8 +76,7 @@ fn delimited_single_chunk_with_reasoning_and_content() {
 #[test]
 fn delimited_partial_tokens_across_chunks() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     assert!(parser.push(DecodedText::unattributed("<thi")).is_empty());
     let delta = parser.push(DecodedText::unattributed("nk>reason</think>answer"));
@@ -90,8 +87,7 @@ fn delimited_partial_tokens_across_chunks() {
 #[test]
 fn delimited_finish_flushes_buffer() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
     parser.initialize(&[THINK_START_ID]);
 
     let delta = parser.push(DecodedText::unattributed("unfinished</thi"));
@@ -150,25 +146,13 @@ fn qwen3_stops_scanning_at_last_special_token() {
 }
 
 #[test]
-fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
+fn deepseek_r1_without_prompt_markers_expects_start_token() {
     let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
 
     let delta = push_str(&mut parser, "reason</think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn deepseek_r1_stops_scanning_at_last_special_token() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
-
-    parser.initialize(&[THINK_END_ID, SPECIAL_BOUNDARY_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "reason</think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(content_str(&delta), Some("reason</think>answer"));
 }
 
 #[test]
@@ -237,8 +221,7 @@ fn minimax_m3_uses_prompt_prefilled_end_marker() {
 #[test]
 fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
     parser.initialize(&[THINK_START_ID]);
 
     // A filtered special token produces a zero-width attribution with no text;
@@ -269,8 +252,7 @@ fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
 #[test]
 fn delimited_marker_tokens_are_dropped_from_attributions() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let mut collected = CollectedAttributions::default();
     for chunk in attributed_chunks(&[

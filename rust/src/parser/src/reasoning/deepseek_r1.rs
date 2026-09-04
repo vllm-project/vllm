@@ -6,10 +6,6 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
 /// Reasoning parser for DeepSeek R1 style outputs.
-///
-/// DeepSeek R1 may begin generating directly inside a reasoning span and only
-/// emit the closing `</think>` delimiter, so the no-boundary fallback defaults
-/// to `in_reasoning = true`.
 pub struct DeepSeekR1ReasoningParser {
     inner: DelimitedReasoningParser,
 }
@@ -19,7 +15,7 @@ impl DeepSeekR1ReasoningParser {
     /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>")?,
         })
     }
 }
