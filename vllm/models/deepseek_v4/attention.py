@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.common.ops.fused_qk_rmsnorm import (
     _FUSED_Q_KV_RMSNORM_KERNEL,
+    fused_q_kv_rmsnorm,
 )
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
@@ -502,7 +503,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         which the downstream wq_b projections consume directly.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = _FUSED_Q_KV_RMSNORM_KERNEL(
+        qr, kv = fused_q_kv_rmsnorm(
             qr,
             kv,
             self.q_norm.weight.data,
