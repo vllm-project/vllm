@@ -691,10 +691,7 @@ def _same_registration(
     """True if two ``(args, kwargs)`` registrations are equivalent."""
     left_args, left_kwargs = left
     right_args, right_kwargs = right
-    if (
-        len(left_args) != len(right_args)
-        or left_kwargs.keys() != right_kwargs.keys()
-    ):
+    if len(left_args) != len(right_args) or left_kwargs.keys() != right_kwargs.keys():
         return False
     return all(
         _same_value(x, y) for x, y in zip(left_args, right_args, strict=True)
