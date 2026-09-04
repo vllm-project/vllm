@@ -340,9 +340,8 @@ def test_schedule_partial_requests():
 @pytest.mark.parametrize("has_running", [True, False])
 def test_schedule_prefills_gating(has_running: bool):
     """DP prefill-balancing gate: when `throttle_prefills` is True, a new
-    WAITING (prefill) request is deferred ONLY if this rank has running work to
-    protect. With no running requests, the prefill is admitted regardless (so a
-    throttled step is never wasted as a dummy), and running/decode requests are
+    WAITING (prefill) request is deferred even when the local rank is idle, so
+    prompt work remains aligned across DP ranks. Running/decode requests are
     unaffected. Once the cadence allows prefills again, the request is admitted.
     """
     scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
@@ -371,16 +370,14 @@ def test_schedule_prefills_gating(has_running: bool):
     scheduler.add_request(new_req)
     output = scheduler.schedule(throttle_prefills=True)
 
+    assert "new0" not in output.num_scheduled_tokens
+    assert new_req.status == RequestStatus.WAITING
     if has_running:
-        # There is running work to protect, so the new prefill is deferred...
-        assert "new0" not in output.num_scheduled_tokens
-        assert new_req.status == RequestStatus.WAITING
-        # ...while the running/decode request keeps being scheduled.
+        # The running/decode request keeps being scheduled.
         assert "run0" in output.num_scheduled_tokens
-        # When the cadence allows prefills again, the request is admitted.
-        output = scheduler.schedule()
 
-    # No running work to protect (or cadence now open): the prefill is admitted.
+    # When the cadence allows prefills again, the request is admitted.
+    output = scheduler.schedule()
     assert "new0" in output.num_scheduled_tokens
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
@@ -431,11 +428,9 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     return scheduler
 
 
-def test_throttle_prefills_excludes_fully_transferred_remote_kv():
-    """A remote-KV resume whose whole prompt was transferred (no local prefill
-    left, e.g. the decode side of P/D disaggregation) must NOT be throttled by
-    the DP prefill cadence -- its single-token step has no prefill compute to
-    defer, so delaying it would be pointless.
+def test_throttle_prefills_defers_fully_transferred_remote_kv_prompt_tail():
+    """A remote-KV resume whose prompt was transferred still has a prompt-tail
+    step. Defer it so all prompt-related work remains cadence-aligned.
     """
     block_size = 16
     num_prompt = block_size * 2
@@ -443,7 +438,7 @@ def test_throttle_prefills_excludes_fully_transferred_remote_kv():
     scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt)
 
     output = scheduler.schedule(throttle_prefills=True)
-    assert "r2" in output.num_scheduled_tokens
+    assert "r2" not in output.num_scheduled_tokens
     assert "r1" in output.num_scheduled_tokens
 
 
@@ -516,11 +511,8 @@ def test_throttle_defers_inflight_prefill_chunk():
     assert "chk0" in output.num_scheduled_tokens
 
 
-def test_throttle_capacity_bound_guard_admits():
-    """Saturation guard: if a cadence-aligned release step cannot drain the
-    waiting prefill queue (it ran out of token budget), the throttle backs off on
-    the next step so the backlog cannot grow into a TTFT avalanche -- prefills are
-    admitted even though throttle_prefills is set."""
+def test_throttle_after_saturated_release_still_defers():
+    """A saturated release does not bypass strict prompt cadence."""
     scheduler = create_scheduler(
         max_num_seqs=16, max_num_batched_tokens=200, enable_chunked_prefill=True
     )
@@ -533,12 +525,9 @@ def test_throttle_capacity_bound_guard_admits():
     output = scheduler.schedule()
     assert "a" in output.num_scheduled_tokens
     assert "b" not in output.num_scheduled_tokens
-    assert scheduler.prefill_capacity_bound
-
-    # Throttle. Because the previous release was capacity-bound, the guard backs
-    # off and `b` is admitted rather than stalling the backlog.
+    # The next throttled step still defers the remaining prompt.
     output = scheduler.schedule(throttle_prefills=True)
-    assert "b" in output.num_scheduled_tokens
+    assert "b" not in output.num_scheduled_tokens
 
 
 def test_no_mm_input_chunking():
