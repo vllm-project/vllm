@@ -254,7 +254,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
         start_time = time.perf_counter()
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-            seq_len=model_config.max_model_len,
+            seq_len=min(
+                model_config.max_model_len,
+                self.config.scheduler_config.max_num_batched_tokens,
+            ),
             mm_counts=dict.fromkeys(mm_limits, 1),
             mm_options=mm_config.limit_per_prompt,
         )
