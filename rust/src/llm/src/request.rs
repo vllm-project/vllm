@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
@@ -48,6 +49,8 @@ pub struct GenerateRequest {
     pub data_parallel_rank: Option<u32>,
     /// Stable session identity shared by related requests.
     pub session_id: Option<String>,
+    /// Optional orchestrator-originated KV hints.
+    pub kv_hints: Option<KvHintsEnvelope>,
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
@@ -79,6 +82,7 @@ impl GenerateRequest {
             priority,
             data_parallel_rank,
             session_id,
+            kv_hints,
             reasoning_parser_kwargs,
             lora_request,
         } = self;
@@ -109,6 +113,7 @@ impl GenerateRequest {
                 trace_headers,
                 resumable: false,
                 session_id,
+                kv_hints,
                 external_req_id: Some(external_request_id),
                 // Rust parser doesn't expose this information, leave it unset and let the
                 // reasoning logic in engine-sided structured output manager handle it.
@@ -134,6 +139,7 @@ impl PreparedGenerateRequest {
 mod tests {
     use std::collections::BTreeMap;
 
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
     use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
     use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
@@ -155,6 +161,16 @@ mod tests {
             priority: 3,
             data_parallel_rank: Some(2),
             session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::new(),
+                }],
+            }),
             reasoning_parser_kwargs: Some(ReasoningParserKwargs {
                 chat_template_kwargs: [(
                     "chat_template_kwargs".to_string(),
@@ -183,6 +199,10 @@ mod tests {
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));
         assert_eq!(request.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            request.kv_hints.as_ref().map(|hints| hints.message_id.as_str()),
+            Some("msg-1")
+        );
         assert_eq!(
             request.trace_headers,
             Some(BTreeMap::from([(
