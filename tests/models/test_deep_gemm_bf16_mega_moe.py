@@ -343,9 +343,9 @@ def test_nvfp4_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch):
     assert l1.dtype == torch.bfloat16
     assert l2.dtype == torch.bfloat16
     interleaved = l1[0].view(-1, 16, 128)
-    assert torch.all(interleaved[:, :8] == 1)
-    assert torch.all(interleaved[:, 8:] == 2)
-    assert torch.all(l2[0] == 3)
+    assert torch.all(interleaved[:, :8] == 0.25)
+    assert torch.all(interleaved[:, 8:] == 0.125)
+    assert torch.allclose(l2[0], torch.full_like(l2[0], 1.0 / 12.0))
     assert experts.w13_weight_packed is None
     assert experts.w2_weight_packed is None
 
@@ -407,6 +407,7 @@ def test_nvfp4_source_weights_are_requantized_for_fp8_fp4_mega_moe(monkeypatch):
         )
 
     quantized_shapes: list[tuple[int, ...]] = []
+    quantized_inputs: list[torch.Tensor] = []
 
     class FakeDeepGemm:
         @staticmethod
@@ -417,6 +418,7 @@ def test_nvfp4_source_weights_are_requantized_for_fp8_fp4_mega_moe(monkeypatch):
                 "use_packed_ue8m0": False,
             }
             quantized_shapes.append(tuple(x.shape))
+            quantized_inputs.append(x.clone())
             return (
                 torch.zeros(x.shape[0], x.shape[1] // 2, dtype=torch.int8),
                 torch.ones(x.shape[0], x.shape[1] // 32),
@@ -436,6 +438,11 @@ def test_nvfp4_source_weights_are_requantized_for_fp8_fp4_mega_moe(monkeypatch):
     experts.finalize_weights()
 
     assert quantized_shapes == [(128, 128), (128, 128), (128, 128)]
+    assert torch.all(quantized_inputs[0] == 0.25)
+    assert torch.all(quantized_inputs[1] == 0.125)
+    assert torch.allclose(
+        quantized_inputs[2], torch.full_like(quantized_inputs[2], 1.0 / 12.0)
+    )
     assert isinstance(experts._transformed_l1_weights, tuple)
     assert isinstance(experts._transformed_l2_weights, tuple)
     assert experts._transformed_l1_weights[0].dtype == torch.int8

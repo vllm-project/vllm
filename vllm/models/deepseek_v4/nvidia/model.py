@@ -615,7 +615,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             gate = dequantize_nvfp4_to_dtype(
                 self.w13_weight_packed[expert_id, :half],
                 self.w13_weight_scale[expert_id, :half],
-                self.w13_weight_global_scale[expert_id, 0],
+                self.w13_weight_global_scale[expert_id, 0].reciprocal(),
                 torch.bfloat16,
                 block_size=16,
                 swizzle=False,
@@ -623,7 +623,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             up = dequantize_nvfp4_to_dtype(
                 self.w13_weight_packed[expert_id, half:],
                 self.w13_weight_scale[expert_id, half:],
-                self.w13_weight_global_scale[expert_id, 1],
+                self.w13_weight_global_scale[expert_id, 1].reciprocal(),
                 torch.bfloat16,
                 block_size=16,
                 swizzle=False,
@@ -637,7 +637,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 dequantize_nvfp4_to_dtype(
                     self.w2_weight_packed[expert_id],
                     self.w2_weight_scale[expert_id],
-                    self.w2_weight_global_scale[expert_id],
+                    self.w2_weight_global_scale[expert_id].reciprocal(),
                     torch.bfloat16,
                     block_size=16,
                     swizzle=False,
@@ -678,7 +678,9 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 dequantized = dequantize_nvfp4_to_dtype(
                     self.w13_weight_packed[expert_id, row_slice],
                     self.w13_weight_scale[expert_id, row_slice],
-                    self.w13_weight_global_scale[expert_id, global_scale_idx],
+                    self.w13_weight_global_scale[
+                        expert_id, global_scale_idx
+                    ].reciprocal(),
                     torch.bfloat16,
                     block_size=16,
                     swizzle=False,
@@ -697,7 +699,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
             dequantized = dequantize_nvfp4_to_dtype(
                 self.w2_weight_packed[expert_id],
                 self.w2_weight_scale[expert_id],
-                self.w2_weight_global_scale[expert_id],
+                self.w2_weight_global_scale[expert_id].reciprocal(),
                 torch.bfloat16,
                 block_size=16,
                 swizzle=False,
