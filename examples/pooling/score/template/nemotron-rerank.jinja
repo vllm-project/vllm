@@ -1,0 +1,3 @@
+question:{{ (messages | selectattr("role", "eq", "query") | first).content }} 
+ 
+ passage:{{ (messages | selectattr("role", "eq", "document") | first).content }}
