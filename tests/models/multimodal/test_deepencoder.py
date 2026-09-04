@@ -36,7 +36,11 @@ def test_rel_pos_attention_cpu_fallback() -> None:
 
     torch.manual_seed(0)
     layer = RelPosAttention(
-        dim=32, num_heads=2, use_rel_pos=True, input_size=(4, 4)
+        dim=32,
+        num_heads=2,
+        use_rel_pos=True,
+        use_flex_attention=True,
+        input_size=(4, 4),
     ).eval()
     layer.rel_pos_h.data.normal_()
     layer.rel_pos_w.data.normal_()
@@ -45,3 +49,66 @@ def test_rel_pos_attention_cpu_fallback() -> None:
 
     assert output.shape == (1, 4, 4, 32)
     assert torch.isfinite(output).all()
+
+
+def test_block_enables_flex_attention_only_for_global_attention() -> None:
+    from vllm.model_executor.models.deepencoder import Block
+
+    global_block = Block(
+        dim=32,
+        num_heads=2,
+        use_rel_pos=True,
+        window_size=0,
+        input_size=(64, 64),
+    )
+    window_block = Block(
+        dim=32,
+        num_heads=2,
+        use_rel_pos=True,
+        window_size=14,
+        input_size=(64, 64),
+    )
+
+    assert global_block.attn.use_flex_attention
+    assert not window_block.attn.use_flex_attention
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("spatial_size", [14, 64])
+def test_rel_pos_attention_cuda_graph(spatial_size: int) -> None:
+    from vllm.model_executor.models.deepencoder import RelPosAttention
+
+    torch.manual_seed(0)
+    layer = (
+        RelPosAttention(
+            dim=768,
+            num_heads=12,
+            use_rel_pos=True,
+            use_flex_attention=True,
+            input_size=(spatial_size, spatial_size),
+        )
+        .cuda()
+        .to(torch.bfloat16)
+        .eval()
+    )
+    layer.rel_pos_h.data.normal_(std=0.02)
+    layer.rel_pos_w.data.normal_(std=0.02)
+    inputs = torch.randn(
+        1,
+        spatial_size,
+        spatial_size,
+        768,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    for _ in range(3):
+        eager = layer(inputs)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = layer(inputs)
+
+    graph.replay()
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(captured, eager, atol=2e-2, rtol=2e-2)

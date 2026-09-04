@@ -236,6 +236,7 @@ class Block(nn.Module):
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             use_rel_pos=use_rel_pos,
+            use_flex_attention=window_size == 0,
             rel_pos_zero_init=rel_pos_zero_init,
             input_size=input_size if window_size == 0 else (window_size, window_size),
         )
@@ -301,6 +302,7 @@ class RelPosAttention(PluggableLayer):
         num_heads: int = 8,
         qkv_bias: bool = True,
         use_rel_pos: bool = False,
+        use_flex_attention: bool = False,
         rel_pos_zero_init: bool = True,
         input_size: tuple[int, int] | None = None,
     ) -> None:
@@ -309,6 +311,8 @@ class RelPosAttention(PluggableLayer):
             dim (int): Number of input channels.
             num_heads (int): Number of attention heads.
             qkv_bias (bool):  If True, add a learnable bias to query, key, value.
+            use_flex_attention (bool): If True, fuse relative position bias with
+                FlexAttention on CUDA.
             rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
             input_size (tuple(int, int) or None): Input resolution for calculating the relative
                 positional parameter size.
@@ -322,6 +326,7 @@ class RelPosAttention(PluggableLayer):
         self.proj = nn.Linear(dim, dim)
 
         self.use_rel_pos = use_rel_pos
+        self.use_flex_attention = use_flex_attention
         if self.use_rel_pos:
             assert input_size is not None, (
                 "Input size must be provided if using relative positional encoding."
@@ -357,7 +362,7 @@ class RelPosAttention(PluggableLayer):
             rel_w = rel_w.view(
                 B, self.num_heads, rel_w.size(1), rel_w.size(2), rel_w.size(3)
             )
-            if current_platform.is_cuda() and q.is_cuda:
+            if self.use_flex_attention and current_platform.is_cuda() and q.is_cuda:
                 x = _flex_attention_with_decomposed_rel_pos(q, k, v, rel_h, rel_w, W)
             else:
                 attn_bias = (rel_h + rel_w).view(
