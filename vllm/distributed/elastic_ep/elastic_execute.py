@@ -233,6 +233,14 @@ class ElasticEPScalingExecutor:
             self._group_cleanup_future = None
             future.result()
 
+    def abort_reconfiguration(self) -> None:
+        self._async_future = None
+        groups = pop_standby_groups()
+        self._start_group_cleanup(
+            (groups["world"], groups["dp"], groups["ep"], groups["eplb"])
+        )
+        self._wait_for_group_cleanup()
+
     def shutdown(self) -> None:
         try:
             self._wait_for_group_cleanup()

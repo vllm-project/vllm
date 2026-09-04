@@ -18,7 +18,11 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    get_elastic_ep_rank_retired,
+    set_elastic_ep_rank_retired,
+    set_scaling_elastic_ep,
+)
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -814,6 +818,12 @@ class AsyncLLM(EngineClient):
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
+                if get_elastic_ep_rank_retired() and isinstance(e, EngineDeadError):
+                    logger.info(
+                        "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
+                    )
+                    output_processor.propagate_error(e)
+                    return
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
@@ -1012,6 +1022,8 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        if get_elastic_ep_rank_retired():
+            return
         if self.errored:
             raise self.dead_error
 
@@ -1122,6 +1134,7 @@ class AsyncLLM(EngineClient):
             await self.wait_for_requests_to_drain(drain_timeout)
         except BaseException:
             set_scaling_elastic_ep(False)
+            await self.engine_core.abort_elastic_ep()
             raise
 
     async def scale_elastic_ep(
@@ -1134,7 +1147,8 @@ class AsyncLLM(EngineClient):
     async def _scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int
     ) -> None:
-        old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        parallel_config = self.vllm_config.parallel_config
+        old_data_parallel_size = parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(
                 "Data parallel size is already %s, skipping scale",
@@ -1142,7 +1156,11 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        try:
+            await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        except BaseException:
+            await self.engine_core.abort_elastic_ep()
+            raise
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1165,9 +1183,34 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
-        self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
-        set_scaling_elastic_ep(False)
+        rank_will_retire = (
+            parallel_config.data_parallel_external_lb
+            and new_data_parallel_size < old_data_parallel_size
+            and parallel_config.data_parallel_rank >= new_data_parallel_size
+        )
+        if rank_will_retire:
+            set_elastic_ep_rank_retired(True)
+
+        commit_succeeded = False
+        try:
+            await self.engine_core.commit_elastic_ep()
+            parallel_config.data_parallel_size = new_data_parallel_size
+            commit_succeeded = True
+            if rank_will_retire:
+                logger.info(
+                    "[Elastic EP] Data-parallel rank %s is retired and awaiting "
+                    "external process shutdown",
+                    parallel_config.data_parallel_rank,
+                )
+        finally:
+            if rank_will_retire and not commit_succeeded:
+                set_elastic_ep_rank_retired(False)
+            if not commit_succeeded:
+                await self.engine_core.abort_elastic_ep()
+            set_scaling_elastic_ep(False)
+
+    async def get_external_elastic_ep_phase(self) -> str | None:
+        return await self.engine_core.get_external_elastic_ep_phase()
 
     async def handle_fault(
         self, fault_tolerance_request: FaultToleranceRequest
@@ -1190,6 +1233,10 @@ class AsyncLLM(EngineClient):
     @property
     def errored(self) -> bool:
         return self.engine_core.resources.engine_dead or not self.is_running
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return get_elastic_ep_rank_retired()
 
     @property
     def dead_error(self) -> BaseException:
