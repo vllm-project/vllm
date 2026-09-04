@@ -20,6 +20,10 @@ MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
+_skip_device_mask = os.getenv("SKIP_DEVICE_MASK_IN_EP", "False").lower()
+if _skip_device_mask not in {"true", "false"}:
+    raise ValueError("SKIP_DEVICE_MASK_IN_EP must be 'True' or 'False'")
+SKIP_DEVICE_MASK_IN_EP = _skip_device_mask == "true"
 
 
 class ExternalLBServerManager:
@@ -69,6 +73,7 @@ class ExternalLBServerManager:
             # Use a thread to start each server to allow parallel initialization
             def start_server(r: int, sargs: list[str]):
                 try:
+                    enable_ep = "--enable-expert-parallel" in sargs
                     # Start the server
                     server = RemoteOpenAIServer(
                         self.model_name,
@@ -80,6 +85,10 @@ class ExternalLBServerManager:
                                 str(current_platform.device_id_to_physical_device_id(i))
                                 for i in range(r * TP_SIZE, (r + 1) * TP_SIZE)
                             ),
+                        }
+                        if not (enable_ep and SKIP_DEVICE_MASK_IN_EP)
+                        else {
+                            "VLLM_SERVER_DEV_MODE": "1",
                         },
                     )
                     server.__enter__()
