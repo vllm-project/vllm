@@ -73,6 +73,9 @@ class BaseModelLoader(ABC):
                     format_gib(peak_memory),
                 )
 
+            # Release transient loader buffers before post-load transforms.
+            torch.accelerator.empty_cache()
+
             # Process weights into kernel format. Note that when using online
             # quantization, weights are (typically) quantized as they are loaded.
             if _has_online_quant(model):
