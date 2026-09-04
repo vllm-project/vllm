@@ -1332,6 +1332,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
+        no_draft_mask_np = None
+        no_draft_req_ids = scheduler_output.no_draft_req_ids
+        if no_draft_req_ids:
+            mask_iter = (req_id in no_draft_req_ids for req_id in req_ids)
+            no_draft_mask_np = np.fromiter(mask_iter, dtype=np.bool_, count=num_reqs)
+
         input_batch = InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1355,6 +1361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            no_draft_mask_np=no_draft_mask_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -1587,6 +1594,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        # Whether every request in this batch has unusable drafts, in which
+        # case drafting can be skipped entirely (agreed across DP ranks).
+        no_draft_req_ids = scheduler_output.no_draft_req_ids
+        want_skip_drafts = no_draft_req_ids is not None and all(
+            req_id in no_draft_req_ids
+            for req_id in scheduler_output.num_scheduled_tokens
+        )
+
         batch_desc, dp_sync = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,
@@ -1597,6 +1612,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            want_skip_drafts=want_skip_drafts,
         )
 
         if batch_desc.num_tokens == 0:
