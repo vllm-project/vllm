@@ -391,13 +391,13 @@ def _prefill_logits(
     logits = torch.empty(
         (num_queries, logits_width), dtype=torch.float32, device=q.device
     )
-    # fp8 halves the K-tile bytes; smaller row tiles + deeper pipelining win
-    # there (measured on SM103a) but slightly regress bf16, so keep the bf16
-    # constants for the bf16 cache.
+    # fp8 halves the K-tile bytes; smaller row tiles and more warps win there
+    # (measured on SM103a) but regress bf16, so keep the bf16 constants for
+    # the bf16 cache.
     if k_cache.dtype == torch.float8_e4m3fn:
-        TILE_R, STAGES = 32, 3
+        TILE_R, STAGES, num_warps = 32, 2, 8
     else:
-        TILE_R, STAGES = 64, 2
+        TILE_R, STAGES, num_warps = 64, 2, 4
     BLOCK_N = 64
     K_TILES = 16
     grid = (
@@ -426,7 +426,7 @@ def _prefill_logits(
         BLOCK_N=BLOCK_N,
         K_TILES=K_TILES,
         STAGES=STAGES,
-        num_warps=4,
+        num_warps=num_warps,
     )
     return logits
 
