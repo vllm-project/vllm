@@ -2526,18 +2526,40 @@ def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
     _validate_qwen3_omni_dspark(target_config, draft_config, 7)
 
 
+def test_fly_defaults_window_size():
+    with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
+        config = SpeculativeConfig(
+            method="draft_model",
+            num_speculative_tokens=2,
+            rejection_sample_method="fly",
+        )
+
+    assert config.fly_window_size == 1
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"method": "ngram"}, "requires a trained drafter"),
-        ({"method": "suffix"}, "requires a trained drafter"),
         (
-            {"method": "draft_model", "fly_window_size": 8},
+            {"method": "draft_model", "num_speculative_tokens": 1},
+            "at least 2",
+        ),
+        (
+            {
+                "method": "draft_model",
+                "num_speculative_tokens": 8,
+                "fly_window_size": 8,
+            },
             "fly_window_size to be smaller",
         ),
         (
-            {"method": "draft_model", "use_heterogeneous_vocab": True},
-            "shared target/draft vocabulary",
+            {
+                "method": "draft_model",
+                "num_speculative_tokens": 8,
+                "use_heterogeneous_vocab": True,
+                "use_local_argmax_reduction": True,
+            },
+            "use_local_argmax_reduction",
         ),
     ],
 )
@@ -2546,38 +2568,19 @@ def test_fly_rejects_unsupported_configurations(kwargs: dict[str, object], match
         patch.object(SpeculativeConfig, "__post_init__", lambda self: None),
         pytest.raises(ValidationError, match=match),
     ):
-        SpeculativeConfig(
-            num_speculative_tokens=8,
-            rejection_sample_method="fly",
-            **kwargs,
-        )
+        SpeculativeConfig(rejection_sample_method="fly", **kwargs)
 
 
-def test_fly_accepts_plain_draft_model():
+def test_fly_accepts_heterogeneous_vocab():
     with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
         config = SpeculativeConfig(
             method="draft_model",
             num_speculative_tokens=8,
             rejection_sample_method="fly",
-            fly_window_size=6,
-            fly_entropy_threshold=0.3,
+            use_heterogeneous_vocab=True,
         )
 
     assert config.fly_window_size == 6
-    assert config.fly_entropy_threshold == 0.3
-
-
-@pytest.mark.parametrize("method", ["eagle", "eagle3", "mtp", "dflash", "dspark"])
-def test_fly_accepts_hidden_state_drafting(method: str):
-    with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
-        config = SpeculativeConfig(
-            method=method,
-            num_speculative_tokens=8,
-            rejection_sample_method="fly",
-            parallel_drafting=True,
-        )
-
-    assert config.rejection_sample_method == "fly"
 
 
 def test_ir_op_priority_default():

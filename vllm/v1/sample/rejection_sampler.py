@@ -78,6 +78,7 @@ class RejectionSampler(nn.Module):
         self.fly_entropy_threshold: float | None = None
         if self.use_fly:
             assert spec_config is not None
+            assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
             self.fly_entropy_threshold = spec_config.fly_entropy_threshold
             if device is not None and device.type == "cpu":
@@ -476,12 +477,14 @@ def rejection_sample(
         )
 
     target_probs: torch.Tensor | None = None
+    if fly_enabled or not sampling_metadata.all_greedy:
+        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        assert target_probs.is_contiguous()
+
     fly_entropy: torch.Tensor | None = None
     if fly_enabled:
-        if not sampling_metadata.all_greedy:
-            target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
-            assert target_probs.is_contiguous()
-        fly_entropy = compute_fly_entropy(target_logits, target_probs)
+        assert target_probs is not None
+        fly_entropy = compute_fly_entropy(target_probs)
 
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
@@ -514,9 +517,7 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids
 
-    # Compute probability distribution from target logits.
-    if target_probs is None:
-        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+    assert target_probs is not None
     assert target_probs.is_contiguous()
 
     # Sample recovered tokens for each position.

@@ -598,11 +598,12 @@ class SpeculativeConfig:
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
-    fly_window_size: int = Field(default=6, ge=1)
-    """Number of subsequent native acceptance decisions checked by FLy."""
+    fly_window_size: int | None = Field(default=None, ge=1)
+    """Number of subsequent native acceptance decisions checked by FLy.
+    If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
 
     fly_entropy_threshold: float = Field(default=0.3, ge=0)
-    """Target top-3 entropy lower bound for FLy loose acceptance."""
+    """Target top-k entropy lower bound for FLy loose acceptance."""
 
     def compute_hash(self) -> str:
         """
@@ -1781,22 +1782,34 @@ class SpeculativeConfig:
                 "omit it."
             )
 
+        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab is not compatible with "
+                "use_local_argmax_reduction because token-level intersection "
+                "requires the full draft logits."
+            )
+
         if self.rejection_sample_method == "fly":
-            if not (self.uses_draft_model() or self.use_eagle()):
+            if self.uses_extract_hidden_states():
                 raise ValueError(
-                    "FLy requires a trained drafter proposing a linear token "
-                    "sequence: method='draft_model' or one of "
-                    "'eagle', 'eagle3', 'mtp', 'dflash', 'dspark'."
+                    "FLy is not compatible with method='extract_hidden_states', "
+                    "which does not perform speculative decoding."
                 )
-            if self.fly_window_size >= self.num_speculative_tokens:
+            if self.num_speculative_tokens < 2:
+                raise ValueError(
+                    "FLy requires num_speculative_tokens to be at least 2."
+                )
+            if self.fly_window_size is None:
+                self.fly_window_size = min(6, self.num_speculative_tokens - 1)
+            elif self.fly_window_size >= self.num_speculative_tokens:
                 raise ValueError(
                     "FLy requires fly_window_size to be smaller than "
                     "num_speculative_tokens."
                 )
-            if self.use_heterogeneous_vocab:
-                raise ValueError(
-                    "FLy currently requires a shared target/draft vocabulary."
-                )
+            logger.warning_once(
+                "FLy verification is a lossy speculative decoding method and "
+                "may degrade model outputs."
+            )
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
