@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
-import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -253,7 +252,6 @@ class DeepseekV2MLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.prefix = prefix
 
         # If is_sequence_parallel, the input and output tensors are sharded
         # across the ranks within the tp_group. In this case the weights are
@@ -284,27 +282,9 @@ class DeepseekV2MLP(nn.Module):
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
-        self._debug_finite("gate_up", gate_up)
         x = self.act_fn(gate_up)
-        self._debug_finite("activation", x)
         x, _ = self.down_proj(x)
-        self._debug_finite("down", x)
         return x
-
-    def _debug_finite(self, stage: str, tensor: torch.Tensor) -> None:
-        if (
-            os.getenv("MEGAMOE_FINITE_CHECK") != "1"
-            or ".layers.0.mlp" not in self.prefix
-            or get_tensor_model_parallel_rank() != 0
-        ):
-            return
-        logger.warning(
-            "Dense MLP finite check %s.%s: finite=%s max=%g",
-            self.prefix,
-            stage,
-            torch.isfinite(tensor).all().item(),
-            tensor.float().abs().max().item(),
-        )
 
 
 def _is_deep_gemm_mega_moe_requested(vllm_config: VllmConfig | None) -> bool:
