@@ -1012,6 +1012,84 @@ def test_concat_and_cache_ds_mla(
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("block_size", [64, 256])
+@torch.inference_mode()
+def test_concat_and_cache_ds_mla_nope(device: str, block_size: int) -> None:
+    """NoPE rows keep the 656-byte layout and padded tokens leave it untouched."""
+    dtype = torch.bfloat16
+    if current_platform.is_rocm():
+        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
+    num_tokens, num_blocks = 8, 8
+    kv_lora_rank = 512
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    total_slots = num_blocks * block_size
+    slot_mapping = torch.tensor(
+        [block_size - 1, block_size]
+        + random.sample(range(block_size + 1, total_slots - 1), num_tokens - 4)
+        + [-1, -1],
+        dtype=torch.long,
+        device=device,
+    )
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    kv_c[0, :128] = 0
+    kv_c[0, 128:256] *= 1e-3
+    k_pe = torch.empty(num_tokens, 0, dtype=dtype, device=device)
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        656,
+        dtype=torch.uint8,
+        kv_cache_dtype="fp8_ds_mla",
+        device=device,
+    )
+    kv_cache.fill_(0xFF)
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    kv_cache.fill_(0xFF)
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale)
+
+    for i in range(num_tokens):
+        slot = slot_mapping[i].item()
+        if slot < 0:
+            continue
+        row = kv_cache[slot // block_size, slot % block_size]
+        kv_c_f = kv_c[i].to(torch.float32)
+        for tile_idx in range(kv_lora_rank // 128):
+            tile = kv_c_f[tile_idx * 128 : (tile_idx + 1) * 128]
+            raw_scale = torch.clamp(tile.abs().max() / 448.0, min=1e-4)
+            tile_scale = torch.exp2(torch.ceil(torch.log2(raw_scale)))
+            torch.testing.assert_close(
+                row.view(torch.float32)[128 + tile_idx], tile_scale, atol=0, rtol=0
+            )
+            ref_tile = torch.empty(128, dtype=torch.uint8, device=device)
+            ops.convert_fp8(
+                ref_tile,
+                kv_c[i][tile_idx * 128 : (tile_idx + 1) * 128],
+                tile_scale.item(),
+                kv_dtype="fp8",
+            )
+            torch.testing.assert_close(
+                row[tile_idx * 128 : (tile_idx + 1) * 128],
+                ref_tile,
+                atol=0,
+                rtol=0,
+            )
+        assert (row[528:656] == 0).all()
+
+    untouched = torch.ones(total_slots, dtype=torch.bool, device=device)
+    untouched[slot_mapping[slot_mapping >= 0]] = False
+    assert (kv_cache.view(total_slots, 656)[untouched] == 0xFF).all()
+
+
 # Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
 NVFP4_DS_MLA_ENTRY_SIZE = 352
 
