@@ -143,6 +143,7 @@ async def init_generate_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_per_request_metrics=args.enable_per_request_metrics,
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )

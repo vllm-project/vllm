@@ -120,6 +120,41 @@ the same `metrics` response field. As with `n > 1`, metrics are omitted for
 requests with multiple prompts, because the timing data cannot be attributed to
 a single prompt's generation.
 
+## Responses API
+
+Per-request metrics are available on the `/v1/responses` endpoint using the
+same `metrics` response field. For streaming requests, metrics are included in
+the final response carried by the `response.completed` event; the initial
+`response.created` and `response.in_progress` events do not include them.
+
+```json
+{
+  "type": "response.completed",
+  "response": {
+    "id": "resp_abc123",
+    "object": "response",
+    "status": "completed",
+    "usage": {
+      "input_tokens": 42,
+      "output_tokens": 128,
+      "total_tokens": 170
+    },
+    "metrics": {
+      "time_to_first_token_ms": 85.2,
+      "generation_time_ms": 1240.5,
+      "queue_time_ms": 12.3,
+      "mean_itl_ms": 9.1,
+      "tokens_per_second": 103.2
+    }
+  }
+}
+```
+
+Metrics are omitted when a Responses request performs multiple model-generation
+turns, such as a built-in tool call followed by another model invocation. Each
+turn has independent engine timing data, so it cannot be represented accurately
+as one set of request metrics.
+
 ## Relationship to Prometheus Metrics
 
 The `metrics` response field provides per-request values for a single request.
