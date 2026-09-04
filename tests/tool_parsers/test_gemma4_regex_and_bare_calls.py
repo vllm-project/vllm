@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Behavioral tests for the offline Gemma-4 tool call parser.
 
-Exercises ``vllm.tool_parsers.gemma4_utils.parse_tool_calls`` directly so
+Exercises `vllm.tool_parsers.gemma4_utils.parse_tool_calls` directly so
 regressions in the production tiered regex are caught. Covers the known
 Gemma-4 output variations:
 
@@ -15,14 +15,15 @@ Gemma-4 output variations:
 
 References:
     1. Google Gemma-4 canonical chat template / transformers reference.
-    2. vLLM offline parser: ``vllm.tool_parsers.gemma4_utils.parse_tool_calls``.
+    2. vLLM offline parser: `vllm.tool_parsers.gemma4_utils.parse_tool_calls`.
+
 """
 
 from vllm.tool_parsers.gemma4_utils import parse_tool_calls
 
 
 class TestGemma4CanonicalFormats:
-    """Tier 1: standard ``<|tool_call>`` delimited calls."""
+    """Tier 1: standard `<|tool_call>` delimited calls."""
 
     def test_canonical_tag_wrapped_call(self):
         text = '<|tool_call>call:bash{command:<|"|>ls -la /work<|"|>}<tool_call|>'
@@ -34,7 +35,7 @@ class TestGemma4CanonicalFormats:
         assert tool_calls[0]["arguments"] == {"command": "ls -la /work"}
 
     def test_turn_end_closure_instead_of_tool_call_end(self):
-        """Gemma-4 sometimes closes the call with ``<turn|>``."""
+        """Gemma-4 sometimes closes the call with `<turn|>`."""
         text = '<|tool_call>call:gdb{args:<|"|>-batch -ex run /tmp/poc<|"|>}<turn|>'
 
         tool_calls = parse_tool_calls(text)
@@ -61,11 +62,11 @@ class TestGemma4CanonicalFormats:
 
 
 class TestGemma4FallbackFormats:
-    """Tier 2: bare ``call:`` variations emitted when the model drops
-    ``<|tool_call>``."""
+    """Tier 2: bare `call:` variations emitted when the model drops
+    `<|tool_call>`."""
 
     def test_bare_call_after_thought_channel(self):
-        """Bare ``call:`` glued to ``<channel|>`` with no whitespace.
+        """Bare `call:` glued to `<channel|>` with no whitespace.
 
         This is the regression the fallback tier exists for: the legacy
         strict regex produced 0 tool calls here and aborted the stream.
@@ -84,7 +85,7 @@ class TestGemma4FallbackFormats:
         assert tool_calls[0]["arguments"] == {"command": "cat /work/src/entry.c"}
 
     def test_colon_prefixed_tool_call(self):
-        """``<|tool_call>:call:...`` — stray colon after the open tag."""
+        """`<|tool_call>:call:...` — stray colon after the open tag."""
         text = '<|tool_call>:call:bash{command:<|"|>pytest<|"|>}'
 
         tool_calls = parse_tool_calls(text)
@@ -103,7 +104,7 @@ class TestGemma4FallbackFormats:
         assert tool_calls[0]["arguments"] == {"command": "make -j8"}
 
     def test_fragmented_call_tag_from_multimodal(self):
-        """``<call>name{...}`` — fragmented special token from MM inputs."""
+        """`<call>name{...}` — fragmented special token from MM inputs."""
         text = '<call>get_weather{city:<|"|>Paris<|"|>}'
 
         tool_calls = parse_tool_calls(text)
@@ -136,7 +137,7 @@ class TestGemma4FallbackFormats:
         assert parse_tool_calls(text) == []
 
     def test_nested_object_argument_not_truncated(self):
-        """A nested ``{...}`` argument must not stop at its own closing brace."""
+        """A nested `{...}` argument must not stop at its own closing brace."""
         text = 'call:tool{config:{mode:<|"|>x<|"|>}}'
 
         tool_calls = parse_tool_calls(text)
@@ -146,6 +147,21 @@ class TestGemma4FallbackFormats:
         # _parse_tool_arguments stringifies nested values; the important
         # thing is "mode" survives instead of being truncated to "{}".
         assert tool_calls[0]["arguments"] == {"config": "{'mode': 'x'}"}
+
+    def test_truncated_call_is_rejected(self):
+        """A call cut off before its closing brace must not be emitted."""
+        text = "call:add{a:1,b:2"
+
+        assert parse_tool_calls(text) == []
+
+    def test_nested_call_like_text_is_not_a_second_call(self):
+        """Argument text that looks like `call:name{...}` isn't a real call."""
+        text = 'call:outer{payload:call:inner{x:<|"|>y<|"|>}}'
+
+        tool_calls = parse_tool_calls(text)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "outer"
 
 
 class TestGemma4EngineBareCallIntegration:
