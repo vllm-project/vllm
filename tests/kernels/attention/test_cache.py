@@ -911,6 +911,72 @@ def test_concat_and_cache_ds_mla(
         torch.testing.assert_close(kv_rope, ref_rope, atol=0.001, rtol=0.1)
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_concat_and_cache_ds_mla_nope(device: str) -> None:
+    # NoPE models (pe_dim=0, e.g. GLM-5.3-Flash sparse layers) keep the fixed
+    # 656-byte fp8_ds_mla row; the kernel must zero the 128-byte reserved tail
+    # so readers of the DS-shaped row never see stale memory.
+    if current_platform.is_rocm():
+        pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
+    num_tokens, block_size, num_blocks = 8, 64, 8
+    kv_lora_rank = 512
+    dtype = torch.bfloat16
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    total_slots = num_blocks * block_size
+    slot_mapping = torch.tensor(
+        random.sample(range(total_slots), num_tokens), dtype=torch.long, device=device
+    )
+    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
+    k_pe = torch.empty(num_tokens, 0, dtype=dtype, device=device)
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    kv_cache = _create_mla_cache(
+        num_blocks,
+        block_size,
+        656,
+        dtype=torch.uint8,
+        kv_cache_dtype="fp8_ds_mla",
+        device=device,
+    )
+    # Sentinel fill: without the zeroing store the tail would survive as 0xFF.
+    kv_cache.fill_(0xFF)
+
+    opcheck(
+        torch.ops._C_cache_ops.concat_and_cache_mla,
+        (kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping, "fp8_ds_mla", scale)
+
+    for i in range(num_tokens):
+        slot = slot_mapping[i].item()
+        row = kv_cache[slot // block_size, slot % block_size]
+        kv_c_f = kv_c[i].to(torch.float32)
+        for tile_idx in range(kv_lora_rank // 128):
+            tile = kv_c_f[tile_idx * 128 : (tile_idx + 1) * 128]
+            tile_scale = tile.abs().max() / 448.0
+            torch.testing.assert_close(
+                row.view(torch.float32)[128 + tile_idx], tile_scale
+            )
+            ref_tile = torch.empty(128, dtype=torch.uint8, device=device)
+            ops.convert_fp8(
+                ref_tile,
+                kv_c[i][tile_idx * 128 : (tile_idx + 1) * 128],
+                tile_scale.item(),
+                kv_dtype="fp8",
+            )
+            torch.testing.assert_close(
+                row[tile_idx * 128 : (tile_idx + 1) * 128],
+                ref_tile,
+                atol=0.001,
+                rtol=0.1,
+            )
+        assert (row[528:656] == 0).all()
+
+
 # Bytes per token for the nvfp4_ds_mla cache layout (see flashmla_sparse.py).
 NVFP4_DS_MLA_ENTRY_SIZE = 352
 
