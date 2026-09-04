@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
@@ -56,6 +57,34 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+
+
+def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
+    """The align block table is laid out in Mamba blocks, which page unification
+    can make larger than cache_config.block_size."""
+    mamba_spec = MambaSpec(
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        block_size=880,
+        mamba_cache_mode="align",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba.0"], mamba_spec)],
+    )
+    state = object.__new__(MambaHybridModelState)
+    state.cache_config = SimpleNamespace(block_size=16)
+    state._align_mode = True
+    state.rope_state = None
+    state.prompt_embeds_state = None
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+    state.set_kv_cache_config(kv_cache_config)
+
+    state.add_request(1, SimpleNamespace(num_computed_tokens=107_360))
+
+    assert state._mamba_state_idx_gpu[1] == 121
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
