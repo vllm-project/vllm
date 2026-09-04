@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from functools import partial
+from io import BytesIO
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -21,6 +22,18 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, is_full_attention_spec
 from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
+
+MAX_ROUTED_EXPERTS_PAYLOAD_BYTES = 63 * 1024 * 1024
+MAX_ROUTED_EXPERTS_ARRAY_BYTES = MAX_ROUTED_EXPERTS_PAYLOAD_BYTES - 1024
+
+
+class _BoundedBytesIO(BytesIO):
+    def write(self, data: bytes) -> int:
+        if self.tell() + len(data) > MAX_ROUTED_EXPERTS_PAYLOAD_BYTES:
+            raise ValueError(
+                "Routed-experts payload exceeds the 63 MiB transport limit."
+            )
+        return super().write(data)
 
 
 @runtime_checkable
@@ -386,6 +399,47 @@ class RoutedExpertsManager:
         per scheduler step in ``update_from_output``.
         """
         self.routed_experts_by_slot[slot_mapping] = data
+
+    @staticmethod
+    def serialize(routed_experts: np.ndarray) -> bytes:
+        """Serialize a complete routed-experts result for opaque transport."""
+        if routed_experts.nbytes > MAX_ROUTED_EXPERTS_PAYLOAD_BYTES:
+            raise ValueError(
+                "Routed-experts payload exceeds the 63 MiB transport limit."
+            )
+        with _BoundedBytesIO() as buffer:
+            np.save(buffer, routed_experts, allow_pickle=False)
+            return buffer.getvalue()
+
+    def serialize_terminal(
+        self,
+        block_ids: list[int],
+        num_tokens: int,
+        token_start: int,
+        *,
+        current_step_captured: bool,
+    ) -> bytes | None:
+        """Build a terminal payload only when the finishing step was captured."""
+        if not current_step_captured or not block_ids:
+            return None
+        token_count = max(0, num_tokens - min(max(token_start, 0), num_tokens))
+        array_bytes = token_count * np.prod(self.routed_experts_by_slot.shape[1:])
+        array_bytes *= self.routed_experts_by_slot.dtype.itemsize
+        if array_bytes > MAX_ROUTED_EXPERTS_ARRAY_BYTES:
+            logger.warning(
+                "Omitting routed-experts payload of %d bytes; limit is %d bytes.",
+                array_bytes,
+                MAX_ROUTED_EXPERTS_ARRAY_BYTES,
+            )
+            return None
+        routed_experts = self.get(block_ids, num_tokens, token_start=token_start)
+        try:
+            return self.serialize(routed_experts)
+        except ValueError:
+            logger.warning(
+                "Omitting routed-experts payload that exceeds transport limit."
+            )
+            return None
 
     def get(
         self,

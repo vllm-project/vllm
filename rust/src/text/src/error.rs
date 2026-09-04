@@ -46,6 +46,10 @@ pub enum Error {
     TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
+    #[error(
+        "`routed_experts_prompt_start` must be less than the prompt length, got start={start}, prompt_len={prompt_len}"
+    )]
+    InvalidRoutedExpertsPromptStart { start: u32, prompt_len: u32 },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
@@ -72,6 +76,7 @@ impl Error {
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
+            | Self::InvalidRoutedExpertsPromptStart { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
