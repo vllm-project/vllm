@@ -1611,7 +1611,7 @@ def test_set_region_members_rejects_layer_outside_any_kv_group():
 def test_member_handshake_rejects_unsupported_geometry(
     local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
 ):
-    """Reject unsupported peers before ratio math or descriptor construction."""
+    """Reject unsupported peers without registering agents or transfer state."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
     metadata.block_size = remote_block_size
     worker = _member_worker([["a"]], {"a": 0})
@@ -1635,4 +1635,10 @@ def test_member_handshake_rejects_unsupported_geometry(
 
     with pytest.raises(NotImplementedError, match=error):
         worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
+    worker.nixl_wrapper.add_remote_agent.assert_not_called()
     worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()
+    assert not worker.tp_mappings
+    assert not worker.dst_num_blocks
+    assert not worker.kv_caches_base_addr
+    with pytest.raises(KeyError):
+        worker.transfer_topo.get_engine_info(metadata.engine_id)

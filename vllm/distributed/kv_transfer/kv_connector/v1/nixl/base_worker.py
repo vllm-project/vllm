@@ -1918,9 +1918,20 @@ class NixlBaseConnectorWorker:
             )
             return self._remote_agents[engine_id][(0, remote_tp_rank)]
 
+        assert self.transfer_topo is not None
+        transfer_topo = self.transfer_topo
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
         if self._member_local_regions:
+            if self.block_size != nixl_agent_meta.block_size:
+                raise NotImplementedError(
+                    "Attention-HMA push requires identical P/D block sizes."
+                )
+            if remote_tp_size > transfer_topo.tp_size and not self.use_mla:
+                raise NotImplementedError(
+                    "Attention-HMA push does not support decode TP greater than "
+                    "prefill TP yet"
+                )
             self._align_remote_regions_by_member(nixl_agent_meta)
         elif (
             self.pp_size > 1
@@ -1939,8 +1950,6 @@ class NixlBaseConnectorWorker:
             nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
 
         ### Register remote engine in TransferTopology (idempotent).
-        assert self.transfer_topo is not None
-        transfer_topo = self.transfer_topo
         physical_blocks_per_logical = (
             nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
@@ -1972,6 +1981,8 @@ class NixlBaseConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
+        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
+
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
 
@@ -1982,7 +1993,6 @@ class NixlBaseConnectorWorker:
         self._validate_remote_agent_handshake(
             nixl_agent_meta, remote_tp_size, remote_dcp_size
         )
-        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -2095,20 +2105,10 @@ class NixlBaseConnectorWorker:
             f"remote={remote_dcp_size} (engine {remote_engine_id})."
         )
 
-        member_order = bool(self._member_local_regions)
-        if member_order and self.block_size != nixl_agent_meta.block_size:
-            raise NotImplementedError(
-                "Attention-HMA push requires identical P/D block sizes."
-            )
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )
-        if member_order and tp_ratio < 0 and not self.use_mla:
-            raise NotImplementedError(
-                "Attention-HMA push does not support decode TP greater than "
-                "prefill TP yet"
-            )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         # MLA models do not need to handle kv replication.
