@@ -76,8 +76,8 @@ from vllm.model_executor.layers.rotary_embedding import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
+    ModelwiseReloader,
+    RuntimeReloadSession,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -5671,27 +5671,83 @@ class GPUModelRunner(
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
             )
 
+        from vllm.model_executor.reload_arena import (
+            snapshot_model_arenas,
+            verify_model_arenas,
+        )
+        from vllm.model_executor.reload_manifest import check_global_storage
+        arena_snaps = snapshot_model_arenas(model)
+
         # begin loading weights
         logger.info_once("Reloading weights inplace...")
-        if is_checkpoint_format:
-            # load weights from checkpoint/ original model format
-            initialize_layerwise_reload(model)
-            loaded_weights = model.load_weights(weights_iterator)
-            finalize_layerwise_reload(model, self.model_config)
+        with reload_storage_guard(model):
+            if is_checkpoint_format:
+                with set_current_vllm_config(self.vllm_config):
+                    loaded_weights = ModelwiseReloader(
+                        model, self.model_config, self.device
+                    ).reload(weights_iterator)
+            else:
+                session = RuntimeReloadSession(model)
+                session.start()
+                try:
+                    session.load_weights(weights_iterator)
+                    loaded_weights = session.finish()
+                except BaseException:
+                    session.abort()
+                    raise
 
-        else:
-            # load weights from kernel format
-            logger.warning_once(
-                "Reloading with `is_checkpoint_format=True` requires that "
-                "weights be in kernel format and already sharded",
+        arena_problems = verify_model_arenas(model, arena_snaps)
+
+        # Dual-run transition: the per-layer verification inside the layerwise
+        # pipeline (LayerReloadingInfo.arena_snapshot) now checks the same
+        # invariant closer to where each PWAL re-runs. While both run, compare
+        # them: the per-layer pass must not be narrower than this model-level
+        # one. A mismatch means the per-layer coverage has a hole (e.g. a
+        # module whose arena the layerwise walk does not reach), so keep the
+        # model-level gate authoritative and log the discrepancy rather than
+        # trusting the newer path prematurely.
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            get_layer_arena_findings)
+        per_layer = get_layer_arena_findings()
+        if len(per_layer) != len(arena_problems):
+            logger.warning(
+                "Reload arena verification mismatch: model-level found %d, "
+                "per-layer found %d. Model-level: %s | Per-layer: %s",
+                len(arena_problems), len(per_layer),
+                arena_problems[:10], per_layer[:10])
+
+        if arena_problems:
+            gate = os.environ.get("VLLM_RELOAD_GATE", "strict")
+            msg = (
+                "Reload violated graph-visible storage identity on "
+                f"{len(arena_problems)} slot(s):\n  "
+                + "\n  ".join(arena_problems[:20])
             )
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = _get_parameter_for_reload(model, name)  # TODO: buffers?
-                param.copy_(loaded_weight)
-                loaded_weights.add(name)
+            if gate == "warn":
+                logger.warning(msg)
+            elif gate != "off":
+                raise RuntimeError(msg)
 
         self.reset_lora_state()
+
+        # Module-level storage the arena cannot own. Defaults to warn rather
+        # than strict: unlike the arena check this has no field data yet, and
+        # a new gate whose false-positive rate is unknown gets switched off
+        # wholesale the first time it misfires.
+        manifest_gate = os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn")
+        if manifest_gate != "off":
+            report = check_global_storage()
+            if report is not None and not report.is_clean:
+                msg = ("Reload rebound module-level storage that was live "
+                       "when graphs were captured:\n" + report.format())
+                if manifest_gate == "strict":
+                    raise RuntimeError(
+                        msg + "\nSet VLLM_RELOAD_GLOBAL_MANIFEST=warn to "
+                        "downgrade.")
+                logger.warning(msg)
+            elif report is not None:
+                logger.debug("Global storage manifest clean (%d checked)",
+                             report.checked)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
@@ -7006,6 +7062,16 @@ class GPUModelRunner(
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
+
+        # Record module-level tensor storage as the graphs just captured it.
+        # These have no owning layer, so neither copy-back nor the reload
+        # arena covers them; the manifest is what lets a reload notice if a
+        # global cache rebinds an address a graph baked in.
+        if os.environ.get("VLLM_RELOAD_GLOBAL_MANIFEST", "warn") != "off":
+            from vllm.model_executor.reload_manifest import record_global_storage
+
+            record_global_storage()
+
         return cuda_graph_size
 
     def _warmup_and_capture(

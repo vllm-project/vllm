@@ -2,13 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.reload_arena import ReloadArena
 
 
 @dataclass
 class MoEPermuteScratch:
     # Reused metadata buffers for repeated grouped-MoE permutes.
+    #
+    # These are allocated on the FIRST FORWARD, so they are live when CUDA
+    # graphs capture and their addresses are baked into the graphs. When a
+    # reload rebuilds the owning experts object, a scratch allocated with
+    # plain torch.empty dies with it and the next forward reallocates
+    # elsewhere -- graph replay then reads freed memory (reproduced as an
+    # illegal memory access on H200). Passing the layer's ReloadArena makes
+    # every buffer here a stable slot that survives the rebuild.
     max_num_tokens: int
     topk: int
     num_experts: int
@@ -16,6 +28,7 @@ class MoEPermuteScratch:
     device: torch.device
     hidden_size: int | None = None
     hidden_dtype: torch.dtype | None = None
+    arena: "ReloadArena | None" = None
     token_expert_indices: torch.Tensor = field(init=False)
     expert_first_token_offset: torch.Tensor = field(init=False)
     permuted_idx: torch.Tensor = field(init=False)
@@ -28,6 +41,16 @@ class MoEPermuteScratch:
     topk_ids_for_sort: torch.Tensor = field(init=False)
     max_expanded_rows: int = field(init=False)
 
+    def _alloc(self, slot: str, shape, dtype: torch.dtype) -> torch.Tensor:
+        """Scratch contents never survive a forward, so PRESERVE-on-reuse is
+        safe; what must survive is the ADDRESS."""
+        if self.arena is not None:
+            from vllm.model_executor.reload_arena import InitPolicy
+            return self.arena.get_or_alloc(
+                f"permute_scratch.{slot}", shape, dtype, self.device,
+                init=InitPolicy.PRESERVE)
+        return torch.empty(shape, dtype=dtype, device=self.device)
+
     def __post_init__(self) -> None:
         assert self.max_num_tokens > 0
         assert self.topk > 0
@@ -39,41 +62,35 @@ class MoEPermuteScratch:
             assert self.hidden_dtype is not None
 
         self.max_expanded_rows = self.max_num_tokens * self.topk
-        self.token_expert_indices = torch.arange(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.expert_first_token_offset = torch.empty(
-            self.num_local_experts + 1, dtype=torch.int64, device=self.device
-        )
-        self.permuted_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.inv_permuted_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
+        self.token_expert_indices = self._alloc(
+            "token_expert_indices", (self.max_expanded_rows,), torch.int32)
+        torch.arange(self.max_expanded_rows, dtype=torch.int32,
+                     device=self.token_expert_indices.device,
+                     out=self.token_expert_indices)
+        self.expert_first_token_offset = self._alloc(
+            "expert_first_token_offset", (self.num_local_experts + 1,),
+            torch.int64)
+        self.permuted_idx = self._alloc(
+            "permuted_idx", (self.max_expanded_rows,), torch.int32)
+        self.inv_permuted_idx = self._alloc(
+            "inv_permuted_idx", (self.max_expanded_rows,), torch.int32)
         if self.hidden_size is not None:
             hidden_numel = self.max_expanded_rows * self.hidden_size
-            self.permuted_hidden_states = torch.empty(
-                hidden_numel, dtype=self.hidden_dtype, device=self.device
-            )
-        self.permuted_experts_id = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.sorted_row_idx = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.topk_ids_int32 = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
-        self.topk_ids_for_sort = torch.empty(
-            self.max_expanded_rows, dtype=torch.int32, device=self.device
-        )
+            self.permuted_hidden_states = self._alloc(
+                "permuted_hidden_states", (hidden_numel,), self.hidden_dtype)
+        self.permuted_experts_id = self._alloc(
+            "permuted_experts_id", (self.max_expanded_rows,), torch.int32)
+        self.sorted_row_idx = self._alloc(
+            "sorted_row_idx", (self.max_expanded_rows,), torch.int32)
+        self.topk_ids_int32 = self._alloc(
+            "topk_ids_int32", (self.max_expanded_rows,), torch.int32)
+        self.topk_ids_for_sort = self._alloc(
+            "topk_ids_for_sort", (self.max_expanded_rows,), torch.int32)
         sorter_size = torch.ops._moe_C.moe_permute_sort_workspace_size(
             self.max_expanded_rows, self.num_experts
         )
-        self.sort_workspace = torch.empty(
-            sorter_size, dtype=torch.int8, device=self.device
-        )
+        self.sort_workspace = self._alloc(
+            "sort_workspace", (sorter_size,), torch.int8)
         # torch.device("cuda") in config, after initialized,
         # will be changed to cuda:{index}, so we need to refresh here.
         self.device = self.token_expert_indices.device

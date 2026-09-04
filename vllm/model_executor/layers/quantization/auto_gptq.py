@@ -45,7 +45,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
+    marlin_get_workspace,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -674,7 +674,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             self.experts_cls, FusedMoEExpertsModular
         ):
             device = layer.w13_qweight.device
-            layer.workspace = marlin_make_workspace_new(device, 4)
+            layer.workspace = marlin_get_workspace(layer, device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         def replace_or_register(name: str, val: torch.Tensor | None):

@@ -19,6 +19,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
 )
+from vllm.model_executor.model_loader.reload.source import observe_weight_sources
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -330,14 +331,14 @@ class DefaultModelLoader(BaseModelLoader):
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
         )
-        yield from self._get_weights_iterator(primary_weights)
+        yield from observe_weight_sources(self._get_weights_iterator(primary_weights))
 
         secondary_weights = cast(
             Iterable[DefaultModelLoader.Source],
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
-            yield from self._get_weights_iterator(source)
+            yield from observe_weight_sources(self._get_weights_iterator(source))
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(

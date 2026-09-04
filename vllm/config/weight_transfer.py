@@ -13,3 +13,12 @@ class WeightTransferConfig:
     """The backend to use for weight transfer. Validated against the
     `WeightTransferEngineFactory` registry at engine creation time.
     """
+
+    weight_format: Literal["checkpoint", "runtime"] = "checkpoint"
+    """Format sent by dense weight-transfer backends.
+
+    ``checkpoint`` restores the model's checkpoint schema and runs post-load
+    processing at commit. ``runtime`` requires tensors already converted to
+    the receiving rank's serving/kernel layout and commits them without any
+    post-load processing.
+    """
