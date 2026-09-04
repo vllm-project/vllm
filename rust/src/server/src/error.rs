@@ -235,7 +235,7 @@ mod tests {
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
-        assert!(response.error.message.contains("max_tokens = 4000"));
+        assert!(response.error.message.contains("input budget of 4000"));
     }
 
     #[test]
