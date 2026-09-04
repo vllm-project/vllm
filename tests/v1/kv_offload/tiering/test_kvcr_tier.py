@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("kvcr")
 
-from kvcr import KVCRBindings
+from kvcr import KVCRBindings, ROUTER_HINT_KEY
 from kvcr.config import G3Options, KVCRBackendConfigs, KVCRConfig, KVCRGuardConfig
 from kvcr.policy import FIFOPolicy, G3FIFOPolicy, G3LRUPolicy, LRUPolicy
 from kvcr.types import (
@@ -218,6 +218,8 @@ def _make_tier(
         compatibility_digest=compatibility_digest,
         policy=policy,
         g3=g3,
+        local_dram_backend="UCX",
+        remote_fw_dram_backend="UCX",
     )
 
 
@@ -238,7 +240,7 @@ def test_kvcr_tier_configures_service_for_local_dp_rank(monkeypatch):
     assert kvcr.framework_control.endpoint == "tcp://127.0.0.1:7002"
     assert kvcr.guard_config == KVCRGuardConfig(
         kvcr_service_socket_path="/tmp/kvcr.sock",
-        pool_index=1,
+        guard_index=1,
         row_stride=tier._primary_row_stride,
         compatibility_digest="Opaque-Digest",
     )
@@ -273,7 +275,7 @@ def test_kvcr_tier_maps_router_hint_to_load(monkeypatch):
     }
     ctx = ReqContext(
         req_id="req",
-        kv_transfer_params={"router_hint": router_hint, "unrelated": object()},
+        kv_transfer_params={ROUTER_HINT_KEY: router_hint, "unrelated": object()},
     )
     key = make_offload_key((123).to_bytes(8, "big"), 0)
     same_hash_other_group = make_offload_key((123).to_bytes(8, "big"), 7)
