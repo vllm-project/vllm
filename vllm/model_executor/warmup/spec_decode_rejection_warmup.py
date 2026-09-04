@@ -44,7 +44,7 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
     use_block_verification = rejection_method == "block"
     use_synthetic = rejection_method == "synthetic"
 
-    device = torch.device("cuda")
+    device = worker.device
     num_reqs = 1
     tokens_per_req = num_spec + 1
     num_logits = num_reqs * tokens_per_req

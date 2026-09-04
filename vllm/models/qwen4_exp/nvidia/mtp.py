@@ -280,6 +280,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | IntermediateTensors:
         hc_count = self.hc_count
         hidden_size = self.hidden_size
+        prev_block_output: torch.Tensor | None = None
 
         if get_pp_group().is_first_rank:
             assert hidden_states is not None
@@ -300,10 +301,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                 num_tokens, hc_count, hidden_size
             )
             hidden_states = self.fc_hidden(hidden_states)
-            # Add the embedding residual to every branch, then fold back
-            # to [T, hc_count*H] (HC outer, HS inner) for the HC decoder.
-            hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states
             hidden_states = hidden_states.flatten(-2)
+            prev_block_output = inputs_embeds
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -312,7 +311,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         layer = self.layers[current_step_idx]
         hidden_states, block_output, injection = layer(
             hidden_states=hidden_states,
-            prev_block_output=None,
+            prev_block_output=prev_block_output,
             prev_injection=None,
             positions=positions,
             input_ids=None,

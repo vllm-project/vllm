@@ -27,6 +27,13 @@ class QuantizeMethodBase(ABC):
     in process_weights_after_loading, reducing peak memory during loading.
     """
 
+    supports_pre_processed_weights: bool = False
+    """
+    Whether ``process_weights_after_loading`` supports running under
+    ``weights_already_processed``. Methods must skip tensor transforms in
+    that mode; the loader driver rejects methods that do not declare support.
+    """
+
     @abstractmethod
     def create_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs

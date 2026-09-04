@@ -217,7 +217,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(
         self,
         mm_processor_kwargs: Mapping[str, object] | None = None,
-    ) -> Mistral3HFEncoderInfo:
+    ) -> PixtralHFEncoderInfo:
         processor = self.get_hf_processor()
         size = processor.image_processor.size
         merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
@@ -251,7 +251,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo]):
+class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
