@@ -70,6 +70,23 @@ async def test_load_lora_adapter_success():
 
 
 @pytest.mark.asyncio
+async def test_load_lora_adapter_engine_failure_is_not_registered(caplog):
+    serving_models = await _async_serving_models_init()
+    serving_models.engine_client.add_lora.side_effect = ValueError(
+        "LoRA adapter has no modules matching target_modules"
+    )
+    request = LoadLoRAAdapterRequest(lora_name="adapter", lora_path="/path/to/adapter")
+
+    response = await serving_models.load_lora_adapter(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "InternalServerError"
+    assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert serving_models.lora_requests == {}
+    assert "Loaded new LoRA adapter" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_load_lora_adapter_missing_fields():
     serving_models = await _async_serving_models_init()
     request = LoadLoRAAdapterRequest(lora_name="", lora_path="")
