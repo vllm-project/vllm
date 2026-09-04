@@ -42,7 +42,7 @@ _STRING_DELIM = '<|"|>'
 _DELIM_LEN = len(_STRING_DELIM)
 
 
-def _scan_balanced_braces(text: str, start: int) -> str:
+def _scan_balanced_braces(text: str, start: int) -> tuple[str, int, bool]:
     """Extract a brace-balanced argument span starting just past ``{``.
 
     Tracks nesting depth and skips over ``<|"|>``-quoted spans so braces
@@ -54,9 +54,11 @@ def _scan_balanced_braces(text: str, start: int) -> str:
         start: Index just past the opening ``{``.
 
     Returns:
-        The argument string up to (but excluding) the matching closing
-        ``}``. If the text ends before the braces balance, returns
-        everything from ``start`` to the end of ``text``.
+        A ``(args_str, end, complete)`` tuple: ``args_str`` is the argument
+        span up to (but excluding) the matching closing ``}``; ``end`` is
+        the index just past that ``}`` (or ``len(text)`` if the braces
+        never balance); ``complete`` is ``False`` when ``text`` ended
+        before the braces balanced, meaning the call is truncated.
     """
     depth = 1
     i = start
@@ -72,8 +74,9 @@ def _scan_balanced_braces(text: str, start: int) -> str:
         elif text[i] == "}":
             depth -= 1
         i += 1
-    end = i - 1 if depth == 0 else i
-    return text[start:end]
+    if depth > 0:
+        return text[start:i], i, False
+    return text[start : i - 1], i, True
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
@@ -154,11 +157,20 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
     # Matches: <call>name{, call:name{, <channel|>call:name{, or bare call:name{
     # The closing `}` is found by balanced-brace scanning (not the regex)
     # so nested objects like config:{"mode":"x"} aren't truncated at the
-    # first `}`.
-    fallback_open_pattern = r"(?:<call>|(?:^|\s|<channel\|>|:)call:)([\w\-\.]+)\{"
-    for match in re.finditer(fallback_open_pattern, text, re.DOTALL):
+    # first `}`. Truncated calls (no matching `}` before the text ends) are
+    # skipped rather than emitted with incomplete arguments, and the next
+    # search resumes past the whole balanced span so argument text that
+    # itself looks like `call:name{...}` isn't re-matched as another call.
+    fallback_open_pattern = re.compile(
+        r"(?:<call>|(?:^|\s|<channel\|>|:)call:)([\w\-\.]+)\{", re.DOTALL
+    )
+    search_pos = 0
+    while match := fallback_open_pattern.search(text, search_pos):
         name = match.group(1)
-        args_str = _scan_balanced_braces(text, match.end())
+        args_str, end_pos, complete = _scan_balanced_braces(text, match.end())
+        search_pos = end_pos
+        if not complete:
+            break
         results.append(
             {
                 "name": name,
