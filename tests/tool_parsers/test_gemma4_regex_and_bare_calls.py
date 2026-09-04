@@ -147,6 +147,21 @@ class TestGemma4FallbackFormats:
         # thing is "mode" survives instead of being truncated to "{}".
         assert tool_calls[0]["arguments"] == {"config": "{'mode': 'x'}"}
 
+    def test_truncated_call_is_rejected(self):
+        """A call cut off before its closing brace must not be emitted."""
+        text = "call:add{a:1,b:2"
+
+        assert parse_tool_calls(text) == []
+
+    def test_nested_call_like_text_is_not_a_second_call(self):
+        """Argument text that looks like ``call:name{...}`` isn't a real call."""
+        text = 'call:outer{payload:call:inner{x:<|"|>y<|"|>}}'
+
+        tool_calls = parse_tool_calls(text)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "outer"
+
 
 class TestGemma4EngineBareCallIntegration:
     """Validate that the engine and offline utils properly extract bare tool calls."""
