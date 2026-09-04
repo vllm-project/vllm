@@ -61,6 +61,7 @@ MTPModelTypes = Literal[
     "hy_v4_mtp",
     "gemma4_mtp",
     "inkling_mtp",
+    "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -436,6 +437,11 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    disable_eagle_block_drop: bool = False
+    """Disable dropping the trailing prefix-cache block for EAGLE-like
+    speculative methods. This is an experimental option for measuring the
+    acceptance-rate impact of reusing that block. It does not disable the
+    speculative drafter itself."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1017,6 +1023,12 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_mtp_modules", 1)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        if hf_config.model_type == "glm5_next":
+            hf_config.model_type = "glm5_next_mtp"
+            n_predict = hf_config.num_nextn_predict_layers
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )
 
         return hf_config
@@ -1845,6 +1857,10 @@ class SpeculativeConfig:
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+
+    def use_eagle_block_drop(self) -> bool:
+        """Whether volatile trailing cache blocks should be discarded."""
+        return self.use_eagle() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

@@ -35,6 +35,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
     quant_dequant_mxfp4,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import PlatformEnum, current_platform
@@ -346,11 +350,11 @@ def test_online_mxfp4_moe_matches_quark(
         online_layer = make_layer("online_layer")
 
         checkpoint_method = QuarkOCP_MX_MoEMethod(
-            weight_config={"qscheme": "per_group", "dtype": "fp4"},
-            input_config={"dtype": "fp4", "is_dynamic": True},
             moe=checkpoint_layer.moe_config,
+            weight_quant_key=kMxfp4Static,
+            activation_quant_key=kMxfp4Dynamic,
         )
-        online_method = Mxfp4OnlineMoEMethod(layer=online_layer)
+        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
 
         # `RoutedExperts.__init__` applies this round-up in production; these
         # layers are built without a quant config, so it is applied explicitly.
@@ -566,8 +570,8 @@ def test_online_mxfp4_dense_matches_quark(
         checkpoint_weight, checkpoint_weight_scale = mxfp4_quantize(weight)
 
         checkpoint_scheme = QuarkOCP_MX(
-            weight_quant_spec={"qscheme": "per_group", "dtype": "fp4"},
-            input_quant_spec={"dtype": "fp4", "is_dynamic": True},
+            weight_quant_key=kMxfp4Static,
+            activation_quant_key=kMxfp4Dynamic,
         )
         checkpoint_scheme.create_weights(
             layer=checkpoint_layer,

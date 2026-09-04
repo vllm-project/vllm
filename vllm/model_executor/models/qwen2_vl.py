@@ -85,6 +85,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -707,7 +708,7 @@ class Qwen2VisionTransformer(nn.Module):
         return {
             "rotary_pos_emb_cos": rotary_pos_emb_cos,
             "rotary_pos_emb_sin": rotary_pos_emb_sin,
-            "cu_seqlens": cu_seqlens.to(device=device, non_blocking=True),
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
             "max_seqlen": max_seqlen,
         }
 
