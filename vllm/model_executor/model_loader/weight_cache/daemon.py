@@ -33,7 +33,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -304,6 +304,21 @@ def _run_daemon(
     daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
 
 
+def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
+    """Reject every parallelism mode other than tensor parallelism."""
+    unsupported = {
+        "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
+        "data parallelism": parallel_config.data_parallel_size > 1,
+        "expert parallelism": parallel_config.enable_expert_parallel,
+    }
+    for name, enabled in unsupported.items():
+        if enabled:
+            raise ValueError(
+                f"The weight cache daemon only supports tensor parallelism; "
+                f"{name} is not supported"
+            )
+
+
 def main() -> None:
     from vllm.engine.arg_utils import EngineArgs
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -331,21 +346,7 @@ def main() -> None:
     # otherwise only surface in the engine, after a full load.
     check_ipc_quant_support(vllm_config.model_config, where="daemon")
     parallel_config = vllm_config.parallel_config
-    if parallel_config.pipeline_parallel_size > 1:
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "pipeline parallelism is not supported"
-        )
-    if parallel_config.data_parallel_size > 1:
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "data parallelism is not supported"
-        )
-    if getattr(parallel_config, "enable_expert_parallel", False):
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "expert parallelism is not supported"
-        )
+    _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
 
     distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
