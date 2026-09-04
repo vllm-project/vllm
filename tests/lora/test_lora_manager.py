@@ -1065,21 +1065,28 @@ def _test_target_modules(
         assert not isinstance(model.get_submodule(module_path), lora_cls)
 
 
-def test_pooling_target_modules_ignore_runtime_model_prefix(dist_init, dummy_model):
-    manager = LoRAModelManager.__new__(LoRAModelManager)
-    manager.lora_config = LoRAConfig(
-        max_lora_rank=8,
-        max_cpu_loras=1,
-        max_loras=1,
-        lora_dtype=DEFAULT_DTYPE,
-        target_modules=["layers.0.self_attn.o_proj"],
-    )
-    manager.packed_modules_mapping = {}
-    manager.is_pooling_model = True
-    manager.supported_lora_modules = ["o_proj"]
+@pytest.mark.parametrize("device", DEVICES)
+def test_pooling_target_modules_load_apply_consistency(
+    default_vllm_config, dist_init, dummy_model, device, monkeypatch
+):
+    monkeypatch.setattr("vllm.lora.model_manager.is_pooling_model", lambda _: True)
+    backbone = nn.Module()
+    backbone.layer1 = dummy_model.layer1
+    del dummy_model.layer1
+    dummy_model.model = backbone
 
-    assert manager._match_target_modules(
-        "model.layers.0.self_attn.o_proj", dummy_model.dense1
+    _test_target_modules(
+        dummy_model,
+        ["layer1.dense1"],
+        device,
+        expected_lora=[
+            ("model.layer1.dense1", ColumnParallelLinearWithLoRA),
+        ],
+        expected_no_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("model.layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+        vllm_config=default_vllm_config,
     )
 
 
