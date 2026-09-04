@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -53,42 +54,27 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
+    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+
     # [num_kept_tokens]
     token_ids: np.ndarray
-    # [num_generated_tokens + 1]
-    offsets: np.ndarray
-    # [num_reqs + 1]
+    # [num_positions + 1], or None for a single position
+    offsets: np.ndarray | None = None
+    # Unused with one position per request; kept for the wire layout.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        if self.cu_num_generated_tokens is None:
-            start_idx = req_idx
-        else:
-            start_idx = self.cu_num_generated_tokens[req_idx]
-        end_idx = start_idx + num_positions
-        flat_start = self.offsets[start_idx]
-        flat_end = self.offsets[end_idx]
+        assert num_positions == 1 and self.offsets is not None
         return SamplingMaskLists(
-            self.token_ids[flat_start:flat_end],
-            self.offsets[start_idx : end_idx + 1] - flat_start,
-            None,
+            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
         )
 
     def to_nested_list(self) -> list[list[int]]:
-        """Convert CSR representation to ``list[list[int]]``."""
-        return [
-            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
-            for i in range(len(self.offsets) - 1)
-        ]
-
-    @staticmethod
-    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
-        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
-        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
-        offsets = np.empty(len(counts) + 1, dtype=np.int64)
-        offsets[0] = 0
-        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
-        return SamplingMaskLists(token_ids, offsets)
+        token_ids = self.token_ids.tolist()
+        if self.offsets is None:
+            return [token_ids]
+        offsets = self.offsets.tolist()
+        return [token_ids[offsets[i] : offsets[i + 1]] for i in range(len(offsets) - 1)]
 
 
 class LogprobsTensors(NamedTuple):
@@ -98,33 +84,47 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
-    # [num_reqs]
+    # [num_reqs + 1]
     cu_num_generated_tokens: list[int] | None = None
+    # [num_reqs + 1]. Set instead of cu_num_generated_tokens when the
+    # boundaries only exist on device (adaptive verification); rides along on
+    # the async D2H copy.
+    cu_num_generated_tokens_tensor: torch.Tensor | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
+        if cu_num_generated_tokens is None:
+            if self.cu_num_generated_tokens_tensor is not None:
+                cu_num_generated_tokens = self.cu_num_generated_tokens_tensor.tolist()
+            else:
+                cu_num_generated_tokens = self.cu_num_generated_tokens
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens
-            if cu_num_generated_tokens is not None
-            else self.cu_num_generated_tokens,
+            cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
         if self.logprob_token_ids.device.type == "cpu":
             return self
+        cu_tensor = self.cu_num_generated_tokens_tensor
+        if cu_tensor is not None:
+            cu_tensor = cu_tensor.to("cpu", non_blocking=True)
         return LogprobsTensors(
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
             self.cu_num_generated_tokens,
+            cu_tensor,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
         """Filter the logprobs tensors with the given bool mask."""
         assert self.cu_num_generated_tokens is None, (
             "filter can't be used with cu_num_generated_tokens"
+        )
+        assert self.cu_num_generated_tokens_tensor is None, (
+            "filter can't be used with cu_num_generated_tokens_tensor"
         )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
@@ -147,6 +147,9 @@ class LogprobsTensors(NamedTuple):
             if cu_num_generated_tokens is None:
                 return tensor
             return tensor._replace(cu_num_generated_tokens=cu_num_generated_tokens)
+        # The multi-chunk path rebuilds boundaries from the CPU layout, which
+        # the device-only boundaries of adaptive verification never use.
+        assert all(tensor.cu_num_generated_tokens_tensor is None for tensor in tensors)
         return LogprobsTensors(
             logprob_token_ids=torch.cat(
                 [tensor.logprob_token_ids for tensor in tensors]
@@ -165,11 +168,18 @@ class LogprobsTensors(NamedTuple):
         """Create empty LogprobsTensors on CPU."""
 
         logprob_token_ids = torch.empty(
-            (num_positions, num_tokens_per_position), dtype=torch.int32, device="cpu"
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
-        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
-        selected_token_ranks = torch.empty(
-            num_positions, dtype=torch.int32, device="cpu"
+        logprobs = logprob_token_ids.new_empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.float32,
+            pin_memory=PIN_MEMORY,
+        )
+        selected_token_ranks = logprob_token_ids.new_empty(
+            num_positions, pin_memory=PIN_MEMORY
         )
         return LogprobsTensors(
             logprob_token_ids=logprob_token_ids,

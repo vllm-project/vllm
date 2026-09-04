@@ -7,9 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
-
-import torch
+from typing import Any, Optional
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -21,13 +19,20 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
-from vllm.exceptions import VLLMClientError, VLLMValidationError
+from vllm.exceptions import (
+    GracefulHTTPError,
+    MaxQueuedTokensError,
+    QueueOverflowError,
+    VLLMClientError,
+    VLLMValidationError,
+)
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -86,6 +91,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        profiler: Optional[TorchProfilerWrapper] = None,  # type: ignore # noqa
     ) -> None:
         """
         Create an AsyncLLM.
@@ -112,6 +118,7 @@ class AsyncLLM(EngineClient):
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
 
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
@@ -146,6 +153,10 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (starts the engine in background process).
+        # Hand the renderer to the client so it can start the frontend MM
+        # warmup only after engine-core fork (the why is in
+        # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
+        # by reset_mm_cache / warmup / shutdown.
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -153,6 +164,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            renderer=renderer,
         )
 
         # Loggers.
@@ -188,19 +200,12 @@ class AsyncLLM(EngineClient):
                 profiler_dir,
             )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                ],
-                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    profiler_dir,
-                    worker_name=worker_name,
-                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
-                ),
+            self.profiler = TorchProfilerWrapper(
+                vllm_config.profiler_config,
+                worker_name=worker_name,
+                local_rank=0,
+                activities=["CPU"],
             )
-        else:
-            self.profiler = None
 
     @classmethod
     def from_vllm_config(
@@ -273,6 +278,64 @@ class AsyncLLM(EngineClient):
         if handler is not None:
             cancel_task_threadsafe(handler)
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.output_processor.get_num_unfinished_requests()
+
+    def get_num_queued_tokens(self) -> int:
+        return self.output_processor.get_num_queued_tokens()
+
+    def check_admission(self, n: int = 1, request_id: str | None = None) -> None:
+        """Reject the request if it would exceed queue limits.
+
+        Both limits return HTTP 503 (Service Unavailable) so that load
+        balancers and client SDKs retry on a different instance.
+
+        - ``max_num_queued_reqs``: hard cap on the number of unfinished requests
+          (waiting + running).  A request with ``n > 1`` counts as ``n`` slots.
+        - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
+          tokens of requests still in prefill.
+
+        Note: ``get_num_queued_tokens`` uses ``prompt_len`` for all prefilling requests.
+        Chunked prefill progress and prefix-cache hits are not subtracted because the
+        scheduler's ``num_computed_tokens`` and ``num_cached_tokens`` are only
+        propagated to the API server after prefill completes. The overestimation is
+        conservative — earlier rejection, preserving TTFT targets.
+
+        Args:
+            n: Number of sequences the request will occupy.
+            request_id: Request id, used for logging only.
+
+        Raises:
+            QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
+            MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
+        """
+        max_num_reqs = self.scheduler_config.max_num_queued_reqs
+        if max_num_reqs is not None:
+            current = self.get_num_unfinished_requests()
+            if current + n > max_num_reqs:
+                logger.info(
+                    "Request queue full - rejecting request %s "
+                    "(current=%d, n=%d, max=%d).",
+                    request_id,
+                    current,
+                    n,
+                    max_num_reqs,
+                )
+                raise QueueOverflowError()
+
+        max_queued_tokens = self.scheduler_config.max_num_queued_tokens
+        if max_queued_tokens is not None:
+            current_tokens = self.get_num_queued_tokens()
+            if current_tokens >= max_queued_tokens:
+                logger.info(
+                    "Max queued tokens reached - rejecting request %s "
+                    "(current_tokens=%d, max=%d).",
+                    request_id,
+                    current_tokens,
+                    max_queued_tokens,
+                )
+                raise MaxQueuedTokensError()
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -317,6 +380,10 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
+        if isinstance(params, SamplingParams) and params.n > 1:
+            # TODO (NickLucche) Batch check admission check for all n requests
+            self.check_admission(params.n, request_id)
+
         if isinstance(prompt, AsyncGenerator):
             if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
@@ -339,8 +406,9 @@ class AsyncLLM(EngineClient):
         if isinstance(prompt, EngineCoreRequest):
             logger.warning_once(
                 "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
-                "is deprecated and will be removed in v0.18. You should instead pass "
-                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+                "is deprecated and will be removed in the future. You should "
+                "instead pass the outputs of Renderer.render_cmpl() or "
+                "Renderer.render_chat()."
             )
 
             request = prompt
@@ -429,7 +497,12 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        # Add the request to OutputProcessor (this process).
+        if parent_req is None and not self.output_processor.has_request(
+            request.request_id
+        ):
+            self.check_admission(request_id=request.request_id)
+
+        # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
@@ -579,6 +652,17 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        Note:
+            Passing a raw prompt string directly to this method is deprecated.
+            Advanced power-users can manually bypass the raw-prompt fallback
+            path using the Engine's underlying Renderer pipeline:
+
+            >>> from vllm.inputs import parse_model_prompt
+            >>> parsed = parse_model_prompt(self.model_config, "Prompt text")
+            >>> params = self.renderer.default_cmpl_tok_params
+            >>> (engine_input,) = self.renderer.render_cmpl([parsed], params)
+            >>> gen = self.generate(engine_input, sampling_params, request_id)
         """
 
         q: RequestOutputCollector | None = None
@@ -629,8 +713,8 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Request validation error.
-        except VLLMClientError as e:
+        # Request validation error or admission control rejection.
+        except (VLLMClientError, GracefulHTTPError) as e:
             if self.log_requests:
                 logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
@@ -906,8 +990,8 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
-        # Request validation error.
-        except VLLMClientError:
+        # Request validation error or admission control rejection.
+        except (VLLMClientError, GracefulHTTPError):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
@@ -955,6 +1039,9 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
+        # Join the background MM warmup first: the mm_processor_cache is not
+        # safe for concurrent access with its apply/clear.
+        self.renderer._join_mm_warmup()
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 
