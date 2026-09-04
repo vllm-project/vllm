@@ -30,6 +30,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -100,6 +101,7 @@ from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
@@ -633,7 +635,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cls=self.pcp_manager_cls,
         )
         initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config, self.kv_cache_config
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            use_replayssm=self.vllm_config.cache_config.use_replayssm,
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
@@ -694,6 +698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     @torch.inference_mode()
@@ -707,6 +712,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        valid_dummy_state_slots: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if skip_attn and not is_profile:
@@ -764,6 +770,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
                 context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
             )
         self.kv_connector.set_disabled(False)
 
@@ -1390,9 +1397,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return block_tables, slot_mappings
 
     def prepare_dummy_attn(
-        self, input_batch: InputBatch
+        self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        if valid_state_slots:
+            state_slots = torch.arange(
+                1,
+                input_batch.num_reqs + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            for block_table in block_tables:
+                block_table[:, 0].copy_(state_slots)
         slot_mappings = pcp.maybe_get_pcp_dummy_slot_mappings(
             self.pcp_manager, self.block_tables, input_batch.num_tokens
         )
@@ -1525,6 +1541,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1587,9 +1604,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
+        cudagraph_stats = None
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
+            if self.observability_config.cudagraph_metrics:
+                cudagraph_stats = make_cudagraph_stats(batch_desc, num_toks)
             assert batch_req_state is not None
             input_batch = self.prepare_inputs(
                 scheduler_output, batch_req_state, batch_desc
@@ -1624,7 +1644,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=batch_desc.max_query_len,
             )
             if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
+                block_tables, slot_mappings = self.prepare_dummy_attn(
+                    input_batch, valid_dummy_state_slots
+                )
                 if context_len:
                     set_dummy_context(
                         input_batch,
@@ -1809,6 +1831,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_req_ids=finished_req_ids,
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
+            cudagraph_stats=cudagraph_stats,
         )
 
         if not self.is_last_pp_rank:
@@ -1834,6 +1857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
+        cudagraph_stats = self.execute_model_state.cudagraph_stats
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1892,6 +1916,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
+            cudagraph_stats=cudagraph_stats,
         )
         # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
@@ -2107,6 +2132,7 @@ class ExecuteModelState(NamedTuple):
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class BatchReqState(NamedTuple):
