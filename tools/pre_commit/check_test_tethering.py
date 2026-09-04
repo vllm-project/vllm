@@ -16,7 +16,8 @@ How it works
 2. Build the inventory of test files under ``tests/``.
 3. A file is a problem if no selection runs it and it is not in the allowlist
    (``tools/pre_commit/test_tethering_allowlist.txt`` - the set of pre-existing
-   gaps, which is only ever meant to shrink).
+   gaps, which is only ever meant to shrink). Every allowlist entry must carry a
+   trailing ``# <reason>``; a bare path line is itself an error.
 
 Modes
 -----
@@ -530,6 +531,21 @@ def load_allowlist() -> set[str]:
     return paths
 
 
+def allowlist_entries_missing_reason() -> list[str]:
+    """Allowlist paths with no trailing ``# reason`` on their own line. Every gap
+    has to say why the test can't be wired into a job, so a bare ``path`` line
+    (the easy way to silence the gate) is itself an error."""
+    if not ALLOWLIST_PATH.exists():
+        return []
+
+    offenders = []
+    for line in ALLOWLIST_PATH.read_text().splitlines():
+        path, _, comment = line.partition("#")
+        if path.strip() and not comment.strip():
+            offenders.append(path.strip())
+    return offenders
+
+
 # --------------------------------------------------------------------------- #
 # The two check modes
 # --------------------------------------------------------------------------- #
@@ -627,9 +643,18 @@ def main() -> int:
     selections = load_selections()
     allowlist = load_allowlist()
 
+    unreasoned = allowlist_entries_missing_reason()
+    for path in unreasoned:
+        print(
+            f"error: {ALLOWLIST_PATH.relative_to(REPO_ROOT)}: {path} has no "
+            "trailing '# <reason>' - say why it can't be wired into a job"
+        )
+
     if args.all or _change_set_touches_ci_config(args.files):
-        return run_full_scan(selections, allowlist, strict=args.all)
-    return run_changed_files_check(args.files, selections, allowlist)
+        rc = run_full_scan(selections, allowlist, strict=args.all)
+    else:
+        rc = run_changed_files_check(args.files, selections, allowlist)
+    return 1 if (unreasoned or rc) else 0
 
 
 if __name__ == "__main__":
