@@ -597,6 +597,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False
+    # Whether autoregressive multi-step drafting supports this metadata builder.
+    _supports_multi_step_drafting: ClassVar[bool] = False
 
     @abstractmethod
     def __init__(
@@ -614,6 +616,10 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
     def set_kernel_block_size(self, kernel_block_size: int) -> None:
         self.kernel_block_size = kernel_block_size
+
+    @property
+    def supports_multi_step_drafting(self) -> bool:
+        return self._supports_multi_step_drafting
 
     @classmethod
     def get_cudagraph_support(

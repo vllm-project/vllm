@@ -16,10 +16,24 @@ from types import SimpleNamespace
 import pytest
 
 import vllm.v1.spec_decode.llm_base_proposer as llm_base_proposer
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonMetadata,
+    MLACommonMetadataBuilder,
+    QueryLenSupport,
+)
+from vllm.v1.attention.backend import AttentionMetadataBuilder
+from vllm.v1.attention.backends import rocm_aiter_fa
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.worker.utils import AttentionGroup as WorkerAttentionGroup
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 SCHEDULER_BLOCK_SIZE = 256
 KERNEL_BLOCK_SIZE = 64
+
+
+class _UniformMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    query_len_support = QueryLenSupport.UNIFORM
 
 
 class _FakeAttentionGroup:
@@ -67,6 +81,27 @@ def _make_kv_cache_config(layer_names: set[str]) -> SimpleNamespace:
     return SimpleNamespace(kv_cache_groups=[group])
 
 
+def _make_validation_proposer(
+    supports_multi_step_drafting: bool,
+) -> EagleProposer:
+    backend = SimpleNamespace(get_name=lambda: "FakeBackend")
+    attn_group = WorkerAttentionGroup(
+        backend=backend,
+        layer_names=["draft.attn"],
+        kv_cache_spec=None,
+        kv_cache_group_id=0,
+    )
+    attn_group.metadata_builders = [
+        SimpleNamespace(
+            supports_multi_step_drafting=supports_multi_step_drafting,
+        )
+    ]
+
+    proposer = EagleProposer.__new__(EagleProposer)
+    proposer.draft_attn_groups = [attn_group]
+    return proposer
+
+
 def test_block_size_uses_kernel_block_size(monkeypatch: pytest.MonkeyPatch):
     """The proposer's slot-mapping math runs against the kernel-granularity
     block table, so block_size must come from kernel_block_sizes."""
@@ -110,3 +145,65 @@ def test_draft_layer_iteration_is_deterministic(monkeypatch: pytest.MonkeyPatch)
         assert len(proposer.draft_attn_groups) == 1
         assert proposer.draft_attn_groups[0].layer_names == expected_order
         assert proposer.block_size == KERNEL_BLOCK_SIZE
+
+
+def test_multi_step_drafting_support_defaults_to_false():
+    assert AttentionMetadataBuilder._supports_multi_step_drafting is False
+
+
+def test_mla_multi_step_drafting_support_follows_query_length_support():
+    single_only = object.__new__(MLACommonMetadataBuilder)
+    uniform = object.__new__(_UniformMLAMetadataBuilder)
+
+    assert single_only.supports_multi_step_drafting is False
+    assert uniform.supports_multi_step_drafting is True
+
+
+def test_aiter_fa_rejects_multi_step_drafting_with_shuffle_kv_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    builder = object.__new__(rocm_aiter_fa.AiterFlashAttentionMetadataBuilder)
+
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: False,
+    )
+    assert builder.supports_multi_step_drafting is True
+
+    monkeypatch.setattr(
+        rocm_aiter_fa.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: True,
+    )
+    assert builder.supports_multi_step_drafting is False
+
+
+def test_rocm_multi_step_drafting_requires_builder_support(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        llm_base_proposer,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: True),
+    )
+
+    unsupported = _make_validation_proposer(supports_multi_step_drafting=False)
+    with pytest.raises(ValueError, match="FakeBackend"):
+        unsupported._raise_if_unsupported_multi_step_drafting()
+
+    supported = _make_validation_proposer(supports_multi_step_drafting=True)
+    supported._raise_if_unsupported_multi_step_drafting()
+
+
+def test_non_rocm_multi_step_drafting_keeps_existing_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        llm_base_proposer,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: False),
+    )
+    proposer = _make_validation_proposer(supports_multi_step_drafting=False)
+
+    proposer._raise_if_unsupported_multi_step_drafting()
