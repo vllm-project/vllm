@@ -15,6 +15,9 @@ from utils import make_rand_tensors
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
+from vllm.kernels.quantization.cutedsl.scaled_mm_dispatch import (
+    cutedsl_scaled_mm,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
@@ -30,7 +33,7 @@ DEFAULT_TP_SIZES = [1]
 def bench_fn(
     label: str, sub_label: str, description: str, fn: Callable, *args, **kwargs
 ) -> TMeasurement:
-    min_run_time = 1
+    min_run_time = 2
 
     globals = {
         "args": args,
@@ -60,9 +63,20 @@ def bench_int8(
     a, b = make_rand_tensors(torch.int8, m, n, k)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    per_token_scale_a = torch.rand((m, 1), device="cuda", dtype=torch.float32)
+    per_channel_scale_b = torch.rand(
+        (1, n), device="cuda", dtype=torch.float32
+    )
     bias = torch.zeros((n,), device="cuda", dtype=torch.bfloat16)
     azp = torch.zeros((m,), device="cuda", dtype=torch.int32)
     azp_adj = torch.zeros((n,), device="cuda", dtype=torch.int32)
+
+    # Pre-compile once so the benchmark measures steady-state, not
+    # torch.compile's JIT tracing/compilation overhead.
+    cutedsl_compiled_per_token_channel = torch.compile(
+        cutedsl_scaled_mm, dynamic=True)
+    cutedsl_compiled_per_token_channel(
+        a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16)
 
     bench_fns = {
         "pytorch_bf16_bf16_bf16_matmul-no-scales": lambda: torch.mm(
@@ -89,12 +103,33 @@ def bench_int8(
         "cutlass_i8_i8_bf16_scaled_mm_azp_pt_bias": lambda: ops.cutlass_scaled_mm_azp(
             a, b, scale_a, scale_b, torch.bfloat16, azp_adj, azp, bias
         ),
+        "cutedsl_i8_i8_bf16_scaled_mm": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.bfloat16
+        ),
+        "cutedsl_i8_i8_bf16_scaled_mm_bias": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.bfloat16, bias
+        ),
+        "cutedsl_i8_i8_bf16_scaled_mm_per_token_channel": lambda: cutedsl_scaled_mm(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
+        "cutedsl_i8_i8_bf16_compiled_per_token_channel": lambda: cutedsl_compiled_per_token_channel(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
+        "cutlass_i8_i8_bf16_scaled_mm_per_token_channel": lambda: ops.cutlass_scaled_mm(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
     }
 
     timers = []
     for name, fn in bench_fns.items():
         # If bench_kernels is None, run all. Otherwise, run only exact matches.
         if bench_kernels is None or name in bench_kernels:
+            # Skip CuTe DSL benchmarks when unsupported (returns None).
+            if name.startswith("cutedsl_"):
+                result = fn()
+                if result is None:
+                    print(f"Skipping {name} (not supported on this GPU)")
+                    continue
             print(f"Running {name}")
             timers.append(bench_fn(label, sub_label, name, fn))
 
@@ -116,6 +151,10 @@ def bench_fp8(
     a_cont = a.contiguous()
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    per_token_scale_a = torch.rand((m, 1), device="cuda", dtype=torch.float32)
+    per_channel_scale_b = torch.rand(
+        (1, n), device="cuda", dtype=torch.float32
+    )
 
     block_scale_a = torch.rand((m, cdiv(k, 128)), device="cuda", dtype=torch.float32)
     block_scale_b = torch.rand(
@@ -126,6 +165,13 @@ def bench_fp8(
     bias = torch.zeros((n,), device="cuda", dtype=torch.bfloat16)
 
     print(m, k, n)
+
+    # Pre-compile once so the benchmark measures steady-state, not
+    # torch.compile's JIT tracing/compilation overhead.
+    cutedsl_compiled_per_token_channel = torch.compile(
+        cutedsl_scaled_mm, dynamic=True)
+    cutedsl_compiled_per_token_channel(
+        a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16)
 
     bench_fns = {
         "pytorch_bf16_bf16_bf16_matmul-no-scales": lambda: torch.mm(
@@ -164,12 +210,39 @@ def bench_fp8(
         "cutlass_fp8_fp8_fp16_scaled_mm_blockwise": lambda: ops.cutlass_scaled_mm(
             a, b, block_scale_a_M_major, block_scale_b_K_major, torch.float16
         ),
+        "cutedsl_fp8_fp8_bf16_scaled_mm": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.bfloat16
+        ),
+        "cutedsl_fp8_fp8_fp16_scaled_mm": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.float16
+        ),
+        "cutedsl_fp8_fp8_bf16_scaled_mm_bias": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.bfloat16, bias
+        ),
+        "cutedsl_fp8_fp8_fp16_scaled_mm_bias": lambda: cutedsl_scaled_mm(
+            a, b, scale_a, scale_b, torch.float16, bias.to(dtype=torch.float16)
+        ),
+        "cutedsl_fp8_fp8_bf16_scaled_mm_per_token_channel": lambda: cutedsl_scaled_mm(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
+        "cutedsl_fp8_fp8_bf16_compiled_per_token_channel": lambda: cutedsl_compiled_per_token_channel(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
+        "cutlass_fp8_fp8_bf16_scaled_mm_per_token_channel": lambda: ops.cutlass_scaled_mm(
+            a, b, per_token_scale_a, per_channel_scale_b, torch.bfloat16
+        ),
     }
 
     timers = []
     for name, fn in bench_fns.items():
         # If bench_kernels is None, run all. Otherwise, run only exact matches.
         if bench_kernels is None or name in bench_kernels:
+            # Skip CuTe DSL benchmarks when unsupported (returns None).
+            if name.startswith("cutedsl_"):
+                result = fn()
+                if result is None:
+                    print(f"Skipping {name} (not supported on this GPU)")
+                    continue
             print(f"Running {name}")
             timers.append(bench_fn(label, sub_label, name, fn))
 
@@ -273,7 +346,6 @@ def run_model_bench(args):
         for m in Ms:
             for k, n in KNs:
                 MKNs.append((m, k, n))
-
         data = run(args.dtype, MKNs, bench_kernels=args.kernels)
         model_bench_data.append(data)
 
@@ -308,13 +380,13 @@ Benchmark Cutlass GEMM.
 
     To run square GEMMs:
         python3 ./benchmarks/cutlass_benchmarks/w8a8_benchmarks.py --dtype fp8 square_bench --dim-start 128 --dim-end 512 --dim-increment 64
-    
+
     To run constant N and K and sweep M:
         python3 ./benchmarks/cutlass_benchmarks/w8a8_benchmarks.py --dtype fp8 range_bench --dim-start 128 --dim-end 512 --dim-increment 64 --n-constant 16384 --k-constant 16384
-    
+
     To run dimensions from a model:
         python3 ./benchmarks/cutlass_benchmarks/w8a8_benchmarks.py --dtype fp8 model_bench --models meta-llama/Llama-2-7b-hf --batch-sizes 16 --tp-sizes 1
-    
+
     Output:
         - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various GEMMs.
             """,  # noqa: E501
