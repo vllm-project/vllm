@@ -400,6 +400,7 @@ dnnl::matmul::primitive_desc W8A8MatMulPrimitiveHandler::create_primitive_desc(
 MatMulPrimitiveHandler::MatMulPrimitiveHandler(const Args& args)
     : DNNLMatMulPrimitiveHandler(
           static_cast<DNNLMatMulPrimitiveHandler::Args>(args), args.ab_type),
+      bf16_in_fp32_out(args.bf16_in_fp32_out),
       m_size_cache_(nullptr) {
   assert(b_type_ == dnnl::memory::data_type::f32 ||
          b_type_ == dnnl::memory::data_type::bf16 ||
