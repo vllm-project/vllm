@@ -211,10 +211,10 @@ def triton_ihc_pre(
     assert weight.dtype == torch.float32
     assert scale.dtype == torch.float32 and base.dtype == torch.float32
 
-    x = x.contiguous()
-    weight = weight.contiguous()
-    scale = scale.contiguous()
-    base = base.contiguous()
+    assert x.is_contiguous()
+    assert weight.is_contiguous()
+    assert scale.is_contiguous()
+    assert base.is_contiguous()
     num_tokens, hc_mult, hidden_size = x.shape
     k_total = hc_mult * hidden_size
     assert weight.shape == (2 * hc_mult, k_total)
