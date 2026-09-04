@@ -38,11 +38,12 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError) as exc:
     # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
-    AudioDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
-        "decoders.AudioDecoder"
-    )
+    AudioDecoder = None  # type: ignore[assignment]
+    _torchcodec_import_exc: BaseException | None = exc
+else:
+    _torchcodec_import_exc = None
 
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`,
@@ -61,6 +62,13 @@ _BAD_SF_CODES = {0, 1, 3, 4}
 # `--media-io-kwargs '{"audio": {"audio_backend": ...}}'`.
 # "auto" tries torchcodec, then soundfile, then PyAV.
 AUDIO_BACKENDS = ("auto", "soundfile", "pyav", "torchcodec")
+
+# Raised as ImportError when the torchcodec backend cannot be used, so
+# `load_audio(backend="auto")` falls back to the soundfile → PyAV chain.
+_TORCHCODEC_UNAVAILABLE_MSG = (
+    "torchcodec audio backend is unavailable (requires the torchcodec "
+    "package and a system ffmpeg installation)"
+)
 
 # Slack on the torchcodec decode window when enforcing `max_duration_s`, so an
 # over-long stream is rejected rather than truncated to the limit.
@@ -267,6 +275,10 @@ def load_audio_torchcodec(
         array (1-D when ``mono=True``) and *sample_rate* is the output
         sample rate in Hz.
     """
+    if AudioDecoder is None:
+        # Unify "torchcodec not installed" and "system ffmpeg missing" into
+        # ImportError so `load_audio(backend="auto")` falls back cleanly.
+        raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from _torchcodec_import_exc
     if sr is not None and sr != int(sr):
         raise ValueError(f"torchcodec requires an integer sample rate, got {sr}")
     sample_rate = int(sr) if sr is not None else None
@@ -277,6 +289,11 @@ def load_audio_torchcodec(
         decoder = AudioDecoder(path, sample_rate=sample_rate)
         metadata = decoder.metadata
     except RuntimeError as e:
+        # torchcodec loads its ffmpeg-backed core lazily at construction, so
+        # an ffmpeg-less (or ABI-incompatible) install can fail here rather
+        # than at import. Treat that as backend-unavailable, not bad input.
+        if "Could not load libtorchcodec" in str(e):
+            raise ImportError(_TORCHCODEC_UNAVAILABLE_MSG) from e
         raise ValueError(
             "Invalid or corrupted audio data. Ensure the input is a valid "
             "audio or video file (e.g. a complete WAV, MP3, or MP4)."

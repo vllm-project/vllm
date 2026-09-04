@@ -1232,7 +1232,9 @@ vllm serve mistralai/Voxtral-Mini-3B-2507 \
 !!! note
     `torchcodec` ships as a requirement on CUDA, CPU and XPU builds. On other
     platforms (e.g. ROCm, TPU) `auto` falls back to the soundfile → PyAV
-    chain unless you install it manually.
+    chain unless you install it manually. torchcodec also links against a
+    system FFmpeg installation; if FFmpeg is missing, `auto` falls back the
+    same way.
 
 ### Embedding Inputs
 
