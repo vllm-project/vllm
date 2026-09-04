@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Optional B12x sparse-MLA helpers for GLM fp8_ds_mla cache experiments."""
 
 from __future__ import annotations

@@ -137,7 +137,10 @@ def _fp8_mqa_logits_torch(
         raise NotImplementedError("SM120 MQA logits torch path only supports FP8 Q")
 
     k_values, k_scales = kv
-    k_f32 = k_values.to(torch.float32)
+    # copy=True: k_values may already be float32 (the kv contract does not
+    # enforce FP8), in which case .to(float32) returns the same tensor and the
+    # in-place mul_ below would corrupt caller-owned storage.
+    k_f32 = k_values.to(torch.float32, copy=True)
     k_f32.mul_(k_scales.reshape(-1, 1).to(torch.float32))
     k_t = k_f32.transpose(0, 1).contiguous()
 
@@ -189,7 +192,10 @@ def _fp8_mqa_logits_topk_torch(
         raise NotImplementedError("SM120 MQA top-k torch path only supports FP8 Q")
 
     k_values, k_scales = kv
-    k_f32 = k_values.to(torch.float32)
+    # copy=True: k_values may already be float32 (the kv contract does not
+    # enforce FP8), in which case .to(float32) returns the same tensor and the
+    # in-place mul_ below would corrupt caller-owned storage.
+    k_f32 = k_values.to(torch.float32, copy=True)
     k_f32.mul_(k_scales.reshape(-1, 1).to(torch.float32))
     k_t = k_f32.transpose(0, 1).contiguous()
 
