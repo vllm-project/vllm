@@ -332,6 +332,7 @@ class SamplingParams(
     output_text_buffer_length: int = 0
     _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _stop_token_ids_set: frozenset[int] = msgspec.field(default_factory=frozenset)
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
@@ -502,16 +503,42 @@ class SamplingParams(
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
+        else:
+            self.stop = list(dict.fromkeys(self.stop))
+        max_stop_strings = envs.VLLM_MAX_STOP_STRINGS
+        if len(self.stop) > max_stop_strings:
+            raise VLLMValidationError(
+                f"Too many stop strings: {len(self.stop)}. "
+                f"The max number is {max_stop_strings}.",
+                parameter="stop",
+                value=self.stop,
+            )
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
+        max_stop_token_ids = envs.VLLM_MAX_STOP_TOKEN_IDS
+        if len(self.stop_token_ids) > max_stop_token_ids:
+            raise VLLMValidationError(
+                f"Too many stop_token_ids: {len(self.stop_token_ids)}. "
+                f"The max number is {max_stop_token_ids}.",
+                parameter="stop_token_ids",
+                value=self.stop_token_ids,
+            )
 
         if self.bad_words is None:
             self.bad_words = []
         else:
             self.bad_words = list(dict.fromkeys(self.bad_words))
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        if len(self.bad_words) > max_num_bad_words:
+            raise VLLMValidationError(
+                f"Too many bad_words: {len(self.bad_words)}. "
+                f"The max number is {max_num_bad_words}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -535,6 +562,7 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+        self._stop_token_ids_set = frozenset(self.stop_token_ids)
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
@@ -735,6 +763,16 @@ class SamplingParams(
                             value=self.bad_words,
                         )
 
+        total_tokens = sum(len(ids) for ids in self._bad_words_token_ids)
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        if total_tokens > max_total_tokens:
+            raise VLLMValidationError(
+                f"Too many total bad word tokens: {total_tokens}. "
+                f"The max is {max_total_tokens}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
+
         invalid_token_ids = [
             token_id
             for bad_words_token_ids in self._bad_words_token_ids
@@ -767,6 +805,10 @@ class SamplingParams(
     @property
     def all_stop_token_ids(self) -> set[int]:
         return self._all_stop_token_ids
+
+    @property
+    def stop_token_ids_set(self) -> frozenset[int]:
+        return self._stop_token_ids_set
 
     @property
     def bad_words_token_ids(self) -> list[list[int]] | None:

@@ -12,8 +12,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
     AnyResponseFormat,
+    BadWordsParam,
     PerRequestMetrics,
     StopParam,
+    StopTokenIdsParam,
     StreamOptions,
     structured_outputs_from_response_format,
     validate_structural_tag_response_format,
@@ -75,7 +77,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float | None = None
     repetition_penalty: float | None = None
     length_penalty: float = 1.0
-    stop_token_ids: list[int] | None = []
+    stop_token_ids: StopTokenIdsParam = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -105,7 +107,7 @@ class CompletionRequest(OpenAIBaseModel):
             "set."
         ),
     )
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: BadWordsParam = Field(default_factory=list)
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]

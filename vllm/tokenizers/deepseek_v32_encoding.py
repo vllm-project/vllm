@@ -122,7 +122,8 @@ def render_message(
     index: int,
     messages: list[dict[str, Any]],
     thinking_mode: str,
-    last_user_idx: int | None = None,
+    last_user_idx: int,
+    last_assistant_idx: int | None = None,
 ) -> str:
     if not (0 <= index < len(messages)):
         raise ValueError(
@@ -133,9 +134,6 @@ def render_message(
 
     prompt = ""
     msg = messages[index]
-    last_user_idx = (
-        find_last_user_index(messages) if last_user_idx is None else last_user_idx
-    )
 
     role = msg.get("role")
     content = msg.get("content")
@@ -189,11 +187,15 @@ def render_message(
             prompt += thinking_end_token
 
     elif role == "tool":
-        prev_assistant_idx = index - 1
-        assistant_msg = messages[prev_assistant_idx]
-        while prev_assistant_idx >= 0 and assistant_msg.get("role") == "tool":
-            prev_assistant_idx -= 1
+        if last_assistant_idx is not None:
+            prev_assistant_idx = last_assistant_idx
             assistant_msg = messages[prev_assistant_idx]
+        else:
+            prev_assistant_idx = index - 1
+            assistant_msg = messages[prev_assistant_idx]
+            while prev_assistant_idx >= 0 and assistant_msg.get("role") == "tool":
+                prev_assistant_idx -= 1
+                assistant_msg = messages[prev_assistant_idx]
 
         if not (
             index == 0
@@ -264,12 +266,9 @@ def render_message(
 
 
 def drop_thinking_messages(
-    messages: list[dict[str, Any]], last_user_idx: int | None = None
+    messages: list[dict[str, Any]], last_user_idx: int
 ) -> list[dict[str, Any]]:
     messages_wo_thinking: list[dict[str, Any]] = []
-    last_user_idx = (
-        find_last_user_index(messages) if last_user_idx is None else last_user_idx
-    )
     for idx, msg in enumerate(messages):
         role = msg.get("role")
         if role in ["user", "system", "tool"] or idx >= last_user_idx:
@@ -297,16 +296,22 @@ def encode_messages(
     prompt = bos_token if add_default_bos_token and len(context) == 0 else ""
 
     if thinking_mode == "thinking" and drop_thinking:
-        full_messages = drop_thinking_messages(full_messages)
+        last_user_idx = find_last_user_index(full_messages)
+        full_messages = drop_thinking_messages(full_messages, last_user_idx)
 
     last_user_idx = find_last_user_index(full_messages)
 
+    last_assistant_idx: int | None = None
     for idx in range(len(messages)):
+        abs_idx = idx + len(context)
+        if full_messages[abs_idx].get("role") == "assistant":
+            last_assistant_idx = abs_idx
         prompt += render_message(
-            idx + len(context),
+            abs_idx,
             full_messages,
             thinking_mode=thinking_mode,
             last_user_idx=last_user_idx,
+            last_assistant_idx=last_assistant_idx,
         )
 
     return prompt
