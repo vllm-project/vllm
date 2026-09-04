@@ -5903,8 +5903,7 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     # ensure_cache_available must have been called with (request, num_computed_tokens=0)
     # for a brand-new request that has no cached tokens yet.
     ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
-    assert ensure_call.args[:2] == (request_deferred, 0)
-    assert not ensure_call.args[2]
+    assert ensure_call.args == (request_deferred, 0)
     # Deferred request must NOT be scheduled
     assert request_deferred.request_id not in output.num_scheduled_tokens
     _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)

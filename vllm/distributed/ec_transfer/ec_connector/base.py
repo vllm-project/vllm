@@ -26,7 +26,6 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -160,25 +159,6 @@ class ECConnectorBase(ABC):
         # TODO: Implement this later for P2P feature
         return
 
-    def start_save_caches(self, **kwargs: Any) -> None:
-        """Start work that can overlap encoder execution."""
-        return None
-
-    def start_worker_services(self) -> None:
-        """Start services that require the worker device to be initialized."""
-        return None
-
-    def take_unavailable_requests(self) -> set[str]:
-        """Requests whose encoder inputs can no longer be obtained.
-
-        A connector that cannot always deliver an item reports the affected
-        requests here instead of deferring them forever. The scheduler fails
-        them with a retryable error, leaving the caller to decide whether to
-        re-issue the request. Called once per scheduling pass; the returned
-        ids are cleared.
-        """
-        return set()
-
     @abstractmethod
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
@@ -265,10 +245,7 @@ class ECConnectorBase(ABC):
         pass
 
     def ensure_cache_available(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
+        self, request: "Request", num_computed_tokens: int
     ) -> bool:
         """
         Ensure encoder cache items are available for the given request.
@@ -277,13 +254,31 @@ class ECConnectorBase(ABC):
         Args:
             request: the request whose multimodal features to check.
             num_computed_tokens: tokens already covered by cached KV blocks.
-            local_cache_hashes: encoder outputs already cached locally.
 
         Returns:
             True if all items are ready or no transfer is needed.
             False if any items are still in transit (request should be deferred).
         """
         return True
+
+    def start_save_caches(self, **kwargs: Any) -> None:
+        """Prepare this step's outbound pushes before the model runs."""
+        return
+
+    def start_worker_services(self) -> None:
+        """Start Worker-side services once the model is resident."""
+        return
+
+    def take_unavailable_requests(self) -> set[str]:
+        """Request IDs whose encoder inputs the connector can no longer obtain.
+
+        The Scheduler fails these; re-issuing the request re-runs the encode.
+        """
+        return set()
+
+    def update_state_after_free(self, request: "Request", index: int):
+        """Notify the connector that an encoder cache entry was released."""
+        return
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):
@@ -294,18 +289,6 @@ class ECConnectorBase(ABC):
             request (Request): the request object.
         """
         pass
-
-    def update_state_after_free(self, request: "Request", index: int):
-        """
-        Called once the request has consumed the encoder input, well before it
-        finishes generating. Connectors that hold per-request transfer state
-        (buffers, reservations) should release this item's share here.
-
-        Args:
-            request (Request): the request object.
-            index (int): the multimodal item index within the request.
-        """
-        return
 
     @abstractmethod
     def build_connector_meta(

@@ -12,7 +12,6 @@ from __future__ import annotations
 import math
 import time
 from collections import OrderedDict
-from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -104,6 +103,10 @@ class ECMooncakeScheduler:
         self._pushes_to_prepare: dict[str, ECMooncakePushSpec] = {}
         self._prepared_push_transfer_ids: set[str] = set()
         self._event_ready_shards: OrderedDict[str, set[int]] = OrderedDict()
+        # Mirror of the engine's encoder cache, maintained from the alloc and
+        # free notifications the Scheduler already sends. Tracking it here
+        # keeps `ensure_cache_available` on the upstream two-argument shape.
+        self._local_cache: set[str] = set()
 
     def _cancel_remote(self, consumer_zmq: str, transfer_id: str) -> bool:
         pending = None
@@ -340,12 +343,7 @@ class ECMooncakeScheduler:
                 return str(item["transfer_id"])
         return None
 
-    def ensure_cache_available(
-        self,
-        request: Any,
-        num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
-    ) -> bool:
+    def ensure_cache_available(self, request: Any, num_computed_tokens: int) -> bool:
         if self._is_producer:
             for index, feature in enumerate(request.mm_features):
                 if (
@@ -357,7 +355,6 @@ class ECMooncakeScheduler:
             return True
 
         self._drain_push_notifications()
-        local_cache_hashes = local_cache_hashes or set()
         all_ready = True
         for index, feature in enumerate(request.mm_features):
             if (
@@ -371,7 +368,7 @@ class ECMooncakeScheduler:
                 self._transfers.touch_available(
                     transfer_id, time.monotonic() + _RESERVATION_TTL_SECONDS
                 )
-            if mm_hash in local_cache_hashes:
+            if mm_hash in self._local_cache:
                 continue
             if self._transfers.has_state(mm_hash, (SchedulerTransferState.READY,)):
                 continue
@@ -427,6 +424,7 @@ class ECMooncakeScheduler:
         self._prepared_push_transfer_ids.add(transfer_id)
 
     def update_state_after_alloc(self, request: Any, index: int) -> None:
+        self._local_cache.add(request.mm_features[index].identifier)
         if self._is_producer:
             self._prepare_push_spec(request, index)
 
@@ -447,6 +445,7 @@ class ECMooncakeScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> ECConnectorMetadata:
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self._local_cache.discard(mm_hash)
             self._transfers.release_ready(mm_hash, time.monotonic())
         for transfer_id in self._transfers.drain_orphaned():
             self._queue_cancel(transfer_id)

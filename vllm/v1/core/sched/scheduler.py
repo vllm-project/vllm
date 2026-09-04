@@ -596,7 +596,6 @@ class Scheduler(SchedulerInterface):
                 and not self.ec_connector.ensure_cache_available(
                     request,
                     request.num_computed_tokens - request.num_output_placeholders,
-                    self.encoder_cache_manager.cached.keys(),
                 )
             ):
                 req_index += 1
@@ -935,9 +934,7 @@ class Scheduler(SchedulerInterface):
                         self.ec_connector is not None
                         and request.mm_features
                         and not self.ec_connector.ensure_cache_available(
-                            request,
-                            num_computed_tokens,
-                            self.encoder_cache_manager.cached.keys(),
+                            request, num_computed_tokens
                         )
                     ):
                         request_queue.pop_request()
