@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVLoadRange,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (
     MooncakeStoreCoordinator,
@@ -180,6 +181,11 @@ class MooncakeStoreScheduler:
         ):
             # Decode checkpoints become reusable Store boundaries.
             kv_cache_config.prefix_cache_retention_interval = self._block_size
+        self._range_load_group_ids = tuple(
+            transfer_idx
+            for transfer_idx, group_id in enumerate(kv_cache_config.transfer_group_ids)
+            if group_id not in self._boundary_state_group_ids
+        )
 
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
@@ -307,6 +313,33 @@ class MooncakeStoreScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
+
+    @property
+    def supports_load_range(self) -> bool:
+        # A non-terminal range owns attention KV only. Pure recurrent models
+        # therefore schedule an empty Store load and leave the boundary state
+        # to the terminal connector.
+        return True
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        load_range: KVLoadRange,
+    ) -> None:
+        load_spec = self.load_specs[request.request_id]
+        load_spec.vllm_cached_tokens = load_range.start_token
+        if load_range.end_token < load_spec.kvpool_cached_tokens:
+            # A partial-hash lookup may have recorded the key boundary for its
+            # original tail. Once MultiConnector trims that tail to an aligned
+            # range, the last full chunk must use its own hash instead.
+            load_spec.tail_key_boundaries = ()
+        if load_range.is_terminal:
+            load_spec.load_group_ids = None
+        else:
+            load_spec.kvpool_cached_tokens = load_range.end_token
+            load_spec.load_group_ids = self._range_load_group_ids
+        self.update_state_after_alloc(request, blocks, load_range.num_tokens)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -536,7 +569,11 @@ class MooncakeStoreScheduler:
         meta: MooncakeStoreConnectorMetadata,
         scheduler_output: SchedulerOutput,
     ) -> None:
-        """Replace append-only mirrors with the core's current block tables."""
+        """Refresh save metadata for block tables changed in this step.
+
+        The core's block state is sparse. Requests without an entry retain the
+        block table already maintained by their scheduler tracker.
+        """
         save_metas = [req_meta for req_meta in meta.requests if req_meta.can_save]
         if not save_metas:
             return
