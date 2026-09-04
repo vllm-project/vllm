@@ -1593,6 +1593,12 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
         hidden_dim = config.model_config.get_hidden_size()
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
         max_size = ca_comm.effective_max_size()
+        if max_size is None:
+            logger.warning_once(
+                "AITER allreduce-rmsnorm fusion disabled: custom all-reduce is "
+                "turned off via AITER_CUSTOM_AR_MAX_SIZE=0."
+            )
+            return
         _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
         if (
             not ca_comm.supports_dynamic_hidden_dim

@@ -21,8 +21,12 @@ class AiterCustomAllreduce:
     MAX_SIZE: int = 8192 * 1024 * 8 * 2
 
     @classmethod
-    def effective_max_size(cls) -> int:
+    def effective_max_size(cls) -> int | None:
         """Max input byte size eligible for AITER custom allreduce.
+
+        Returns ``None`` when custom AR is disabled entirely
+        (``AITER_CUSTOM_AR_MAX_SIZE=0``), so callers skip the fusion instead of
+        building a zero-length compile range.
 
         This has to agree with what AITER accepts at runtime, which is
         ``min(_car_max_size, max_size / 2)``. ``_car_max_size`` comes from
@@ -45,7 +49,11 @@ class AiterCustomAllreduce:
             )
         except ImportError:
             return two_shot_limit
-        return min(two_shot_limit, _resolve_car_max_size(cls.MAX_SIZE))
+        car_max_size = _resolve_car_max_size(cls.MAX_SIZE)
+        if car_max_size <= 0:
+            # AITER_CUSTOM_AR_MAX_SIZE=0 turns custom AR off for every size.
+            return None
+        return min(two_shot_limit, car_max_size)
 
     def __init__(
         self,
