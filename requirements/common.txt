@@ -7,7 +7,7 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 5.5.3
+transformers >= 5.10.4
 huggingface_hub >= 1.28.0
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 fastokens >= 0.2.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64" or platform_machine == "ppc64le" # Required for VLLM_USE_FASTOKENS=1
@@ -52,7 +52,7 @@ setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.14, < 1.0.0
-mcp
+mcp >= 2.0.0, < 3.0.0
 opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0

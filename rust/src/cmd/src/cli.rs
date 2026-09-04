@@ -7,6 +7,7 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
+mod ssl;
 mod unsupported;
 
 use std::collections::HashMap;
@@ -22,17 +23,18 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
-use vllm_chat::ReasoningParserFactory;
 use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RenderConfig, RendererSelection,
-    TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
+    RendererSelection,
 };
 
+use crate::cli::ssl::SslArgs;
 use crate::cli::unsupported::UnsupportedArgs;
 
 /// Top-level parser for the `vllm-rs` binary.
@@ -143,10 +145,15 @@ pub struct RenderArgs {
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    ssl: SslArgs,
 }
 
 impl RenderArgs {
     pub(super) fn into_config(self) -> RenderConfig {
+        let tls = self.ssl.tls_config();
+
         RenderConfig {
             model: self.model,
             served_model_name: self.served_model_name,
@@ -160,6 +167,7 @@ impl RenderArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_model_len: self.max_model_len,
             max_logprobs: self.max_logprobs,
+            tls,
         }
     }
 }
@@ -185,6 +193,12 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// The source of generation-config sampling defaults. `"auto"` loads the
+    /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub generation_config: GenerationConfigMode,
 
     /// Maximum time to wait for the expected engines to register on the
     /// frontend transport.
@@ -262,6 +276,13 @@ pub struct SharedRuntimeArgs {
     #[arg(long, value_parser = parse_json::<MmLimitPerPrompt>, value_name = "JSON", default_value = "{}")]
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+
+    /// LoRA adapters to load before serving, each as `name=path` or a JSON
+    /// object: `{"name": "name", "path": "lora_path", "base_model_name": "id"}`.
+    /// Requires `--enable-lora`; startup fails if any adapter cannot be loaded.
+    #[arg(long, num_args = 1.., value_name = "MODULE")]
+    #[serde(default)]
+    pub lora_modules: Vec<LoraModulePath>,
 
     /// The format to render message content within a chat template.
     ///
@@ -347,33 +368,10 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
-    /// The file path to the SSL key file. When omitted, the key is read from
-    /// `--ssl-certfile` (combined PEM).
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_keyfile: Option<String>,
-
-    /// The file path to the SSL cert file. Enables TLS when set.
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_certfile: Option<String>,
-
-    /// The CA certificates file used to verify client certificates (mTLS).
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_ca_certs: Option<String>,
-
-    /// Whether a client certificate is required: 0 = none, 1 = optional,
-    /// 2 = required (mirrors Python's `ssl.CERT_*`).
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=2))]
-    #[serde(default)]
-    pub ssl_cert_reqs: i32,
-
-    /// OpenSSL cipher string for HTTPS (TLS 1.2 and below).
-    /// When unset, the linked OpenSSL's default suites are used.
-    #[arg(long)]
-    #[serde(default)]
-    pub ssl_ciphers: Option<String>,
+    /// TLS options for HTTPS/mTLS.
+    #[command(flatten)]
+    #[serde(default, flatten)]
+    pub ssl: SslArgs,
 
     /// Profiler configuration forwarded by the Python supervisor.
     ///
@@ -465,7 +463,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
-        let tls = self.tls_config();
+        let tls = self.ssl.tls_config();
         let profiler = self.profiler();
 
         Config {
@@ -482,6 +480,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
@@ -491,6 +490,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -521,7 +521,7 @@ impl SharedRuntimeArgs {
         let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
-        let tls = self.tls_config();
+        let tls = self.ssl.tls_config();
         let profiler = self.profiler();
 
         Config {
@@ -535,6 +535,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
@@ -544,6 +545,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            lora_modules: self.lora_modules,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -573,23 +575,6 @@ impl SharedRuntimeArgs {
             allow_headers: self.allowed_headers.0.clone(),
             allow_credentials: self.allow_credentials,
         }
-    }
-
-    /// Build the TLS config: `Some` when any `ssl_*` argument is set, else
-    /// `None` (plaintext). The combination is validated in [`Config::validate`].
-    fn tls_config(&self) -> Option<TlsConfig> {
-        let tls_requested = self.ssl_certfile.is_some()
-            || self.ssl_keyfile.is_some()
-            || self.ssl_ca_certs.is_some()
-            || self.ssl_cert_reqs != 0
-            || self.ssl_ciphers.is_some();
-        tls_requested.then(|| TlsConfig {
-            cert_file: self.ssl_certfile.clone(),
-            key_file: self.ssl_keyfile.clone(),
-            ca_certs: self.ssl_ca_certs.clone(),
-            cert_reqs: self.ssl_cert_reqs,
-            ciphers: self.ssl_ciphers.clone(),
-        })
     }
 }
 

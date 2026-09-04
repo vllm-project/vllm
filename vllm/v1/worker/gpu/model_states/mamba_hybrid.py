@@ -9,9 +9,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import (
+    PleShortConvAttentionMetadataBuilder,
+    ShortConvAttentionMetadataBuilder,
+)
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -23,7 +28,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
+    get_mamba_group_ids,
+    get_mamba_groups,
     preprocess_mamba_align_fused_kernel,
+    validate_mamba_state_copy_funcs,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -48,7 +56,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     ) -> dict[str, Any]:
         if not isinstance(
             attn_metadata_builder,
-            (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+            (
+                Mamba2AttentionMetadataBuilder,
+                GDNAttentionMetadataBuilder,
+                ShortConvAttentionMetadataBuilder,
+                PleShortConvAttentionMetadataBuilder,
+            ),
         ):
             return {}
         return {
@@ -97,6 +110,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
             self._mamba_group_ids: list[int] = []
             self._mamba_spec: MambaSpec | None = None
+            self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -112,17 +126,16 @@ class MambaHybridModelState(DefaultModelState):
         self, kv_cache_config: KVCacheConfig
     ) -> tuple[list[int], MambaSpec]:
         if self._mamba_spec is None:
-            group_ids: list[int] = []
-            specs: list[MambaSpec] = []
-            for i, group in enumerate(kv_cache_config.kv_cache_groups):
-                spec = group.kv_cache_spec
-                if isinstance(spec, MambaSpec):
-                    group_ids.append(i)
-                    specs.append(spec)
-            assert specs, "no mamba layers in the model"
-            assert all(specs[0] == s for s in specs)
-            self._mamba_group_ids = group_ids
-            self._mamba_spec = specs[0]
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_spec = next(iter(mamba_groups))
+            assert all(
+                spec.block_size == mamba_spec.block_size
+                and spec.num_speculative_blocks == mamba_spec.num_speculative_blocks
+                and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
+                for spec in mamba_groups
+            ), "all mamba groups must share cache scheduling parameters"
+            self._mamba_group_ids = get_mamba_group_ids(mamba_groups)
+            self._mamba_spec = mamba_spec
         return self._mamba_group_ids, self._mamba_spec
 
     def _ensure_align_ctx(
@@ -131,8 +144,14 @@ class MambaHybridModelState(DefaultModelState):
         mamba_group_ids: list[int],
         block_tables: tuple[torch.Tensor, ...],
     ) -> MambaSpecDecodeGPUContext:
+        if self._mamba_state_copy_funcs is None:
+            mamba_groups = get_mamba_groups(kv_cache_config)
+            mamba_types = {spec.mamba_type for spec in mamba_groups}
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+            validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+            self._mamba_state_copy_funcs = copy_funcs
+        copy_funcs = self._mamba_state_copy_funcs
         if self._mamba_ctx is None:
-            copy_funcs = self.model.get_mamba_state_copy_func()
             # Both SD and DS conv layouts support a >0 spec-decode shift: the
             # fused pre-copy kernel (``_copy_mamba_state_block``) applies the
             # ``token_bias = num_accepted - 1`` window shift per conv layout
@@ -141,7 +160,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_ctx = MambaSpecDecodeGPUContext.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=kv_cache_config,
-                num_state_types=len(copy_funcs),
+                copy_funcs=copy_funcs,
                 device=self.device,
                 make_buffer=lambda n, dtype: CpuGpuBuffer(
                     n, dtype=dtype, device=self.device
@@ -156,7 +175,7 @@ class MambaHybridModelState(DefaultModelState):
             ctx.initialize_from_forward_context(
                 kv_cache_config,
                 forward_context,
-                self.model.get_mamba_state_copy_func(),
+                copy_funcs,
                 [block_tables[gid] for gid in mamba_group_ids],
             )
         return ctx
@@ -266,6 +285,24 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        if self._align_mode:
+            mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
+            aligned_index_builders = []
+            for group_idx, group_id in enumerate(mamba_group_ids):
+                for group in attn_groups[group_id]:
+                    builder = group.get_metadata_builder(0)
+                    if hasattr(builder, "mamba_aligned_state_indices"):
+                        aligned_index_builders.append((group_idx, builder))
+            if aligned_index_builders:
+                ctx = self._ensure_align_ctx(
+                    kv_cache_config, mamba_group_ids, block_tables
+                )
+                all_group_indices = ctx.compute_aligned_state_indices(
+                    input_batch.seq_lens, num_reqs
+                )
+                for group_idx, builder in aligned_index_builders:
+                    builder.mamba_aligned_state_indices = all_group_indices[group_idx]
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
@@ -285,6 +322,7 @@ class MambaHybridModelState(DefaultModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            positions=input_batch.positions,
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
