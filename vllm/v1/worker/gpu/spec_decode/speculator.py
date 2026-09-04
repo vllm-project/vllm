@@ -47,6 +47,11 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 class BaseSpeculator(ABC):
     @abstractmethod
+    def load_model(self, target_model: nn.Module) -> None:
+        """Bind the loaded target model and initialize proposal weights."""
+        pass
+
+    @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
 
