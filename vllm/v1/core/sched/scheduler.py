@@ -973,7 +973,8 @@ class Scheduler(SchedulerInterface):
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
-                        and (scheduled_running_reqs and not prefill_scheduled)
+                        and not prefill_scheduled
+                        and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
@@ -2703,7 +2704,7 @@ class Scheduler(SchedulerInterface):
         )
         spec_stats = spec_decoding_stats
         connector_stats_payload = (
-            kv_connector_stats.data if kv_connector_stats else None
+            kv_connector_stats.to_dict() if kv_connector_stats else None
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),
