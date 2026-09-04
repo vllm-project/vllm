@@ -501,6 +501,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
                     expected_consumers=plan.local_consumers,
                     awaiting_kvs=meta.awaiting_kvs,
+                    load_start_token=meta.load_start_token,
+                    load_end_token=meta.load_end_token,
                     region_pairs=stage.pairs,
                     remote_region_num_blocks=stage.region_num_blocks,
                     remote_agent=self._remote_agents[engine_id][
@@ -548,6 +550,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         region_pairs: _RegionPairs,
         remote_region_num_blocks: list[int],
         remote_agent: str,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
