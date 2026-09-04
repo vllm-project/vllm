@@ -343,6 +343,43 @@ struct PreparedItem {
 }
 
 impl MultimodalModelInfo {
+    pub(crate) fn validate_preprocessed_modalities<'a>(
+        &self,
+        modalities: impl IntoIterator<Item = &'a str>,
+    ) -> Result<()> {
+        let mut counts: HashMap<MmLimitModality, usize> = HashMap::new();
+        for modality in modalities {
+            let limit_modality = match modality {
+                "image" if self.image.is_some() => MmLimitModality::Image,
+                "video" if self.video.is_some() => MmLimitModality::Video,
+                "audio" if self.audio.is_some() => MmLimitModality::Audio,
+                _ => {
+                    return Err(Error::UnsupportedModality {
+                        modality: modality.to_string(),
+                    });
+                }
+            };
+            *counts.entry(limit_modality).or_default() += 1;
+        }
+        self.validate_mm_counts(counts)
+    }
+
+    fn validate_mm_counts(&self, counts: HashMap<MmLimitModality, usize>) -> Result<()> {
+        for (modality, count) in counts {
+            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
+            else {
+                continue;
+            };
+            if count > limit {
+                return Err(Error::MmLimitExceeded {
+                    modality: modality.as_str().to_string(),
+                    limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Load and resolve multimodal support from model files.
     ///
     /// Returns `Ok(Some(_))` only when the model spec is registered and at
@@ -674,20 +711,7 @@ impl MultimodalModelInfo {
             }
         }
 
-        for (modality, count) in counts {
-            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
-            else {
-                continue;
-            };
-            if count > limit {
-                return Err(Error::MmLimitExceeded {
-                    modality: modality.as_str().to_string(),
-                    limit,
-                });
-            }
-        }
-
-        Ok(())
+        self.validate_mm_counts(counts)
     }
 
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
