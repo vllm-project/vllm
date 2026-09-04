@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Intel XPU QSA owner with Triton kernels."""
+"""Intel XPU QSA owner backed by deepklox kernels."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ from vllm.v1.kv_cache_interface import (
 from ..common.qsa_cache import QSAForwardMetadata
 from . import model
 from .indexer_qsa import QSAIndexer
+from .ops.qsa import qsa_sparse_paged_attention
 
 
 class Qwen4ExpQSAMetadataBuilder(FlashAttentionMetadataBuilder):
@@ -72,7 +73,7 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "QWEN4_EXP_QSA_TRITON"
+        return "QWEN4_EXP_QSA_DEEPKLOX"
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -97,7 +98,7 @@ class Qwen4ExpQSAFlashAttentionBackend(FlashAttentionBackend):
 
 
 class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
-    """Run paged sparse GQA with the QSA Triton kernel."""
+    """Run paged sparse GQA with the deepklox QSA kernel."""
 
     supports_dcp: bool = False
     supports_pcp: bool = False
@@ -151,8 +152,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         if key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA requires BF16 Q/K/V")
 
-        from .ops.qsa import qsa_sparse_paged_attention
-
         qsa_sparse_paged_attention(
             query[:num_tokens],
             key_cache,
@@ -161,6 +160,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             attn_metadata.block_table,
             token_to_req,
             output[:num_tokens],
+            sm_scale=self.scale,
         )
         return output
 

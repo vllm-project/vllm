@@ -18,7 +18,21 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    create_fp8_scale_parameter,
+    create_fp8_weight_parameter,
+    is_fp8,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
@@ -31,6 +45,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from ..common.ple import PLEVocabParallelEmbedding
+from .ops.ple import can_use_ple_ngram_ids, ple_ngram_ids
 
 
 class Qwen4ExpPLEGroupedNorm(nn.Module):
@@ -64,6 +79,74 @@ class Qwen4ExpPLEGroupedNorm(nn.Module):
             variance = grouped.square().mean(dim=-1, keepdim=True)
             normalized = (grouped * torch.rsqrt(variance + self.eps)).flatten(-2)
         return (normalized * (1.0 + self.weight.float())).to(input_dtype)
+
+
+class Qwen4ExpPLEFp8EmbeddingMethod(QuantizeMethodBase):
+    """FP8 PLE embedding with one global checkpoint scale."""
+
+    def create_weights(
+        self,
+        layer: nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        del input_size, output_size, params_dtype
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        weight = create_fp8_weight_parameter(
+            sum(output_partition_sizes), input_size_per_partition, weight_loader
+        )
+        layer.register_parameter("weight", weight)
+
+        weight_scale = create_fp8_scale_parameter(
+            PerTensorScaleParameter,
+            output_partition_sizes,
+            input_size_per_partition,
+            None,
+            weight_loader,
+            scale_dtype=torch.bfloat16,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def apply(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError("PLE FP8 weights only support embedding lookup")
+
+    def embedding(self, layer: nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        return F.embedding(input_, layer.weight)
+
+
+def _get_ple_embedding_quant_method(
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+) -> QuantizeMethodBase | None:
+    """Select global-scale FP8 only for quantized PLE checkpoint shards."""
+
+    if not isinstance(quant_config, Fp8Config):
+        return None
+    if not quant_config.is_checkpoint_fp8_serialized:
+        return None
+
+    ignored_layers = quant_config.ignored_layers
+    if is_layer_skipped(
+        prefix,
+        ignored_layers,
+        quant_config.packed_modules_mapping,
+        match_mode=quant_config.ignored_layers_match_mode,
+    ):
+        return None
+    # PLE checkpoint shards form one runtime embedding parameter.
+    shard_prefix = f"{prefix}.shard_"
+    if any(name.startswith(shard_prefix) for name in ignored_layers):
+        return None
+    return Qwen4ExpPLEFp8EmbeddingMethod()
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -172,6 +255,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         max_num_reqs: int,
         prefix: str,
         layer_name: str,
+        quant_config: QuantizationConfig | None = None,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.embedding_dim = embedding_dim
@@ -227,8 +312,12 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self.ngram_embedding = PLEVocabParallelEmbedding(
             padded_vocab_size,
             self.head_dim,
+            params_dtype=params_dtype,
             padding_size=divisor,
             prefix=f"{prefix}.ngram_embedding",
+            quant_method=_get_ple_embedding_quant_method(
+                quant_config, f"{prefix}.ngram_embedding"
+            ),
         )
         self.register_buffer(
             "positions_buffer",
@@ -280,13 +369,29 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         valid = (source.unsqueeze(0) >= 0) & (position_in_segment >= shift)
         return torch.where(valid, shifted, tokens.new_full((), eos_token_id))
 
-    def forward(
+    def compute_ngram_ids(
         self,
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        output: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        input_ids = input_ids.reshape(-1).long()
+        """Compute n-gram embedding indices for the current request layout."""
+        input_ids = input_ids.reshape(-1)
+        if can_use_ple_ngram_ids(input_ids):
+            return ple_ngram_ids(
+                input_ids=input_ids,
+                query_start_loc=query_start_loc,
+                ngram_context=ngram_context,
+                layer_multipliers=self.layer_multipliers,
+                ngram_heads_vocab_sizes=self.ngram_heads_vocab_sizes,
+                ngram_heads_offsets=self.ngram_heads_offsets,
+                eos_token_id=self.eos_token_id,
+                heads_per_ngram=self.heads_per_ngram,
+                output=output,
+            )
+
+        input_ids = input_ids.long()
         query_start_loc = query_start_loc.long()
         num_reqs = query_start_loc.numel() - 1
         num_tokens = input_ids.shape[0]
@@ -302,7 +407,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
 
         positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs]
+        # The column axis must be cropped to the live token count: the shifted
+        # n-gram tensors below are materialized at this width per head.
+        packed = self.padded_buffer[:num_reqs, :num_tokens]
         packed.fill_(self.eos_token_id)
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
@@ -344,9 +451,35 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             ids = torch.remainder(mixed.unsqueeze(-1), sizes) + offsets
             id_blocks.append(ids[request_indices, adjusted_columns])
         ngram_ids = torch.cat(id_blocks, dim=-1)
+        if output is not None:
+            output.copy_(ngram_ids)
+            return output
+        return ngram_ids
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> torch.Tensor:
+        # ID generation depends on num_reqs, which the compiled graph does not
+        # dispatch on; keep it behind a custom op that writes graph-owned
+        # storage.
+        ngram_ids = input_ids.new_empty(
+            (input_ids.numel(), self.ngram_heads), dtype=torch.long
+        )
+        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
+            input_ids,
+            query_start_loc,
+            ngram_context,
+            ngram_ids,
+            self.layer_name,
+        )
+        # Storage dtype, not params_dtype: an FP8 quant method keeps the weight
+        # in FP8 and the caller dequantizes with the global scale.
         output = ngram_ids.new_empty(
             (ngram_ids.shape[0], self.embedding_dim),
-            dtype=self.ngram_embedding.params_dtype,
+            dtype=self.ngram_embedding.weight.dtype,
         )
         torch.ops.vllm.qwen4_exp_xpu_ple_ngram_embedding(
             ngram_ids,
@@ -460,6 +593,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             vllm_config.scheduler_config.max_num_seqs,
             f"{prefix}.ple_embedding",
             prefix,
+            quant_config=quant_config,
+            params_dtype=model_config.dtype,
         )
         self.key_proj = ReplicatedLinear(
             int(config.ple_embed_dim),
@@ -501,6 +636,26 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _get_embedding_weight_scale(self) -> torch.Tensor | None:
+        embedding = getattr(self.ple_embedding, "ngram_embedding", None)
+        return getattr(embedding, "weight_scale", None)
+
+    def _dequantize_embeddings(
+        self,
+        embeddings: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Dequantize PLE lookup output."""
+
+        if not is_fp8(embeddings):
+            return embeddings
+        weight_scale = self._get_embedding_weight_scale()
+        if weight_scale is None:
+            raise RuntimeError("FP8 PLE embedding is missing its global scale")
+        if weight_scale.device != embeddings.device:
+            raise RuntimeError("FP8 PLE embedding scale must be on the output device")
+        return embeddings.to(output_dtype) * weight_scale.to(output_dtype)
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
@@ -1045,6 +1200,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 f"{hidden_states.shape[0]}"
             )
         embeddings = self.ple_embedding(input_ids, query_start_loc, ngram_context)
+        embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
         key, _ = self.key_proj(embeddings)
         value, _ = self.value_proj(embeddings)
         token_count = hidden_states.shape[0]
@@ -1063,6 +1219,33 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.prefix,
         )
         return gated_value.flatten(-2) + conv_output
+
+
+def qwen4_exp_compute_ple_ngram_ids(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
+    layer = get_forward_context().no_compile_layers[layer_name]
+    layer.ple_embedding.compute_ngram_ids(
+        input_ids,
+        query_start_loc,
+        ngram_context,
+        output,
+    )
+
+
+def qwen4_exp_compute_ple_ngram_ids_fake(
+    input_ids: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    ngram_context: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
 
 
 def qwen4_exp_xpu_ple_ngram_embedding(
@@ -1106,6 +1289,14 @@ def qwen4_exp_ple_short_conv_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+direct_register_custom_op(
+    op_name="qwen4_exp_compute_ple_ngram_ids",
+    op_func=qwen4_exp_compute_ple_ngram_ids,
+    mutates_args=["output"],
+    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
+)
 
 
 direct_register_custom_op(
