@@ -22,13 +22,6 @@ PROMPTS = [
     "Once upon a time, in a small village,",
 ]
 
-try:
-    from flashinfer.mamba.checkpointing_ssu import CheckpointingSSURunner
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = CheckpointingSSURunner is not None
-except ImportError:
-    HAS_FLASHINFER_CHECKPOINTING_SSU = False
-
 
 @pytest.fixture(autouse=True)
 def _use_v1_model_runner_by_default(monkeypatch):
@@ -92,10 +85,6 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_replayssm_flashinfer_decode_matches_baseline(
@@ -117,10 +106,6 @@ def test_replayssm_flashinfer_decode_matches_baseline(
         envs.disable_envs_cache()
 
 
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_name):
     common = dict(
@@ -151,10 +136,6 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner):
