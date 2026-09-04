@@ -153,7 +153,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # Now check the matches
         for match_name in matches_check:
-            log_matches = list(int(ms) for ms in log_matches_dict[match_name])
+            # manual_act_quant_fusion is tracked via match_table, not log patterns
+            if match_name == "manual_act_quant_fusion":
+                log_matches = []
+            else:
+                log_matches = list(int(ms) for ms in log_matches_dict[match_name])
 
             # AR+RMS skips the largest range; SP skips the smallest.
             # When both are enabled, AR+RMS activation count is
@@ -182,7 +186,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             # TODO: Remove log counting in unit tests
             # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            if match_name not in ("attn_quant_fusion", "act_quant_fusion"):
+            # manual_act_quant_fusion uses match_table, not log patterns
+            if match_name not in (
+                "attn_quant_fusion",
+                "act_quant_fusion",
+                "manual_act_quant_fusion",
+            ):
                 assert len(log_matches) == n_expected, (
                     f"Could not find {n_expected} {match_name} "
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"
@@ -248,6 +257,12 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 assert actual_match == expected_matches * n_expected, (
                     f"Could not find {expected_matches * n_expected} "
                     f"{match_name} (found {actual_match})."
+                )
+            elif match_name == "manual_act_quant_fusion":
+                actual_match = match_table.get("manual_act_quant_fusion", 0)
+                assert actual_match >= expected_matches, (
+                    f"Expected at least {expected_matches} manual_act_quant_fusion "
+                    f"(found {actual_match})."
                 )
             elif match_name == "attn_quant_fusion":
                 actual_match = match_table.get(
