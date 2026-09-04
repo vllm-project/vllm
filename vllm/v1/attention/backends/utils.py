@@ -187,6 +187,44 @@ def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
 
 
+def backend_supports_layouts(
+    backend: type["AttentionBackend"],
+    layout_constraint: tuple[str, ...] | None,
+) -> bool:
+    """Whether ``backend`` can share a KV cache layout with the constraint.
+
+    A backend that declares no layouts works with any, so it always fits.
+    """
+    if not layout_constraint:
+        return True
+    layouts = backend.supported_kv_cache_layouts()
+    if layouts is None:
+        return True
+    return any(layout.name in layout_constraint for layout in layouts)
+
+
+def drop_layout_incompatible_backends(candidates, layout_constraint, get_backend_class):
+    """Drop candidates whose layouts are disjoint from ``layout_constraint``.
+
+    Keeps the unfiltered list when nothing survives, so the caller still reports
+    its own selection error rather than an empty-candidate one.
+    """
+    if not layout_constraint:
+        return candidates
+    kept = [
+        candidate
+        for candidate in candidates
+        if backend_supports_layouts(get_backend_class(candidate), layout_constraint)
+    ]
+    if not kept:
+        logger.debug(
+            "No attention backend supports layouts %s; ignoring the constraint.",
+            layout_constraint,
+        )
+        return candidates
+    return kept
+
+
 def get_supported_kv_cache_layouts(
     backends: Iterable[type[AttentionBackend]],
 ) -> list[KVCacheLayout]:

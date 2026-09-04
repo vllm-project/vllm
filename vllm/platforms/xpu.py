@@ -144,6 +144,7 @@ class XPUPlatform(Platform):
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> str:
         # TurboQuant KV cache: route directly to TQ backend
         kv_cache_dtype = attn_selector_config.kv_cache_dtype
