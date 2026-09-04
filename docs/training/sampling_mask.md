@@ -63,9 +63,12 @@ The mask is also available via the `/inference/v1/generate` HTTP endpoint:
 | `top_k > 0` | Bounds mask size; pure top-p can produce vocab-sized masks |
 | Model Runner V2 | Required by the async D2H copy pipeline |
 
-The engine rejects unsupported combinations at startup or request time:
+Sampling-mask replay with speculative decoding is supported only for
+fixed-boundary MTP with `rejection_sample_method="standard"`. The engine
+rejects unsupported combinations at startup or request time, including:
 
-- Speculative decoding
+- Adaptive verification, non-MTP draft methods, and synthetic or block
+  verification
 - Diffusion models
 - Custom logits processors (engine-level `--logits-processors`)
 
@@ -76,8 +79,10 @@ The engine rejects unsupported combinations at startup or request time:
    logits to `-inf`.
 2. After sampling, `torch.isfinite(processed_logits)` identifies the surviving
    token IDs — this is the sampling mask.
-3. The mask is transferred GPU → CPU asynchronously alongside sampled tokens.
-4. On request completion, per-step masks are merged and converted to
+3. For MTP, the engine returns aligned processed-target sampling support for
+   every actually emitted accepted, recovered, or bonus token.
+4. The mask is transferred GPU → CPU asynchronously alongside sampled tokens.
+5. On request completion, per-step masks are merged and converted to
    `list[list[int]]` for the response.
 
 ## RL training usage

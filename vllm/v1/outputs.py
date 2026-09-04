@@ -54,19 +54,32 @@ class LogprobsLists(NamedTuple):
 
 
 class SamplingMaskLists(NamedTuple):
-    """CSR sampling masks; a step slice holds one position (``offsets=None``)."""
+    """CSR sampling masks; a request slice may contain multiple positions."""
 
     # [num_kept_tokens]
     token_ids: np.ndarray
     # [num_positions + 1], or None for a single position
     offsets: np.ndarray | None = None
-    # Unused with one position per request; kept for the wire layout.
+    # [num_requests + 1] for multi-position request batches.
     cu_num_generated_tokens: list[int] | None = None
 
     def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
-        assert num_positions == 1 and self.offsets is not None
+        assert self.offsets is not None
+        start_idx = (
+            req_idx
+            if self.cu_num_generated_tokens is None
+            else self.cu_num_generated_tokens[req_idx]
+        )
+        end_idx = start_idx + num_positions
+        if self.cu_num_generated_tokens is not None:
+            assert end_idx <= self.cu_num_generated_tokens[req_idx + 1]
+        flat_start = self.offsets[start_idx]
+        flat_end = self.offsets[end_idx]
+        if num_positions == 1:
+            return SamplingMaskLists(self.token_ids[flat_start:flat_end])
         return SamplingMaskLists(
-            self.token_ids[self.offsets[req_idx] : self.offsets[req_idx + 1]]
+            self.token_ids[flat_start:flat_end],
+            self.offsets[start_idx : end_idx + 1] - flat_start,
         )
 
     def to_nested_list(self) -> list[list[int]]:
