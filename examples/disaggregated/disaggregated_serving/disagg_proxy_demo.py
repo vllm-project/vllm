@@ -9,6 +9,7 @@ launch this proxy demo through:
        --model $model_name  \
        --prefill localhost:8100 localhost:8101   \
        --decode localhost:8200 localhost:8201   \
+       [--nixl] \
        --port 8000
 
 Note: This demo will be removed once the PDController implemented in PR 15343
@@ -52,6 +53,7 @@ class Proxy:
         custom_create_completion: Callable[[Request], StreamingResponse] | None = None,
         custom_create_chat_completion: Callable[[Request], StreamingResponse]
         | None = None,
+        nixl: bool = False,
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -61,6 +63,7 @@ class Proxy:
         self.scheduling_policy = scheduling_policy
         self.custom_create_completion = custom_create_completion
         self.custom_create_chat_completion = custom_create_chat_completion
+        self.nixl = nixl
         self.router = APIRouter()
         self.setup_routes()
 
@@ -253,16 +256,46 @@ class Proxy:
 
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            kv_prepare_request.pop("min_tokens", None)
+            kv_prepare_request.pop("min_completion_tokens", None)
+            if self.nixl:
+                # Tell the prefill node that disaggregation is enabled and
+                # decode will happen remotely. Ask for a non-streaming response
+                # so that it can be parsed in a single step and the
+                # kv_transfer_params extracted.
+                kv_prepare_request["stream"] = False
+                kv_prepare_request.pop("stream_options", None)
+                kv_prepare_request["kv_transfer_params"] = {"do_remote_decode": True}
 
             prefill_instance = self.schedule(self.prefill_cycler)
+            chunks: list[bytes] = []
             try:
-                async for _ in self.forward_request(
-                    f"http://{prefill_instance}/v1/completions", kv_prepare_request
+                async for chunk in self.forward_request(
+                    f"http://{prefill_instance}/v1/completions",
+                    kv_prepare_request,
+                    use_chunked=not self.nixl,
                 ):
-                    continue
+                    if self.nixl:
+                        chunks.append(chunk)
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
+
+            if self.nixl:
+                # Extract the kv_transfer_params from the prefill's response
+                # and forward to the decode node.
+                body = json.loads(b"".join(chunks))
+                kv_transfer_params = body.get("kv_transfer_params") if isinstance(
+                    body, dict) else None
+                if not kv_transfer_params:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Prefill node failed to provide kv_transfer_params. "
+                        f"Response: {body}")
+                request["kv_transfer_params"] = {
+                    "do_remote_prefill": True,
+                    **kv_transfer_params,
+                }
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
@@ -290,19 +323,44 @@ class Proxy:
             # add params to request
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            kv_prepare_request.pop("min_tokens", None)
+            kv_prepare_request.pop("min_completion_tokens", None)
             if "max_completion_tokens" in kv_prepare_request:
                 kv_prepare_request["max_completion_tokens"] = 1
+            if self.nixl:
+                kv_prepare_request["stream"] = False
+                kv_prepare_request.pop("stream_options", None)
+                kv_prepare_request["kv_transfer_params"] = {"do_remote_decode": True}
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
+            chunks: list[bytes] = []
             try:
-                async for _ in self.forward_request(
-                    f"http://{prefill_instance}/v1/chat/completions", kv_prepare_request
+                async for chunk in self.forward_request(
+                    f"http://{prefill_instance}/v1/chat/completions",
+                    kv_prepare_request,
+                    use_chunked=not self.nixl,
                 ):
-                    continue
+                    if self.nixl:
+                        chunks.append(chunk)
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
+
+            if self.nixl:
+                body = json.loads(b"".join(chunks))
+                kv_transfer_params = body.get("kv_transfer_params") if isinstance(
+                    body, dict) else None
+                if not kv_transfer_params:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Prefill node failed to provide kv_transfer_params. "
+                        f"Response: {body}")
+                request["kv_transfer_params"] = {
+                    "do_remote_prefill": True,
+                    **kv_transfer_params,
+                }
+
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
 
@@ -362,6 +420,7 @@ class ProxyServer:
             ),
             custom_create_completion=create_completion,
             custom_create_chat_completion=create_chat_completion,
+            nixl=getattr(args, "nixl", False),
         )
 
     def validate_parsed_serve_args(self, args: argparse.Namespace):
@@ -442,6 +501,19 @@ def parse_args():
         type=int,
         default=8000,
         help="Server port number",
+    )
+
+    parser.add_argument(
+        "--nixl",
+        action="store_true",
+        help=(
+            "Enable the NixlConnector P/D handshake: inject "
+            "do_remote_decode=True into the prefill request and forward "
+            "the producer's kv_transfer_params (remote_engine_id, "
+            "remote_block_ids, remote_host, remote_port) into the decode "
+            "request, along with setting do_remote_prefill=True. Required for "
+            "NixlConnector-based disaggregated serving."
+        ),
     )
     return parser.parse_args()
 
