@@ -294,17 +294,16 @@ def _is_deep_gemm_mega_moe_requested(vllm_config: VllmConfig | None) -> bool:
     )
 
 
-def _use_sequence_parallel_moe(
-    parallel_config: ParallelConfig, vllm_config: VllmConfig | None
-) -> bool:
-    return parallel_config.pipeline_parallel_size == 1 and (
-        parallel_config.use_sequence_parallel_moe
-        or (
-            _is_deep_gemm_mega_moe_requested(vllm_config)
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-        )
-    )
+def _scale_mega_moe_output_for_deferred_reduce(
+    output: torch.Tensor,
+    *,
+    tp_size: int,
+    is_sequence_parallel: bool,
+    reduce_results: bool,
+) -> torch.Tensor:
+    if not is_sequence_parallel and not reduce_results:
+        output = output / tp_size
+    return output
 
 
 class DeepseekV2MoE(nn.Module):
@@ -330,10 +329,9 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.use_mega_moe = _is_deep_gemm_mega_moe_requested(vllm_config)
-        self.is_sequence_parallel = _use_sequence_parallel_moe(
-            parallel_config, vllm_config
-        )
+        self.reduce_results = reduce_results
         if self.use_mega_moe and not current_platform.is_cuda():
             raise NotImplementedError("DeepGEMM MegaMoE requires CUDA.")
         if self.use_mega_moe and not parallel_config.enable_expert_parallel:
@@ -398,7 +396,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=self.use_mega_moe,
+                reduce_results=(reduce_results if self.use_mega_moe else False),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -511,6 +509,12 @@ class DeepseekV2MoE(nn.Module):
                 topk_weights,
                 topk_ids,
                 activation_clamp=None,
+            )
+            final_hidden_states = _scale_mega_moe_output_for_deferred_reduce(
+                final_hidden_states,
+                tp_size=self.tp_size,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=self.reduce_results,
             )
             if self.shared_experts is not None:
                 final_hidden_states += self.shared_experts(hidden_states)
