@@ -179,7 +179,7 @@ def create_hisparse_layout(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                enable_kv_transfer=False,
+                enable_kv_transfer=True,
             )
         )
         hot_groups.append(
