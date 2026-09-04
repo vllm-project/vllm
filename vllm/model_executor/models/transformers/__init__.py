@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import torch.nn.functional as F
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.base import VLLM_ATTN_ATTR, Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
@@ -40,8 +40,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 if TYPE_CHECKING:
     import torch
 
-    from vllm.model_executor.layers.attention import Attention, MLAAttention
-
 
 def vllm_attention_forward(
     # Transformers args
@@ -50,15 +48,9 @@ def vllm_attention_forward(
     key: "torch.Tensor",
     value: "torch.Tensor",
     attention_mask: "torch.Tensor",
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: "dict[int, Attention] | None" = None,
     **kwargs,
 ):
-    self_attn = attention_instances[module.layer_idx]
-    if scaling is not None:
-        self_attn.impl.scale = float(scaling)
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
     hidden = query.shape[-2]
     head_dim_qk = query.shape[-1]
     head_dim_v = value.shape[-1]
@@ -85,13 +77,9 @@ def vllm_mla_attention_forward(
     kv_c_normed: "torch.Tensor",
     k_pe: "torch.Tensor",
     attention_mask: "torch.Tensor",
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: "dict[int, MLAAttention] | None" = None,
     **kwargs,
 ):
-    self_attn = attention_instances[module.layer_idx]
+    self_attn = getattr(module, VLLM_ATTN_ATTR)
     # [batch=1, heads, num_tokens, qk_head_dim] -> [num_tokens, heads, qk_head_dim]
     query = query.transpose(1, 2).flatten(0, 1)
     num_tokens, num_heads = query.shape[:2]
