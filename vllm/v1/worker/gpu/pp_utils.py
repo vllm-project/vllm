@@ -78,7 +78,13 @@ class PPHandler:
         self.broadcast_stream = torch.cuda.Stream(device)
 
         self.requested_recv_launch_delay = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV
+        self.post_model_recv_launch = envs.VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV
         self.collect_recv_wait_stats = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS
+        if self.post_model_recv_launch and not self.requested_recv_launch_delay:
+            raise ValueError(
+                "VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV requires a non-zero "
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV"
+            )
         if not 0 <= self.requested_recv_launch_delay < pp_group.world_size:
             raise ValueError(
                 "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must satisfy "
@@ -110,6 +116,7 @@ class PPHandler:
         self.pending_wait_events: deque[tuple[torch.cuda.Event, torch.cuda.Event]] = (
             deque()
         )
+        self.pending_post_model_receive: PendingRecv | None = None
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
@@ -142,10 +149,11 @@ class PPHandler:
         pp_group = get_pp_group()
         logger.info_once(
             "Enabled deferred PP sampled-token receive: "
-            "pp_rank=%d/%d recv_delay_steps=%d",
+            "pp_rank=%d/%d recv_delay_steps=%d post_model_launch=%s",
             pp_group.rank_in_group,
             pp_group.world_size,
             self.recv_launch_delay,
+            self.post_model_recv_launch,
         )
         return True
 
@@ -208,11 +216,18 @@ class PPHandler:
             self.num_deferred_recv_launches += 1
 
     def _advance_receive_queue(self) -> PendingRecv | None:
-        """Launch the configured slot and return the slot due this step."""
+        """Select the configured slot and return the slot due this step."""
         if self.recv_launch_delay:
             launch_slot = self.queue[-self.recv_launch_delay]
             if launch_slot is not None:
-                self._launch_receive(launch_slot)
+                if self.post_model_recv_launch:
+                    if self.pending_post_model_receive is not None:
+                        raise RuntimeError(
+                            "Previous post-model sampled-token receive was not launched"
+                        )
+                    self.pending_post_model_receive = launch_slot
+                else:
+                    self._launch_receive(launch_slot)
 
         due_slot = self.queue.popleft()
         # Reserve this step's slot; `receive` overwrites it if applicable.
@@ -237,6 +252,17 @@ class PPHandler:
         self.num_consume_fallbacks += 1
         self._launch_receive(slot)
 
+    def launch_post_model_receive(self) -> bool:
+        """Post the selected receive behind this step's model kernels."""
+        if not self.post_model_recv_launch or self.is_last_rank:
+            return False
+        slot = self.pending_post_model_receive
+        if slot is None:
+            return False
+        self.pending_post_model_receive = None
+        self._launch_receive(slot)
+        return True
+
     def flush_pending_collectives(self, reason: str = "explicit") -> int:
         """Post all deferred receives before an idle boundary or shutdown."""
         if self.is_last_rank:
@@ -246,6 +272,11 @@ class PPHandler:
             self.num_idle_boundaries += 1
 
         launched = 0
+        if self.pending_post_model_receive is not None:
+            slot = self.pending_post_model_receive
+            self.pending_post_model_receive = None
+            self._launch_receive(slot)
+            launched += 1
         for slot in self.queue:
             if slot is not None and slot.event is None:
                 self._launch_receive(slot)
