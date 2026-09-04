@@ -319,10 +319,9 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             raise RuntimeError(
                 "TRT-LLM FP8 PTPC experts require per-token activation scales"
             )
-        if self.routing_method_type == RoutingMethodType.Llama4:
-            assert apply_router_weight_on_input
-        else:
-            assert not apply_router_weight_on_input
+        if apply_router_weight_on_input:
+            # Prepare already scaled the top-1 input by its routing weight.
+            topk_weights = torch.ones_like(topk_weights)
 
         result = flashinfer_trtllm_fp8_per_channel_scale_routed_moe(
             topk_ids=pack_topk_ids_weights(topk_ids, topk_weights),
@@ -344,7 +343,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
-            use_routing_scales_on_input=apply_router_weight_on_input,
+            use_routing_scales_on_input=False,
             routing_method_type=int(self.routing_method_type),
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),

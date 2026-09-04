@@ -33,7 +33,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 
@@ -121,6 +123,12 @@ def _get_priority_backends(
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_CUTLASS)
         else:
             _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
+
+    # The TRT-LLM FP8 PTPC kernel quantizes the FC1 output per-tensor with a
+    # unit scale rather than per-token, so only use it when requested
+    # explicitly via moe_backend.
+    if (weight_key, activation_key) == (kFp8StaticChannelSym, kFp8DynamicTokenSym):
+        _AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
 
     if current_platform.is_xpu():
         # XPU platform supports TritonExperts and XPUExpertsFp8,

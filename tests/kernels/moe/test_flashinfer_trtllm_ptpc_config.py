@@ -5,6 +5,7 @@ import sys
 import types
 from enum import IntEnum
 
+import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe as fi_trtllm_moe
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
+    _get_priority_backends,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_quant_config,
 )
@@ -29,7 +31,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
     kFp8StaticChannelSym,
 )
 
@@ -80,6 +84,23 @@ def test_flashinfer_cutlass_does_not_claim_ptpc_quant_scheme():
     )
 
 
+def test_flashinfer_trtllm_ptpc_is_not_auto_selected():
+    moe_config = types.SimpleNamespace(
+        moe_parallel_config=types.SimpleNamespace(
+            use_deepep_v2_kernels=False, ep_size=1
+        )
+    )
+    ptpc_backends = _get_priority_backends(
+        moe_config, kFp8StaticChannelSym, kFp8DynamicTokenSym
+    )
+    block_backends = _get_priority_backends(
+        moe_config, kFp8Static128BlockSym, kFp8Dynamic128Sym
+    )
+
+    assert Fp8MoeBackend.FLASHINFER_TRTLLM not in ptpc_backends
+    assert Fp8MoeBackend.FLASHINFER_TRTLLM in block_backends
+
+
 def test_flashinfer_trtllm_claims_ptpc_quant_scheme(monkeypatch):
     monkeypatch.setattr(
         fi_trtllm_moe,
@@ -115,7 +136,10 @@ def test_pack_topk_ids_weights_roundtrips_expert_ids_and_bf16_weights():
     assert torch.equal(unpacked_weights, topk_weights.to(torch.bfloat16))
 
 
-def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(monkeypatch):
+@pytest.mark.parametrize("apply_router_weight_on_input", [False, True])
+def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
+    monkeypatch, apply_router_weight_on_input
+):
     class ActivationType(IntEnum):
         Gelu = 0
         Relu = 1
@@ -164,7 +188,7 @@ def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(monkeypatch):
     w1 = torch.empty((2, 6, 5), dtype=torch.uint8)
     w2 = torch.empty((2, 5, 3), dtype=torch.uint8)
     output = torch.empty((3, 5), dtype=torch.bfloat16)
-    topk_weights = torch.ones((3, 1), dtype=torch.float32)
+    topk_weights = torch.full((3, 1), 0.5, dtype=torch.float32)
     topk_ids = torch.tensor([[0], [1], [0]], dtype=torch.int64)
     a1q_scale = torch.ones((3, 1), dtype=torch.float32)
 
@@ -183,11 +207,17 @@ def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(monkeypatch):
         workspace13=None,
         workspace2=None,
         expert_tokens_meta=None,
-        apply_router_weight_on_input=False,
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
+    # Prepare already applies the top-1 routing weight to the input, so the
+    # kernel must finalize with unit weights in that case.
+    expected_weights = (
+        torch.ones_like(topk_weights) if apply_router_weight_on_input else topk_weights
+    )
     assert torch.equal(
-        captured_kwargs["topk_ids"], pack_topk_ids_weights(topk_ids, topk_weights)
+        captured_kwargs["topk_ids"],
+        pack_topk_ids_weights(topk_ids, expected_weights),
     )
     assert captured_kwargs["hidden_states"] is hidden_states
     assert captured_kwargs["hidden_states_scale"].shape == (3, 1)
@@ -211,7 +241,10 @@ def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(monkeypatch):
     assert torch.equal(output, torch.full((3, 5), 3, dtype=torch.bfloat16))
 
 
-def test_flashinfer_trtllm_ptpc_prepare_permutes_scales_with_weights(monkeypatch):
+@pytest.mark.parametrize("is_gated", [True, False])
+def test_flashinfer_trtllm_ptpc_prepare_permutes_scales_with_weights(
+    monkeypatch, is_gated
+):
     index_calls: list[tuple[str, tuple[int, ...]]] = []
 
     def interleave_indices(num_rows: int) -> torch.Tensor:
@@ -241,23 +274,24 @@ def test_flashinfer_trtllm_ptpc_prepare_permutes_scales_with_weights(monkeypatch
         },
     )
 
-    intermediate = 16
-    hidden_size = 2
+    # Non-gated weights are aligned to 128 rows, gated ones to 16 per half.
+    intermediate = 16 if is_gated else 128
+    up_mult = 2 if is_gated else 1
+    hidden_size = 32
     layer = types.SimpleNamespace(
         moe_config=types.SimpleNamespace(
-            is_act_and_mul=True,
+            is_act_and_mul=is_gated,
             intermediate_size_per_partition=intermediate,
         ),
-        activation=MoEActivation.SILU,
+        activation=MoEActivation.SILU if is_gated else MoEActivation.RELU2_NO_MUL,
     )
-    w13 = torch.arange(2 * intermediate * hidden_size, dtype=torch.uint8).reshape(
-        1, 2 * intermediate, hidden_size
-    )
+    w13 = torch.arange(up_mult * intermediate * hidden_size, dtype=torch.uint8)
+    w13 = w13.reshape(1, up_mult * intermediate, hidden_size)
     w2 = torch.arange(hidden_size * intermediate, dtype=torch.uint8).reshape(
         1, hidden_size, intermediate
     )
-    w13_scale = torch.arange(2 * intermediate, dtype=torch.float32).reshape(
-        1, 2 * intermediate, 1
+    w13_scale = torch.arange(up_mult * intermediate, dtype=torch.float32).reshape(
+        1, up_mult * intermediate, 1
     )
     w2_scale = torch.arange(hidden_size, dtype=torch.float32).reshape(1, hidden_size, 1)
 
@@ -273,29 +307,74 @@ def test_flashinfer_trtllm_ptpc_prepare_permutes_scales_with_weights(monkeypatch
         per_out_ch_quant=True,
     )
 
-    w31 = torch.cat([w13[:, intermediate:], w13[:, :intermediate]], dim=1)
-    gated_idx = interleave_indices(2 * intermediate)
-    shuffle_idx = torch.arange(2 * intermediate).flip(0)
-    expected_w13 = w31[:, gated_idx][:, shuffle_idx]
-    w31_scale = torch.cat(
-        [w13_scale[:, intermediate:], w13_scale[:, :intermediate]], dim=1
-    ).squeeze(-1)
-    expected_w13_scale = w31_scale[:, gated_idx][:, shuffle_idx]
-    w2_shuffle_idx = torch.arange(hidden_size).flip(0)
+    num_rows = up_mult * intermediate
+    row_idx = torch.arange(num_rows).flip(0)
+    expected_calls = [("shuffle", (num_rows, hidden_size))]
+    if is_gated:
+        # W31 swap first, then gate/up interleave, then the weight shuffle.
+        w13 = torch.cat([w13[:, intermediate:], w13[:, :intermediate]], dim=1)
+        w13_scale = torch.cat(
+            [w13_scale[:, intermediate:], w13_scale[:, :intermediate]], dim=1
+        )
+        row_idx = interleave_indices(num_rows)[row_idx]
+        expected_calls.insert(0, ("gated", (num_rows, hidden_size)))
+    expected_calls.append(("shuffle", (hidden_size, intermediate)))
+    w2_row_idx = torch.arange(hidden_size).flip(0)
 
     assert out_w13.dtype == torch.float8_e4m3fn
     assert out_w2.dtype == torch.float8_e4m3fn
-    assert torch.equal(out_w13.view(torch.uint8), expected_w13)
-    assert torch.equal(out_w2.view(torch.uint8), w2[:, w2_shuffle_idx])
-    assert out_w13_scale.shape == (1, 2 * intermediate)
-    assert torch.equal(out_w13_scale, expected_w13_scale)
+    assert torch.equal(out_w13.view(torch.uint8), w13[:, row_idx])
+    assert torch.equal(out_w2.view(torch.uint8), w2[:, w2_row_idx])
+    assert out_w13_scale.shape == (1, num_rows)
+    assert torch.equal(out_w13_scale, w13_scale.squeeze(-1)[:, row_idx])
     assert out_w2_scale.shape == (1, hidden_size)
-    assert torch.equal(out_w2_scale, w2_scale.squeeze(-1)[:, w2_shuffle_idx])
-    assert index_calls == [
-        ("gated", (2 * intermediate, hidden_size)),
-        ("shuffle", (2 * intermediate, hidden_size)),
-        ("shuffle", (hidden_size, intermediate)),
-    ]
+    assert torch.equal(out_w2_scale, w2_scale.squeeze(-1)[:, w2_row_idx])
+    assert index_calls == expected_calls
+
+
+def test_flashinfer_trtllm_ptpc_prepare_keeps_scales_paired_with_real_shuffle():
+    pytest.importorskip("flashinfer.utils")
+    pytest.importorskip("flashinfer.fused_moe.core")
+
+    intermediate = 16
+    hidden_size = 32
+    layer = types.SimpleNamespace(
+        moe_config=types.SimpleNamespace(
+            is_act_and_mul=True,
+            intermediate_size_per_partition=intermediate,
+        ),
+        activation=MoEActivation.SILU,
+    )
+    # Encode the source row index in every weight element and its scale so the
+    # pairing survives any row permutation the real FlashInfer helpers apply.
+    w13_rows = torch.arange(2 * intermediate, dtype=torch.uint8)
+    w13 = w13_rows.view(1, -1, 1).expand(1, 2 * intermediate, hidden_size).clone()
+    w2_rows = torch.arange(hidden_size, dtype=torch.uint8)
+    w2 = w2_rows.view(1, -1, 1).expand(1, hidden_size, intermediate).clone()
+    w13_scale = w13_rows.to(torch.float32).view(1, -1, 1).clone()
+    w2_scale = w2_rows.to(torch.float32).view(1, -1, 1).clone()
+
+    out_w13, out_w2, out_w13_scale, out_w2_scale = convert_to_fp8_moe_kernel_format(
+        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+        layer=layer,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+        w13_input_scale=None,
+        w2_input_scale=None,
+        per_out_ch_quant=True,
+    )
+
+    out_w13_rows = out_w13.view(torch.uint8)[0, :, 0]
+    out_w2_rows = out_w2.view(torch.uint8)[0, :, 0]
+    assert torch.equal(out_w13_rows.sort().values, w13_rows)
+    assert torch.equal(out_w2_rows.sort().values, w2_rows)
+    assert torch.equal(out_w13_scale[0], out_w13_rows.to(torch.float32))
+    assert torch.equal(out_w2_scale[0], out_w2_rows.to(torch.float32))
+    # The gate (second W13 half after the W31 swap) must be interleaved with
+    # the up rows rather than left as a contiguous block.
+    assert not torch.equal(out_w13_rows, w13_rows)
 
 
 def test_flashinfer_prepare_pads_and_swaps_per_channel_w13_scales():
