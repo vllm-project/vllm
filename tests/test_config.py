@@ -753,6 +753,22 @@ def test_v1_model_runner_rejects_v2_only_features():
         VllmConfig._validate_v1_model_runner(config)
 
 
+def test_batch_sharded_sampling_rejects_return_sampling_mask():
+    """The batch-sharded gather drops sampling masks, so the combination must
+    fail loudly instead of returning ``sampling_mask=None``."""
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_batch_sharded_sampling=True, tensor_parallel_size=2
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=8),
+        model_config=SimpleNamespace(max_logprobs=20, return_sampling_mask=True),
+        speculative_config=None,
+    )
+
+    with pytest.raises(ValueError, match="sampling masks"):
+        VllmConfig._validate_batch_sharded_sampling(config)
+
+
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,

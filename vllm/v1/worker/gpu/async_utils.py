@@ -179,7 +179,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
+                self.sampling_mask_tensors.tolists()
             )
 
         if self.num_nans is not None:
