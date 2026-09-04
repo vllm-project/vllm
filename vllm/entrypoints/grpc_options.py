@@ -14,17 +14,20 @@ def grpc_server_options() -> list[tuple[str, int | bool]]:
     every client keepalive or BDP-probe PING received in that window is judged
     against ``min_ping_interval_without_data_ms``. A PING arriving sooner than
     that floor is a strike. Strikes reset only when the server writes a frame,
-    which never happens mid-decode, and once they exceed ``max_ping_strikes``
-    gRPC Core sends ``GOAWAY(ENHANCE_YOUR_CALM, "too_many_pings")`` and fails
-    every in-flight RPC on the connection.
+    which a non-streaming ``Generate`` does not do while decoding, and once
+    they exceed ``max_ping_strikes`` gRPC Core sends
+    ``GOAWAY(ENHANCE_YOUR_CALM, "too_many_pings")`` and fails every in-flight
+    RPC on the connection.
 
     Fixing the interval key (the old spelling was silently ignored, leaving
     the 300s default in force) makes a 30s client keepalive a good PING.
-    ``max_ping_strikes = 0`` disables the check outright and is the setting
-    that actually protects us: it also covers sub-floor BDP probes and, with
-    ``keepalive_permit_without_calls``, keepalives on an idle connection,
-    where gRPC Core applies a fixed two-hour floor regardless of the option.
-    With strikes disabled the interval value is inert and documents intent.
+    ``max_ping_strikes = 0`` disables the check outright and covers what the
+    interval cannot: sub-floor BDP probe pings during a long decode.
+    ``keepalive_permit_without_calls`` matters separately. gRPC Core widens
+    the floor to a fixed two hours when it is off and no streams are open
+    (``transport_idle`` in ``frame_ping.cc``), so enabling it is what lets a
+    30s keepalive pass on an idle connection. With strikes disabled the
+    interval value is inert and documents intent.
     """
     return [
         ("grpc.max_send_message_length", -1),
