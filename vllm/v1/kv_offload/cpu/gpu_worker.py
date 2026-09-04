@@ -636,8 +636,10 @@ class SingleDirectionOffloadingHandler:
 
         # Stores must wait for the model to finish writing the KV they read.
         # Loads must wait for pending writes (including zeroing) to their
-        # destination blocks; otherwise an earlier transfer can be overwritten
-        # by compute-stream work that was already queued when the load began.
+        # destination blocks: the scheduler's _skip_zero_block_ids only edits
+        # the step being scheduled and cannot retract zeroing shipped in an
+        # earlier step for a since-reallocated block; with async scheduling
+        # nothing else orders that zeroing against this copy.
         stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]

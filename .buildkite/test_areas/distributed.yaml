@@ -6,6 +6,7 @@ steps:
   key: distributed-comm-ops
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed
@@ -19,6 +20,7 @@ steps:
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer
+  device: l4
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_devices: 1
@@ -34,8 +36,9 @@ steps:
 
 - label: ":nvidia: (L4) Distributed DP Basic"
   key: distributed-dp-tests-2-gpus
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -47,6 +50,9 @@ steps:
   - vllm/v1/worker/
   - tests/v1/distributed
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+  - tests/v1/e2e/general/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/utils.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -54,6 +60,9 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
+  # Batch-sharded sampling requires TP=2
+  - pytest -v -s v1/e2e/general/test_sharded_sampling.py
+  - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
   mirror:
     amd:
       label: ":amd: (MI300) Distributed DP Basic"
@@ -78,6 +87,7 @@ steps:
   key: distributed-compile-rpc-tests-2-gpus
   timeout_in_minutes: 65
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
@@ -100,6 +110,7 @@ steps:
   key: distributed-torchrun-shutdown-tests-2-gpus
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -124,6 +135,7 @@ steps:
   key: distributed-torchrun-examples-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -166,6 +178,7 @@ steps:
   key: distributed-dp-tests-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -189,6 +202,7 @@ steps:
   key: distributed-compile-comm-4-gpus
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -307,6 +321,7 @@ steps:
   key: pipeline-context-parallelism-4-gpus
   timeout_in_minutes: 55
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
@@ -315,14 +330,17 @@ steps:
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
+  - tests/v1/distributed/test_pp_dp_v2.py
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
+  device: l4
   num_devices: 4
   source_file_dependencies:
   - vllm/v1/executor/ray_executor_v2.py

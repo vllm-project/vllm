@@ -832,6 +832,20 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
+                scale_refine = getattr(self.quant_method, "weight_scale_refine", None)
+                if (
+                    quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+                    and scale_refine is not None
+                ):
+                    # FP8 block scales are stored per (block_n, block_k) tile
+                    # of the unsharded weight, while the TP-sharded parameters
+                    # use a refined block grid (see Fp8MoEMethod). Upsample the
+                    # scales to the refined grid (lossless: the refined block
+                    # divides the checkpoint block) so per-rank slicing stays
+                    # exact. Dim -2 is the weight's N dim, dim -1 is K.
+                    loaded_weight = loaded_weight.repeat_interleave(
+                        scale_refine[0], dim=-2
+                    ).repeat_interleave(scale_refine[1], dim=-1)
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,

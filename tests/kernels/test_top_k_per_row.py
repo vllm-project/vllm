@@ -60,9 +60,9 @@ def _run_topk_backend(
             logits, lengths, indices, workspace, top_k, max_seq_len
         )
     elif backend == "cooperative_topk":
-        if indices.shape[0] > 32:
+        if indices.shape[0] > 64:
             pytest.skip(
-                "cooperative_topk supports <=32 rows; "
+                "cooperative_topk supports <=64 rows; "
                 "persistent_topk covers larger batches"
             )
         if logits.stride(0) % 4 != 0:
@@ -879,6 +879,18 @@ def run_large_context_topk_test(
         ), f"""Row {i}: Top-k values don't match.
             CUDA: {cuda_vals.sort(descending=True)[0][:10]},
             Torch: {torch_vals.sort(descending=True)[0][:10]}"""
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+def test_cooperative_topk_cs2(top_k: int) -> None:
+    """The 64-row dispatch uses the two-CTA cooperative kernel."""
+    run_large_context_topk_test(
+        batch_size=64,
+        seq_lens=[65536] * 64,
+        top_k=top_k,
+        backend="cooperative_topk",
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

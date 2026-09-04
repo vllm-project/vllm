@@ -58,6 +58,7 @@ class BaseModelLoader(ABC):
                     prefix=prefix,
                 )
 
+            log_online_quantization(vllm_config)
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
@@ -90,6 +91,23 @@ def log_model_inspection(model: nn.Module) -> None:
     from vllm.model_inspection import format_model_inspection
 
     logger.info("vLLM model structure:\n%s", format_model_inspection(model))
+
+
+def log_online_quantization(vllm_config: VllmConfig) -> None:
+    """Log the online-quantized layer count and types, when applicable."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    quant_config = vllm_config.quant_config
+    if not isinstance(quant_config, OnlineQuantizationConfig):
+        return
+
+    logger.info(
+        "Quantized %d layers of types: %s",
+        len(quant_config.quantized_layers),
+        "; ".join(quant_config.quantized_layer_summaries),
+    )
 
 
 def _has_online_quant(model: nn.Module):

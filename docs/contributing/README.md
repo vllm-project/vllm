@@ -221,26 +221,33 @@ AI-assisted code must meet all quality standards: proper testing, documentation,
 
 ### PR Title and Classification
 
-Only specific types of PRs will be reviewed. The PR title is prefixed
-appropriately to indicate the type of change. Please use one of the following:
+PR titles must start with one or more bracketed tags, followed by a space and a
+concise description, for example, `[Bugfix][Scheduler] Fix priority handling`.
+Any descriptive tag is accepted. The following well-known tags improve
+consistency and discoverability; use one of them when it fits, or choose a more
+specific tag.
 
-- `[Bugfix]` for bug fixes.
-- `[CI/Build]` for build or continuous integration improvements.
-- `[Doc]` for documentation fixes and improvements.
-- `[Model]` for adding a new model or improving an existing model. Model name
-  should appear in the title.
-- `[Frontend]` For changes on the vLLM frontend (e.g., OpenAI API server,
-  `LLM` class, etc.)
-- `[Kernel]` for changes affecting CUDA kernels or other compute kernels.
-- `[Core]` for changes in the core vLLM logic (e.g., `LLMEngine`,
-  `AsyncLLMEngine`, `Scheduler`, etc.)
-- `[Hardware][Vendor]` for hardware-specific changes. Vendor name should
-  appear in the prefix (e.g., `[Hardware][AMD]`).
-- `[Misc]` for PRs that do not fit the above categories. Please use this
-  sparingly.
+**Type tags** describe the nature of the change:
 
-!!! note
-    If the PR spans more than one category, please include all relevant prefixes.
+- `[Bugfix]`, `[Feature]`, `[Perf]`, and `[Refactor]` for code changes.
+- `[CI]` or `[CI/Build]`, `[Test]`, and `[Doc]` or `[Docs]` for project
+  infrastructure, tests, and documentation.
+- `[Misc]` when another type tag does not fit.
+
+**Scope tags** identify the affected area:
+
+- `[Model]`, `[Frontend]`, `[Rust Frontend]`, `[Core]`, and `[Kernel]` for major
+  areas of the codebase.
+- `[Model Runner V2]` or `[MRV2]`, `[Attention]`, `[Multimodal]`,
+  `[Quantization]`, `[MoE]`, `[Spec Decode]`, `[LoRA]`, `[KV Connector]`, and
+  `[KV Offload]` for frequently changed subsystems.
+- `[ROCm]`, `[XPU]`, `[CPU]`, or `[Hardware][Vendor]` for hardware-specific
+  changes. Replace `Vendor` with the vendor name, for example,
+  `[Hardware][AMD]`.
+
+Type and scope tags can be combined, and multiple tags from either category can
+be stacked without spaces. For example, `[Bugfix][KV Offload] Fix block
+accounting` or `[Perf][ROCm][Kernel] Optimize fused MoE`.
 
 ### Code Quality
 

@@ -368,6 +368,7 @@ class BlockPool:
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
+            session_id=request.session_id,
         )
 
     def emit_cached_block_events(
@@ -539,6 +540,7 @@ class BlockPool:
                     else None,
                     extra_keys=[extra_keys],
                     group_idx=kv_cache_group_id,
+                    session_id=request.session_id,
                 )
             )
         return block_hash_with_group_id
@@ -715,6 +717,10 @@ class BlockPool:
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
+
+    def is_block_writable(self, block: KVCacheBlock) -> bool:
+        """Return whether a block can be mutated by its sole owner."""
+        return not block.is_null and block.ref_cnt == 1 and block.block_hash is None
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their

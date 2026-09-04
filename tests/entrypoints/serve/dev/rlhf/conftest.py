@@ -68,6 +68,16 @@ _DUMMY_ARGS = [
 # ---------------------------------------------------------------------------
 
 
+def _warm_up(url: str) -> None:
+    """Put one request through the engine before tests start timing things.
+
+    /health turns green before any request has travelled the request path, and
+    that first pass costs seconds on a loaded machine.
+    """
+    response = gen(url, max_tokens=4, timeout=120)
+    assert ok(response), f"warm-up generation failed: {response}"
+
+
 @contextmanager
 def server(
     extra_args=None,
@@ -118,6 +128,7 @@ def server(
         else:
             proc.terminate()
             raise RuntimeError("vllm server did not start in time")
+        _warm_up(url)
         yield url
     finally:
         proc.terminate()
@@ -216,6 +227,10 @@ def ok(resp) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# First-token wait for a streaming request; loaded machines need the slack.
+STREAM_START_TIMEOUT = 20.0
+
+
 @dataclass
 class StreamResult:
     started: threading.Event = field(default_factory=threading.Event)
@@ -265,12 +280,18 @@ def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thr
         args=(url, result, max_tokens),
     )
     thread.start()
-    started = result.started.wait(timeout=10)
+    started = result.started.wait(timeout=STREAM_START_TIMEOUT)
     if not started or result.done.is_set():
-        pause(url, mode="abort")
-        resume(url)
+        # Best-effort: on a stalled server these time out too, and would then
+        # mask the assertions below.
+        with contextlib.suppress(requests.RequestException):
+            pause(url, mode="abort")
+            resume(url)
         thread.join(timeout=10)
-    assert started, "request did not start generating"
+    assert started, (
+        f"request did not start generating within {STREAM_START_TIMEOUT}s "
+        f"(stream error: {result.error})"
+    )
     assert not result.done.is_set(), "request completed before it could be paused"
     return result, thread
 

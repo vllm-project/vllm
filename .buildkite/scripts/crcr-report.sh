@@ -37,9 +37,16 @@ fi
 
 # read_builds only. Needed because a job cannot see its siblings' outcomes:
 # the agent exposes only its own step, so the job list comes from the REST API.
+TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-CRCR_BUILDKITE_API_TOKEN}"
 BK_TOKEN="${BUILDKITE_API_TOKEN:-}"
+if [[ -z "${BK_TOKEN}" ]] && command -v buildkite-agent >/dev/null 2>&1; then
+    # Not in the job environment, so read it from a Buildkite secret. The agent
+    # redacts values fetched this way from the log.
+    BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>/dev/null)" || BK_TOKEN=""
+fi
 if [[ -z "${BK_TOKEN}" ]]; then
-    echo "BUILDKITE_API_TOKEN unset -- skipping report"
+    echo "no Buildkite API token (env BUILDKITE_API_TOKEN or secret" \
+        "'${TOKEN_SECRET_KEY}') -- skipping report"
     exit 0
 fi
 
@@ -63,7 +70,10 @@ fi
 # One callback per job, matching HUD's per-job crcr_workflow_job schema.
 # delivery_id is synthetic: the nightly path has no upstream dispatch to borrow
 # one from, so build+job is used as the idempotency key.
-python3 .buildkite/scripts/crcr_report.py \
+# Resolved from this script's location: the pipeline runs it from
+# /vllm-workspace/tests, so a repo-relative path would not resolve.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${SCRIPT_DIR}/crcr_report.py" \
     --build-json "${BUILD_JSON}" \
     --callback-url "${CALLBACK_URL}" \
     --oidc-token "${OIDC_TOKEN}" \

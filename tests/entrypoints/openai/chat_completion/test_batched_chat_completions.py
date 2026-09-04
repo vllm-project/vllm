@@ -2,11 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from collections.abc import AsyncGenerator
 
 import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.chat_completion.batch_serving import (
+    OpenAIServingChatBatch,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+)
+from vllm.outputs import CompletionOutput, RequestOutput
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -221,3 +230,95 @@ async def test_batched_chat_completions_logprob_token_ids(
         "token_id:5000",
         sampled_token,
     }
+
+
+def _make_request_output(prompt_idx: int, text: str) -> RequestOutput:
+    return RequestOutput(
+        request_id=f"req-{prompt_idx}",
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text=text,
+                token_ids=[4, 5],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="stop",
+            )
+        ],
+        finished=True,
+    )
+
+
+async def _generator(prompt_idx: int, text: str) -> AsyncGenerator[RequestOutput, None]:
+    yield _make_request_output(prompt_idx, text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_echo_does_not_prepend_user_prompt() -> None:
+    """echo must only echo the assistant turn, never the user's prompt.
+
+    With `add_generation_prompt` (the default) the response role is `assistant`
+    while the last conversation message is the user's, so there is nothing to
+    echo; without the role check the user prompt leaks into the answer.
+    """
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+
+    conversations = [[{"role": "user", "content": "USER PROMPT"}]]
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=conversations,
+        echo=True,
+    )
+
+    response = await serving.chat_completion_full_generator_batch(
+        request=request,
+        generators=[_generator(0, "ASSISTANT ANSWER")],
+        request_id="req-echo",
+        model_name="test-model",
+        all_conversations=conversations,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="req-echo"),
+    )
+
+    assert response.choices[0].message.content == "ASSISTANT ANSWER"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
+    """A trailing assistant turn is a real prefix and must still be echoed."""
+    serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
+    serving.response_role = "assistant"
+    serving.system_fingerprint = None
+
+    conversations = [
+        [
+            {"role": "user", "content": "USER PROMPT"},
+            {"role": "assistant", "content": "PREFIX "},
+        ]
+    ]
+    request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=conversations,
+        echo=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+
+    response = await serving.chat_completion_full_generator_batch(
+        request=request,
+        generators=[_generator(0, "ASSISTANT ANSWER")],
+        request_id="req-echo-2",
+        model_name="test-model",
+        all_conversations=conversations,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="req-echo-2"),
+    )
+
+    assert response.choices[0].message.content == "PREFIX ASSISTANT ANSWER"

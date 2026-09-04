@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import weakref
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -11,6 +12,7 @@ from collections.abc import (
 )
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,6 +33,7 @@ from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
@@ -45,13 +48,18 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
-    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
-    from vllm.model_executor.models.interfaces_base import VllmModel
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFunc,
+        MambaStateCopyFuncsByType,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -118,7 +126,9 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 # Cache results of `SupportsMultiModal.get_language_model`
-_language_model_by_module = dict[nn.Module, "VllmModel"]()
+_language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @runtime_checkable
@@ -127,12 +137,22 @@ class SupportsMultiModalEmbeddings(Protocol):
 
     supports_multimodal_embeddings: ClassVar[Literal[True]] = True
 
+    @overload
     def embed_input_ids(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        multimodal_embeddings: None = None,
         *,
         is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
     ) -> Tensor: ...
 
 
@@ -242,26 +262,30 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             torch.nn.Module: The core language model component.
         """
         # Cached
-        if self in _language_model_by_module:
-            return _language_model_by_module[self]
+        assert isinstance(self, nn.Module)
+        self_module = self
+        if self_module in _language_model_by_module:
+            return _language_model_by_module[self_module]
 
         if self._language_model_names:
-            mod = self
+            mod = self_module
             for attr in common_prefix(
                 [name.split(".") for name in self._language_model_names]
             ):
                 if attr:
                     mod = getattr(mod, attr)
 
-            if mod is not self and hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+            candidate: object = mod
+            if candidate is not self_module and isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         # Fallback
-        for mod in self.children():
-            if hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+        for mod in self_module.children():
+            candidate = mod
+            if isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -288,7 +312,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         """
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -321,7 +345,13 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
         If `targets` is set, instead include descendants that are an instance
         of `targets`, even if they aren't direct children.
+
+        Marked components are also routed through the active offloader (when
+        it supports tower offloading), since `make_layers` only ever sees the
+        decoder layer stack.
         """
+        from vllm.model_executor.offloader import get_offloader
+
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
         if isinstance(modalities, str):
@@ -332,7 +362,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         else:
             stage_name = "_".join([*modalities, "tower"])
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -347,6 +377,15 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                 yield
 
         self._tower_model_names = children_names
+
+        # Towers are constructed directly, so `make_layers` never routes them
+        # through the offloader. Do it here, at the same construction stage,
+        # so offloaded tower weights are never allocated on the device.
+        offloader = get_offloader()
+        if offloader.supports_tower_offload:
+            for name in children_names:
+                modules = (module for module in [attrgetter(name)(self)])
+                offloader.wrap_modules(modules, prefix=name)
 
     @contextmanager
     def _mark_composite_model(
@@ -419,18 +458,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             num_connector_tokens if isinstance(num_connector_tokens, int) else None,
         )
 
-    @overload
-    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
-
-    @overload
-    def embed_input_ids(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings,
-        *,
-        is_multimodal: torch.Tensor,
-    ) -> Tensor: ...
-
     def _embed_text_input_ids(
         self,
         input_ids: Tensor,
@@ -449,6 +476,24 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
+    ) -> Tensor: ...
 
     def embed_input_ids(
         self,
@@ -656,7 +701,7 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None"
@@ -849,11 +894,11 @@ class HasInnerState(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 @overload
-def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
+def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
 
 
 def has_inner_state(
@@ -876,11 +921,11 @@ class IsAttentionFree(Protocol):
 
 
 @overload
-def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 @overload
-def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
 
 
 def is_attention_free(
@@ -929,13 +974,21 @@ class IsHybrid(Protocol):
         """
         ...
 
-
-@overload
-def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload
 def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
+
+
+@overload
+def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
 
 
 def is_hybrid(
@@ -1010,7 +1063,7 @@ class MixtureOfExperts(Protocol):
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
+            self.expert_weights.append(list(layer.get_expert_weights()))
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1068,11 +1121,11 @@ class HasNoOps(Protocol):
 
 
 @overload
-def has_noops(model: object) -> TypeIs[HasNoOps]: ...
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 @overload
-def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
+def has_noops(model: object) -> TypeIs[HasNoOps]: ...
 
 
 def has_noops(
@@ -1090,17 +1143,31 @@ class SupportsMambaPrefixCaching(Protocol):
 
     supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
+        """Return copy functions for the model's Mamba states."""
+        ...
 
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        """Map legacy copy functions to each requested Mamba backend."""
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload
 def supports_mamba_prefix_caching(
     model: type[object],
 ) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
 
 
 def supports_mamba_prefix_caching(
@@ -1121,11 +1188,11 @@ class SupportsReplaySSM(Protocol):
 
 
 @overload
-def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
 
 
 @overload
-def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
 
 
 def supports_replayssm(
@@ -1157,7 +1224,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: "WeightsMapper | None" = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]]]
+    packed_modules_mapping: dict[str, list[str]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1488,6 +1555,9 @@ class LocalArgmaxMixin:
         ``self.lm_head``: ParallelLMHead
         ``self.draft_id_to_target_id`` (optional): nn.Parameter
     """
+
+    logits_processor: "LogitsProcessor"
+    lm_head: "ParallelLMHead"
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""

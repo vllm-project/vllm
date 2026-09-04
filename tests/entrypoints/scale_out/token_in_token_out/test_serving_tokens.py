@@ -79,7 +79,11 @@ def server(request):
             else [str(extra_args)]
         )
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"},
+    ) as remote_server:
         yield remote_server
 
 
@@ -133,6 +137,7 @@ async def test_generate_sampling_mask(client):
             "top_p": 0.9,
             "ignore_eos": True,
             "seed": 0,
+            "logprobs": top_k,
         },
         "stream": False,
     }
@@ -146,11 +151,16 @@ async def test_generate_sampling_mask(client):
     assert len(token_ids) == len(sampling_mask)
 
     vocab_size = get_vocab_size(MODEL_NAME)
-    for token_id, support in zip(token_ids, sampling_mask):
+    logprobs_content = choice["logprobs"]["content"]
+    for token_id, support, entry in zip(token_ids, sampling_mask, logprobs_content):
         assert support
         assert len(support) == len(set(support))
         assert all(0 <= support_token_id < vocab_size for support_token_id in support)
         assert token_id in support
+        # processed_logprobs: exactly the support carries finite probability.
+        for top in entry["top_logprobs"]:
+            in_support = int(top["token"].removeprefix("token_id:")) in support
+            assert in_support == (top["logprob"] > -9999.0)
 
 
 @pytest.mark.asyncio

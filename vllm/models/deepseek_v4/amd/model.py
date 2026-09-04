@@ -1044,11 +1044,18 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def process_weights_after_loading(self) -> None:
         # After per-layer quant finalize, so we preshuffle the final fp8 weights.
+        fused_compressor_layers = 0
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                fused_compressor_layers += module.prepare_compressor_gemm_fusion()
                 module.prepare_attn_preshuffle()
             elif isinstance(module, DeepseekV4MLP):
                 module.prepare_gateup_preshuffle()
+        if fused_compressor_layers:
+            logger.info(
+                "Fused the C4 compressor GEMMs in %d DeepSeek V4 layers",
+                fused_compressor_layers,
+            )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

@@ -113,6 +113,45 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+def _gemma_rms_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    # GemmaRMSNorm: computes out = (x_normed_fp32 * (1 + weight.float())
+    # ).to(dtype) with a raw (bf16/fp16) weight; the +1 offset and fp32
+    # multiply are done in-kernel. See vllm-xpu-kernels gemma_rms_norm.
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def _gemma_rms_norm_fake(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    return None
+
+
+def _fused_add_gemma_rms_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
+def _fused_add_gemma_rms_norm_fake(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    return None
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -1218,6 +1257,21 @@ class xpu_ops:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
+            if hasattr(torch.ops._C, "gemma_rms_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_gemma_rms_norm",
+                    op_func=_gemma_rms_norm_impl,
+                    mutates_args=["out"],
+                    fake_impl=_gemma_rms_norm_fake,
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_gemma_rms_norm",
+                    op_func=_fused_add_gemma_rms_norm_impl,
+                    mutates_args=["input", "residual"],
+                    fake_impl=_fused_add_gemma_rms_norm_fake,
+                )
+
             direct_register_custom_op(
                 op_name="xpu_ops_deepseek_scaling_rope",
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,

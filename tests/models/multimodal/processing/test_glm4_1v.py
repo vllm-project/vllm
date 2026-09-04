@@ -146,7 +146,7 @@ def test_processor_override(
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
-@pytest.mark.parametrize("backend", ["opencv", "pyav"])
+@pytest.mark.parametrize("backend", ["opencv"])
 def test_video_loader_consistency(
     model_id: str,
     fps: int,

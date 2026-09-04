@@ -212,23 +212,30 @@ __global__ void shuffleInputRowsKernel(const T* input,
                                        int64_t num_src_rows,
                                        int64_t num_dst_rows, int64_t num_cols) {
   int64_t dest_row_idx = blockIdx.x;
-  int64_t const source_row_idx = dst2src_map[dest_row_idx];
-
   if (blockIdx.x < num_dst_rows) {
+    int64_t const source_row_idx = dst2src_map[dest_row_idx];
     // Load 128-bits per thread
     constexpr int64_t ELEM_PER_THREAD = 128 / sizeof(T) / 8;
     using DataElem = cutlass::Array<T, ELEM_PER_THREAD>;
 
-    // Duplicate and permute rows
-    auto const* source_row_ptr =
-        reinterpret_cast<DataElem const*>(input + source_row_idx * num_cols);
     auto* dest_row_ptr =
         reinterpret_cast<DataElem*>(output + dest_row_idx * num_cols);
-
     int64_t const start_offset = threadIdx.x;
     int64_t const stride = blockDim.x;
     int64_t const num_elems_in_col = num_cols / ELEM_PER_THREAD;
 
+    if (source_row_idx < 0 || source_row_idx >= num_src_rows) {
+      DataElem const zero{};
+      for (int elem_index = start_offset; elem_index < num_elems_in_col;
+           elem_index += stride) {
+        dest_row_ptr[elem_index] = zero;
+      }
+      return;
+    }
+
+    // Duplicate and permute rows
+    auto const* source_row_ptr =
+        reinterpret_cast<DataElem const*>(input + source_row_idx * num_cols);
     for (int elem_index = start_offset; elem_index < num_elems_in_col;
          elem_index += stride) {
       dest_row_ptr[elem_index] = source_row_ptr[elem_index];

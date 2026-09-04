@@ -6,7 +6,6 @@ from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
@@ -17,6 +16,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger

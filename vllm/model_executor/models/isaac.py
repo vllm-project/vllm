@@ -901,7 +901,11 @@ class IsaacForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                mm_data = mm_feature.data
+                assert mm_data is not None
+                grid_thw = mm_data["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, h // spatial_merge_size, w // spatial_merge_size
             else:
@@ -912,7 +916,7 @@ class IsaacForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        llm_pos_ids_list = []
+        llm_pos_ids_list: list[np.ndarray] = []
         st = 0
         for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
             input_tokens, mm_features

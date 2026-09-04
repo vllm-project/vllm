@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -25,6 +26,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -54,6 +56,34 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # Non-causal DSpark block is flattened to one decode row per query token in
     # forward_mqa, so no intra-block causal masking is required.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        """Report UNIFORM_BATCH where a non-causal multi-token block is served.
+
+        ``_cudagraph_support`` is a class constant, so serving the DSpark
+        draft's (1 + num_spec) block through the decode path reports
+        UNIFORM_SINGLE_TOKEN_DECODE and, because the engine takes the minimum
+        over all attention groups, downgrades the *whole* engine off full
+        cudagraphs. ``forward_mqa`` flattens that block with
+        ``repeat_interleave`` on a Python int and performs no device->host
+        sync, so it does satisfy the UNIFORM_BATCH contract.
+
+        ``non_causal_multi_token_decode`` is a KV-cache-group property, not a
+        per-layer one: ``MLAAttentionSpec.merge`` ORs it over every layer in
+        the group, so a group holding both a draft and its target reports it
+        for both. That is the same predicate ``__init__`` below already uses to
+        raise ``reorder_batch_threshold``, so the two stay consistent, but it
+        does mean this lifts a causal target sharing the draft's KV cache group
+        as well.
+        """
+        if getattr(kv_cache_spec, "non_causal_multi_token_decode", False):
+            return AttentionCGSupport.UNIFORM_BATCH
+        return cls._cudagraph_support
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)

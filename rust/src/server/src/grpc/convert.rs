@@ -11,8 +11,8 @@ use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
-    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
-    TextDecodeOptions, TextRequest,
+    DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, PromptTruncation,
+    PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
 use super::pb;
@@ -22,49 +22,66 @@ pub fn media_parts_from_request(
 ) -> Result<Vec<MediaContentPart>, Status> {
     let mut parts = Vec::with_capacity(media.len());
     for (index, item) in media.into_iter().enumerate() {
-        match item.modality() {
-            pb::Modality::Image => {}
-            pb::Modality::Unspecified => {
-                return Err(Status::invalid_argument(format!(
-                    "media[{index}].modality is required"
-                )));
-            }
-            other => {
-                return Err(Status::unimplemented(format!(
-                    "media[{index}].modality {other:?} is not supported by the gRPC service"
-                )));
-            }
+        let modality = item.modality();
+        if modality == pb::Modality::Unspecified {
+            return Err(Status::invalid_argument(format!(
+                "media[{index}].modality is required"
+            )));
         }
         let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
         let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
-        let part = match item.source {
-            Some(pb::media_item::Source::Url(url)) => {
-                validate_media_uri(index, "url", &url, &["http", "https"])?;
-                MediaContentPart::ImageUrl {
-                    url,
-                    detail: None,
-                    uuid,
-                }
+        let source = item.source.ok_or_else(|| {
+            Status::invalid_argument(format!("media[{index}].source is required"))
+        })?;
+        match &source {
+            pb::media_item::Source::Url(url) => {
+                validate_media_uri(index, "url", url, &["http", "https"])?;
             }
-            Some(pb::media_item::Source::DataUri(uri)) => {
-                validate_media_uri(index, "data_uri", &uri, &["data"])?;
-                MediaContentPart::ImageUrl {
-                    url: uri,
-                    detail: None,
-                    uuid,
-                }
+            pb::media_item::Source::DataUri(uri) => {
+                validate_media_uri(index, "data_uri", uri, &["data"])?;
             }
-            Some(pb::media_item::Source::RawBytes(bytes)) => MediaContentPart::ImageData {
-                data: bytes,
-                mime_type,
-                uuid,
+            pb::media_item::Source::RawBytes(_) => {}
+        }
+        let part = match (modality, source) {
+            (
+                pb::Modality::Image,
+                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
+            ) => MediaContentPart::ImageUrl {
+                url,
                 detail: None,
+                uuid,
             },
-            None => {
-                return Err(Status::invalid_argument(format!(
-                    "media[{index}].source is required"
-                )));
+            (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
+                MediaContentPart::ImageData {
+                    data,
+                    mime_type,
+                    uuid,
+                    detail: None,
+                }
             }
+            (
+                pb::Modality::Video,
+                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
+            ) => MediaContentPart::VideoUrl { url, uuid },
+            (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
+                MediaContentPart::VideoData {
+                    data,
+                    mime_type,
+                    uuid,
+                }
+            }
+            (
+                pb::Modality::Audio,
+                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
+            ) => MediaContentPart::AudioUrl { url, uuid },
+            (pb::Modality::Audio, pb::media_item::Source::RawBytes(data)) => {
+                MediaContentPart::AudioData {
+                    data,
+                    mime_type,
+                    uuid,
+                }
+            }
+            (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
         };
         parts.push(part);
     }
@@ -110,11 +127,12 @@ pub fn to_text_request(
         )));
     }
 
-    if req.truncate_prompt_tokens != 0 {
-        return Err(Status::invalid_argument(
-            "truncate_prompt_tokens is not supported",
-        ));
-    }
+    // Proto3 uses zero as unset; positive values select fixed left truncation.
+    // The -1 input-budget sentinel is outside the uint32 field domain.
+    let prompt_truncation = (req.truncate_prompt_tokens != 0).then_some(PromptTruncation {
+        limit: PromptTruncationLimit::Fixed(u64::from(req.truncate_prompt_tokens)),
+        side: TruncationSide::Left,
+    });
 
     let prompt = match req.prompt {
         Some(pb::generate_request::Prompt::Text(text)) => Prompt::Text(text),
@@ -173,6 +191,7 @@ pub fn to_text_request(
         sampling_params,
         decode_options,
         intermediate: stream,
+        prompt_truncation,
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
