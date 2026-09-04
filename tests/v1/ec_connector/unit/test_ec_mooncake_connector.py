@@ -1259,14 +1259,14 @@ class TestECMooncakeSchedulerMetadata:
                     patch.object(scheduler._scheduler, "_drain_push_notifications"),
                     patch.object(scheduler._scheduler, "_queue_cancel") as cancel,
                 ):
-                    assert scheduler._ensure_cache_available(request, 0, {mm_hash})
+                    assert scheduler.ensure_cache_available(request, 0, {mm_hash})
                     cancel.assert_not_called()
                     record = scheduler._scheduler._transfers.get("request-transfer")
                     assert record is not None
                     assert record.state is SchedulerTransferState.AVAILABLE
 
                     # Once the entry is evicted the request can still get it.
-                    assert not scheduler._ensure_cache_available(request, 0, set())
+                    assert not scheduler.ensure_cache_available(request, 0, set())
                 assert (
                     scheduler._scheduler._transfers.first_for_hash(
                         mm_hash, (SchedulerTransferState.LOADING,)
@@ -1456,7 +1456,7 @@ class TestECMooncakeSchedulerMetadata:
                 )
                 scheduler._scheduler._drain_push_notifications()
 
-                assert not scheduler._ensure_cache_available(first, 0, set())
+                assert not scheduler.ensure_cache_available(first, 0, set())
                 meta = scheduler.build_connector_meta(
                     SimpleNamespace(free_encoder_mm_hashes=[])
                 )
@@ -1481,7 +1481,7 @@ class TestECMooncakeSchedulerMetadata:
                 # transfer is spent. It must still be served.
                 with patch.object(scheduler._scheduler, "_drain_push_notifications"):
                     assert scheduler.has_cache_item(mm_hash)
-                    assert not scheduler._ensure_cache_available(second, 0, set())
+                    assert not scheduler.ensure_cache_available(second, 0, set())
                 assert record.state is SchedulerTransferState.LOADING
                 reload = scheduler.build_connector_meta(
                     SimpleNamespace(free_encoder_mm_hashes=[])

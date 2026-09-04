@@ -268,6 +268,7 @@ class ECConnectorBase(ABC):
         self,
         request: "Request",
         num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         """
         Ensure encoder cache items are available for the given request.
@@ -276,20 +277,13 @@ class ECConnectorBase(ABC):
         Args:
             request: the request whose multimodal features to check.
             num_computed_tokens: tokens already covered by cached KV blocks.
+            local_cache_hashes: encoder outputs already cached locally.
+
         Returns:
             True if all items are ready or no transfer is needed.
             False if any items are still in transit (request should be deferred).
         """
         return True
-
-    def _ensure_cache_available(
-        self,
-        request: "Request",
-        num_computed_tokens: int,
-        local_cache_hashes: Collection[str],
-    ) -> bool:
-        """Core-only adapter that preserves the connector extension API."""
-        return self.ensure_cache_available(request, num_computed_tokens)
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):

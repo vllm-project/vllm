@@ -93,15 +93,7 @@ class ECMooncakeConnector(ECConnectorBase):
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> bool:
-        assert self._scheduler is not None
-        return self._scheduler.ensure_cache_available(request, num_computed_tokens)
-
-    def _ensure_cache_available(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-        local_cache_hashes: Collection[str],
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         assert self._scheduler is not None
         return self._scheduler.ensure_cache_available(

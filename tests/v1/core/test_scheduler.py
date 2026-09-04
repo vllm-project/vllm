@@ -5837,9 +5837,11 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     scheduler.add_request(request_behind)
     output = scheduler.schedule()
 
-    # The public connector API remains the legacy two-argument method.
+    # ensure_cache_available must have been called with (request, num_computed_tokens=0)
+    # for a brand-new request that has no cached tokens yet.
     ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
-    assert ensure_call.args == (request_deferred, 0)
+    assert ensure_call.args[:2] == (request_deferred, 0)
+    assert not ensure_call.args[2]
     # Deferred request must NOT be scheduled
     assert request_deferred.request_id not in output.num_scheduled_tokens
     _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
@@ -5894,46 +5896,6 @@ def test_ec_connector_defers_running_request_for_async_reload():
     assert request.request_id not in second_output.num_scheduled_tokens
     ensure_call = scheduler.ec_connector.ensure_cache_available.call_args
     assert ensure_call.args[:2] == (request, 32)
-
-
-@pytest.mark.skip_global_cleanup
-def test_ec_connector_legacy_ensure_cache_available_signature_is_supported(tmp_path):
-    """An out-of-tree connector with the original method remains callable."""
-
-    from vllm.distributed.ec_transfer.ec_connector.example_connector import (
-        ECExampleConnector,
-    )
-
-    calls = []
-
-    class LegacyConnector(ECExampleConnector):
-        def ensure_cache_available(self, request, num_computed_tokens):
-            calls.append((request, num_computed_tokens))
-            return False
-
-    (tmp_path / "config.json").write_text(
-        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
-    )
-    scheduler = create_scheduler(
-        model=str(tmp_path),
-        skip_tokenizer_init=True,
-        use_ec_connector=True,
-        ec_role="ec_consumer",
-    )
-    scheduler.ec_connector = LegacyConnector(
-        scheduler.vllm_config, scheduler.ec_connector.role
-    )
-    request = create_requests(
-        num_requests=1,
-        num_tokens=128,
-        mm_positions=[[PlaceholderRange(offset=48, length=32)]],
-    )[0]
-
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-
-    assert request.request_id not in output.num_scheduled_tokens
-    assert calls == [(request, 0)]
 
 
 def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
