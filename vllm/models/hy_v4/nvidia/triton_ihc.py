@@ -211,10 +211,10 @@ def triton_ihc_pre(
     assert weight.dtype == torch.float32
     assert scale.dtype == torch.float32 and base.dtype == torch.float32
 
-    assert x.is_contiguous()
+    x = x.contiguous()
     assert weight.is_contiguous()
-    assert scale.is_contiguous()
-    assert base.is_contiguous()
+    scale = scale.contiguous()
+    base = base.contiguous()
     num_tokens, hc_mult, hidden_size = x.shape
     k_total = hc_mult * hidden_size
     assert weight.shape == (2 * hc_mult, k_total)
@@ -284,9 +284,9 @@ def triton_ihc_post(
     assert x.is_cuda and residual.is_cuda and post.is_cuda
     assert post.dtype == torch.float32
 
-    assert x.is_contiguous()
-    assert residual.is_contiguous()
-    assert post.is_contiguous()
+    x = x.contiguous()
+    residual = residual.contiguous()
+    post = post.contiguous()
     num_tokens, hidden_size = x.shape
     hc_mult = post.shape[-1]
     assert residual.shape == (num_tokens, hc_mult, hidden_size)
