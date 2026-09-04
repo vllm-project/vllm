@@ -482,9 +482,7 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
         self.extract_moe_parameters(example_moe)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded = super().load_weights(weights)
-        self.process_weights_after_loading()
-        return loaded
+        return super().load_weights(weights)
 
     def process_weights_after_loading(self) -> None:
         for layer in self.model.layers:

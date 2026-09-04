@@ -480,7 +480,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
                 )
-        self.process_weights_after_loading()
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
