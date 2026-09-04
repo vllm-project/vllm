@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -8261,3 +8262,99 @@ def test_drafts_unused_with_async_placeholders():
     (request,) = create_requests(num_requests=1, num_tokens=16, max_tokens=3)
     request.num_output_placeholders = 2
     assert not scheduler._drafts_unused(request, 17, 3)
+
+
+def test_get_inflight_queue_diagnostics():
+    scheduler = create_scheduler()
+    scheduler.parallel_config.data_parallel_index = 1
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        request.arrival_time = time.time() - 1
+        scheduler.add_request(request)
+
+    scheduler.running.append(scheduler.waiting.pop_request())
+    scheduler.running[0].status = RequestStatus.RUNNING
+
+    diagnostics = scheduler.get_inflight_queue_diagnostics(limit=2)
+
+    assert diagnostics["data_parallel_rank"] == 1
+    assert [queue["name"] for queue in diagnostics["queues"]] == [
+        "running",
+        "waiting",
+        "kv_holding_waiting",
+        "finished_pending_cleanup",
+    ]
+    assert [len(queue["requests"]) for queue in diagnostics["queues"]] == [1, 1, 0, 0]
+    assert diagnostics["queues"][0]["requests"][0]["status"] == "RUNNING"
+    assert diagnostics["queues"][0]["requests"][0]["age_seconds"] >= 1
+
+
+@pytest.mark.parametrize("limit, expected", [(-1, 0), (0, 0), (1, 1), (1001, 1000)])
+def test_inflight_diagnostics_bounds_and_fields(limit, expected):
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=1001)
+    for request in requests:
+        scheduler.add_request(request)
+
+    diagnostics = scheduler.get_inflight_queue_diagnostics(limit)
+
+    assert diagnostics["has_pending_work"] is True
+    assert [queue["num_requests"] for queue in diagnostics["queues"]] == [
+        0,
+        1001,
+        0,
+        0,
+    ]
+    entries = diagnostics["queues"][1]["requests"]
+    assert len(entries) == expected
+    assert scheduler.get_num_unfinished_requests() == 1001
+    for entry, request in zip(entries, requests):
+        assert set(entry) == {
+            "request_id",
+            "status",
+            "age_seconds",
+            "prompt_tokens",
+            "output_tokens",
+        }
+        assert entry["request_id"] == request.request_id
+        assert entry["status"] == "WAITING"
+        assert entry["age_seconds"] >= 0
+        assert entry["prompt_tokens"] == request.num_prompt_tokens
+        assert entry["output_tokens"] == request.num_output_tokens
+
+
+def test_inflight_diagnostics_remote_kv_abort_cleanup():
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=32, is_async=True),
+        block_size=16,
+    )
+    request = create_requests(num_requests=1, num_tokens=48, block_size=16)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    diagnostics = scheduler.get_inflight_queue_diagnostics(10)
+    assert diagnostics["has_pending_work"] is True
+    assert diagnostics["queues"][2]["requests"][0]["status"] == "WAITING_FOR_REMOTE_KVS"
+    assert diagnostics["queues"][2]["requests"][0]["request_id"] == request.request_id
+
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+    diagnostics = scheduler.get_inflight_queue_diagnostics(10)
+    assert diagnostics["has_pending_work"] is True
+    assert [queue["num_requests"] for queue in diagnostics["queues"]] == [0, 0, 0, 1]
+    assert diagnostics["queues"][3]["requests"][0]["status"] == "FINISHED_ABORTED"
+    assert diagnostics["queues"][3]["requests"][0]["request_id"] == request.request_id
+
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_connector_output=KVConnectorOutput(
+                finished_recving={request.request_id}
+            ),
+        ),
+    )
+    diagnostics = scheduler.get_inflight_queue_diagnostics(10)
+    assert diagnostics["has_pending_work"] is False
+    assert all(queue["num_requests"] == 0 for queue in diagnostics["queues"])

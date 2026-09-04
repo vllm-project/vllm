@@ -225,6 +225,9 @@ class EngineCoreClient(ABC):
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
@@ -232,6 +235,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_weight_version_async(self) -> str:
+        raise NotImplementedError
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -463,6 +471,9 @@ class InprocClient(EngineCoreClient):
 
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
+
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return [self.engine_core.get_inflight_queue_diagnostics(limit)]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -1035,20 +1046,31 @@ class SyncMPClient(MPClient):
             self.engines_running = False
         return outputs
 
-    def _send_input(self, request_type: EngineCoreRequestType, request: Any):
+    def _send_input(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+        engine: EngineIdentity | None = None,
+    ):
         self.ensure_alive()
+        if engine is None:
+            engine = self.core_engine
         # (Identity, RequestType, SerializedRequest)
-        msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+        msg = (engine, request_type.value, *self.encoder.encode(request))
         # Any zero-copy tensor/ndarray frames are kept alive by zmq itself
         # until it's finished sending them (there is a ref chain from the underlying
         # memoryview back to the original owning tensor/ndarray).
         self.input_socket.send_multipart(msg, copy=False)
 
-    def call_utility(self, method: str, *args) -> Any:
+    def call_utility(
+        self, method: str, *args, engine: EngineIdentity | None = None
+    ) -> Any:
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-        self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
+        self._send_input(
+            EngineCoreRequestType.UTILITY, (0, call_id, method, args), engine
+        )
 
         return future.result()
 
@@ -1124,6 +1146,12 @@ class SyncMPClient(MPClient):
 
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
+
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return [
+            self.call_utility("get_inflight_queue_diagnostics", limit, engine=engine)
+            for engine in self.core_engines
+        ]
 
     def collective_rpc(
         self,
@@ -1405,6 +1433,12 @@ class AsyncMPClient(MPClient):
 
     async def get_weight_version_async(self) -> str:
         return await self.call_utility_consensus_async("get_weight_version")
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
+        result = await self.call_utility_async("get_inflight_queue_diagnostics", limit)
+        return [result]
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
@@ -1806,6 +1840,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
         return (await self.call_utility_all_async(method, *args))[0]
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(
+                    "get_inflight_queue_diagnostics", limit, engine=engine
+                )
+                for engine in self.core_engines
+            ]
+        )
 
     @staticmethod
     async def process_engine_outputs(
