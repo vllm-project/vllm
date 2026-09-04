@@ -20,7 +20,7 @@ _SPECULATIVE_DECODING_SUPPORT: dict[WatermarkingAlgorithm, bool] = {
 class WatermarkConfig:
     """Configuration for text watermark generation."""
 
-    key: int = Field(ge=0, repr=False)
+    key: int = Field(ge=0, repr=False, exclude=True)
     """Secret key used to watermark generated text."""
     algorithm: WatermarkingAlgorithm = "gumbel"
     """Algorithm used to watermark generated text."""

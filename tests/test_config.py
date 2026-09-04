@@ -2123,6 +2123,14 @@ def test_watermark_key_range_is_prf_specific(prf, key, key_bits):
         WatermarkConfig(key=key, prf=prf)
 
 
+def test_watermark_key_is_excluded_from_serialization():
+    serialized = pydantic.TypeAdapter(WatermarkConfig).dump_python(
+        WatermarkConfig(key=42), mode="json"
+    )
+
+    assert "key" not in serialized
+
+
 def test_watermarking_forces_model_runner_v2(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config = SimpleNamespace(watermark_config=WatermarkConfig(key=42))
