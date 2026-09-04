@@ -109,7 +109,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Step3VLProcessor:
         return Step3VLProcessor(
             tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(),
+            image_processor=self.get_image_processor(**kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
