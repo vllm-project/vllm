@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -78,6 +81,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
     sp_shard,
+)
+from vllm.models.deepseek_v4.nvidia.model import (
+    make_deepseek_v4_expert_params_mapping,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -156,8 +162,10 @@ class Glm5NextMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        vllm_config: VllmConfig | None = None,
     ):
         super().__init__()
+        self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -169,7 +177,16 @@ class Glm5NextMoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
+        self.use_mega_moe = bool(
+            vllm_config is not None
+            and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        )
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        if self.use_mega_moe and not parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "GLM-5.3 MegaMoE requires expert parallel. Enable it with "
+                "--enable-expert-parallel, or pick a different MoE backend."
+            )
 
         if config.hidden_act != "silu":
             raise ValueError(
@@ -217,35 +234,71 @@ class Glm5NextMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=False,
+                reduce_results=self.use_mega_moe,
                 prefix=f"{prefix}.shared_experts",
                 swiglu_limit=swiglu_limit,
             )
 
-        self.experts = FusedMoEFactory(
-            shared_experts=self.shared_experts,
-            gate=self.gate,
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_token,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            renormalize=config.moe_renormalize,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=None,
-            router_logits_dtype=self.gate.out_dtype,
-            swiglu_limit=swiglu_limit,
-        )
+        if self.use_mega_moe:
+            assert vllm_config is not None
+            from vllm.models.deepseek_v4.nvidia.model import (
+                DeepGemmMegaMoEExperts,
+            )
+
+            source_weight_block_size = (
+                DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+                    quant_config, self, prefix
+                )
+            )
+            source_nvfp4 = DeepGemmMegaMoEExperts.source_is_nvfp4(
+                quant_config, self, prefix
+            )
+
+            if self.n_physical_experts % self.ep_size != 0:
+                raise ValueError(
+                    f"n_physical_experts={self.n_physical_experts} must be "
+                    f"divisible by ep_size={self.ep_size}. Adjust "
+                    "num_redundant_experts."
+                )
+            self.experts = DeepGemmMegaMoEExperts(
+                vllm_config,
+                num_experts=self.n_physical_experts,
+                num_local_experts=self.n_local_physical_experts,
+                experts_start_idx=self.physical_expert_start,
+                num_logical_experts=self.n_logical_experts,
+                top_k=config.num_experts_per_token,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                mma_type="fp8xfp4" if source_nvfp4 else "bf16xbf16",
+                source_weight_block_size=source_weight_block_size,
+                source_nvfp4=source_nvfp4,
+                prefix=f"{prefix}.experts",
+            )
+        else:
+            self.experts = FusedMoEFactory(
+                shared_experts=self.shared_experts,
+                gate=self.gate,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_token,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=config.moe_renormalize,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func=config.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                apply_routed_scale_to_output=apply_routed_scale_to_output,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,
+                n_shared_experts=None,
+                router_logits_dtype=self.gate.out_dtype,
+                swiglu_limit=swiglu_limit,
+            )
 
     def forward(
         self,
@@ -259,12 +312,35 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.use_mega_moe:
+            topk_weights, topk_ids = grouped_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=self.config.num_experts_per_token,
+                renormalize=self.config.moe_renormalize,
+                num_expert_group=self.config.n_group,
+                topk_group=self.config.topk_group,
+                scoring_func=self.config.scoring_func,
+                e_score_correction_bias=(
+                    self.gate.e_score_correction_bias.data
+                    if self.gate.e_score_correction_bias is not None
+                    else None
+                ),
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+            final_hidden_states = self.experts(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                activation_clamp=self.config.swiglu_limit,
+            )
+            if self.shared_experts is not None:
+                final_hidden_states += self.shared_experts(hidden_states)
+        else:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -273,6 +349,10 @@ class Glm5NextMoE(nn.Module):
             final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe:
+            self.experts.finalize_weights()
 
 
 class Glm5NextDecoderLayer(nn.Module):
@@ -348,6 +428,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                vllm_config=vllm_config,
             )
         else:
             self.mlp = Glm5NextMLP(
@@ -725,13 +806,27 @@ class Glm5NextModel(nn.Module):
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
+            uses_mega_moe = any(
+                isinstance(layer, Glm5NextDecoderLayer)
+                and isinstance(layer.mlp, Glm5NextMoE)
+                and layer.mlp.use_mega_moe
+                for layer in self.layers
             )
+            if uses_mega_moe:
+                expert_params_mapping = make_deepseek_v4_expert_params_mapping(
+                    self.config.n_routed_experts,
+                    ckpt_gate_proj_name="gate_proj",
+                    ckpt_down_proj_name="down_proj",
+                    ckpt_up_proj_name="up_proj",
+                )
+            else:
+                expert_params_mapping = fused_moe_make_expert_params_mapping(
+                    self,
+                    ckpt_gate_proj_name="gate_proj",
+                    ckpt_down_proj_name="down_proj",
+                    ckpt_up_proj_name="up_proj",
+                    num_experts=self.config.n_routed_experts,
+                )
         else:
             expert_params_mapping = []
         params_dict = dict(self.named_parameters())
@@ -861,7 +956,15 @@ class Glm5NextModel(nn.Module):
                     )
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        self.finalize_mega_moe_weights()
         return loaded_params
+
+    def finalize_mega_moe_weights(self) -> None:
+        for layer in self.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, Glm5NextMoE):
+                layer.mlp.finalize_mega_moe_weights()
 
 
 class Glm5NextForCausalLM(
@@ -953,6 +1056,9 @@ class Glm5NextForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.finalize_mega_moe_weights()
 
 
 @MULTIMODAL_REGISTRY.register_processor(

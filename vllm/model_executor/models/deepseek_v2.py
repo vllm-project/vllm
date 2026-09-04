@@ -58,6 +58,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
@@ -284,6 +287,25 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+def _is_deep_gemm_mega_moe_requested(vllm_config: VllmConfig | None) -> bool:
+    return bool(
+        vllm_config is not None
+        and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    )
+
+
+def _scale_mega_moe_output_for_deferred_reduce(
+    output: torch.Tensor,
+    *,
+    tp_size: int,
+    is_sequence_parallel: bool,
+    reduce_results: bool,
+) -> torch.Tensor:
+    if not is_sequence_parallel and not reduce_results:
+        output = output / tp_size
+    return output
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -293,8 +315,10 @@ class DeepseekV2MoE(nn.Module):
         reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
+        vllm_config: VllmConfig | None = None,
     ):
         super().__init__()
+        self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -306,6 +330,15 @@ class DeepseekV2MoE(nn.Module):
         self.n_shared_experts: int = config.n_shared_experts
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.use_mega_moe = _is_deep_gemm_mega_moe_requested(vllm_config)
+        self.reduce_results = reduce_results
+        if self.use_mega_moe and not current_platform.is_cuda():
+            raise NotImplementedError("DeepGEMM MegaMoE requires CUDA.")
+        if self.use_mega_moe and not parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "DeepGEMM MegaMoE requires expert parallel. Enable it with "
+                "--enable-expert-parallel, or pick a different MoE backend."
+            )
 
         if config.hidden_act != "silu":
             raise ValueError(
@@ -339,7 +372,7 @@ class DeepseekV2MoE(nn.Module):
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         self.is_fused_shared_expert_enabled = False
-        if config.n_shared_experts is not None:
+        if not self.use_mega_moe and config.n_shared_experts is not None:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             )
@@ -363,37 +396,75 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 is_sequence_parallel=self.is_sequence_parallel,
-                reduce_results=False,
+                reduce_results=(reduce_results if self.use_mega_moe else False),
                 prefix=f"{prefix}.shared_experts",
             )
 
-        self.experts = FusedMoEFactory(
-            shared_experts=self.shared_experts,
-            gate=self.gate,
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
-            prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, "scoring_func", "softmax"),
-            routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=apply_routed_scale_to_output,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
-            reduce_results=reduce_results,
-            n_shared_experts=config.n_shared_experts
-            if self.is_fused_shared_expert_enabled
-            else None,
-            fuse_shared_experts=self.is_fused_shared_expert_enabled,
-            router_logits_dtype=self.gate.out_dtype,
-        )
+        if self.use_mega_moe:
+            assert vllm_config is not None
+            from vllm.models.deepseek_v4.nvidia.model import (
+                DeepGemmMegaMoEExperts,
+            )
+
+            source_weight_block_size = (
+                DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+                    quant_config, self, prefix
+                )
+            )
+            source_nvfp4 = DeepGemmMegaMoEExperts.source_is_nvfp4(
+                quant_config, self, prefix
+            )
+
+            if self.n_physical_experts % self.ep_size != 0:
+                raise ValueError(
+                    f"n_physical_experts={self.n_physical_experts} must be "
+                    f"divisible by ep_size={self.ep_size}. Adjust "
+                    "num_redundant_experts."
+                )
+            num_local_experts = self.n_physical_experts // self.ep_size
+            expert_start = get_ep_group().rank_in_group * num_local_experts
+            self.experts = DeepGemmMegaMoEExperts(
+                vllm_config,
+                num_experts=self.n_physical_experts,
+                num_local_experts=num_local_experts,
+                experts_start_idx=expert_start,
+                num_logical_experts=self.n_logical_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                mma_type="fp8xfp4" if source_nvfp4 else "bf16xbf16",
+                source_weight_block_size=source_weight_block_size,
+                source_nvfp4=source_nvfp4,
+                prefix=f"{prefix}.experts",
+            )
+        else:
+            self.experts = FusedMoEFactory(
+                shared_experts=self.shared_experts,
+                gate=self.gate,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=getattr(config, "n_group", 1),
+                topk_group=getattr(config, "topk_group", 1),
+                prefix=f"{prefix}.experts",
+                scoring_func=getattr(config, "scoring_func", "softmax"),
+                routed_scaling_factor=self.routed_scaling_factor,
+                apply_routed_scale_to_output=apply_routed_scale_to_output,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=reduce_results,
+                n_shared_experts=config.n_shared_experts
+                if self.is_fused_shared_expert_enabled
+                else None,
+                fuse_shared_experts=self.is_fused_shared_expert_enabled,
+                router_logits_dtype=self.gate.out_dtype,
+            )
 
         if (
             self.is_rocm_aiter_moe_enabled
@@ -416,9 +487,41 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=hidden_states
-        )
+        if self.use_mega_moe:
+            router_logits, _ = self.gate(hidden_states)
+            topk_weights, topk_ids = grouped_topk(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=self.config.num_experts_per_tok,
+                renormalize=self.config.norm_topk_prob,
+                num_expert_group=getattr(self.config, "n_group", 1),
+                topk_group=getattr(self.config, "topk_group", 1),
+                scoring_func=getattr(self.config, "scoring_func", "softmax"),
+                e_score_correction_bias=(
+                    self.gate.e_score_correction_bias.data
+                    if self.gate.e_score_correction_bias is not None
+                    else None
+                ),
+                routed_scaling_factor=self.routed_scaling_factor,
+            )
+            final_hidden_states = self.experts(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                activation_clamp=None,
+            )
+            final_hidden_states = _scale_mega_moe_output_for_deferred_reduce(
+                final_hidden_states,
+                tp_size=self.tp_size,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=self.reduce_results,
+            )
+            if self.shared_experts is not None:
+                final_hidden_states += self.shared_experts(hidden_states)
+        else:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -427,6 +530,10 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def finalize_mega_moe_weights(self) -> None:
+        if self.use_mega_moe:
+            self.experts.finalize_weights()
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
