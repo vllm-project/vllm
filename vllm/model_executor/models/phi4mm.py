@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import typing
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -16,7 +17,7 @@ from transformers import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -533,6 +534,11 @@ class Phi4MMAudioEmbeddingInputs(TensorSchema):
 Phi4MMAudioInputs: TypeAlias = Phi4MMAudioFeatureInputs | Phi4MMAudioEmbeddingInputs
 
 
+class Phi4MMParsedModalities(typing.TypedDict, total=False):
+    images: Phi4MMImagePixelInputs
+    audios: Phi4MMAudioInputs
+
+
 def stack_with_pad(
     tensors: torch.Tensor | list[torch.Tensor],
     padding_value: int | float = 0,
@@ -611,13 +617,13 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
             aspect_ratio = orig_width / orig_height
 
             # calculate the existing image aspect ratio
-            target_ratios = set(
+            target_ratio_candidates = set(
                 (i, j)
                 for i in range(1, max_num + 1)
                 for j in range(1, max_num + 1)
                 if i * j <= max_num and i * j >= min_num
             )
-            target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+            target_ratios = sorted(target_ratio_candidates, key=lambda x: x[0] * x[1])
 
             # find the closest aspect ratio to the target
             image_processor = self.get_hf_processor().image_processor
@@ -785,7 +791,8 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
         # Resample to 16000 or 8000 if needed
         if sr > 16000:
-            audio_len //= sr // 16000
+            resample_ratio = int(sr // 16000)
+            audio_len //= resample_ratio
         elif 8000 <= sr < 16000:
             # We'll resample to 16K from 8K
             audio_len *= 2
@@ -850,6 +857,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
         image_overrides = mm_options.get("image")
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         mm_data = {
             "image": self._get_dummy_images(
@@ -885,12 +893,20 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
 
         sr = self.info.get_feature_extractor(**hf_processor_mm_kwargs).sampling_rate
-        if audio_data := mm_data.get("audios", []):
-            mm_data["audios"] = [(data, sr) for data in audio_data]
+        raw_audio_data = mm_data.get("audios", [])
+        assert isinstance(raw_audio_data, Sequence)
+        audio_data = []
+        for data in raw_audio_data:
+            assert isinstance(data, (list, np.ndarray, torch.Tensor))
+            audio_data.append(data)
+
+        processor_data = dict(text=prompt_text, **mm_data)
+        if audio_data:
+            processor_data["audios"] = [(data, sr) for data in audio_data]
 
         processed_data = self.info.ctx.call_hf_processor(
             self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
+            processor_data,
             hf_processor_mm_kwargs,
         )
 
@@ -960,6 +976,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -1201,8 +1218,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             num_img_tokens=num_img_tokens,
         )
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> Phi4MMParsedModalities:
+        modalities = Phi4MMParsedModalities()
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -1211,12 +1230,16 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 input_key in ("input_image_embeds", "image_embeds")
                 and "images" not in modalities
             ):
-                modalities["images"] = self._parse_and_validate_image_input(**kwargs)
+                image_input = self._parse_and_validate_image_input(**kwargs)
+                assert image_input is not None
+                modalities["images"] = image_input
             if (
                 input_key in ("input_audio_embeds", "audio_embeds")
                 and "audios" not in modalities
             ):
-                modalities["audios"] = self._parse_and_validate_audio_input(**kwargs)
+                audio_input = self._parse_and_validate_audio_input(**kwargs)
+                assert audio_input is not None
+                modalities["audios"] = audio_input
 
         return modalities
 
