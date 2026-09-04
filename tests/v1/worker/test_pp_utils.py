@@ -100,11 +100,14 @@ class _FakeSlot:
 
 
 def _make_queue_handler(
-    pp_size: int, delay: int
+    pp_size: int, delay: int, post_model: bool = False
 ) -> tuple[PPHandler, list[tuple[int, int]], Callable[[int], None]]:
     handler = PPHandler.__new__(PPHandler)
     handler.queue = deque([None] * pp_size)
     handler.recv_launch_delay = delay
+    handler.post_model_recv_launch = post_model
+    handler.pending_post_model_receive = None
+    handler.is_last_rank = False
     handler.num_deferred_recv_launches = 0
     handler.num_idle_boundaries = 0
     handler.num_idle_flushes = 0
@@ -189,6 +192,50 @@ def test_immediate_receive_launches_at_origin_step() -> None:
     assert launches == [(3, 3)]
 
 
+def test_post_model_receive_waits_for_explicit_launch() -> None:
+    handler, launches, set_current_step = _make_queue_handler(
+        pp_size=4, delay=3, post_model=True
+    )
+    handler.queue[-1] = cast(PendingRecv, _FakeSlot(0))
+
+    for step in range(1, 4):
+        set_current_step(step)
+        handler._advance_receive_queue()
+
+    assert launches == []
+    assert handler.launch_post_model_receive()
+    assert launches == [(0, 3)]
+    assert not handler.launch_post_model_receive()
+
+
+def test_post_model_receive_must_launch_before_next_selection() -> None:
+    handler, _, set_current_step = _make_queue_handler(
+        pp_size=4, delay=1, post_model=True
+    )
+    handler.queue[-1] = cast(PendingRecv, _FakeSlot(0))
+    set_current_step(1)
+    handler._advance_receive_queue()
+    handler.queue[-1] = cast(PendingRecv, _FakeSlot(1))
+
+    set_current_step(2)
+    with pytest.raises(RuntimeError, match="Previous post-model"):
+        handler._advance_receive_queue()
+
+
+def test_flush_launches_pending_post_model_receive_once() -> None:
+    handler, launches, set_current_step = _make_queue_handler(
+        pp_size=4, delay=3, post_model=True
+    )
+    slot = _FakeSlot(0)
+    handler.pending_post_model_receive = cast(PendingRecv, slot)
+    handler.queue[0] = cast(PendingRecv, slot)
+    set_current_step(3)
+
+    assert handler.flush_pending_collectives() == 1
+    assert handler.flush_pending_collectives() == 0
+    assert launches == [(0, 3)]
+
+
 def test_idle_flush_is_counted() -> None:
     handler, launches, set_current_step = _make_queue_handler(pp_size=4, delay=3)
     handler.is_last_rank = False
@@ -217,7 +264,7 @@ def test_consume_fallback_is_counted() -> None:
     ("old_computed", "scheduled", "prefill_len", "max_seq_len", "expected"),
     [
         (0, 64, 128, 256, None),  # Non-final chunked prefill.
-        (0, 128, 128, 129, None),  # The first sample finishes the request.
+        (0, 128, 128, 129, [True]),  # Finishing is decided by the scheduler.
         (0, 128, 128, 130, [True]),  # Another decode step needs feedback.
     ],
 )
