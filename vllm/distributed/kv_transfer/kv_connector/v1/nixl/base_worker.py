@@ -427,7 +427,9 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        self._hisparse_destination = make_hisparse_nixl_destination(kv_cache_config)
+        self._hisparse_destination = make_hisparse_nixl_destination(
+            kv_cache_config, vllm_config
+        )
         attention_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -1263,6 +1265,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        region_indices: dict[tuple[int, str | None], int] = {}
         tensor_configs = {
             layer_name: tensor_config
             for tensor_config in self.kv_cache_config.kv_cache_tensors
@@ -1495,10 +1498,13 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
-                    region_index = seen_base_addresses.index(base_addr)
-                    assert region_mem_types[region_index] == mem_type
-                    self._region_is_mla[region_index] |= is_mla_region
+                region_name = transfer_layer_name(layer_name)
+                region_key = (
+                    base_addr,
+                    region_name if self._hisparse_destination is not None else None,
+                )
+                if region_key in region_indices:
+                    region_index = region_indices[region_key]
                     if is_mla_region:
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
@@ -1507,11 +1513,12 @@ class NixlBaseConnectorWorker:
                         self.region_group_ids[region_index] = _SHARED_REGION_GROUP_ID
                 else:
                     region_index = len(seen_base_addresses)
+                    region_indices[region_key] = region_index
                     seen_base_addresses.append(base_addr)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
-                    self.region_names.append(transfer_layer_name(layer_name))
+                    self.region_names.append(region_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
@@ -1609,14 +1616,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
         if self._hisparse_destination is not None:
-            registered_host_ranges = [
-                (start, end)
-                for (_, mem_type), (start, end, _) in registration_ranges.items()
-                if mem_type == "DRAM"
-            ]
-            self._hisparse_destination.prepare_host_descriptors(
-                self, registered_host_ranges
-            )
+            self._hisparse_destination.prepare_host_descriptors(self)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
