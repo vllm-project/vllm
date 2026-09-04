@@ -848,19 +848,33 @@ def test_concat_and_cache_mla_grouped(
         dtype=torch.int64,
     )
     ref_cache = kv_caches[0]
-    ops.concat_and_cache_mla_grouped(
-        kv_c,
-        k_pe,
-        cache_ptrs,
-        slot_mapping,
-        ref_cache.size(1),
-        ref_cache.stride(0),
-        ref_cache.stride(1),
-        None if kv_cache_dtype == "auto" else scales,
-        kv_cache_dtype,
-    )
+
+    def run_grouped(kv_scales: torch.Tensor | None) -> None:
+        ops.concat_and_cache_mla_grouped(
+            kv_c,
+            k_pe,
+            cache_ptrs,
+            slot_mapping,
+            ref_cache.size(1),
+            ref_cache.stride(0),
+            ref_cache.stride(1),
+            kv_scales,
+            kv_cache_dtype,
+        )
+
+    run_grouped(None if kv_cache_dtype == "auto" else scales)
 
     torch.testing.assert_close(kv_caches, reference, rtol=0, atol=0)
+
+    if kv_cache_dtype == "fp8" and not shared_slot_mapping:
+        noncontiguous_scales = torch.ones(num_layers, 2)[:, 0]
+        assert not noncontiguous_scales.is_contiguous()
+        for invalid_scales, error in (
+            (scales.cpu(), "same CUDA device"),
+            (noncontiguous_scales, "must be contiguous"),
+        ):
+            with pytest.raises(RuntimeError, match=error):
+                run_grouped(invalid_scales)
 
 
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)

@@ -1045,6 +1045,10 @@ void concat_and_cache_mla_grouped(
         "kv_scales must be float32");
     STD_TORCH_CHECK(kv_scales->numel() == num_layers,
                     "kv_scales must contain one scale per layer");
+    STD_TORCH_CHECK(kv_scales->is_cuda() && kv_scales->get_device_index() ==
+                                                kv_c.get_device_index(),
+                    "kv_scales must be on the same CUDA device as kv_c");
+    STD_TORCH_CHECK(kv_scales->is_contiguous(), "kv_scales must be contiguous");
     kv_scales_ptr = kv_scales->const_data_ptr<float>();
   } else {
     STD_TORCH_CHECK(!kv_scales.has_value(),
