@@ -626,6 +626,7 @@ class SpeculativeConfig:
             "extract_hidden_states",
             "dflash",
             "dspark",
+            "pard2",
         )
         factors.append(uses_aux_hidden_states)
 

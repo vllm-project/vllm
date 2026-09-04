@@ -316,5 +316,10 @@ class Pard2ForCausalLMMixin:
 
         # target_proj ships separately in warp_model.bin.
         if not any("target_proj" in n for n in model_weights):
-            self._load_warp_projection()
+            if not self._load_warp_projection():
+                raise RuntimeError(
+                    "PARD-2 needs target_proj weights to fuse target hidden "
+                    f"states, but neither {self._draft_model_name}'s checkpoint "
+                    "nor its warp_model.bin provided them."
+                )
         return loaded
