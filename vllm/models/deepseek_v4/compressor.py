@@ -436,13 +436,13 @@ class DeepseekCompressor(nn.Module):
         compress_norm_rope_store_fn: Any
         if current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
-                compress_norm_rope_store_cutedsl,
+                _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
             # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
-            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
                 store_full_fp8=store_full_fp8,

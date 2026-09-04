@@ -137,10 +137,14 @@ class PackSeqTritonKernel(VllmTritonJitKernel["PackSeqTritonKernel.CompileKey"])
         block_t: int,
         block_d: int,
     ) -> LaunchSpec:
-        grid = (lengths.numel(), triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
+        grid = (
+            lengths.shape[0],
+            triton.cdiv(Lmax, block_t),
+            triton.cdiv(D, block_d),
+        )
         return grid, dict(
             x_ptr=x_reshaped,
-            lengths_ptr=lengths.int(),
+            lengths_ptr=lengths,
             PAD_VALUE=pad_value,
             PAD_IS_UINT8=pad_is_uint8,
             BLOCK_T=block_t,
@@ -199,6 +203,7 @@ def pack_seq_triton(
 
     out = torch.empty((B, Lmax, D), device=x.device, dtype=x.dtype)
 
+    lengths = lengths.int()
     _PACK_SEQ_TRITON_KERNEL(
         x_reshaped,
         out,
@@ -315,7 +320,7 @@ class UnpackSeqTritonKernel(VllmTritonJitKernel["UnpackSeqTritonKernel.CompileKe
         grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
         return grid, dict(
             packed_ptr=packed_reshaped,
-            lengths_ptr=lengths.int(),
+            lengths_ptr=lengths,
             BLOCK_T=block_t,
             BLOCK_D=block_d,
             num_warps=4,
@@ -358,6 +363,7 @@ def unpack_seq_triton(
 
     out = torch.empty((N, D), device=packed_tensor.device, dtype=packed_tensor.dtype)
 
+    lengths = lengths.int()
     _UNPACK_SEQ_TRITON_KERNEL(
         packed_reshaped,
         out,

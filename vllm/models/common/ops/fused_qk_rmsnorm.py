@@ -123,7 +123,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         return dict(
-            qr=TritonWarmupTensor(
+            q=TritonWarmupTensor(
                 torch.bfloat16,
                 shape=(1, compile_key.q_size),
                 strides=(compile_key.q_in_stride, 1),
@@ -133,7 +133,7 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
                 shape=(1, compile_key.kv_size),
                 strides=(compile_key.kv_in_stride, 1),
             ),
-            qr_out=TritonWarmupTensor(
+            q_out=TritonWarmupTensor(
                 torch.bfloat16,
                 shape=(1, compile_key.q_size),
                 strides=(compile_key.q_out_stride, 1),
@@ -157,19 +157,19 @@ class FusedQKVRMSNormKernel(VllmTritonJitKernel["FusedQKVRMSNormKernel.CompileKe
     @kernel_launcher
     def __call__(
         self,
-        qr: torch.Tensor,
+        q: torch.Tensor,
         kv: torch.Tensor,
-        qr_out: torch.Tensor,
+        q_out: torch.Tensor,
         kv_out: torch.Tensor,
         q_weight: torch.Tensor,
         kv_weight: torch.Tensor,
         eps: float,
     ) -> LaunchSpec:
-        q_size = qr.shape[1]
+        q_size = q.shape[1]
         kv_size = kv.shape[1]
-        return (qr.shape[0], 2), dict(
-            q_in_stride=qr.stride(0),
-            q_out_stride=qr_out.stride(0),
+        return (q.shape[0], 2), dict(
+            q_in_stride=q.stride(0),
+            q_out_stride=q_out.stride(0),
             kv_in_stride=kv.stride(0),
             kv_out_stride=kv_out.stride(0),
             Q_SIZE=q_size,

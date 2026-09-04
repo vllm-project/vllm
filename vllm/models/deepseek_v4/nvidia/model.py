@@ -907,7 +907,6 @@ class DeepseekV4MoE(nn.Module):
                 )
                 from vllm.model_executor.layers.fused_moe.utils import (
                     _COUNT_EXPERT_NUM_TOKENS_KERNEL,
-                    _PACK_TOPK_IDS_WEIGHTS_KERNEL,
                     _SWIGLU_LIMIT_PAD_AWARE_KERNEL,
                 )
 
@@ -939,7 +938,6 @@ class DeepseekV4MoE(nn.Module):
                 _COMPUTE_IDENTITY_KERNEL.register_warmup()
                 _MOE_FUSED_MUL_SUM_KERNEL.register_warmup()
                 _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
-                _PACK_TOPK_IDS_WEIGHTS_KERNEL.register_warmup()
                 _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
                 if vllm_config.kernel_config.moe_backend == "emulation":
