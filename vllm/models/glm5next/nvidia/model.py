@@ -725,12 +725,24 @@ class Glm5NextModel(nn.Module):
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
+            # EPLB: the mapping enumerates physical experts, so it must cover
+            # the redundant replicas or their slots are never loaded.
+            num_redundant_experts = next(
+                (
+                    layer.mlp.n_redundant_experts
+                    for layer in self.layers
+                    if isinstance(layer, Glm5NextDecoderLayer)
+                    and isinstance(layer.mlp, Glm5NextMoE)
+                ),
+                0,
+            )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
                 num_experts=self.config.n_routed_experts,
+                num_redundant_experts=num_redundant_experts,
             )
         else:
             expert_params_mapping = []
@@ -818,28 +830,38 @@ class Glm5NextModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for idx, (
+                is_expert_weight = False
+                for (
                     param_name,
                     weight_name,
                     expert_id,
                     expert_shard_id,
-                ) in enumerate(expert_params_mapping):
+                ) in expert_params_mapping:
                     if weight_name not in name:
                         continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
+                    # A checkpoint expert may map to several physical replicas
+                    # under EPLB; keep `name` intact and try the next entry
+                    # when this physical expert is not local to the rank.
+                    is_expert_weight = True
+                    name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
                         continue
-                    param = params_dict[name]
+                    param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
-                    weight_loader(
+                    success = weight_loader(
                         param,
                         loaded_weight,
-                        name,
+                        name_mapped,
                         expert_id=expert_id,
                         shard_id=expert_shard_id,
+                        return_success=True,
                     )
-                    break
+                    if success:
+                        name = name_mapped
+                        break
                 else:
+                    if is_expert_weight:
+                        continue
                     # Skip loading extra bias for GPTQ models.
                     if (
                         name.endswith(".bias")
