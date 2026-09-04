@@ -11,7 +11,7 @@
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -24,6 +24,7 @@ use llm_multimodal::{
     PromptReplacement, Tokenizer as TokenResolver, TrackedMedia, VideoClip, VisionPreProcessor,
     VisionProcessorRegistry,
 };
+use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -52,6 +53,71 @@ pub struct MultimodalModelInfo {
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    /// Maximum number of input items allowed per prompt for each modality.
+    limit_mm_per_prompt: MmLimitPerPrompt,
+}
+
+/// Per-modality item-count limits configured by `--limit-mm-per-prompt`.
+///
+/// Modalities absent from the map are unlimited.
+pub type MmLimitPerPrompt = HashMap<MmLimitModality, MmLimitSpec>;
+
+/// Modalities that `--limit-mm-per-prompt` can be keyed by.
+///
+/// Closed on purpose: these are exactly the keys Python accepts, per
+/// `MultiModalDummyOptionsBuiltins` in `vllm/config/multimodal.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MmLimitModality {
+    Image,
+    Audio,
+    Video,
+}
+
+impl MmLimitModality {
+    /// The wire name, matching Python's modality strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+/// One modality's limit, in either of the two shapes Python accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    untagged,
+    expecting = "an item count, or an object with an optional `count` field"
+)]
+pub enum MmLimitSpec {
+    /// Legacy form: `"image": 16`
+    Count(usize),
+
+    /// Configurable form:
+    /// `"video": {"count": 1, "num_frames": 32}`
+    Options {
+        /// Absent means unlimited, matching an absent modality.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<usize>,
+
+        /// Preserve Python-owned options for forwarding. Never interpreted
+        /// here: they size the engine's dummy-profiling encoder cache, which
+        /// has no Rust counterpart.
+        #[serde(flatten)]
+        extra: BTreeMap<String, serde_json::Value>,
+    },
+}
+
+impl MmLimitSpec {
+    /// The configured item count, or `None` when this modality is unlimited.
+    pub fn count(&self) -> Option<usize> {
+        match self {
+            Self::Count(count) => Some(*count),
+            Self::Options { count, .. } => *count,
+        }
+    }
 }
 
 /// Model metadata and tokenizer access shared by all multimodal specs.
@@ -287,6 +353,7 @@ impl MultimodalModelInfo {
         model_type: Option<String>,
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -319,7 +386,12 @@ impl MultimodalModelInfo {
             tokenizer: TokenizerResolver(tokenizer),
         };
 
-        Self::from_loaded(context, preprocessor_config, video_preprocessor_config)
+        Self::from_loaded(
+            context,
+            preprocessor_config,
+            video_preprocessor_config,
+            limit_mm_per_prompt,
+        )
     }
 
     /// Resolve multimodal support from an assembled context and parsed
@@ -328,6 +400,7 @@ impl MultimodalModelInfo {
         context: MultimodalModelContext,
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -356,6 +429,7 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            limit_mm_per_prompt,
         }))
     }
 
@@ -567,14 +641,62 @@ fn input_audio_data_url(data: &str, format: Option<&str>) -> Result<String> {
     Ok(format!("data:{mime_type};base64,{data}"))
 }
 
+/// The modality a content part counts against, or `None` for plain text.
+///
+/// Embedding inputs share their base modality's budget rather than getting one
+/// of their own, matching Python's `modality.replace("_embeds", "")` in
+/// `vllm/entrypoints/chat_utils.py`.
+fn media_part_limit_modality(part: &MediaContentPart) -> Option<MmLimitModality> {
+    match part {
+        MediaContentPart::Text { .. } => None,
+        MediaContentPart::ImageUrl { .. }
+        | MediaContentPart::ImageData { .. }
+        | MediaContentPart::ImageEmbeds { .. } => Some(MmLimitModality::Image),
+        MediaContentPart::AudioUrl { .. } | MediaContentPart::AudioData { .. } => {
+            Some(MmLimitModality::Audio)
+        }
+        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => {
+            Some(MmLimitModality::Video)
+        }
+    }
+}
+
 impl MultimodalModelInfo {
+    /// Reject requests exceeding `--limit-mm-per-prompt`'s configured
+    /// per-modality item count, before any fetch/decode work is spent on them.
+    ///
+    /// Modalities without a configured count are unlimited.
+    fn validate_mm_limits(&self, media_parts: &[MediaContentPart]) -> Result<()> {
+        let mut counts: HashMap<MmLimitModality, usize> = HashMap::new();
+        for part in media_parts {
+            if let Some(modality) = media_part_limit_modality(part) {
+                *counts.entry(modality).or_default() += 1;
+            }
+        }
+
+        for (modality, count) in counts {
+            let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
+            else {
+                continue;
+            };
+            if count > limit {
+                return Err(Error::MmLimitExceeded {
+                    modality: modality.as_str().to_string(),
+                    limit,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
     ///
     /// `prompt_token_ids` is mutated in place because placeholder expansion
     /// changes both the final prompt and the offsets recorded in
     /// `PlaceholderRange`.
-    async fn prepare_multimodal(
+    pub(crate) async fn prepare_multimodal(
         &self,
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
@@ -584,8 +706,7 @@ impl MultimodalModelInfo {
         if media_parts_len == 0 {
             return Ok(Vec::new());
         }
-        // TODO: enforce per-modality item-count limits, aligned with the
-        // engine's `--limit-mm-per-prompt` semantics.
+        self.validate_mm_limits(&media_parts)?;
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
@@ -753,10 +874,11 @@ mod tests {
             .with_regular_token("<|video_pad|>", QWEN3_VIDEO_PAD_ID)
     }
 
-    fn test_info(
+    fn test_info_with_limits(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
             model_id: format!("{model_type}-test"),
@@ -769,9 +891,18 @@ mod tests {
             context,
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
+            limit_mm_per_prompt,
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
+    }
+
+    fn test_info(
+        model_type: &str,
+        config: serde_json::Value,
+        tokenizer: TestTokenizer,
+    ) -> MultimodalModelInfo {
+        test_info_with_limits(model_type, config, tokenizer, HashMap::new())
     }
 
     fn llama4_info() -> MultimodalModelInfo {
@@ -783,16 +914,19 @@ mod tests {
         test_info("llama4", config, llama4_tokenizer())
     }
 
-    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
-        let config = serde_json::json!({
+    fn qwen3_vl_config() -> serde_json::Value {
+        serde_json::json!({
             "model_type": "qwen3_vl",
             "image_token_id": QWEN3_IMAGE_PAD_ID,
             "video_token_id": QWEN3_VIDEO_PAD_ID,
             "vision_start_token_id": 151652,
             "vision_end_token_id": 151653,
             "vision_config": {"patch_size": 16}
-        });
-        test_info("qwen3_vl", config, qwen3_vl_tokenizer())
+        })
+    }
+
+    pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
+        test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
     }
 
     #[test]
@@ -852,5 +986,124 @@ mod tests {
             "data:application/octet-stream;base64,CCCC"
         );
         assert!(input_audio_data_url("AAAA", Some("flac")).is_err());
+    }
+
+    fn image_url_part() -> MediaContentPart {
+        MediaContentPart::ImageUrl {
+            url: "https://example.com/image.png".to_string(),
+            detail: None,
+            uuid: None,
+        }
+    }
+
+    fn qwen3_vl_info_with_limits(limit_mm_per_prompt: MmLimitPerPrompt) -> MultimodalModelInfo {
+        test_info_with_limits(
+            "qwen3_vl",
+            qwen3_vl_config(),
+            qwen3_vl_tokenizer(),
+            limit_mm_per_prompt,
+        )
+    }
+
+    #[test]
+    fn validate_mm_limits_ignores_text_parts() {
+        let info = qwen3_vl_info();
+        let parts = vec![
+            MediaContentPart::Text {
+                text: "hello".to_string(),
+            },
+            MediaContentPart::Text {
+                text: "world".to_string(),
+            },
+        ];
+        assert!(info.validate_mm_limits(&parts).is_ok());
+    }
+
+    #[test]
+    fn validate_mm_limits_leaves_unconfigured_modalities_unlimited() {
+        let info = qwen3_vl_info();
+        let parts: Vec<_> = std::iter::repeat_with(image_url_part).take(1_000).collect();
+
+        assert!(info.validate_mm_limits(&parts).is_ok());
+    }
+
+    #[test]
+    fn validate_mm_limits_enforces_configured_limit_at_the_boundary() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmLimitModality::Image,
+            MmLimitSpec::Count(1),
+        )]));
+        assert!(info.validate_mm_limits(&[image_url_part()]).is_ok());
+
+        let error = info.validate_mm_limits(&[image_url_part(), image_url_part()]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+        // Confirms the HTTP-mapping bug found during implementation stays fixed:
+        // this must map to 400, not 500.
+        assert!(error.is_request_validation_error());
+    }
+
+    #[test]
+    fn validate_mm_limits_counts_image_embeds_against_the_image_limit() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmLimitModality::Image,
+            MmLimitSpec::Count(1),
+        )]));
+        let image_embeds_part = MediaContentPart::ImageEmbeds {
+            payload: serde_json::Value::String("AAAA".to_string()),
+            uuid: None,
+        };
+
+        let error = info.validate_mm_limits(&[image_url_part(), image_embeds_part]).unwrap_err();
+        assert_eq!(
+            error.to_report_string(),
+            "At most 1 image(s) may be provided in one prompt."
+        );
+    }
+
+    /// An options object without a `count` carries only profiling keys, which
+    /// say nothing about how many items are allowed.
+    #[test]
+    fn validate_mm_limits_treats_a_count_less_options_object_as_unlimited() {
+        let info = qwen3_vl_info_with_limits(HashMap::from([(
+            MmLimitModality::Image,
+            MmLimitSpec::Options {
+                count: None,
+                extra: BTreeMap::from([("width".to_string(), serde_json::json!(512))]),
+            },
+        )]));
+
+        assert!(info.validate_mm_limits(&[image_url_part(), image_url_part()]).is_ok());
+    }
+
+    fn parse_limits(json: &str) -> MmLimitPerPrompt {
+        serde_json::from_str(json).expect("limit map should parse")
+    }
+
+    #[test]
+    fn limit_map_parses_both_shapes_python_accepts() {
+        let limits = parse_limits(r#"{"image": 16, "video": {"count": 1, "num_frames": 32}}"#);
+
+        assert_eq!(limits[&MmLimitModality::Image].count(), Some(16));
+        assert_eq!(limits[&MmLimitModality::Video].count(), Some(1));
+        assert_eq!(limits.get(&MmLimitModality::Audio), None);
+    }
+
+    #[test]
+    fn limit_map_rejects_keys_python_does_not_accept() {
+        assert!(serde_json::from_str::<MmLimitPerPrompt>(r#"{"image_embeds": 1}"#).is_err());
+    }
+
+    /// Managed mode forwards this map back to Python as JSON, where
+    /// `BaseDummyOptions.count` is a non-optional `int` under `extra="forbid"`.
+    /// Emitting `"count": null` would make the engine subprocess fail to start.
+    #[test]
+    fn limit_map_round_trips_without_emitting_a_null_count() {
+        let source = r#"{"video":{"num_frames":32}}"#;
+        let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
+
+        assert_eq!(encoded, source);
     }
 }

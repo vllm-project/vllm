@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -56,6 +57,24 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+if hasattr(torch.ops._xpu_C, "fp4_gemm"):
+
+    @register_fake("_xpu_C::fp4_gemm")
+    def _fp4_gemm_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale_act: torch.Tensor,
+        scale_wei: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        input_2d = input.view(-1, input.shape[-1])
+        M = input_2d.size(0)
+        N = weight.size(-1)
+        result_dtype = out_dtype if out_dtype is not None else torch.get_default_dtype()
+        return torch.empty((M, N), dtype=result_dtype, device=input.device)
+
+
 if hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
 
     @register_fake("_xpu_C::int4_gemm_w4a8")
@@ -92,6 +111,45 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         M = input_2d.size(0)
         N = q_weight.size(1)
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
+
+
+def _gemma_rms_norm_impl(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    # GemmaRMSNorm: computes out = (x_normed_fp32 * (1 + weight.float())
+    # ).to(dtype) with a raw (bf16/fp16) weight; the +1 offset and fp32
+    # multiply are done in-kernel. See vllm-xpu-kernels gemma_rms_norm.
+    torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
+
+
+def _gemma_rms_norm_fake(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    return None
+
+
+def _fused_add_gemma_rms_norm_impl(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
+
+
+def _fused_add_gemma_rms_norm_fake(
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> None:
+    return None
 
 
 def _gdn_attention_core_xpu_impl(
@@ -1199,6 +1257,21 @@ class xpu_ops:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
+            if hasattr(torch.ops._C, "gemma_rms_norm"):
+                direct_register_custom_op(
+                    op_name="xpu_gemma_rms_norm",
+                    op_func=_gemma_rms_norm_impl,
+                    mutates_args=["out"],
+                    fake_impl=_gemma_rms_norm_fake,
+                )
+
+                direct_register_custom_op(
+                    op_name="xpu_fused_add_gemma_rms_norm",
+                    op_func=_fused_add_gemma_rms_norm_impl,
+                    mutates_args=["input", "residual"],
+                    fake_impl=_fused_add_gemma_rms_norm_fake,
+                )
+
             direct_register_custom_op(
                 op_name="xpu_ops_deepseek_scaling_rope",
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,
@@ -1239,7 +1312,7 @@ class xpu_ops:
 
             direct_register_custom_op(
                 op_name="gdn_attention_core_xpu",
-                op_func=_gdn_attention_core_xpu_impl,
+                op_func=eager_break_during_capture(_gdn_attention_core_xpu_impl),
                 mutates_args=["core_attn_out", "z"],
                 fake_impl=_gdn_attention_core_xpu_fake,
             )

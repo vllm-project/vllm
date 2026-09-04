@@ -284,7 +284,7 @@ def kill_process_tree(pid: int):
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630
 def set_ulimit(target_soft_limit: int = 65535):
     if sys.platform.startswith("win"):
-        logger.info("Windows detected, skipping ulimit adjustment.")
+        logger.debug("Windows detected, skipping ulimit adjustment.")
         return
 
     import resource

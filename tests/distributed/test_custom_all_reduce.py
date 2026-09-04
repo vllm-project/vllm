@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
-from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import ray
@@ -11,8 +9,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
-from vllm.distributed.device_communicators import custom_all_reduce
-from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
+from vllm.distributed.device_communicators import custom_all_reduce as car
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 
 from ..utils import (
@@ -27,57 +24,88 @@ for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
 
 
-def test_sp16_dispatches_only_to_mnnvl_lamport(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [
+        (torch.float32, True),
+        (torch.float16, True),
+        (torch.bfloat16, True),
+        (torch.int8, False),
+        (torch.float8_e4m3fn, False),
+    ],
+)
+def test_custom_allreduce_filters_dtype(
+    dtype: torch.dtype,
+    expected: bool,
+) -> None:
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator._ptr = 0
+
+    assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+@pytest.mark.parametrize(
+    ("major", "local_multicast", "expected"),
+    [
+        (8, True, False),
+        (9, True, False),
+        (10, False, False),
+        (10, True, True),
+    ],
+)
+def test_cross_node_mnnvl_gate_checks_generation_and_multicast(
+    monkeypatch,
+    major,
+    local_multicast,
+    expected,
 ):
-    """SP16 uses the MNNVL Lamport kernels and rejects same-host dispatch."""
-    comm = CustomAllreduce.__new__(CustomAllreduce)
-    comm.disabled = False
-    comm.world_size = 16
-    comm.fully_connected = False
-    comm.mnnvl_only = True
-    comm._IS_CAPTURING = False
-    comm.max_mnnvl_all_gather_size = 2 * 1024 * 1024
-    comm.max_mnnvl_reduce_scatter_size = 16 * 1024 * 1024
-    comm.mnnvl_multicast_ptr = 1
-    comm.mnnvl_lamport_ag_local_ptr = 1
-    comm.mnnvl_lamport_ag_multicast_ptr = 1
-    comm.mnnvl_lamport_ag_epoch_ptr = 1
-    comm.mnnvl_lamport_rs_local_ptr = 1
-    comm.mnnvl_lamport_rs_epoch_ptr = 1
-    comm.mnnvl_buffer_size = 32 * 1024 * 1024
-    comm._ptr = 0
+    def has_device_capability(capability, device_id):
+        assert capability == 100
+        assert device_id == 3
+        return major >= 10
 
-    lamport_all_gather = Mock()
-    lamport_reduce_scatter = Mock()
-    monkeypatch.setattr(custom_all_reduce.current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
-        custom_all_reduce,
-        "ops",
-        SimpleNamespace(
-            mnnvl_lamport_all_gather=lamport_all_gather,
-            mnnvl_lamport_reduce_scatter=lamport_reduce_scatter,
-        ),
+        car.current_platform,
+        "has_device_capability",
+        has_device_capability,
+    )
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: local_multicast,
+    )
+    monkeypatch.setattr(car.dist, "all_reduce", lambda *_args, **_kwargs: None)
+
+    assert car._group_can_attempt_mnnvl(object(), torch.device("cuda:3")) is expected
+
+
+def test_cross_node_mnnvl_gate_requires_support_on_every_rank(monkeypatch):
+    monkeypatch.setattr(
+        car.current_platform,
+        "has_device_capability",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        car,
+        "_has_local_multicast_support",
+        lambda _device: True,
     )
 
-    gathered = comm.custom_all_gather(torch.empty((8, 8), dtype=torch.bfloat16))
-    scattered = comm.custom_reduce_scatter(torch.empty((16, 8), dtype=torch.bfloat16))
+    def report_unsupported_peer(support, **_kwargs):
+        support.zero_()
 
-    assert gathered is not None
-    assert scattered is not None
-    lamport_all_gather.assert_called_once()
-    lamport_reduce_scatter.assert_called_once()
-    assert not comm.should_custom_ar(torch.empty(8, dtype=torch.bfloat16))
-    assert not comm.should_custom_all_gather(torch.empty((8, 8), dtype=torch.int32))
-    assert not comm.should_custom_all_gather(
-        torch.empty((131073, 8), dtype=torch.bfloat16)
-    )
+    monkeypatch.setattr(car.dist, "all_reduce", report_unsupported_peer)
 
-    comm.mnnvl_only = False
-    assert not comm.should_custom_all_gather(torch.empty((8, 8), dtype=torch.bfloat16))
-    assert not comm.should_custom_reduce_scatter(
-        torch.empty((16, 8), dtype=torch.bfloat16)
-    )
+    assert not car._group_can_attempt_mnnvl(object(), torch.device("cuda:0"))
+
+
+def test_local_multicast_support_rejects_non_cuda(monkeypatch):
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: False)
+
+    assert not car._has_local_multicast_support(torch.device("cuda:0"))
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -137,32 +165,6 @@ def graph_allreduce(
                 torch.testing.assert_close(out1, inp1)
                 torch.testing.assert_close(out2, inp2)
 
-        fa = get_tp_group().device_communicator.ca_comm
-        tp_rank = rank % tp_size
-        with graph_capture(device=device) as graph_capture_context:
-            local = torch.full(
-                (512, 4096), tp_rank + 1, dtype=torch.bfloat16, device=device
-            )
-            reduce_input = torch.full(
-                (512 * tp_size, 4096),
-                tp_rank + 1,
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=graph_capture_context.stream):
-                gathered = fa.custom_all_gather(local)
-                scattered = fa.custom_reduce_scatter(reduce_input)
-        graph.replay()
-        assert gathered is not None
-        assert scattered is not None
-        expected_gather = torch.cat(
-            [torch.full_like(local, peer_rank + 1) for peer_rank in range(tp_size)]
-        )
-        expected_scatter = torch.full_like(local, tp_size * (tp_size + 1) // 2)
-        torch.testing.assert_close(gathered, expected_gather)
-        torch.testing.assert_close(scattered, expected_scatter)
-
 
 @ray.remote(num_gpus=1, max_calls=1)
 def eager_allreduce(
@@ -193,29 +195,6 @@ def eager_allreduce(
             out = fa.all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
-        group = get_tp_group().device_group
-        tp_rank = rank % tp_size
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            local = torch.full((64, 4096), tp_rank + 1, dtype=dtype, device=device)
-            expected_gather = torch.empty(
-                (64 * tp_size, 4096), dtype=dtype, device=device
-            )
-            dist.all_gather_into_tensor(expected_gather, local, group=group)
-            gathered = fa.custom_all_gather(local)
-            assert gathered is not None
-            torch.testing.assert_close(gathered, expected_gather)
-
-            reduce_input = torch.full(
-                (64 * tp_size, 4096), tp_rank + 1, dtype=dtype, device=device
-            )
-            expected_scatter = torch.empty((64, 4096), dtype=dtype, device=device)
-            dist.reduce_scatter_tensor(
-                expected_scatter, reduce_input.clone(), group=group
-            )
-            scattered = fa.custom_reduce_scatter(reduce_input)
-            assert scattered is not None
-            torch.testing.assert_close(scattered, expected_scatter)
-
         inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
         out = inp
         for _ in range(num_communication):
@@ -236,14 +215,3 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
-
-
-@pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
-def test_custom_collectives_world_size_four(
-    monkeypatch: pytest.MonkeyPatch,
-    test_target,
-):
-    """Exercise the four-rank kernel specialization used by Kimi SP."""
-    if torch.accelerator.device_count() < 4:
-        pytest.skip("Not enough GPUs to run the test.")
-    multi_process_parallel(monkeypatch, 4, 1, test_target)

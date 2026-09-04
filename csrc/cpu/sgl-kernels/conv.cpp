@@ -182,14 +182,13 @@ struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
 
     using fVec = at::vec::Vectorized<float>;
     using bVec = at::vec::Vectorized<at::BFloat16>;
-    const fVec one = fVec(1.f);
     auto storec = [&](auto i, int64_t m) {
       constexpr int col = i;
       fVec x0 = fVec(vc[col * 2 + 0]);
       fVec x1 = fVec(vc[col * 2 + 1]);
       if constexpr (has_silu) {
-        x0 = x0 / (one + x0.neg().exp_u20());
-        x1 = x1 / (one + x1.neg().exp_u20());
+        x0 = fast_silu(x0);
+        x1 = fast_silu(x1);
       }
       bVec out_vec = convert_from_float_ext<at::BFloat16>(x0, x1);
       out_vec.store(C + m * lda + col * 32);

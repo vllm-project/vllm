@@ -12,7 +12,7 @@ use clap::Parser;
 #[command(
     name = "vllm-bench",
     about = "Benchmark online serving throughput",
-    version
+    version = vllm_build_info::VERSION
 )]
 struct Cli {
     #[command(flatten)]

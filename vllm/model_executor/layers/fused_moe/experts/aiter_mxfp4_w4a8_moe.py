@@ -5,6 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -22,6 +23,61 @@ __all__ = [
     "AiterW4A8ExpertsMonolithic",
     "aiter_triton_kernel_w4a8_moe_forward",
 ]
+
+
+# TODO(akaratza): Remove
+# _get_padding_mask and patch_gating_output after
+# https://github.com/ROCm/aiter/pull/4530 is released and consumed by vLLM.
+def _get_padding_mask() -> torch.Tensor | None:
+    """
+    Retrieves a boolean mask with non-padding (0) and padding (1) tokens.
+
+    `slot_mapping < 0` comes from:
+
+        slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+
+    in gpu_model_runner.py.
+
+    Direct kernel callers do not have model-runner padding metadata, so no
+    mask is needed when there is no forward context.
+    """
+    if not is_forward_context_available():
+        return None
+
+    forward_context = get_forward_context()
+
+    # model runner v2.
+    if forward_context.is_padding is not None:
+        return forward_context.is_padding
+
+    # model runner v1.
+    slot_mapping = forward_context.slot_mapping
+
+    if isinstance(slot_mapping, list):
+        slot_mapping_dict = slot_mapping[0]
+    else:
+        slot_mapping_dict = slot_mapping
+
+    if isinstance(slot_mapping_dict, dict):
+        slot_mapping_sample = next(iter(slot_mapping_dict.values()), None)
+
+    if isinstance(slot_mapping_sample, torch.Tensor):
+        return slot_mapping_sample < 0
+    else:
+        return None
+
+
+def patch_gating_output(
+    gating_output: torch.Tensor, global_num_experts: int
+) -> torch.Tensor:
+    if global_num_experts != 128:
+        is_padding = _get_padding_mask()
+
+        if is_padding is not None:
+            assert is_padding.shape[0] == gating_output.shape[0]
+            gating_output = gating_output.masked_fill(is_padding[:, None], 0.0)
+
+    return gating_output
 
 
 def aiter_triton_kernel_w4a8_moe_forward(
@@ -46,11 +102,32 @@ def aiter_triton_kernel_w4a8_moe_forward(
         and quant_config.use_mxfp4_w4a8
         and rocm_aiter_ops.is_enabled()
     )
-    from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+    from vllm.platforms.rocm import on_gfx1250
+
+    try:
+        from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
+    except ImportError:
+        from aiter.ops.triton.moe_routing import routing as _routing_mod
+
+    if on_gfx1250():
+        _routing_mod.is_tdm_avail = lambda: False
+    aiter_routing = _routing_mod.routing
+
+    # See context in #50859.
+    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
+    # AITER released, and AITER pin in vLLM increased from 0.1.19.
+    gating_output = patch_gating_output(gating_output, global_num_experts)
 
     routing_data, gather_idx, scatter_idx = aiter_routing(
         gating_output, topk, sm_first=not renormalize
     )
+
+    # gfx1250: aiter's in-kernel gather is numerically broken
+    if on_gfx1250():
+        gather_src = gather_idx.to(torch.long) // topk
+        hidden_states = hidden_states[gather_src]
+        gather_idx = None
+
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
         hidden_states,
@@ -199,12 +276,11 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # Requires AITER and GFX950
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-        return on_gfx950()
+        return on_gfx950() or on_gfx1250()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
