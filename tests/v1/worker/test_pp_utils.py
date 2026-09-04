@@ -5,14 +5,18 @@
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 from unittest.mock import Mock
 
 import numpy as np
 import pytest
 
 from vllm.v1.worker.gpu import pp_utils
-from vllm.v1.worker.gpu.pp_utils import PendingRecv, PPHandler
+from vllm.v1.worker.gpu.pp_utils import (
+    PendingRecv,
+    PPHandler,
+    compute_need_sampled_mask,
+)
 
 
 def _batch(num_computed, prefill_len, num_scheduled):
@@ -101,6 +105,11 @@ def _make_queue_handler(
     handler = PPHandler.__new__(PPHandler)
     handler.queue = deque([None] * pp_size)
     handler.recv_launch_delay = delay
+    handler.num_deferred_recv_launches = 0
+    handler.num_idle_boundaries = 0
+    handler.num_idle_flushes = 0
+    handler.num_idle_flushed_receives = 0
+    handler.num_consume_fallbacks = 0
 
     launches: list[tuple[int, int]] = []
     current_step = -1
@@ -132,7 +141,7 @@ def test_deferred_receive_launch_and_consume_cadence(pp_size: int, delay: int) -
             fake_slot = cast(_FakeSlot, due_slot)
             consumed.append((fake_slot.sequence, step))
         if step < num_origin_steps:
-            handler.queue[-1] = cast(PendingRecv, _FakeSlot(step))
+            handler._queue_receive(cast(PendingRecv, _FakeSlot(step)))
 
     assert launches == [(origin, origin + delay) for origin in range(num_origin_steps)]
     assert consumed == [
@@ -151,7 +160,7 @@ def test_deferred_receive_empty_steps_preserve_collective_order() -> None:
         if due_slot is not None:
             consumed.append(cast(_FakeSlot, due_slot).sequence)
         if step in sampled_steps:
-            handler.queue[-1] = cast(PendingRecv, _FakeSlot(step))
+            handler._queue_receive(cast(PendingRecv, _FakeSlot(step)))
 
     assert [sequence for sequence, _ in launches] == sorted(sampled_steps)
     assert consumed == sorted(sampled_steps)
@@ -169,6 +178,70 @@ def test_flush_pending_collectives_is_idempotent() -> None:
     assert handler.flush_pending_collectives() == 2
     assert handler.flush_pending_collectives() == 0
     assert launches == [(0, 7), (1, 7)]
+
+
+def test_immediate_receive_launches_at_origin_step() -> None:
+    handler, launches, set_current_step = _make_queue_handler(pp_size=4, delay=0)
+    set_current_step(3)
+
+    handler._queue_receive(cast(PendingRecv, _FakeSlot(3)))
+
+    assert launches == [(3, 3)]
+
+
+def test_idle_flush_is_counted() -> None:
+    handler, launches, set_current_step = _make_queue_handler(pp_size=4, delay=3)
+    handler.is_last_rank = False
+    handler.queue[-1] = cast(PendingRecv, _FakeSlot(0))
+    set_current_step(1)
+
+    assert handler.flush_pending_collectives(reason="idle") == 1
+    assert handler.num_idle_boundaries == 1
+    assert handler.num_idle_flushes == 1
+    assert handler.num_idle_flushed_receives == 1
+    assert launches == [(0, 1)]
+
+
+def test_consume_fallback_is_counted() -> None:
+    handler, launches, set_current_step = _make_queue_handler(pp_size=4, delay=3)
+    slot = cast(PendingRecv, _FakeSlot(0))
+    set_current_step(4)
+
+    handler._ensure_receive_launched(slot)
+
+    assert handler.num_consume_fallbacks == 1
+    assert launches == [(0, 4)]
+
+
+@pytest.mark.parametrize(
+    ("old_computed", "scheduled", "prefill_len", "max_seq_len", "expected"),
+    [
+        (0, 64, 128, 256, None),  # Non-final chunked prefill.
+        (0, 128, 128, 129, None),  # The first sample finishes the request.
+        (0, 128, 128, 130, [True]),  # Another decode step needs feedback.
+    ],
+)
+def test_compute_need_sampled_mask_is_shared_skip_predicate(
+    old_computed: int,
+    scheduled: int,
+    prefill_len: int,
+    max_seq_len: int,
+    expected: list[bool] | None,
+) -> None:
+    input_batch = type(
+        "InputBatchStub",
+        (),
+        {
+            "num_computed_tokens_np": np.array([old_computed]),
+            "prefill_len_np": np.array([prefill_len]),
+            "max_seq_len_np": np.array([max_seq_len]),
+            "num_scheduled_tokens": np.array([scheduled]),
+        },
+    )()
+
+    result = compute_need_sampled_mask(cast(Any, input_batch))
+
+    assert (None if result is None else result.tolist()) == expected
 
 
 def test_last_rank_has_no_receives_to_flush() -> None:
