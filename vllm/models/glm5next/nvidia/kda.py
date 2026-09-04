@@ -239,7 +239,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # Lazily-built merged q|k|v conv weight (built on first forward, after
         # weights are loaded). See _forward.
         self._merged_conv_weight: torch.Tensor | None = None
-        self._merged_conv_weight_key: tuple[tuple[int, int], ...] | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -284,31 +283,33 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self._conv_state_dim_first = is_conv_state_dim_first()
 
     def _get_merged_conv_weight(self) -> torch.Tensor:
-        source_weights = (
-            self.q_conv1d.weight,
-            self.k_conv1d.weight,
-            self.v_conv1d.weight,
-        )
-        cache_key = tuple(
-            (weight.data_ptr(), weight._version) for weight in source_weights
-        )
-        if (
-            self._merged_conv_weight is None
-            or self._merged_conv_weight_key != cache_key
-        ):
+        """Return the merged q|k|v convolution weight, building it lazily.
 
-            def _w(weight: torch.Tensor) -> torch.Tensor:
-                return weight.view(weight.size(0), weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(weight) for weight in source_weights], dim=0
+        The merged tensor is rebuilt only when explicitly invalidated via
+        ``invalidate_merged_conv_weight``, which is invoked before every
+        ``load_weights`` call so online refits always observe fresh weights.
+        """
+        if self._merged_conv_weight is None:
+            source_weights = (
+                self.q_conv1d.weight,
+                self.k_conv1d.weight,
+                self.v_conv1d.weight,
+            )
+            merged = torch.cat(
+                [
+                    weight.view(weight.size(0), weight.size(2))
+                    for weight in source_weights
+                ],
+                dim=0,
             ).contiguous()
-            self._merged_conv_weight_key = cache_key
+            self._merged_conv_weight = merged
         return self._merged_conv_weight
 
     def invalidate_merged_conv_weight(self) -> None:
+        """Drop the cached merged convolution weight so it is rebuilt from the
+        current q/k/v weights on the next forward call.
+        """
         self._merged_conv_weight = None
-        self._merged_conv_weight_key = None
 
     def forward(
         self,
@@ -412,8 +413,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # One merged short-conv over q|k|v instead of three separate calls. The
         # 1D conv is independent per channel, so concatenating q/k/v along the
         # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # cached while refreshing automatically when a source weight changes.
+        # three calls. The merged weight is q|k|v conv weights concatenated and
+        # cached; it is invalidated before weight loading so refits rebuild it.
         # conv_state is already stored as the merged q|k|v state, so it is used
         # directly.
         conv_weights = self._get_merged_conv_weight()

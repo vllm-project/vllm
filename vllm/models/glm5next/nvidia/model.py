@@ -651,6 +651,9 @@ class Glm5NextModel(nn.Module):
         )
 
     def invalidate_kda_conv_weight_caches(self) -> None:
+        """Drop all cached merged KDA convolution weights so they are rebuilt
+        from the current q/k/v weights on the next forward call.
+        """
         for layer in self.layers:
             self_attn = getattr(layer, "self_attn", None)
             if isinstance(self_attn, Glm5NextLinearAttention):
