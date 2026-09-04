@@ -33,7 +33,7 @@ pub struct RenderConfig {
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    pub max_model_len: u32,
+    pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
     pub tls: Option<TlsConfig>,
 }
@@ -77,7 +77,11 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .context("failed to load renderer/tokenizer backends")?;
     let served_model_names =
         crate::effective_served_model_names(&config.model, &config.served_model_name);
-    let text = TextRequestProcessor::new(loaded.text_backend, config.max_model_len)
+    let max_model_len = resolve_max_model_len(
+        config.max_model_len,
+        loaded.text_backend.derived_max_model_len(),
+    )?;
+    let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
         config.tool_call_parser.clone(),
@@ -89,6 +93,13 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         text,
         chat,
     }))
+}
+
+/// Resolve `max_model_len` from the CLI flag or the HF config. Errors when
+/// neither source provides a value (unlike Python, which falls back to 2048).
+fn resolve_max_model_len(cli: Option<u32>, derived: Option<u32>) -> Result<u32> {
+    cli.or(derived)
+        .context("failed to derive max_model_len; pass --max-model-len explicitly")
 }
 
 /// Run the text-only preprocessing server without starting or connecting
@@ -138,6 +149,15 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn resolve_max_model_len_errors_when_neither_cli_nor_config_has_value() {
+        let err = resolve_max_model_len(None, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("max_model_len"),
+            "expected max_model_len error, got: {err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn serve_render_rejects_unknown_parser_before_startup() {
         let shutdown = CancellationToken::new();
@@ -154,7 +174,7 @@ mod tests {
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: 128,
+                max_model_len: Some(128),
                 max_logprobs: None,
                 tls: None,
             },

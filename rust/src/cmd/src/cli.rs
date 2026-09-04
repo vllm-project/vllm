@@ -141,7 +141,7 @@ pub struct RenderArgs {
     chat_template_content_format: ChatTemplateContentFormatOption,
     /// Maximum model context length used for request validation.
     #[arg(long)]
-    max_model_len: u32,
+    max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
