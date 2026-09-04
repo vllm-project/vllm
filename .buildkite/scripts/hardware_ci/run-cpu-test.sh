@@ -16,11 +16,14 @@ TEST_COMMAND=$2
 # DISK_USAGE_THRESHOLD percent, and cap the shared BuildKit cache at
 # BUILDKIT_CACHE_MAX so subsequent builds keep reusing the hottest layers.
 DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-70}
-BUILDKIT_CACHE_MAX=${BUILDKIT_CACHE_MAX:-80GB}
+BUILDKIT_CACHE_MAX=${BUILDKIT_CACHE_MAX:-200GB}
 
 # Reclaim disk only when the host is under pressure. We trim (not purge) the
 # shared BuildKit cache so cross-job/cross-agent reuse stays intact, and only
 # touch dangling images; other agents' uniquely tagged images are left alone.
+# Cache mounts (exec.cachemount: uv/cargo/apt) are excluded so they survive
+# pruning -- they're what let installs reuse packages instead of hitting the
+# network, and are otherwise reclaimable like any other build cache record.
 prune_if_disk_pressure() {
     local docker_root disk_usage
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
@@ -31,7 +34,7 @@ prune_if_disk_pressure() {
     if [ "${disk_usage:-0}" -gt "$DISK_USAGE_THRESHOLD" ]; then
         echo "--- :broom: Disk usage ${disk_usage}% exceeds ${DISK_USAGE_THRESHOLD}%, reclaiming space"
         docker image prune -f || true
-        docker builder prune -f --keep-storage="$BUILDKIT_CACHE_MAX" || true
+        docker builder prune -f --keep-storage="$BUILDKIT_CACHE_MAX" --filter type!=exec.cachemount || true
     else
         echo "Disk usage ${disk_usage:-unknown}% within ${DISK_USAGE_THRESHOLD}% threshold; skipping prune"
     fi
