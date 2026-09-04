@@ -1396,6 +1396,7 @@ def _member_worker(
     worker = _StubWriterWorker.fresh()
     worker.pp_size = pp_size
     worker.dcp_size = 1
+    worker.block_size = 16
     worker._has_mamba = False
     worker._is_hma_required = is_hma
     worker._layer_name_to_kv_group_index = group_by_member
@@ -1571,6 +1572,25 @@ def test_set_region_members_rejects_duplicate_local_member():
 def test_set_region_members_rejects_layer_outside_any_kv_group():
     with pytest.raises(AssertionError, match="outside any local group"):
         _member_worker([["a"], ["b"]], {"a": 0})
+
+
+@pytest.mark.parametrize(
+    ("local_block_size", "remote_block_size"),
+    [(32, 16), (16, 32)],
+)
+def test_attention_member_routing_rejects_heterogeneous_block_sizes(
+    local_block_size: int, remote_block_size: int
+):
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    metadata.block_size = remote_block_size
+    worker = _member_worker([["a"]], {"a": 0})
+    worker.block_size = local_block_size
+    remote_info = worker.transfer_topo.get_engine_info.return_value
+    remote_info.remote_tp_size = 1
+    remote_info.remote_dcp_size = 1
+
+    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
+        worker._validate_remote_agent_handshake(metadata, 1)
 
 
 def test_attention_member_routing_rejects_decode_tp_fanout():

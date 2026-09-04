@@ -2113,11 +2113,15 @@ class NixlBaseConnectorWorker:
             f"remote={remote_dcp_size} (engine {remote_engine_id})."
         )
 
+        member_order = bool(self._member_local_regions)
+        if member_order and self.block_size != nixl_agent_meta.block_size:
+            raise NotImplementedError(
+                "Attention-HMA push requires identical P/D block sizes."
+            )
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
             nixl_agent_meta.block_size
         )
-        member_order = bool(self._member_local_regions)
         if member_order and tp_ratio < 0 and not self.use_mla:
             raise NotImplementedError(
                 "Attention-HMA push does not support decode TP greater than "
