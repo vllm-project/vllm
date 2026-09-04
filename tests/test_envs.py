@@ -68,6 +68,14 @@ def test_scale_out_endpoints_flag_treats_empty_as_unset(
     assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
 
 
+def test_trtllm_nvfp4_moe_max_chunk_size(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE", raising=False)
+    assert envs.VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE is None
+
+    monkeypatch.setenv("VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE", "32319")
+    assert envs.VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE == 32319
+
+
 @pytest.mark.parametrize("value", ["-1", "2", "01", "+1", "invalid", " "])
 def test_scale_out_endpoints_flag_rejects_values_other_than_zero_or_one(
     monkeypatch: pytest.MonkeyPatch, value: str

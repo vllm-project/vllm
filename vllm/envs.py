@@ -219,6 +219,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE: int | None = None
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1755,6 +1756,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # Cap the number of input tokens processed by one TRTLLM NVFP4 MoE kernel
+    # invocation. Lower values reduce peak activation memory at the cost of
+    # additional kernel launches. Unset keeps the backend's default safe cap.
+    "VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE": lambda: (
+        int(value)
+        if (value := os.getenv("VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE")) is not None
+        else None
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for

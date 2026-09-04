@@ -9,6 +9,8 @@ and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
 intermediate_size 704) that exercises the non-256-aligned padding path.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -21,6 +23,7 @@ from tests.kernels.quantization.nvfp4_utils import (
 )
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp, op_registry
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp, SituAndMul
@@ -105,6 +108,45 @@ ACTIVATION_CASES = [
     ),
     pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, id="gelu"),
 ]
+
+
+@pytest.mark.parametrize(
+    ("configured_max", "topk", "num_experts", "expected"),
+    [
+        (None, 16, 896, 300000),
+        (32319, 16, 896, 32319),
+        (400000, 16, 896, 300000),
+        (100000, 128, 896, 64646),
+    ],
+)
+def test_trtllm_nvfp4_moe_max_chunk_size(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_max: int | None,
+    topk: int,
+    num_experts: int,
+    expected: int,
+):
+    monkeypatch.setattr(envs, "VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE", configured_max)
+    experts = object.__new__(TrtLlmNvFp4ExpertsModular)
+    experts.topk = topk
+    experts.moe_config = SimpleNamespace(num_experts=num_experts)
+
+    assert experts._get_chunk_size() == expected
+
+
+@pytest.mark.parametrize("configured_max", [0, -1])
+def test_trtllm_nvfp4_moe_max_chunk_size_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, configured_max: int
+):
+    monkeypatch.setattr(envs, "VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE", configured_max)
+    experts = object.__new__(TrtLlmNvFp4ExpertsModular)
+    experts.topk = 16
+    experts.moe_config = SimpleNamespace(num_experts=896)
+
+    with pytest.raises(
+        ValueError, match="VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE must be"
+    ):
+        experts._get_chunk_size()
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
