@@ -128,7 +128,6 @@ For example:
 **8. MoE:**
 
 ```python
---8<-- "vllm/model_executor/layers/fused_moe/layer.py:fused_moe"
 
 --8<-- "vllm/model_executor/layers/fused_moe/fused_moe_modular_method.py:modular_fused_moe"
 
