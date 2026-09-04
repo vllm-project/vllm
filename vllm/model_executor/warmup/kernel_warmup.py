@@ -13,9 +13,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (
-    warmup_flashinfer_pcie_ipc_allreduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
@@ -37,7 +34,16 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
+    qwen4_exp_qsa_triton_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.replayssm_warmup import (
+    replayssm_autotune_warmup,
+)
+from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
+    spec_decode_rejection_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -108,6 +114,12 @@ def _warmup_kimi_k3_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
 
 
+def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
+    module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
+    if module is not None:
+        module.autotune_kda_qkvg(model)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -154,6 +166,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
+        spec_decode_rejection_warmup(worker)
+        qwen4_exp_qsa_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
@@ -187,7 +201,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
-    warmup_flashinfer_pcie_ipc_allreduce(worker)
+    # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
+    # which initializes CUDA at import time and must not run at module scope.
+    if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+        from vllm.distributed.device_communicators import (
+            flashinfer_pcie_ipc_all_reduce,
+        )
+
+        flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -335,6 +356,8 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
             _run_flashinfer_autotune_dummy_runs(runner)
+            replayssm_autotune_warmup(runner)
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
         set_autotune_process_group(None)
 
