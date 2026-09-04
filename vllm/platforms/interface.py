@@ -858,9 +858,29 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             )
-            attn_page_size_1_token = backend_cls.customize_spec(
-                attn_spec
-            ).page_size_bytes
+            aligned_spec = backend_cls.customize_spec(attn_spec)
+            if aligned_spec.state_content_bytes is None and kv_quant_mode.is_nvfp4:
+                # A backend that does not customize the nvfp4 page geometry
+                # would otherwise size the block against a page that does not
+                # exist. Same geometry as FlashInferBackend.customize_spec:
+                # K and V in separate head slots, head // 2 + head // 16 bytes
+                # per row (fp4 data plus fp8 block scales).
+                from dataclasses import replace
+
+                from vllm.utils.torch_utils import (
+                    get_dtype_size,
+                    nvfp4_kv_cache_full_dim,
+                )
+
+                aligned_spec = replace(
+                    aligned_spec,
+                    num_head_slots=2 * aligned_spec.num_kv_heads,
+                    state_content_bytes=(
+                        nvfp4_kv_cache_full_dim(aligned_spec.head_size)
+                        * get_dtype_size(aligned_spec.dtype)
+                    ),
+                )
+            attn_page_size_1_token = aligned_spec.page_size_bytes
 
         # Compute mamba page size
         model_cls, _ = ModelRegistry.resolve_model_cls(
