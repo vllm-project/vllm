@@ -846,6 +846,7 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    supports_multi_step_drafting = True
 
     def __init__(
         self,

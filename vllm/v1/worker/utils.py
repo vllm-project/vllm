@@ -317,6 +317,10 @@ class AttentionGroup:
     def supports_draft_decode_metadata_update(self) -> bool:
         return self.get_metadata_builder().supports_draft_decode_metadata_update
 
+    @property
+    def supports_multi_step_drafting(self) -> bool:
+        return self.get_metadata_builder().supports_multi_step_drafting
+
     def update_draft_decode_metadata(
         self,
         attn_metadata: Mapping[str, Any],

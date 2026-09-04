@@ -441,6 +441,7 @@ class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+    supports_multi_step_drafting = True
 
     def __init__(
         self,

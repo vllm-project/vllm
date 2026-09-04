@@ -75,6 +75,7 @@ class RocmAttentionMetadata:
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    supports_multi_step_drafting = True
 
     def __init__(
         self,

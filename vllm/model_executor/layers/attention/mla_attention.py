@@ -2171,6 +2171,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
 
     kv_cache_spec: AttentionSpec
+    supports_multi_step_drafting = True
 
     # Defines the level of query length support for this backend.
     # - SINGLE_ONLY: Only single-token queries (no spec decode support)
