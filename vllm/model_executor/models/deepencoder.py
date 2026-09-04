@@ -16,12 +16,14 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import flex_attention
 from transformers import CLIPVisionConfig
 
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 
 from .clip import CLIPEncoder, CLIPVisionEmbeddings
 from .utils import AutoWeightsLoader
@@ -264,6 +266,28 @@ class Block(nn.Module):
         return x
 
 
+_flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
+
+
+def _flex_attention_with_decomposed_rel_pos(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    rel_h: torch.Tensor,
+    rel_w: torch.Tensor,
+    key_width: int,
+) -> torch.Tensor:
+    compact_h = rel_h.squeeze(-1)
+    compact_w = rel_w.squeeze(-2)
+
+    def score_mod(score, b, h, q_idx, kv_idx):
+        key_h = kv_idx // key_width
+        key_w = kv_idx % key_width
+        return score + compact_h[b, h, q_idx, key_h] + compact_w[b, h, q_idx, key_w]
+
+    return _flex_attention_compiled(q, k, v, score_mod=score_mod)
+
+
 # --8<-- [start:rel_pos_attention]
 @PluggableLayer.register("rel_pos_attention")
 class RelPosAttention(PluggableLayer):
@@ -333,14 +357,18 @@ class RelPosAttention(PluggableLayer):
             rel_w = rel_w.view(
                 B, self.num_heads, rel_w.size(1), rel_w.size(2), rel_w.size(3)
             )
-            attn_bias = (rel_h + rel_w).view(
-                B, self.num_heads, rel_h.size(2), rel_h.size(3) * rel_w.size(4)
-            )
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_bias
-            )
+            if current_platform.is_cuda() and q.is_cuda:
+                x = _flex_attention_with_decomposed_rel_pos(q, k, v, rel_h, rel_w, W)
+            else:
+                attn_bias = (rel_h + rel_w).view(
+                    B,
+                    self.num_heads,
+                    rel_h.size(2),
+                    rel_h.size(3) * rel_w.size(4),
+                )
+                x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias)
         else:
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+            x = F.scaled_dot_product_attention(q, k, v)
 
         x = (
             x.view(B, self.num_heads, H, W, -1)
