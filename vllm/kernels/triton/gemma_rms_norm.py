@@ -60,7 +60,16 @@ def gemma_rms_norm_supported(
         return False
     if weight.shape != x.shape[-1:] or weight.stride(-1) != 1:
         return False
-    return residual is None or (residual.shape == x.shape and residual.stride(-1) == 1)
+    if residual is None:
+        return True
+    if residual.shape != x.shape or residual.dtype != x.dtype:
+        return False
+    if residual.stride(-1) != 1:
+        return False
+    return all(
+        residual.stride(i) == residual.size(i + 1) * residual.stride(i + 1)
+        for i in range(residual.dim() - 2)
+    )
 
 
 def gemma_rms_norm(

@@ -7,6 +7,7 @@ import torch
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import fp8_allclose, fp8_ulp_distance, opcheck
 from vllm import ir
+from vllm.kernels.triton.gemma_rms_norm import gemma_rms_norm_supported
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -272,6 +273,41 @@ def test_gemma_rms_norm(
         ref_out = layer.forward_native(x)
         out = layer(x)
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_gemma_rms_norm_layouts_off_the_fused_path(default_vllm_config) -> None:
+    device = CUDA_DEVICES[0]
+    torch.set_default_device(device)
+    hidden_size = 128
+    layer = GemmaRMSNorm(hidden_size, eps=1e-6).to(dtype=torch.bfloat16)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+
+    def sliced(seed: int) -> torch.Tensor:
+        set_random_seed(seed)
+        return torch.randn((4, 3, hidden_size), dtype=torch.bfloat16)[::2]
+
+    assert not gemma_rms_norm_supported(sliced(0), layer.weight.data, sliced(1))
+    ref = layer.forward_native(sliced(0), sliced(1))
+    out = layer(sliced(0), sliced(1))
+    torch.testing.assert_close(out[0], ref[0], atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out[1], ref[1], atol=1e-2, rtol=1e-2)
+
+    x = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    residual = torch.randn(4, hidden_size, dtype=torch.float32)
+    assert not gemma_rms_norm_supported(x, layer.weight.data, residual)
+    ref = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    assert out[1].dtype == ref[1].dtype
+    torch.testing.assert_close(out[0], ref[0], atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(out[1], ref[1], atol=1e-2, rtol=1e-2)
+
+    set_random_seed(0)
+    weight = torch.randn(1, dtype=torch.bfloat16).expand(hidden_size)
+    layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+    x = torch.randn(4, hidden_size, dtype=torch.bfloat16)
+    assert not gemma_rms_norm_supported(x, weight, None)
+    torch.testing.assert_close(layer(x), layer.forward_native(x), atol=1e-2, rtol=1e-2)
 
 
 @torch.inference_mode()
