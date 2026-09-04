@@ -29,7 +29,12 @@ import pickle
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import (
+    AbstractContextManager,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
@@ -2321,13 +2326,10 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
-        torch.accelerator.empty_cache()
-        try:
+        with suppress(RuntimeError, AttributeError):
+            torch.accelerator.empty_cache()
+        with suppress(RuntimeError, AttributeError):
             torch.accelerator.empty_host_cache()
-        except AttributeError:
-            logger.warning(
-                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
-            )
 
     logger.debug_once("[shutdown] Distributed: cleanup complete")
 
