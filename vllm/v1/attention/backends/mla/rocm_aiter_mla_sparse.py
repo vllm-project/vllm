@@ -864,6 +864,12 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
             ):
                 supported_head_buckets = (16, 128)
                 head_dtype_name = "FP8"
+            else:
+                raise ValueError(
+                    "ROCm AITER MLA attention sinks require query and KV to "
+                    "both use BF16 or both use FP8, got "
+                    f"query={q.dtype}, KV={kv_c_and_k_pe_cache.dtype}"
+                )
 
         if supported_head_buckets is not None:
             from vllm.platforms.rocm import on_mi3xx

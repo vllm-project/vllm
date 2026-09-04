@@ -159,6 +159,44 @@ def test_sparse_mla_sink_matches_ragged_reference(
     )
 
 
+@pytest.mark.parametrize(
+    ("q_dtype", "kv_dtype"),
+    [
+        (torch.float16, torch.float16),
+        (torch.float16, torch.bfloat16),
+        (torch.bfloat16, torch.float16),
+    ],
+)
+def test_sparse_mla_sink_rejects_unsupported_aiter_dtypes(
+    q_dtype: torch.dtype, kv_dtype: torch.dtype
+) -> None:
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        ROCMAiterMLASparseImpl,
+    )
+
+    impl = object.__new__(ROCMAiterMLASparseImpl)
+    impl.num_heads = 16
+    impl.kv_lora_rank = V_HEAD_DIM
+    impl.kv_cache_dtype = "auto"
+    impl.scale = SM_SCALE
+    impl.sinks = torch.zeros(16, dtype=torch.float32)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=0,
+        num_decodes=1,
+        num_decode_tokens=1,
+        max_query_len=1,
+    )
+
+    with pytest.raises(ValueError, match="both use BF16 or both use FP8"):
+        impl._forward_mla(
+            SimpleNamespace(_q_scale=None, _k_scale=None),
+            torch.empty(1, 16, Q_HEAD_DIM, dtype=q_dtype),
+            torch.empty(1, 1, Q_HEAD_DIM, dtype=kv_dtype),
+            metadata,
+        )
+
+
 def _make_noncontiguous_sink() -> torch.Tensor:
     return torch.empty(8, dtype=torch.float32)[::2]
 
