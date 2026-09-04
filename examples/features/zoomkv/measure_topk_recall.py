@@ -64,11 +64,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--output-json", default=None)
     # Retrieval knobs (defaults mirror ZoomKVRuntimeConfig).
-    parser.add_argument("--quest-large-ratio", type=float, default=0.5)
-    parser.add_argument("--quest-small-ratio", type=float, default=0.3)
-    parser.add_argument("--dense-ratio", type=float, default=0.4)
     parser.add_argument("--dense-topk", type=int, default=8)
     parser.add_argument("--sparse-topk", type=int, default=4)
+    parser.add_argument("--chunk-candidates", type=int, default=200)
+    parser.add_argument("--dense-chunks", type=int, default=60)
     return parser.parse_args()
 
 
@@ -272,11 +271,9 @@ def main() -> None:
             zoomkv_sink_size=64,
             zoomkv_local_size=256,
             zoomkv_final_topk=args.final_topk,
-            zoomkv_quest_chunk=16,
-            zoomkv_quest_large_chunk=256,
-            zoomkv_quest_large_ratio=args.quest_large_ratio,
-            zoomkv_quest_small_ratio=args.quest_small_ratio,
-            zoomkv_dense_ratio=args.dense_ratio,
+            zoomkv_chunk_size=16,
+            zoomkv_chunk_candidates=args.chunk_candidates,
+            zoomkv_dense_chunks=args.dense_chunks,
             zoomkv_dense_topk=args.dense_topk,
             zoomkv_sparse_topk=args.sparse_topk,
             zoomkv_full_attention_threshold=args.threshold,
@@ -329,9 +326,8 @@ def main() -> None:
     summary["output_tokens"] = args.output_tokens
     summary["final_topk"] = args.final_topk
     summary["retrieval_config"] = {
-        "quest_large_ratio": args.quest_large_ratio,
-        "quest_small_ratio": args.quest_small_ratio,
-        "dense_ratio": args.dense_ratio,
+        "chunk_candidates": args.chunk_candidates,
+        "dense_chunks": args.dense_chunks,
         "dense_topk": args.dense_topk,
         "sparse_topk": args.sparse_topk,
     }

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ from vllm.config import (
 from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 DEVICE_TYPE = current_platform.device_type
@@ -76,6 +78,39 @@ def _create_vllm_config(
 
 
 class TestCudagraphDispatcher:
+    def test_zoomkv_context_bucket_keys(self):
+        comp_config = CompilationConfig(
+            cudagraph_mode="FULL_DECODE_ONLY",
+            mode=CompilationMode.NONE,
+            cudagraph_capture_sizes=[1, 8],
+        )
+        config = _create_vllm_config(comp_config, max_num_seqs=8)
+        config.attention_config = SimpleNamespace(
+            backend=AttentionBackendEnum.ZOOMKV
+        )
+        config.model_config = SimpleNamespace(max_model_len=131072)
+
+        dispatcher = CudagraphDispatcher(config)
+        dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode=comp_config.cudagraph_mode,
+            uniform_decode_query_len=1,
+        )
+
+        assert dispatcher.zoomkv_chunk_buckets == (1024, 2048, 4096, 8192)
+        assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 8
+        assert dispatcher.get_zoomkv_chunk_bucket(12000) == 1024
+        assert dispatcher.get_zoomkv_chunk_bucket(25000) == 2048
+        assert dispatcher.get_zoomkv_chunk_bucket(50000) == 4096
+        assert dispatcher.get_zoomkv_chunk_bucket(90000) == 8192
+
+        mode, desc = dispatcher.dispatch(
+            num_tokens=8,
+            uniform_decode=True,
+            attention_chunk_bucket=4096,
+        )
+        assert mode == CUDAGraphMode.FULL
+        assert desc.attention_chunk_bucket == 4096
+
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,lora_config",
         [

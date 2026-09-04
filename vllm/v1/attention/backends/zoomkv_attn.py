@@ -3,8 +3,8 @@
 """ZoomKV V1 attention backend.
 
 Dense prefill / short-context decode use FlashAttention over the Triton
-paged KV layout. Long-context single-token decode runs hierarchical
-Quest + KIVI retrieval over physical-block block_summaries, then
+paged KV layout. Long-context single-token decode runs chunk-mean + KIVI
+retrieval over physical-block block summaries, then
 non-causal attention over sink + local + Top-K tokens.
 """
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
@@ -48,11 +48,13 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.zoomkv import recall_probe as _zoomkv_recall
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.paged import (
+    _aligned_local_start_scalar,
     assemble_sparse_context_indices,
     assemble_sparse_context_indices_batch,
     gather_kv_by_logical_indices,
     gather_kv_by_logical_indices_batch,
     gather_kv_from_topk_batch,
+    gather_kv_hot_and_cpu_topk,
     gather_kv_hybrid,
     sparse_decode_attention,
     sparse_decode_attention_batch,
@@ -186,17 +188,16 @@ def _load_zoomkv_runtime_config(vllm_config: VllmConfig | None) -> ZoomKVRuntime
         local_size=getattr(attn, "zoomkv_local_size", 256),
         max_model_len=int(vllm_config.model_config.max_model_len),
         final_topk=getattr(attn, "zoomkv_final_topk", 100),
-        quest_chunk=getattr(attn, "zoomkv_quest_chunk", 16),
-        quest_large_chunk=getattr(attn, "zoomkv_quest_large_chunk", 256),
-        quest_large_ratio=getattr(attn, "zoomkv_quest_large_ratio", 0.5),
-        quest_small_ratio=getattr(attn, "zoomkv_quest_small_ratio", 0.3),
-        dense_ratio=getattr(attn, "zoomkv_dense_ratio", 0.4),
+        chunk_size=getattr(attn, "zoomkv_chunk_size", 16),
+        chunk_candidates=getattr(attn, "zoomkv_chunk_candidates", 200),
+        dense_chunks=getattr(attn, "zoomkv_dense_chunks", 60),
         dense_topk=getattr(attn, "zoomkv_dense_topk", 8),
         sparse_topk=getattr(attn, "zoomkv_sparse_topk", 4),
         full_attention_threshold=getattr(attn, "zoomkv_full_attention_threshold", 2000),
         dense_fallback=getattr(attn, "zoomkv_dense_fallback", False),
         strict_kernels=strict,
         enable_offload=getattr(attn, "zoomkv_enable_offload", False),
+        offload_unit_tokens=getattr(attn, "zoomkv_offload_unit_tokens", 64),
     )
 
 
@@ -206,9 +207,8 @@ def _graph_chunk_bucket(cfg: ZoomKVRuntimeConfig, block_size: int) -> int:
     local_start = max(cfg.sink_size, cfg.max_model_len - cfg.local_size)
     max_chunks = max(1, local_start // block_size - start_block)
     # Graph shapes are already static; unlike eager scratch buckets, they do
-    # not need power-of-two rounding. Align only to a complete parent group.
-    factor = cfg.hq_factor
-    return max(factor, ((max_chunks + factor - 1) // factor) * factor)
+    # not need power-of-two rounding.
+    return max_chunks
 
 
 @dataclass
@@ -277,10 +277,10 @@ class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
             raise ValueError(
                 f"ZoomKV requires --block-size 16 (got {kv_cache_spec.block_size})"
             )
-        if self.zoomkv.quest_chunk != 16:
+        if self.zoomkv.chunk_size != 16:
             raise ValueError(
-                "ZoomKV first release requires zoomkv_quest_chunk=16 "
-                f"(got {self.zoomkv.quest_chunk})"
+                "ZoomKV requires zoomkv_chunk_size=16 "
+                f"(got {self.zoomkv.chunk_size})"
             )
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
         self.graph_chunk_bucket = _graph_chunk_bucket(
@@ -288,10 +288,10 @@ class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
         )
         logger.info_once(
             "ZoomKV GPU-only CUDA Graph retrieval capacity: %d child chunks "
-            "(max_model_len=%d, max_small_candidates=%d)",
+            "(max_model_len=%d, chunk_candidates=%d)",
             self.graph_chunk_bucket,
             self.zoomkv.max_model_len,
-            self.zoomkv.max_small_candidates,
+            self.zoomkv.chunk_candidates,
         )
         # Preallocate once; sparse decode writes into these buffers instead of
         # allocating temporary Top-K / context index tensors per request.
@@ -412,7 +412,11 @@ class ZoomKVMetadataBuilder(FlashAttentionMetadataBuilder):
             "use_sparse": use_sparse,
             "use_mixed_sparse": use_mixed_sparse,
             "is_cudagraph_capture": False,
-            "graph_chunk_bucket": None,
+            "graph_chunk_bucket": (
+                self.graph_chunk_bucket
+                if use_sparse or use_mixed_sparse
+                else None
+            ),
             "topk_indices_buffer": self.topk_indices_buffer,
             "context_indices_buffer": self.context_indices_buffer,
         }
@@ -563,10 +567,34 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         except Exception:
             self._runtime_cfg = _load_zoomkv_runtime_config(None)
 
+    _shared_retrievers: ClassVar[dict[tuple[Any, ...], ZoomKVRetriever]] = {}
+
     def _get_retriever(self, cfg: ZoomKVRuntimeConfig) -> ZoomKVRetriever:
-        if self._retriever is None or self._retriever.cfg != cfg:
-            self._retriever = ZoomKVRetriever(cfg)
-        return self._retriever
+        cfg_key = (
+            cfg.sink_size,
+            cfg.local_size,
+            cfg.max_model_len,
+            cfg.final_topk,
+            cfg.chunk_size,
+            cfg.chunk_candidates,
+            cfg.dense_chunks,
+            cfg.dense_topk,
+            cfg.sparse_topk,
+            cfg.full_attention_threshold,
+            cfg.dense_fallback,
+            cfg.strict_kernels,
+            cfg.enable_offload,
+            cfg.offload_unit_tokens,
+        )
+        retriever = self._shared_retrievers.get(cfg_key)
+        if retriever is None:
+            retriever = ZoomKVRetriever(cfg)
+            self._shared_retrievers[cfg_key] = retriever
+        elif retriever.cfg != cfg:
+            retriever = ZoomKVRetriever(cfg)
+            self._shared_retrievers[cfg_key] = retriever
+        self._retriever = retriever
+        return retriever
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
@@ -593,8 +621,6 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
         block_table: torch.Tensor | None = None,
         seq_lens: torch.Tensor | None = None,
         num_reqs: int = 0,
-        scan_all_parents: bool = False,
-        graph_chunk_bucket: int | None = None,
     ) -> None:
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         triton_reshape_and_cache_flash(
@@ -628,45 +654,25 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             block_size=self.block_size,
             device=kv_cache.device,
             dtype=dtype,
-            blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
         )
         slots = slot_mapping.flatten()
         # Pure decode: metadata builder publishes whether any request just
         # completed a physical block (seq_len % block_size == 0). Skip the
         # conditional Triton launch on the other 15/16 decode steps.
         if self._step_need_summary_update:
-            start_b = cfg.sink_size // self.block_size
-            max_parents = None
-            if graph_chunk_bucket is not None:
-                max_parents = max(
-                    1, graph_chunk_bucket // block_summary.blocks_per_parent
-                )
-            parent_block_table = block_table
-            parent_seq_lens = seq_lens
-            if parent_seq_lens is not None and num_reqs > 0:
-                parent_seq_lens = parent_seq_lens[:num_reqs]
-                if parent_block_table is not None:
-                    parent_block_table = parent_block_table[:num_reqs]
-            else:
-                parent_block_table = None
-                parent_seq_lens = None
             with _zt.Stage("block_summary.update"):
-                block_summary.update_completed_slots(
-                    key_cache,
-                    slots,
-                    block_table=parent_block_table,
-                    start_block=start_b,
-                    seq_lens=parent_seq_lens,
-                    scan_all_parents=scan_all_parents,
-                    max_parents=max_parents,
-                )
+                block_summary.update_completed_slots(key_cache, slots)
 
-        # K+V offload: after block_summaries are built for completed blocks,
-        # async D2H the Key and Value pages. GPU pages are NOT zeroed here —
-        # this step's (and later prefill chunks') dense attention still reads
-        # them. Zeroing happens lazily in the sparse decode path (mark_cold).
+        # K+V offload: after block_summaries are built, async D2H completed
+        # retrieval-zone units. Sink / local / the in-flight write page stay
+        # GPU-only. GPU pages are NOT zeroed here — this step's (and later
+        # prefill chunks') dense FA still reads them. Zeroing happens lazily
+        # in the sparse decode path (mark_cold).
         if cfg.enable_offload:
-            from vllm.v1.attention.ops.zoomkv.offload import get_cpu_key_pool
+            from vllm.v1.attention.ops.zoomkv.offload import (
+                filter_completed_for_offload,
+                get_cpu_key_pool,
+            )
 
             pool = get_cpu_key_pool()
             if pool is not None:
@@ -678,13 +684,23 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                     )
                     offsets = torch.remainder(valid_slots, self.block_size)
                     complete = block_ids[offsets == (self.block_size - 1)].unique()
+                    if complete.numel() and block_table is not None and seq_lens is not None:
+                        complete = filter_completed_for_offload(
+                            complete,
+                            block_table[:num_reqs] if num_reqs > 0 else block_table,
+                            seq_lens[:num_reqs] if num_reqs > 0 else seq_lens,
+                            sink_size=cfg.sink_size,
+                            local_size=cfg.local_size,
+                            block_size=self.block_size,
+                            unit_tokens=cfg.offload_unit_tokens,
+                            num_reqs=num_reqs,
+                        )
                     if complete.numel():
                         with _zt.Stage("block_summary.offload"):
                             pool.offload_blocks_bulk(
                                 self._layer_name,
                                 key_cache,
                                 value_cache,
-                                block_summary,
                                 complete,
                             )
 
@@ -721,13 +737,6 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                     block_table=getattr(attn_metadata, "block_table", None),
                     seq_lens=getattr(attn_metadata, "seq_lens", None),
                     num_reqs=getattr(attn_metadata, "num_reqs", 0),
-                    scan_all_parents=(
-                        getattr(attn_metadata, "num_prefills", 0) > 0
-                        or getattr(attn_metadata, "max_query_len", 1) != 1
-                    ),
-                    graph_chunk_bucket=getattr(
-                        attn_metadata, "graph_chunk_bucket", None
-                    ),
                 )
 
         with _zt.Stage("sparse.route"):
@@ -1031,7 +1040,6 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 dtype=dtype
                 if dtype in (torch.float16, torch.bfloat16)
                 else torch.bfloat16,
-                blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
             )
             retriever = self._get_retriever(cfg)
             q_start = (
@@ -1080,11 +1088,8 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             else:
                 phys_ids = torch.empty(0, dtype=torch.int64, device=q.device)
 
-            # Host copy of this request's visible block ids (fetched once per
-            # step for the whole batch, shared across layers).
             n_blocks_total = (seq_len + self.block_size - 1) // self.block_size
             bt_row_cpu = self._block_table_cpu(attn_metadata)[req_i]
-            full_ids = bt_row_cpu[:n_blocks_total].tolist()
             # Content-anchored summary-cache key: the batch index alone is
             # not a request identity (requests reorder in the persistent
             # batch, and prefix-cache hits skip the big prefill that used to
@@ -1093,84 +1098,45 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 req_i,
                 start_b,
                 end_b,
-                full_ids[start_b] if start_b < len(full_ids) else -1,
-                full_ids[end_b - 1] if 0 < end_b <= len(full_ids) else -1,
+                int(bt_row_cpu[start_b]) if start_b < n_blocks_total else -1,
+                int(bt_row_cpu[end_b - 1]) if 0 < end_b <= n_blocks_total else -1,
             )
 
-            # Offload bookkeeping (host-side, no extra GPU sync): map the
-            # full visible range to CPU slots once, transition warm
-            # retrieval-zone blocks to cold (pure GPU zeroing), and reuse the
-            # slot tensor for both retrieval and the hybrid gather below.
-            slots_full = None
-            retrieval_has_slots = False
+            # Prefill offloads complete 64-token units. At sparse-decode entry
+            # only the final partial unit can still be pending, so inspect at
+            # most one unit instead of traversing the full block table.
             if cpu_pool is not None and cfg.enable_offload:
-                # Only retrieval-zone blocks may go cold: sink/local blocks
-                # of *this* request stay warm, and cross-request sharing of
-                # cold blocks is safe because the hybrid gather below covers
-                # the whole visible range, not just the retrieval zone.
+                unit_blocks = max(1, cfg.offload_unit_tokens // self.block_size)
+                tail_start = max(start_b, end_b - unit_blocks)
+                tail_ids = bt_row_cpu[tail_start:end_b].tolist()
+                pending = [
+                    b for b in tail_ids
+                    if b >= 0 and cpu_pool.lookup_slot(str(layer_name), b) is None
+                ]
+                if pending:
+                    cpu_pool.offload_blocks_bulk(
+                        str(layer_name),
+                        key_cache,
+                        value_cache,
+                        pending,
+                    )
                 cpu_pool.mark_cold(
                     str(layer_name),
                     key_cache,
                     value_cache,
-                    full_ids[start_b:end_b],
+                    None,
                 )
-                slots_full, slots_list = cpu_pool.slots_from_block_ids(
-                    str(layer_name), full_ids
-                )
-                retrieval_has_slots = any(s >= 0 for s in slots_list[start_b:end_b])
 
-            # Prefer CPU-slot block_summaries when Keys have been offloaded.
+            # K/V offload never invalidates the original GPU summaries.
+            # Keep the direct physical retrieval path in both modes.
             with _zt.Stage("sparse.retrieve"):
-                if cpu_pool is not None and cfg.enable_offload and end_b > start_b:
-                    assert slots_full is not None
-                    cpu_slots = slots_full[start_b:end_b]
-                    if retrieval_has_slots:
-                        packed, cmin, cmax, centroid, valid = (
-                            cpu_pool.gather_block_summaries_by_physical_ids(
-                                str(layer_name), phys_ids
-                            )
-                        )
-                        # Fall back to GPU block_summaries for blocks not yet offloaded.
-                        gpu_packed, gpu_cmin, gpu_cmax, gpu_cent, gpu_valid = (
-                            block_summary.gather_request_block_summaries(phys_ids)
-                        )
-                        on_cpu = (cpu_slots >= 0).to(device=q.device)
-                        packed = torch.where(
-                            on_cpu.view(1, 1, -1, 1, 1), packed, gpu_packed
-                        )
-                        cmin = torch.where(on_cpu.view(1, 1, -1, 1), cmin, gpu_cmin)
-                        cmax = torch.where(on_cpu.view(1, 1, -1, 1), cmax, gpu_cmax)
-                        centroid = torch.where(
-                            on_cpu.view(1, 1, -1, 1), centroid, gpu_cent
-                        )
-                        valid = torch.where(on_cpu.view(1, 1, -1), valid, gpu_valid)
-                        topk = retriever.retrieve_topk_from_block_summaries(
-                            raw_q,
-                            packed,
-                            cmin,
-                            cmax,
-                            centroid,
-                            valid,
-                            seq_len,
-                            self.block_size,
-                            start_b,
-                        )
-                    else:
-                        topk = retriever.retrieve_topk_tokens(
-                            raw_q,
-                            block_summary,
-                            phys_ids,
-                            seq_len,
-                            cache_key=cache_key,
-                        )
-                else:
-                    topk = retriever.retrieve_topk_tokens(
-                        raw_q,
-                        block_summary,
-                        phys_ids,
-                        seq_len,
-                        cache_key=cache_key,
-                    )
+                topk = retriever.retrieve_topk_tokens(
+                    raw_q,
+                    block_summary,
+                    phys_ids,
+                    seq_len,
+                    cache_key=cache_key,
+                )
 
             # Materialize into the preallocated MLA-style buffer when present.
             topk_logical = topk[0]
@@ -1214,23 +1180,24 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 )
             with _zt.Stage("sparse.gather"):
                 if cfg.enable_offload and cpu_pool is not None:
-                    # Cover the full visible range, not just the retrieval
-                    # zone: with prefix sharing a block that is cold for one
-                    # request may fall inside another request's sink/local
-                    # window, and those tokens must also come from the CPU
-                    # copy once the GPU page is zeroed.
-                    gk, gv = gather_kv_hybrid(
+                    sink_len = min(cfg.sink_size, seq_len)
+                    aligned = _aligned_local_start_scalar(
+                        seq_len, sink_len, cfg.local_size, self.block_size
+                    )
+                    first_local = max(aligned, sink_len) if sink_len else aligned
+                    n_hot = sink_len + max(0, seq_len - first_local)
+                    gk, gv = gather_kv_hot_and_cpu_topk(
                         key_cache,
                         value_cache,
                         bt,
                         ctx_idx,
+                        seq_len,
+                        cfg.sink_size,
+                        cfg.local_size,
                         self.block_size,
                         cpu_pool,
                         str(layer_name),
-                        0,
-                        n_blocks_total,
-                        cpu_slots=slots_full,
-                        any_offloaded=any(s >= 0 for s in slots_list),
+                        n_hot=max(n_hot, 0),
                     )
                 else:
                     gk, gv = gather_kv_by_logical_indices(
@@ -1290,7 +1257,6 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 dtype=dtype
                 if dtype in (torch.float16, torch.bfloat16)
                 else torch.bfloat16,
-                blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
             )
             retriever = self._get_retriever(cfg)
             block_table = attn_metadata.block_table
@@ -1355,6 +1321,21 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
             if topk_buf is not None and topk_buf.shape[0] >= num_reqs
             else None
         )
+        graph_chunk_bucket = getattr(attn_metadata, "graph_chunk_bucket", None)
+        retrieval_chunk_bucket = (
+            graph_chunk_bucket
+            if graph_capture or graph_chunk_bucket is not None
+            else (
+                _graph_chunk_bucket(cfg, self.block_size)
+                if num_decode_reqs is not None
+                else None
+            )
+        )
+        # Replay a retrieval-only CUDA graph for eager sparse decode. Full-model
+        # graph capture already records the eager retrieval ops in the outer graph.
+        use_retrieval_cudagraph = (
+            not graph_capture and retrieval_chunk_bucket is not None
+        )
         with _zt.Stage("sparse.retrieve"):
             retrieval = retriever.retrieve_topk_tokens_batch_result(
                 raw_q,
@@ -1363,22 +1344,14 @@ class ZoomKVAttentionImpl(AttentionImpl[ZoomKVMetadata]):
                 seq_lens_t,
                 # Production sparse decode only exposes fully-completed
                 # retrieval blocks. Summary lifecycle finalizes those blocks
-                # before they enter the retrieval zone and preserves state on
-                # CoW remaps; invalid-summary tests deliberately omit this.
+                # before they enter the retrieval zone and invalidates them
+                # when the physical block returns to the allocator.
                 summaries_guaranteed_valid=True,
                 topk_out=topk_out,
                 assume_context_fully_valid=graph_capture,
-                chunk_bucket=(
-                    attn_metadata.graph_chunk_bucket
-                    if graph_capture
-                    else (
-                        _graph_chunk_bucket(cfg, self.block_size)
-                        if num_decode_reqs is not None
-                        else None
-                    )
-                ),
+                chunk_bucket=retrieval_chunk_bucket,
                 seq_lens_host=seq_lens_host,
-                use_cudagraph=num_decode_reqs is not None,
+                use_cudagraph=use_retrieval_cudagraph,
             )
         if graph_capture and not retrieval.used_direct_physical:
             raise RuntimeError(

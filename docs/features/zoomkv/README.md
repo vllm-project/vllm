@@ -1,208 +1,104 @@
-# ZoomKV attention (GPU-only + K+V CPU offload)
+# ZoomKV attention: experimental GPU-only and K+V CPU offload
 
-ZoomKV is an experimental vLLM V1 attention backend for sparse long-context
-decode. Prefill and short-context decode use dense attention. Long-context,
-single-token decode retrieves a fixed sparse context using hierarchical Quest
-and KIVI reranking.
+> For serving parameters and benchmark procedures in Chinese, see
+> [SERVING_AND_BENCHMARK.zh-CN.md](./SERVING_AND_BENCHMARK.zh-CN.md).
 
-This implementation targets vLLM v0.20.0. It has passed an end-to-end
-Qwen3.6-27B tensor-parallel smoke test on two NVIDIA H20 GPUs and Qwen3-4B
-accuracy/latency tests on a single GPU.
+ZoomKV is an experimental vLLM V1 backend for sparse long-context decode.
+Prefill, short-context decode, and unsupported decode shapes use dense
+attention. GPU-only mixed batches can use sparse attention for the eligible
+decode prefix and dense attention for the prefill suffix; offload mixed
+batches restore cold pages and use dense attention. Pure single-token
+long-context decode uses a fixed-width sparse path. This tree targets vLLM
+v0.20.0 and is under performance testing; it has not been production
+validated.
 
-## Current integration status
+## What changed after `b3cb5f4d1`
 
-This first PR includes:
+- K+V CPU offload is now a directly testable mode. vLLM's physical page remains
+  16 tokens, while completed retrieval-zone data is copied asynchronously D2H
+  in 64-token logical units.
+- Retrieval is no longer hierarchical Quest parent/child selection. It is one
+  16-token `q·centroid` chunk-mean pass: keep Top-200 chunks, apply 8-token KIVI
+  selection to the first 60 and 4-token selection to the rest, then retain the
+  final Top-100 tokens.
+- The offload hot path now has a persistent `physical_to_slot` map, direct
+  physical retrieval, and one hybrid K+V gather kernel. Head dimensions 128 and
+  256 use a 16-byte vectorized UVA path when layout requirements are met.
+- Hybrid-cache block-id expansion/reuse invalidation was fixed. CPU pools are
+  allocated only for full-attention KV caches, and offload state participates
+  in zero/invalidate/free hooks.
+- The Qwen3 performance path directly invokes `fused_qk_norm_rope`, keeps the
+  long-context RoPE cache resident in FP32, and optionally emits per-layer NVTX
+  ranges with `VLLM_ZOOMKV_LAYER_NVTX=1`.
 
-- a native V1 `ZOOMKV` attention backend and configuration validation;
-- dense prefill/short-context fallback plus hierarchical Quest and
-  dense/sparse KIVI reranking for long single-token decode;
-- physical-block min/max/centroid/4-bit Key summaries with Triton/CUDA
-  kernels and reference fallbacks;
-- optional K+V CPU offload with warm/cold/restore block lifecycle;
-- block-reuse invalidation and local prefix-cache restoration support;
-- recall instrumentation, unit tests, smoke tests, and same-prompt
-  dense/sparse latency benchmarks.
+The removed configuration names `zoomkv_quest_chunk`,
+`zoomkv_quest_large_chunk`, `zoomkv_quest_large_ratio`,
+`zoomkv_quest_small_ratio`, and `zoomkv_dense_ratio` are invalid and must not
+be passed.
 
-Known limitations in this first PR:
+## Offload lifecycle
 
-- mixed prefill/decode batches and multi-token/speculative decode fall back
-  to dense attention;
-- full CUDA Graph capture is supported for GPU-only pure single-token sparse
-  decode; offload, mixed batches, and speculative decode are excluded;
-- GPU-only full-graph sparse decode uses a static, parent-aligned retrieval
-  capacity derived from `max_model_len`; device-side valid counts mask the
-  unused tail at replay time;
-- the non-block-aligned boundary between the retrieval and local windows is
-  rounded down to the previous 16-token child boundary. The extra 0-15 tokens
-  are always attended and replace the same number of lowest-ranked Top-K slots,
-  keeping the decode attention width fixed;
-- CPU offload capacity is fixed by `zoomkv_cpu_bytes_per_rank`; exhaustion
-  degrades safely to GPU-resident blocks but reduces memory savings.
+Only regular full-attention layers use ZoomKV; local/GDN layers are unchanged.
+The CPU pool is created only for full-attention KV caches.
 
-## Modes
+1. A completed retrieval-zone 64-token logical unit is asynchronously copied
+   to pinned host memory. Its four 16-token GPU pages remain valid: **warm**.
+2. On sparse decode, warm retrieval-zone pages are zeroed after D2H completes:
+   **cold**. Sink, local-window, and in-flight write pages remain on GPU.
+3. Hybrid sparse gather reads hot pages from GPU and cold pages directly from
+   mapped pinned memory. One kernel gathers both K and V.
+4. Before any dense reader (for example chunked prefill, mixed decode, or a
+   prefix-cache hit), cold K+V pages are restored H2D: **warm** again. The CPU
+   copy is retained, so a later cold transition only needs GPU zeroing.
+5. Block reuse/free invalidates summaries, slot mappings, masks, and CPU slots.
 
-- **GPU-only (default):** full Key and Value stay on GPU. Block summaries
-  and 4-bit packed Keys live on GPU for retrieval.
-- **K+V CPU offload (`zoomkv_enable_offload=True`):** after a 16-token
-  child chunk completes, its full-precision Key and Value are async-copied
-  to pinned host memory (the block becomes *warm*; the GPU pages stay
-  intact for dense readers). Once the block enters the sparse-decode
-  retrieval zone its GPU pages are zeroed (*cold*, no extra PCIe traffic).
-  Sparse decode gathers cold tokens straight from pinned memory; before any
-  dense read (prefill chunks, mixed batches, prefix-cache hits) cold blocks
-  are restored to GPU and can later be re-zeroed for free because block
-  content is immutable.
+`zoomkv_cpu_bytes_per_rank` is the total pinned **K+V** budget for each worker
+rank, not a per-layer or per-tensor allowance. Pool exhaustion safely leaves
+additional pages GPU-resident, reducing memory savings.
 
-## Algorithm
+## Retrieval and routing
 
-ZoomKV is used only for layers backed by regular full attention. Hybrid models
-such as the local Qwen3.6-27B checkpoint contain Gated DeltaNet (GDN) and full
-attention layers; the GDN layers are unchanged.
+For every eligible decode step and KV group:
 
-### Prefill / chunked prefill
+1. Mean-reduce its GQA query heads.
+2. Score every retrieval-zone 16-token chunk by `q·centroid`.
+3. Keep at most 200 chunks.
+4. Run KIVI token selection with budget 8 for the leading 60 chunks and 4 for
+   the remaining chunks.
+5. Select the final Top-100 tokens and attend to
+   `sink + local window + retrieved tokens`.
 
-1. Write Key/Value into the normal paged KV cache.
-2. Run dense FlashAttention over the paged cache (same Triton KV layout
-   used by sparse gather).
-3. When a 16-token child chunk completes, build min/max/centroid and 4-bit
-   packed Key block summaries on GPU.
-4. When a full 256-token parent (16 consecutive retrieval-zone children)
-   completes, aggregate child min/max into an anchor-indexed parent summary.
-   The anchor is the physical block id of the parent's last child; parent
-   grouping is relative to `zoomkv_sink_size`, not absolute position.
-5. If offload is enabled, async D2H the completed child Key and Value into
-   the pinned CPU pool. GPU pages are NOT zeroed during prefill (the same
-   step's dense attention still reads them); zeroing happens lazily when the
-   block enters the sparse-decode retrieval zone.
+Dense attention is used below `zoomkv_full_attention_threshold`, for prefill,
+multi-token/speculative steps, and unsupported mixed shapes. The current
+performance template sets the threshold to 3072.
 
-### Sparse decode
+## Current configuration
 
-1. Reduce GQA query heads to one retrieval query per KV group using the
-   group mean (matching the original ZoomKV implementation).
-2. Run hierarchical Quest over parent then child chunks. Parent scores read
-   precomputed anchor-indexed min/max when valid; otherwise the CUDA kernel
-   falls back to inline 16-child reduction.
-3. Use centroid density scoring and KIVI reranking to select the final Top-K
-   tokens.
-4. Attend to `sink + local window + retrieved Top-K` tokens (Value from GPU;
-   Key from GPU hot pages or CPU for offloaded blocks).
+- `zoomkv_sink_size=64`: always-attended prefix.
+- `zoomkv_local_size=256`: always-attended recent window.
+- `zoomkv_chunk_size=16`: retrieval chunk; must equal `block_size`.
+- `zoomkv_chunk_candidates=200`: chunk-mean candidates.
+- `zoomkv_dense_chunks=60`: leading candidates using the larger KIVI budget.
+- `zoomkv_dense_topk=8`, `zoomkv_sparse_topk=4`.
+- `zoomkv_final_topk=100`.
+- `zoomkv_full_attention_threshold=3072` in the performance template (code
+  default: 2000).
+- `zoomkv_enable_offload=true` for CPU-offload testing.
+- `zoomkv_cpu_bytes_per_rank=25769803776` (24 GiB) recommended as a starting
+  point for each rank; size for the host and NUMA topology.
+- `zoomkv_offload_unit_tokens=64`.
+- `zoomkv_strict_kernels=true` for the performance template; this fails fast if
+  the required extension kernels are unavailable.
 
-The backend falls back to dense attention for prefill, multi-token decode, and
-decode sequences below `zoomkv_full_attention_threshold`. Mixed batches use
-sparse attention for the decode prefix only when every decode request reaches
-the threshold; the prefill suffix remains dense. Full CUDA Graph replay is
-disabled below the threshold and becomes eligible once every active request is
-long enough for sparse decode.
+The implementation requires a 16-token KV block and FP16/BF16 KV. The
+vectorized UVA gather is specialized for head dimensions 128 and 256.
+Speculative/multi-token sparse decode and KV connectors are not supported.
+Offload is excluded from full CUDA Graph capture. CPU-offload and
+`zoomkv_dense_fallback=true` cannot be enabled together.
 
-## Requirements and current support
+## Build and launch
 
-| Item | First-release support |
-| --- | --- |
-| Accelerator | NVIDIA CUDA; validated on H20 (compute capability 9.0) |
-| Model | Qwen3.6-27B dense and sparse smoke test passed |
-| Tensor parallelism | TP=2 smoke test passed |
-| Head size | 128 or 256 |
-| KV dtype | FP16 or BF16 |
-| KV block size | Exactly 16 |
-| Prefill | Dense FlashAttention over paged KV |
-| Sparse decode | Pure single-token decode batches |
-| CUDA Graph | Full graph for GPU-only pure single-token sparse decode with a static `max_model_len` retrieval capacity; piecewise graph otherwise |
-| Prefix caching | Supported (GPU-only and offload modes) |
-| Speculative decoding | Not supported; multi-token steps use dense fallback |
-| KV connector | Not supported |
-| K+V CPU offload | Supported via `zoomkv_enable_offload=True` |
-
-Use `block_size=16`. Dense prefill/short decode use FlashAttention while
-keeping ZoomKV's Triton paged KV layout so block summaries and sparse gather
-stay compatible. `enforce_eager=True` is optional and disables compile and
-CUDA Graphs entirely. Long-context GPU-only pure single-token decode uses a
-full graph; short decode, prefill, and unsupported batch shapes use the
-dense/piecewise route. Full-graph capture allocates a parent-aligned child
-capacity for `max_model_len`; shorter requests are masked by their device-side
-actual chunk counts. GPU-only mode keeps full Key/Value on
-GPU. With offload enabled, cold Key/Value pages move to pinned host
-memory and are transparently restored before any dense read (including
-prefix-cache hits).
-
-## Python example
-
-```python
-from vllm import LLM, SamplingParams
-from vllm.config.attention import AttentionConfig
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-llm = LLM(
-    model="/data/qyl/models/Qwen3.6-27B",
-    trust_remote_code=True,
-    dtype="bfloat16",
-    tensor_parallel_size=2,
-    max_model_len=65536,
-    block_size=16,
-    attention_config=AttentionConfig(
-        backend=AttentionBackendEnum.ZOOMKV,
-        zoomkv_sink_size=64,
-        zoomkv_local_size=256,
-        zoomkv_final_topk=100,
-        zoomkv_full_attention_threshold=2000,
-    ),
-)
-
-outputs = llm.generate(
-    ["A long prompt ..."],
-    SamplingParams(max_tokens=32, temperature=0.0),
-)
-```
-
-## Server example
-
-```bash
-vllm serve /data/qyl/models/Qwen3.6-27B \
-  --trust-remote-code \
-  --dtype bfloat16 \
-  --tensor-parallel-size 2 \
-  --max-model-len 65536 \
-  --block-size 16 \
-  --attention-config '{
-    "backend":"ZOOMKV",
-    "zoomkv_sink_size":64,
-    "zoomkv_local_size":256,
-    "zoomkv_final_topk":100,
-    "zoomkv_full_attention_threshold":2000
-  }'
-```
-
-Do not also pass `--attention-backend`; it is mutually exclusive with the
-backend in `--attention-config`.
-
-## Configuration
-
-| Option | Default | Description |
-| --- | ---: | --- |
-| `zoomkv_sink_size` | 64 | Prefix tokens always included in sparse attention |
-| `zoomkv_local_size` | 256 | Most recent tokens always included |
-| `zoomkv_final_topk` | 100 | Final retrieved-token budget per KV head |
-| `zoomkv_quest_chunk` | 16 | Child chunk and required KV block size |
-| `zoomkv_quest_large_chunk` | 256 | Parent chunk size |
-| `zoomkv_quest_large_ratio` | 0.5 | Fraction of parent chunks retained |
-| `zoomkv_quest_small_ratio` | 0.3 | Fraction of child chunks retained |
-| `zoomkv_dense_ratio` | 0.4 | Fraction of candidate chunks treated as dense |
-| `zoomkv_dense_topk` | 8 | Tokens retained from a dense candidate chunk |
-| `zoomkv_sparse_topk` | 4 | Tokens retained from a sparse candidate chunk |
-| `zoomkv_full_attention_threshold` | 2000 | Dense attention below this sequence length |
-| `zoomkv_dense_fallback` | false | Force dense attention for debugging |
-| `zoomkv_strict_kernels` | false | Fail rather than use a kernel fallback |
-| `zoomkv_enable_offload` | false | Enable K+V CPU offload of cold blocks |
-| `zoomkv_cpu_bytes_per_rank` | 8 GiB | Pinned host Key pool budget per rank |
-
-`sink_size`, `local_size`, and `quest_large_chunk` must be divisible by
-`quest_chunk`. The first release requires `quest_chunk=16`.
-`zoomkv_enable_offload` cannot be combined with `zoomkv_dense_fallback`.
-
-## Optional CUDA extension
-
-The Python package works with Triton/PyTorch fallbacks. For the CUDA Quest,
-Top-K, density, mask, KIVI, and K+V H2D kernels, configure the vLLM build
-with:
+Build the optional CUDA extension used by strict mode:
 
 ```bash
 cmake -S . -B build -DVLLM_BUILD_ZOOMKV_EXT=ON
@@ -210,135 +106,118 @@ cmake --build build --target _zoomkv_C
 python -c "import vllm._zoomkv_C"
 ```
 
-Set `zoomkv_strict_kernels=true` only after the production kernels are
-available. Without strict mode, the runtime can JIT compile individual CUDA
-operators or use a reference implementation.
+Launch the editable performance-test template (24 GiB pinned K+V per rank by
+default):
 
-Parent summaries add three anchor-indexed pools per layer
-(`parent_min`, `parent_max`, `parent_valid`, plus `parent_first_child`),
-roughly doubling block-summary GPU memory (~2 GiB for large 128K contexts on
-Qwen3-4B-class models).
+```bash
+bash examples/features/zoomkv/serve_zoomkv_qwen36_example.sh
+```
 
-## Smoke test
+Override host-specific values without editing it:
 
-The example runs one short dense request and one long sparse request:
+```bash
+CUDA_VISIBLE_DEVICES=0,1 \
+MODEL_PATH=/path/to/Qwen3.6-27B \
+ZOOMKV_CPU_BYTES_PER_RANK=$((24 * 1024**3)) \
+bash examples/features/zoomkv/serve_zoomkv_qwen36_example.sh
+```
+
+Do not also pass `--attention-backend`; the backend is supplied in
+`--attention-config`.
+
+For a GPU-only comparison, use the same configuration with
+`zoomkv_enable_offload=false`. For a dense routing comparison, GPU-only mode
+may additionally set `zoomkv_dense_fallback=true`; keep the prompt, TP, batch,
+generation length, and warmup identical.
+
+## Test and benchmark commands
+
+Lightweight CPU tests:
+
+```bash
+pytest -q tests/v1/attention/zoomkv/test_zoomkv_ops.py -k cpu
+```
+
+GPU-only smoke:
 
 ```bash
 python examples/features/zoomkv/zoomkv_gpu_only.py \
-  --model /data/qyl/models/Qwen3.6-27B \
+  --model /path/to/model \
   --tensor-parallel-size 2 \
-  --threshold 512 \
+  --threshold 3072 \
   --output-json /tmp/zoomkv-smoke.json
 ```
 
-The worker log prints `ZoomKV GPU-only sparse decode path is active` when the
-long request enters sparse decode.
-
-## Validation status
-
-The v0.20.0 integration passed the following checks:
-
-- ZoomKV unit tests, including CUDA block-summary and sparse-attention paths
-- Unified optional CUDA extension compilation and binding checks
-- Qwen3.6-27B BF16, TP=2 on two NVIDIA H20 GPUs
-- Dense path: 12 prompt tokens, 8 output tokens
-- Sparse path: 1,332 prompt tokens, 8 output tokens, threshold 512
-- Both smoke requests produced `Paris`
-- Qwen3-4B needle retrieval with K+V offload: 3/3 prompts recovered the target
-- Qwen3-4B measured retrieval recall: recall@100 0.700 against
-  exact-attention Top-K and 0.869 against the retrieval-query oracle
-- Prefix-cache smoke tests in GPU-only and K+V offload modes
-
-On Qwen3-4B at approximately 12K tokens (single GPU, BF16, eager, batch 1),
-dense decode measured 25.5 ms/token and ZoomKV GPU-only sparse decode measured
-45.2 ms/token. At approximately 32K tokens the corresponding measurements
-were 26.3 and 44.6 ms/token. These results show that retrieval cost is nearly
-context-length independent, but the current unbatched eager implementation
-does not yet beat dense attention at these context lengths.
-
-The smoke test proves integration and execution-path correctness, not
-representative long-context quality or performance. The measured sparse wall
-time includes first-use Triton/JIT compilation and must not be treated as a
-benchmark.
-
-### Measuring per-decode-step Top-K recall
-
-`VLLM_ZOOMKV_RECALL_LOG=<dir>` enables a debug probe that, at every sparse
-decode step, compares the retrieved Top-K tokens of each layer and KV head
-with the exact-attention Top-K (softmax of q.K over the full sequence,
-aggregated per GQA group, restricted to the retrieval zone). Each worker
-appends JSONL records to `<dir>/recall.<pid>.jsonl`. The probe synchronizes
-the GPU per record and only supports GPU-only mode (not offload); never
-enable it in production runs.
+Recall measurement (the current CLI has no Quest ratio arguments):
 
 ```bash
 python examples/features/zoomkv/measure_topk_recall.py \
-  --model <model> --tensor-parallel-size 1 \
-  --prompt-sentences 600 --output-tokens 64 \
+  --model /path/to/model \
+  --tensor-parallel-size 2 \
+  --threshold 3072 \
+  --chunk-candidates 200 \
+  --dense-chunks 60 \
+  --dense-topk 8 \
+  --sparse-topk 4 \
+  --final-topk 100 \
   --output-json /tmp/zoomkv-recall.json
 ```
 
-The script reports, per decode step: recall@`final_topk`, retrieved
-attention-mass coverage of the retrieval zone versus the oracle Top-K
-coverage, and the fraction of total attention mass inside the zone.
+Focused 128K retrieval profiling:
 
-### Same-prompt benchmark
+```bash
+python examples/features/zoomkv/profile_retrieval_128k.py --help
+```
 
-After warmup, dense fallback and ZoomKV sparse decode were measured on the
-same prompt at each context length using Qwen3.6-27B BF16, TP=2, two NVIDIA
-H20 GPUs, eager mode, and three runs per configuration:
-
-| Prompt tokens | Output tokens | Dense median | Sparse median | Result |
-| ---: | ---: | ---: | ---: | --- |
-| 7,712 | 32 | 3.814 s | 4.036 s | Sparse is 5.8% slower |
-| 7,712 | 128 | 10.158 s | 11.108 s | Sparse is 9.4% slower |
-| 15,962 | 128 | 12.180 s | 13.386 s | Sparse is 9.9% slower |
-| 63,812 | 128 | 32.063 s | 33.166 s | Sparse is 3.4% slower |
-
-These are end-to-end request times and include the identical prefill in both
-modes. The current implementation does not yet provide a speedup at this
-context length. Sparse output also diverged from dense output, so retrieval
-quality requires evaluation and tuning before production use.
-
-Reproduce one side of the comparison with:
+End-to-end GPU-only comparison:
 
 ```bash
 python examples/features/zoomkv/benchmark_zoomkv_gpu_only.py \
-  --model /data/qyl/models/Qwen3.6-27B \
+  --model /path/to/model \
   --mode sparse \
-  --prompt-repeats 700 \
-  --output-tokens 128 \
-  --runs 3
+  --threshold 3072 \
+  --output-tokens 1024 \
+  --runs 3 \
+  --output-json /tmp/zoomkv-gpu-only.json
 ```
 
-## Why GPU-only first
+For the K+V CPU-offload path, add:
 
-For Qwen3.6-27B, only 16 of 64 layers use full attention. With BF16 KV,
-TP=2, two KV heads per rank, and head size 256, the approximate KV footprint
-per rank is:
+```bash
+  --enable-offload \
+  --cpu-bytes-per-rank $((24 * 1024**3))
+```
 
-| Context length | KV cache per rank |
-| ---: | ---: |
-| 16K | 0.5 GiB |
-| 32K | 1 GiB |
-| 64K | 2 GiB |
+Write generated JSON, logs, traces, and profiler output outside the repository.
+Recall instrumentation synchronizes the GPU and is for debugging only.
 
-At 16K-64K, GPU-only integration avoids PCIe transfer and invasive scheduler
-changes for a modest KV footprint. Offload becomes more relevant for 128K+
-contexts, high concurrency, or deployments where model weights leave little
-KV capacity.
+## Performance status (2026-09-04)
+
+The implementation is experimental and still being optimized. A temporary
+same-machine baseline on NUMA node 0, TP=2, batch size 1, and 1024 decode
+tokens measured:
+
+- GPU-only TPOT: 14.03 ms at 64K; 14.28 ms at 128K.
+- Offload, vectorized UVA TPOT: 27.72 ms at 64K; 33.70 ms at 128K.
+
+CPU offload is currently slower than GPU-only. These numbers are only a
+stage baseline, not production results or a general performance claim.
 
 ## Implementation map
 
-- Backend: `vllm/v1/attention/backends/zoomkv_attn.py`
+- Configuration: `vllm/config/attention.py`
+- Backend/routing: `vllm/v1/attention/backends/zoomkv_attn.py`
 - Retrieval: `vllm/v1/attention/ops/zoomkv/retriever.py`
-- Block summaries: `vllm/v1/attention/ops/zoomkv/state.py`
-- K+V CPU pool: `vllm/v1/attention/ops/zoomkv/offload.py`
-- Paged gather and sparse attention: `vllm/v1/attention/ops/zoomkv/paged.py`
-- CUDA dispatch: `vllm/v1/attention/ops/zoomkv/kernels.py`
+- Summary/state: `vllm/v1/attention/ops/zoomkv/state.py`
+- CPU pool/lifecycle: `vllm/v1/attention/ops/zoomkv/offload.py`
+- Paged gather/attention: `vllm/v1/attention/ops/zoomkv/paged.py`
+- Dispatch: `vllm/v1/attention/ops/zoomkv/kernels.py`
+- CUDA hybrid gather: `vllm/v1/attention/ops/zoomkv/cuda/h2d_gather_tokens.cu`
+- Direct physical retrieval:
+  `vllm/v1/attention/ops/zoomkv/cuda/physical_retrieval.cu`
 - CUDA build: `cmake/zoomkv.cmake`
 - Unit tests: `tests/v1/attention/zoomkv/test_zoomkv_ops.py`
-- Benchmark: `examples/features/zoomkv/benchmark_zoomkv_gpu_only.py`
+- 128K profiler: `examples/features/zoomkv/profile_retrieval_128k.py`
 
-The original standalone ZoomKV project and its published benchmark results are
-not vLLM integration results and should not be quoted as such.
+The original standalone ZoomKV project's benchmark results are not results for
+this vLLM integration.

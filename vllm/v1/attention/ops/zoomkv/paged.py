@@ -11,6 +11,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
+
 _REFERENCE_GATHER_LOGGED = False
 _GATHER_SNAPSHOT_DUMPED = False
 
@@ -71,6 +73,8 @@ def gather_kv_by_logical_indices(
     block_table: torch.Tensor,
     logical_token_ids: torch.Tensor,
     block_size: int,
+    out_k: torch.Tensor | None = None,
+    out_v: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather K/V for logical token indices of one request.
 
@@ -94,6 +98,8 @@ def gather_kv_by_logical_indices(
             block_table,
             logical_token_ids,
             block_size,
+            out_k=out_k,
+            out_v=out_v,
         )
     kv_heads, n_tok = logical_token_ids.shape
     head_dim = key_cache.shape[-1]
@@ -650,6 +656,74 @@ def gather_kv_hybrid(
     cpu_pool.metrics.h2d_bytes += 2 * tok_bytes * out_k.shape[1]
     cpu_pool.metrics.h2d_events += 1
     return out_k, out_v
+
+
+def gather_kv_hot_and_cpu_topk(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    ctx_idx: torch.Tensor,
+    seq_len: int,
+    sink_size: int,
+    local_size: int,
+    block_size: int,
+    cpu_pool,
+    layer_name: str,
+    n_hot: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sparse-decode gather with hot GPU pages + CPU Top-K.
+
+    ``ctx_idx`` is the assembled [Hkv, sink_local + topk] index tensor so
+    the split matches attention width (aligned local boundary tokens
+    replace the lowest-ranked Top-K slots). One fused kernel gathers K and V
+    for the complete sparse context, choosing GPU pages for sink/local and
+    mapped pinned pages for cold Top-K tokens from the persistent slot map.
+    """
+    if ctx_idx.dim() != 2:
+        raise ValueError(
+            "gather_kv_hot_and_cpu_topk expects ctx_idx [Hkv, n_ctx], "
+            f"got {tuple(ctx_idx.shape)}"
+        )
+    if n_hot is None:
+        sink_local = build_sink_local_indices(
+            seq_len, sink_size, local_size, ctx_idx.device, block_size
+        )
+        n_hot = int(sink_local.numel())
+    n_hot = min(int(n_hot), ctx_idx.shape[1])
+    hkv = ctx_idx.shape[0]
+    n_top = ctx_idx.shape[1] - n_hot
+    head_dim = key_cache.shape[-1]
+    gk = torch.empty(
+        hkv, n_hot + n_top, head_dim, device=key_cache.device, dtype=key_cache.dtype
+    )
+    gv = torch.empty_like(gk)
+    if ctx_idx.shape[1]:
+        offloaded_mask = cpu_pool.ensure_offload_mask(layer_name, key_cache.shape[0])
+        physical_to_slot = cpu_pool.ensure_physical_to_slot(
+            layer_name, key_cache.shape[0]
+        )
+        from vllm.v1.attention.ops.zoomkv.kernels import h2d_fill_kv_hybrid
+
+        with _zt.Stage("cpu_gather.kv_h2d"):
+            value_pool = getattr(cpu_pool, "value", None)
+            if value_pool is None or layer_name not in value_pool:
+                raise RuntimeError(f"missing offloaded Value pool for {layer_name}")
+            h2d_fill_kv_hybrid(
+                cpu_pool.key[layer_name],
+                value_pool[layer_name],
+                key_cache,
+                value_cache,
+                ctx_idx,
+                block_table,
+                physical_to_slot,
+                offloaded_mask,
+                gk,
+                gv,
+            )
+        tok_bytes = n_top * key_cache.element_size() * head_dim
+        cpu_pool.metrics.h2d_bytes += 2 * tok_bytes * hkv
+        cpu_pool.metrics.h2d_events += 1
+    return gk, gv
 
 
 def sparse_decode_attention(

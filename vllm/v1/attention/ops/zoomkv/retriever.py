@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ZoomKV hierarchical Quest + KIVI retrieval pipeline."""
+"""Single-layer chunk-mean + KIVI retrieval pipeline for ZoomKV."""
 
 from __future__ import annotations
-import math
 import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -12,23 +11,19 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.attention.ops.zoomkv import stage_timer as _zt
 from vllm.v1.attention.ops.zoomkv.kernels import (
-    chunk_density_scores,
+    centroid_score_physical,
     density_score_physical,
-    dense_mask_from_topk,
     direct_physical_retrieval_available,
     float_topk_3d_varlen,
     float_topk_values_3d,
     float_topk_values_3d_varlen,
-    get_quest_ops,
     kivi_physical,
-    quest_parent_score_physical,
-    quest_sub_score_physical,
+    try_load_zoomkv_c,
 )
 
 from vllm.v1.attention.ops.zoomkv.kivi_rerank import partial_chunk_kivi_qk
 from vllm.v1.attention.ops.zoomkv.retrieval_metadata_triton import (
     build_actual_num_chunks,
-    build_stage_budgets,
 )
 from vllm.v1.attention.ops.zoomkv.state import ZoomKVBlockSummary
 
@@ -61,22 +56,26 @@ class ZoomKVRuntimeConfig:
     local_size: int = 256
     max_model_len: int = 131072
     final_topk: int = 100
-    quest_chunk: int = 16
-    quest_large_chunk: int = 256
-    quest_large_ratio: float = 0.5
-    quest_small_ratio: float = 0.3
-    dense_ratio: float = 0.4
+    chunk_size: int = 16
+    chunk_candidates: int = 200
+    dense_chunks: int = 60
     dense_topk: int = 8
     sparse_topk: int = 4
-    max_small_candidates: int = 1024
     full_attention_threshold: int = 2000
     dense_fallback: bool = False
     strict_kernels: bool = False
     enable_offload: bool = False
+    offload_unit_tokens: int = 64
+    @property
+    def sparse_chunks(self) -> int:
+        return max(0, int(self.chunk_candidates) - int(self.dense_chunks))
 
     @property
-    def hq_factor(self) -> int:
-        return max(1, self.quest_large_chunk // self.quest_chunk)
+    def kivi_width(self) -> int:
+        return (
+            int(self.dense_chunks) * int(self.dense_topk)
+            + int(self.sparse_chunks) * int(self.sparse_topk)
+        )
 
 
 @dataclass(frozen=True)
@@ -95,19 +94,6 @@ class _CachedBatchMeta:
     bucket: int
     start_b: int
     sink_local_full: bool
-
-
-@dataclass(frozen=True)
-class _StageBudgets:
-    parent_lengths: torch.Tensor
-    large_ks: torch.Tensor
-    sub_lengths: torch.Tensor
-    small_ks: torch.Tensor
-    dense_ks: torch.Tensor
-    final_ks: torch.Tensor
-    max_large: int
-    max_small: int
-    max_dense: int
 
 
 @dataclass
@@ -149,10 +135,8 @@ class ZoomKVRetriever:
     # Shared across per-layer retriever instances: metadata depends only on
     # seq_lens / block-table capacity, not on layer weights or Q.
     _batch_meta_cache: ClassVar[_CachedBatchMeta | None] = None
-
     def __init__(self, cfg: ZoomKVRuntimeConfig) -> None:
         self.cfg = cfg
-        self.quest = get_quest_ops(prefer_triton=True, strict=cfg.strict_kernels)
         # Scratch-buffer cache to align with the reference implementation:
         # score/index tensors depend only on (n_chunks, n_large, kv_heads), which stay constant across all layers of a decode step (and only change when a new block completes ~every block_size tokens).  Reusing
         # them removes per-layer/per-step allocations in the retrieve hot path.
@@ -351,11 +335,11 @@ class ZoomKVRetriever:
             self._mixed_cudagraphs[key] = state
 
         state.raw_q.zero_()
-        state.raw_q[:batch].copy_(raw_q)
+        state.raw_q[:batch].copy_(raw_q, non_blocking=True)
         state.block_table.fill_(-1)
-        state.block_table[:batch].copy_(block_table[:batch])
+        state.block_table[:batch].copy_(block_table[:batch], non_blocking=True)
         state.seq_lens.zero_()
-        state.seq_lens[:batch].copy_(seq_lens[:batch])
+        state.seq_lens[:batch].copy_(seq_lens[:batch], non_blocking=True)
         state.topk.fill_(-1)
         state.graph.replay()
         self._last_topk_fully_filled = True
@@ -440,16 +424,15 @@ class ZoomKVRetriever:
         block_size: int,
         start_b: int,
     ) -> torch.Tensor:
-        """Run Quest+KIVI on pre-gathered CPU-slot or physical summaries."""
+        """Run chunk-mean + KIVI on pre-gathered reference summaries."""
         cfg = self.cfg
         batch = raw_q.shape[0]
         n_chunks = packed.shape[2]
         if n_chunks <= 0:
             return torch.full((batch, raw_q.shape[1], cfg.final_topk),-1,dtype=torch.int64,device=raw_q.device)
-        factor = cfg.hq_factor
-        parent_min, parent_max, parent_valid = self._parent_minmax_from_children(cmin, cmax, valid, factor)
-        chunk_idx = self._hierarchical_quest(raw_q, cmin, cmax, parent_min, parent_max, parent_valid, n_chunks, factor)
-        topk_local = self._cds_select(chunk_idx, packed, cmin, cmax, centroid, raw_q, block_size)
+        topk_local = self._select_gathered(
+            raw_q, packed, cmin, cmax, centroid, valid, block_size, n_chunks
+        )
         ret_token_offset = start_b * block_size
         return torch.where(topk_local >= 0,topk_local + ret_token_offset,torch.full_like(topk_local, -1))
 
@@ -481,7 +464,7 @@ class ZoomKVRetriever:
         seq_len: int,
         cache_key: tuple | None = None,
     ) -> torch.Tensor:
-        """Run Quest + KIVI and return logical token indices in full-seq coords.
+        """Run chunk-mean + KIVI and return full-sequence token indices.
 
         Production sparse decode uses the batched direct path; this entry
         point remains for the offload serial loop and tests.
@@ -536,7 +519,7 @@ class ZoomKVRetriever:
         seq_lens_host: torch.Tensor | None = None,
         use_cudagraph: bool = False,
     ) -> ZoomKVRetrievalResult:
-        """Batched Quest + KIVI over a decode batch of requests.
+        """Batched chunk-mean + KIVI retrieval for decode requests.
         Args:
             raw_q: [B, kv_heads, D]
             block_table: [B, max_blocks] physical block ids
@@ -696,8 +679,10 @@ class ZoomKVRetriever:
             )
 
         with _retrieve_stage("physical_ids"):
-            bt = block_table.to(device=device)
-            physical_ids = bt[:batch, start_b:]
+            if block_table.device == device:
+                physical_ids = block_table[:batch, start_b:]
+            else:
+                physical_ids = block_table.to(device=device)[:batch, start_b:]
 
         self._require_direct_physical(raw_q, block_summary, physical_ids)
         topk = self._retrieve_topk_physical(raw_q,block_summary,physical_ids,bucket,start_b * block_size,actual_num_chunks=actual_num_chunks,topk_out=topk_out)
@@ -733,60 +718,6 @@ class ZoomKVRetriever:
 
 
 
-    def _build_stage_budgets(
-        self,
-        actual_num_chunks: torch.Tensor,
-        *,
-        n_chunks: int,
-        factor: int,
-        kv_heads: int,
-    ) -> _StageBudgets:
-        cfg = self.cfg
-        batch = actual_num_chunks.shape[0]
-        n_large = n_chunks // factor
-        max_large = min(
-            n_large,
-            max(1, int(math.ceil(n_large * cfg.quest_large_ratio))),
-        )
-        max_small = min(
-            max_large * factor,
-            cfg.max_small_candidates,
-            max(
-                1,
-                int(math.ceil(max_large * factor * cfg.quest_small_ratio)),
-            ),
-        )
-        max_dense = min(max_small, max(1, int(max_small * cfg.dense_ratio)))
-        shape = (batch, kv_heads)
-        outputs = [
-            self._scratch_buf(name, shape, torch.int32, actual_num_chunks.device)
-            for name in (
-                "parent_lengths",
-                "large_ks",
-                "sub_lengths",
-                "small_ks",
-                "dense_ks",
-                "final_ks",
-            )
-        ]
-        dense_topk = max(1, min(cfg.dense_topk, cfg.quest_chunk))
-        sparse_topk = max(1, min(cfg.sparse_topk, cfg.quest_chunk))
-        build_stage_budgets(
-            actual_num_chunks,
-            *outputs,
-            factor=factor,
-            large_ratio=cfg.quest_large_ratio,
-            small_ratio=cfg.quest_small_ratio,
-            dense_ratio=cfg.dense_ratio,
-            max_large=max_large,
-            max_small=max_small,
-            dense_topk=dense_topk,
-            sparse_topk=sparse_topk,
-            final_topk=cfg.final_topk,
-        )
-        return _StageBudgets(*outputs, max_large, max_small, max_dense)
-
-
     def _retrieve_topk_physical(
         self,
         raw_q: torch.Tensor,
@@ -798,274 +729,293 @@ class ZoomKVRetriever:
         actual_num_chunks: torch.Tensor | None = None,
         topk_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Quest+CDS+KIVI directly over global physical summary pools."""
-        cfg = self.cfg
+        """Chunk-mean Top-K + KIVI over global physical summary pools."""
         if actual_num_chunks is None:
-            actual_num_chunks = torch.full((raw_q.shape[0],),n_chunks,dtype=torch.int32,device=raw_q.device)
-        factor = cfg.hq_factor
-        budgets = self._build_stage_budgets(
-            actual_num_chunks,
-            n_chunks=n_chunks,
-            factor=factor,
-            kv_heads=raw_q.shape[1],
-        )
-        chunk_idx = self._hierarchical_quest_physical(
-            raw_q,
-            block_summary,
-            physical_ids,
-            n_chunks,
-            factor,
-            actual_num_chunks,
-            budgets,
-        )
-        return self._cds_select_physical(
-            chunk_idx,
+            actual_num_chunks = torch.full(
+                (raw_q.shape[0],),
+                n_chunks,
+                dtype=torch.int32,
+                device=raw_q.device,
+            )
+        return self._retrieve_physical(
             raw_q,
             block_summary,
             physical_ids,
             n_chunks,
             token_offset,
             actual_num_chunks,
-            budgets,
             topk_out,
         )
 
+    def _budgets(
+        self,
+        actual_num_chunks: torch.Tensor,
+        *,
+        n_chunks: int,
+        kv_heads: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int]:
+        """Fixed 200/60/140 budgets for chunk-mean retrieval."""
+        cfg = self.cfg
+        batch = actual_num_chunks.shape[0]
+        device = actual_num_chunks.device
+        n_cand = min(int(cfg.chunk_candidates), int(n_chunks))
+        n_dense = min(int(cfg.dense_chunks), n_cand)
+        n_sparse = n_cand - n_dense
+        out_width = n_dense * int(cfg.dense_topk) + n_sparse * int(cfg.sparse_topk)
+        shape = (batch, kv_heads)
+        chunk_lengths = self._scratch_buf(
+            "single_chunk_lengths", shape, torch.int32, device
+        )
+        chunk_ks = self._scratch_buf("single_chunk_ks", shape, torch.int32, device)
+        final_ks = self._scratch_buf("single_final_ks", shape, torch.int32, device)
+        # Broadcast per-request actual chunk counts to [B, H].
+        actual = actual_num_chunks.to(dtype=torch.int32).view(batch, 1).expand(shape)
+        chunk_lengths.copy_(actual)
+        chunk_ks.copy_(torch.minimum(actual, actual.new_full((), n_cand)))
+        final_ks.fill_(int(cfg.final_topk))
+        return chunk_lengths, chunk_ks, final_ks, n_cand, n_dense, out_width
 
-
-
-    @staticmethod
-    def _parent_minmax_from_children(
-        cmin: torch.Tensor,
-        cmax: torch.Tensor,
-        valid: torch.Tensor,
-        factor: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Aggregate gathered child summaries into parent min/max tensors."""
-        tmp = ZoomKVBlockSummary.__new__(ZoomKVBlockSummary)
-        tmp.num_kv_heads = cmin.shape[1]
-        tmp.head_dim = cmin.shape[-1]
-        tmp.blocks_per_parent = factor
-        return ZoomKVBlockSummary.build_parent_minmax(tmp, torch.empty(0), cmin, cmax, valid)
-
-
-
-
-    def _hierarchical_quest_physical(
+    def _score_all_chunk_means_physical(
         self,
         raw_q: torch.Tensor,
         block_summary: ZoomKVBlockSummary,
         physical_ids: torch.Tensor,
         n_chunks: int,
-        factor: int,
         actual_num_chunks: torch.Tensor,
-        budgets: _StageBudgets,
-    ) -> torch.Tensor:
+        scores: torch.Tensor,
+    ) -> None:
+        mod = try_load_zoomkv_c()
+        if mod is not None and hasattr(mod, "centroid_score_physical"):
+            centroid_score_physical(
+                physical_ids,
+                block_summary.centroid,
+                block_summary.valid,
+                raw_q,
+                scores,
+                n_chunks,
+                actual_num_chunks,
+            )
+            return
+        # Fallback for older extensions: score identity chunk ids.
         batch, kv_heads = raw_q.shape[:2]
-        n_large = n_chunks // factor
-        nk_large = budgets.max_large
-        large_scores = self._scratch_buf("large_scores",(batch, kv_heads, n_large),torch.float32,raw_q.device)
-        
-        with _retrieve_stage("quest_parent_score_direct"):
-            quest_parent_score_physical(raw_q,physical_ids,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,large_scores,n_chunks,factor,actual_num_chunks,block_summary.parent_min,block_summary.parent_max,block_summary.parent_valid,block_summary.parent_first_child)
-        
-        with _retrieve_stage("quest_large_topk"):
-            large_idx = float_topk_3d_varlen(
-                large_scores,
-                budgets.parent_lengths,
-                budgets.large_ks,
-                nk_large,
-                strict=self.cfg.strict_kernels,
-            )
-        sub_scores = self._scratch_buf("sub_scores",(batch, kv_heads, nk_large * factor),torch.float32,raw_q.device)
-        
-        with _retrieve_stage("quest_sub_score_direct"):
-            quest_sub_score_physical(raw_q,physical_ids,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,large_idx,sub_scores,nk_large,factor,n_chunks,actual_num_chunks)
-        nk_small = budgets.max_small
-       
-        with _retrieve_stage("quest_sub_topk"):
-            sub_pos = float_topk_3d_varlen(
-                sub_scores,
-                budgets.sub_lengths,
-                budgets.small_ks,
-                nk_small,
-                strict=self.cfg.strict_kernels,
-            )
-        chunk_idx = self._scratch_buf("chunk_idx",(batch, kv_heads, nk_small),torch.int64,raw_q.device)
-        
-        with _retrieve_stage("quest_map_back"):
-            self.quest.quest_map_back(large_idx, sub_pos, chunk_idx, factor, n_chunks)
-        return chunk_idx
+        identity = self._scratch_buf(
+            "identity_chunks",
+            (batch, kv_heads, n_chunks),
+            torch.int64,
+            raw_q.device,
+        )
+        base = torch.arange(n_chunks, device=raw_q.device, dtype=torch.int64)
+        identity.copy_(base.view(1, 1, n_chunks).expand(batch, kv_heads, n_chunks))
+        density_score_physical(
+            identity,
+            physical_ids,
+            block_summary.centroid,
+            block_summary.valid,
+            raw_q,
+            scores,
+            n_chunks,
+            actual_num_chunks,
+        )
 
-
-
-
-    def _cds_select_physical(
+    def _retrieve_physical(
         self,
-        chunk_idx: torch.Tensor,
         raw_q: torch.Tensor,
         block_summary: ZoomKVBlockSummary,
         physical_ids: torch.Tensor,
         n_chunks: int,
         token_offset: int,
         actual_num_chunks: torch.Tensor,
-        budgets: _StageBudgets,
         topk_out: torch.Tensor | None,
     ) -> torch.Tensor:
+        """Mean-score → Top-200 → dense/sparse KIVI → Top-100."""
         cfg = self.cfg
         batch, kv_heads = raw_q.shape[:2]
-        nk = budgets.max_small
-        density = self._scratch_buf("density_scores", (batch, kv_heads, nk), torch.float32, raw_q.device)
-        
-        with _retrieve_stage("cds_density_direct"):
-            density_score_physical(chunk_idx,physical_ids,block_summary.centroid,block_summary.valid,raw_q,density,n_chunks,actual_num_chunks)
-        n_dense = budgets.max_dense
-        with _retrieve_stage("cds_density_topk"):
-            dense_pos = float_topk_3d_varlen(
-                density,
-                budgets.small_ks,
-                budgets.dense_ks,
-                n_dense,
+        (
+            chunk_lengths,
+            chunk_ks,
+            final_ks,
+            n_cand,
+            n_dense,
+            out_width,
+        ) = self._budgets(
+            actual_num_chunks, n_chunks=n_chunks, kv_heads=kv_heads
+        )
+
+        mean_scores = self._scratch_buf(
+            "single_mean_scores",
+            (batch, kv_heads, n_chunks),
+            torch.float32,
+            raw_q.device,
+        )
+        with _retrieve_stage("mean_score"):
+            self._score_all_chunk_means_physical(
+                raw_q,
+                block_summary,
+                physical_ids,
+                n_chunks,
+                actual_num_chunks,
+                mean_scores,
+            )
+
+        with _retrieve_stage("chunk_topk"):
+            chunk_idx = float_topk_3d_varlen(
+                mean_scores,
+                chunk_lengths,
+                chunk_ks,
+                n_cand,
                 strict=cfg.strict_kernels,
             )
-        
-        dense_mask = self._scratch_buf("dense_mask",(batch, kv_heads, nk),torch.bool,raw_q.device)
-        dense_mask_from_topk(dense_pos,nk,out=dense_mask,strict=cfg.strict_kernels)
+
+        dense_mask = self._scratch_buf(
+            "single_dense_mask", (batch, kv_heads, n_cand), torch.bool, raw_q.device
+        )
+        dense_mask.fill_(False)
+        dense_mask[..., :n_dense] = True
 
         dense_topk = max(1, min(cfg.dense_topk, block_summary.block_size))
         sparse_topk = max(1, min(cfg.sparse_topk, block_summary.block_size))
-        output_slots = max(dense_topk, sparse_topk)
-        out_width = nk * output_slots
+        # Compact KIVI indexes outputs as tightly packed [B,H,out_width].
+        # Older wheels without compact still need the padded width.
+        mod = try_load_zoomkv_c()
+        supports_compact = mod is not None and hasattr(mod, "centroid_score_physical")
+        padded_w = n_cand * max(dense_topk, sparse_topk)
+        buf_w = padded_w if not supports_compact else out_width
+        out_scores = self._scratch_buf(
+            "single_kivi_scores", (batch, kv_heads, buf_w), torch.float32, raw_q.device
+        )
+        out_indices = self._scratch_buf(
+            "single_kivi_indices", (batch, kv_heads, buf_w), torch.int64, raw_q.device
+        )
+        out_scores.fill_(float("-inf"))
+        out_indices.fill_(-1)
+        with _retrieve_stage("kivi"):
+            kivi_physical(
+                chunk_idx,
+                dense_mask,
+                physical_ids,
+                block_summary.packed,
+                block_summary.chunk_min,
+                block_summary.chunk_max,
+                block_summary.valid,
+                raw_q,
+                dense_topk,
+                sparse_topk,
+                token_offset,
+                out_scores,
+                out_indices,
+                actual_num_chunks,
+                compact=True,
+                n_dense=n_dense,
+            )
 
-        out_scores = self._scratch_buf("kivi_scores",(batch, kv_heads, out_width),torch.float32,raw_q.device)
-        out_indices = self._scratch_buf("kivi_indices",(batch, kv_heads, out_width),torch.int64,raw_q.device)
-        
-        with _retrieve_stage("kivi_qk_direct"):
-            kivi_physical(chunk_idx,dense_mask,physical_ids,block_summary.packed,block_summary.chunk_min,block_summary.chunk_max,block_summary.valid,raw_q,dense_topk,sparse_topk,token_offset,out_scores,out_indices,actual_num_chunks)
-        actual_topk = min(cfg.final_topk, out_width)
         final_lengths = self._scratch_buf(
-            "final_lengths",
+            "single_final_lengths",
             (batch, kv_heads),
             torch.int32,
             raw_q.device,
             fill=out_width,
         )
-        
-        with _retrieve_stage("final_topk_direct"):
+        actual_topk = min(cfg.final_topk, out_width)
+        with _retrieve_stage("final_topk"):
             selected = float_topk_values_3d_varlen(
                 out_scores,
                 out_indices,
                 final_lengths,
-                budgets.final_ks,
+                final_ks,
                 actual_topk,
                 strict=cfg.strict_kernels,
                 out=topk_out if actual_topk == cfg.final_topk else None,
             )
-        
         if actual_topk == cfg.final_topk:
-            # Sparse routing's minimum-context gate guarantees enough runtime
-            # candidates without introducing a device-to-host sync here.
             self._last_topk_fully_filled = True
             return selected
         self._last_topk_fully_filled = False
-        padded = self._scratch_buf("selected_direct",(batch, kv_heads, cfg.final_topk),torch.int64,raw_q.device,fill=-1)
+        padded = self._scratch_buf(
+            "single_selected",
+            (batch, kv_heads, cfg.final_topk),
+            torch.int64,
+            raw_q.device,
+            fill=-1,
+        )
         padded[..., :actual_topk].copy_(selected)
         return padded
-
-
-
-
-    def _hierarchical_quest(
+    def _select_gathered(
         self,
         raw_q: torch.Tensor,
-        cmin: torch.Tensor,
-        cmax: torch.Tensor,
-        parent_min: torch.Tensor,
-        parent_max: torch.Tensor,
-        parent_valid: torch.Tensor,
-        n_chunks: int,
-        factor: int,
-    ) -> torch.Tensor:
-        cfg = self.cfg
-        batch = raw_q.shape[0]
-        n_large = parent_min.shape[2]
-        nk_large = max(1, int(math.ceil(n_large * cfg.quest_large_ratio)))
-        nk_large = min(nk_large, n_large)
-        large_scores = self._scratch_buf("large_scores",(batch, raw_q.shape[1], n_large),torch.float32,raw_q.device)
-        
-        with _retrieve_stage("quest_large_score"):
-            self.quest.quest_chunk_score(raw_q, parent_min, parent_max, large_scores, n_large, parent_valid)
-        
-        with _retrieve_stage("quest_large_topk"):
-            large_idx = _topk_3d(large_scores, nk_large, strict=cfg.strict_kernels)
-
-        sub_scores = self._scratch_buf("sub_scores",(batch, raw_q.shape[1], nk_large * factor),torch.float32,raw_q.device)
-        
-        with _retrieve_stage("quest_sub_score"):
-            self.quest.quest_sub_chunk_score(raw_q, cmin, cmax, large_idx, sub_scores, nk_large, factor)
-        nk_small = max(1, int(math.ceil(nk_large * factor * cfg.quest_small_ratio)))
-        nk_small = min(nk_small, nk_large * factor, cfg.max_small_candidates)
-        
-        with _retrieve_stage("quest_sub_topk"):
-            sub_pos = _topk_3d(sub_scores, nk_small, strict=cfg.strict_kernels)
-        chunk_idx = self._scratch_buf("chunk_idx",(batch, raw_q.shape[1], nk_small),torch.int64,raw_q.device)
-
-        with _retrieve_stage("quest_map_back"):
-            self.quest.quest_map_back(large_idx, sub_pos, chunk_idx, factor, n_chunks)
-        return chunk_idx
-
-
-
-
-
-
-    def _cds_select(
-        self,
-        chunk_idx: torch.Tensor,
         packed: torch.Tensor,
         cmin: torch.Tensor,
         cmax: torch.Tensor,
         centroid: torch.Tensor,
-        raw_q: torch.Tensor,
+        valid: torch.Tensor,
         block_size: int,
+        n_chunks: int,
     ) -> torch.Tensor:
+        """Gathered/offload path for single-chunk retrieval."""
         cfg = self.cfg
-        batch = raw_q.shape[0]
-        kv_heads = raw_q.shape[1]
-        nk = chunk_idx.shape[2]
-        # Density via centroid @ q
-        density = self._scratch_buf("density_scores",(batch, kv_heads, nk),torch.float32,raw_q.device)
-        density = chunk_density_scores(chunk_idx,centroid,raw_q,out=density,strict=cfg.strict_kernels)
-        n_dense = max(1, int(nk * cfg.dense_ratio))
-        n_dense = min(n_dense, nk)
-        with _retrieve_stage("cds_density_topk"):
-            dense_pos = _topk_3d(density, n_dense, strict=cfg.strict_kernels)
-
-        dense_mask = self._scratch_buf("dense_mask",(batch, kv_heads, nk),torch.bool,raw_q.device)
-        dense_mask = dense_mask_from_topk(dense_pos,nk,out=dense_mask,strict=cfg.strict_kernels)
+        batch, kv_heads = raw_q.shape[:2]
+        n_cand = min(int(cfg.chunk_candidates), n_chunks)
+        n_dense = min(int(cfg.dense_chunks), n_cand)
+        # valid: [B, H, N]; mean score over all chunks.
+        q = raw_q.to(dtype=centroid.dtype).unsqueeze(2)
+        scores = (centroid * q).sum(dim=-1).float()
+        scores = torch.where(valid, scores, torch.full_like(scores, float("-inf")))
+        chunk_idx = _topk_3d(scores, n_cand, strict=cfg.strict_kernels)
+        dense_mask = self._scratch_buf(
+            "single_dense_mask_g", (batch, kv_heads, n_cand), torch.bool, raw_q.device
+        )
+        dense_mask.fill_(False)
+        dense_mask[..., :n_dense] = True
         dense_topk = max(1, min(cfg.dense_topk, block_size))
         sparse_topk = max(1, min(cfg.sparse_topk, block_size))
-        output_slots = max(dense_topk, sparse_topk)
-        out_width = nk * output_slots
+        out_width = n_dense * dense_topk + (n_cand - n_dense) * sparse_topk
+        # Use padded KIVI then compact-pack for the gathered CUDA/ref path.
+        padded_slots = max(dense_topk, sparse_topk)
+        padded_w = n_cand * padded_slots
+        out_scores = self._scratch_buf(
+            "single_kivi_scores_g", (batch, kv_heads, max(padded_w, out_width)), torch.float32, raw_q.device
+        )
+        out_indices = self._scratch_buf(
+            "single_kivi_indices_g", (batch, kv_heads, max(padded_w, out_width)), torch.int64, raw_q.device
+        )
+        out_scores, out_indices = partial_chunk_kivi_qk(
+            chunk_idx,
+            dense_mask,
+            packed,
+            cmin,
+            cmax,
+            raw_q.to(cmin.dtype),
+            group_size=block_size,
+            dense_topk=dense_topk,
+            sparse_topk=sparse_topk,
+            out_scores=out_scores,
+            out_indices=out_indices,
+            strict=cfg.strict_kernels,
+        )
+        from vllm.v1.attention.ops.zoomkv.kernels import _pack_padded_kivi_to_compact
 
-
-        out_scores = self._scratch_buf("kivi_scores",(batch, kv_heads, out_width),torch.float32,raw_q.device)
-        out_indices = self._scratch_buf("kivi_indices",(batch, kv_heads, out_width),torch.int64,raw_q.device)
-
-        with _retrieve_stage("kivi_qk"):
-            out_scores, out_indices = partial_chunk_kivi_qk(chunk_idx,dense_mask,packed,cmin,cmax,raw_q.to(cmin.dtype),group_size=block_size,dense_topk=dense_topk,sparse_topk=sparse_topk,out_scores=out_scores,out_indices=out_indices,strict=cfg.strict_kernels)
-        actual_topk = min(cfg.final_topk, out_scores.shape[-1])
-        with _retrieve_stage("final_topk"):
-            selected = float_topk_values_3d(
-                out_scores,
-                out_indices,
-                actual_topk,
-                strict=cfg.strict_kernels,
-            )
-
-
+        _pack_padded_kivi_to_compact(
+            out_scores,
+            out_indices,
+            nk=n_cand,
+            n_dense=n_dense,
+            dense_topk=dense_topk,
+            sparse_topk=sparse_topk,
+        )
+        actual_topk = min(cfg.final_topk, out_width)
+        selected = float_topk_values_3d(
+            out_scores[..., :out_width],
+            out_indices[..., :out_width],
+            actual_topk,
+            strict=cfg.strict_kernels,
+        )
         if actual_topk == cfg.final_topk:
             return selected
-
-        padded = self._scratch_buf("selected",(batch, kv_heads, cfg.final_topk),torch.int64,raw_q.device,fill=-1)
+        padded = self._scratch_buf(
+            "single_selected_g",
+            (batch, kv_heads, cfg.final_topk),
+            torch.int64,
+            raw_q.device,
+            fill=-1,
+        )
         padded[..., :actual_topk].copy_(selected)
         return padded

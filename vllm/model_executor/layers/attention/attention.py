@@ -639,7 +639,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sink_size=getattr(attn_cfg, "zoomkv_sink_size", 64),
                 local_size=getattr(attn_cfg, "zoomkv_local_size", 256),
-                native_block_size=getattr(attn_cfg, "zoomkv_quest_chunk", 16),
+                native_block_size=getattr(attn_cfg, "zoomkv_chunk_size", 16),
             )
         else:
             return FullAttentionSpec(

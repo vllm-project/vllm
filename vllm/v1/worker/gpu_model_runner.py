@@ -1105,7 +1105,8 @@ class GPUModelRunner(
             pool = get_cpu_key_pool()
             if pool is not None:
                 pool.free_gpu_blocks_all_layers(
-                    list(scheduler_output.new_block_ids_to_zero)
+                    list(scheduler_output.new_block_ids_to_zero),
+                    allocation_num_blocks=self.kv_cache_config.num_blocks,
                 )
 
         # Free the cached encoder outputs.
@@ -6981,7 +6982,11 @@ class GPUModelRunner(
         for name, cache in kv_caches.items():
             if not hasattr(cache, "ndim"):
                 continue
-            if cache.ndim >= 4:
+            # Full-attention ZoomKV pages only. Hybrid GDN/Mamba states are
+            # also 4-D+ but must not consume the pinned K+V pool.
+            if cache.ndim == 5 and cache.shape[1] == 2:
+                zoomkv_layers.append(name)
+            elif cache.ndim == 4 and cache.shape[2] == 16 and cache.shape[-1] % 2 == 0:
                 zoomkv_layers.append(name)
         if not zoomkv_layers:
             return
@@ -7019,8 +7024,9 @@ class GPUModelRunner(
         set_cpu_key_pool(pool)
         self._zoomkv_cpu_key_pool = pool
         logger.info(
-            "ZoomKV K+V CPU pool ready: slots=%d layers=%d",
+            "ZoomKV K+V CPU pool ready: slots=%d physical_blocks=%d layers=%d",
             num_slots,
+            int(sample.shape[0]),
             len(zoomkv_layers),
         )
 

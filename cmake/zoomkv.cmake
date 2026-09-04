@@ -25,7 +25,6 @@ set(
 
 set(VLLM_ZOOMKV_SRCS
   ${ZOOMKV_SRC_DIR}/cuda/bindings.cpp
-  ${ZOOMKV_SRC_DIR}/cuda/quest_chunk_score.cu
   ${ZOOMKV_SRC_DIR}/cuda/physical_retrieval.cu
   ${ZOOMKV_SRC_DIR}/kivi_qk_dot.cu
   ${ZOOMKV_SRC_DIR}/cuda/rerank_topk.cu

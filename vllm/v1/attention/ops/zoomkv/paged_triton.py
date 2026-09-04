@@ -604,14 +604,24 @@ def paged_gather_kv(
     block_table: torch.Tensor,
     logical_ids: torch.Tensor,
     block_size: int,
+    out_k: torch.Tensor | None = None,
+    out_v: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Gather per-head sparse K/V from paged cache in one CUDA launch."""
     heads, n_ctx = logical_ids.shape
     head_dim = key_cache.shape[-1]
-    out_k = torch.empty(
-        heads, n_ctx, head_dim, dtype=key_cache.dtype, device=key_cache.device
-    )
-    out_v = torch.empty_like(out_k)
+    if (
+        out_k is None
+        or out_k.shape[0] != heads
+        or out_k.shape[1] < n_ctx
+        or out_k.shape[-1] != head_dim
+    ):
+        out_k = torch.empty(
+            heads, n_ctx, head_dim, dtype=key_cache.dtype, device=key_cache.device
+        )
+        out_v = torch.empty_like(out_k)
+    elif out_v is None:
+        out_v = torch.empty_like(out_k)
     _paged_gather_kv_kernel[(heads, n_ctx)](
         key_cache,
         value_cache,

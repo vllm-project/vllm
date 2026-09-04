@@ -23,20 +23,21 @@ from vllm.v1.attention.backends.zoomkv_attn import (
 )
 from vllm.v1.attention.ops.zoomkv.kernels import (
     float_topk_3d_varlen,
-    get_quest_ops,
-    quest_score_reference,
 )
 from vllm.v1.attention.ops.zoomkv.kivi_rerank import partial_chunk_kivi_qk_ref
+from vllm.v1.attention.ops.zoomkv.offload import (
+    filter_completed_for_offload,
+    retrieval_zone_logical_range,
+)
 from vllm.v1.attention.ops.zoomkv.paged import (
     assemble_sparse_context_indices,
     gather_kv_by_logical_indices,
+    gather_kv_hot_and_cpu_topk,
     sparse_decode_attention,
 )
 from vllm.v1.attention.ops.zoomkv.quant_pack import pack_block_kcache_4bit
-from vllm.v1.attention.ops.zoomkv.quest import QuestTorchOps
 from vllm.v1.attention.ops.zoomkv.retrieval_metadata_triton import (
     build_actual_num_chunks,
-    build_stage_budgets,
 )
 from vllm.v1.attention.ops.zoomkv.retriever import ZoomKVRetriever, ZoomKVRuntimeConfig
 from vllm.v1.attention.ops.zoomkv.state import (
@@ -82,38 +83,6 @@ def test_fused_actual_num_chunks_metadata(input_dtype):
         max_chunks=8192,
     )
     assert host == expected.to(torch.int32).tolist()
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_stage_budgets_follow_actual_request_widths():
-    actual = torch.tensor([0, 23, 100, 8192], device="cuda", dtype=torch.int32)
-    outputs = [
-        torch.empty((4, 2), device="cuda", dtype=torch.int32) for _ in range(6)
-    ]
-    build_stage_budgets(
-        actual,
-        *outputs,
-        factor=16,
-        large_ratio=0.5,
-        small_ratio=0.3,
-        dense_ratio=0.4,
-        max_large=256,
-        max_small=1024,
-        dense_topk=8,
-        sparse_topk=4,
-        final_topk=100,
-    )
-    parent_lengths, large_ks, sub_lengths, small_ks, dense_ks, final_ks = [
-        out[:, 0].cpu().tolist() for out in outputs
-    ]
-    assert parent_lengths == [0, 2, 7, 512]
-    assert large_ks == [0, 1, 4, 256]
-    assert sub_lengths == [0, 16, 64, 4096]
-    assert small_ks == [0, 5, 20, 1024]
-    assert dense_ks == [0, 2, 8, 409]
-    assert final_ks == [0, 28, 100, 100]
-    for out in outputs:
-        assert torch.equal(out[:, 0], out[:, 1])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -196,29 +165,6 @@ def test_batch_meta_cache_reused_across_layers():
     clear_block_summaries()
 
 
-def test_quest_torch_vs_reference():
-    device = _device()
-    bs, kv, n, d = 1, 2, 8, 256
-    q = torch.randn(bs, kv, d, device=device, dtype=torch.bfloat16)
-    cmin = torch.randn(bs, kv, n, d, device=device, dtype=torch.bfloat16)
-    cmax = cmin + 1
-    ref = quest_score_reference(q, cmin, cmax)
-    out = torch.empty(bs, kv, n, device=device, dtype=torch.float32)
-    QuestTorchOps().quest_chunk_score(q, cmin, cmax, out, n, None)
-    assert torch.allclose(ref, out, atol=1e-2, rtol=1e-2)
-
-
-def test_quest_ops_dispatch():
-    ops = get_quest_ops(prefer_triton=True, strict=False)
-    device = _device()
-    q = torch.randn(1, 2, 128, device=device, dtype=torch.bfloat16)
-    cmin = torch.randn(1, 2, 4, 128, device=device, dtype=torch.bfloat16)
-    cmax = cmin + 0.5
-    out = torch.empty(1, 2, 4, device=device, dtype=torch.float32)
-    ops.quest_chunk_score(q, cmin, cmax, out, 4, None)
-    assert torch.isfinite(out).all()
-
-
 def test_kivi_rerank_uses_compact_per_chunk_output():
     device = _device()
     group_size = 16
@@ -252,63 +198,6 @@ def test_kivi_rerank_uses_compact_per_chunk_output():
     assert torch.all(scores[..., :8] > -1.0e30)
     assert torch.all(scores[..., 8:12] > -1.0e30)
     assert torch.all(scores[..., 12:] < -1.0e30)
-
-
-def test_quest_ops_prefers_complete_cuda_extension(monkeypatch):
-    class FakeQuestCuda:
-        def quest_chunk_score(self):
-            raise AssertionError("not called")
-
-        def quest_sub_chunk_score(self):
-            raise AssertionError("not called")
-
-        def quest_map_back(self):
-            raise AssertionError("not called")
-
-    fake = FakeQuestCuda()
-    monkeypatch.setattr(zoomkv_kernels, "try_load_zoomkv_c", lambda: fake)
-
-    ops = zoomkv_kernels.get_quest_ops(prefer_triton=True, strict=False)
-
-    assert ops.__class__.__name__ == "_CudaQuestOps"
-    assert ops._mod is fake
-
-
-def test_quest_cuda_extension_matches_torch_reference():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    mod = zoomkv_kernels.try_load_zoomkv_c()
-    if not zoomkv_kernels._has_cuda_quest(mod):
-        pytest.skip("vllm._zoomkv_C Quest kernels are not built")
-
-    device = torch.device("cuda")
-    q = torch.randn(1, 2, 128, device=device, dtype=torch.bfloat16)
-    cmin = torch.randn(1, 2, 8, 128, device=device, dtype=torch.bfloat16)
-    cmax = cmin + torch.rand(1, 2, 8, 128, device=device, dtype=torch.bfloat16)
-    valid = torch.ones(1, 2, 8, device=device, dtype=torch.bool)
-    valid[..., -1] = False
-
-    cuda_ops = zoomkv_kernels.get_quest_ops(prefer_triton=False, strict=True)
-    torch_ops = QuestTorchOps()
-    cuda_scores = torch.empty(1, 2, 8, device=device, dtype=torch.float32)
-    torch_scores = torch.empty_like(cuda_scores)
-    cuda_ops.quest_chunk_score(q, cmin, cmax, cuda_scores, 8, valid)
-    torch_ops.quest_chunk_score(q, cmin, cmax, torch_scores, 8, valid)
-    assert torch.allclose(cuda_scores, torch_scores, atol=1e-2, rtol=1e-2)
-
-    large_idx = torch.tensor([[[0, 2, 3], [1, 0, 2]]], device=device)
-    cuda_sub = torch.empty(1, 2, 6, device=device, dtype=torch.float32)
-    torch_sub = torch.empty_like(cuda_sub)
-    cuda_ops.quest_sub_chunk_score(q, cmin, cmax, large_idx, cuda_sub, 3, 2)
-    torch_ops.quest_sub_chunk_score(q, cmin, cmax, large_idx, torch_sub, 3, 2)
-    assert torch.allclose(cuda_sub, torch_sub, atol=1e-2, rtol=1e-2)
-
-    sub_pos = torch.tensor([[[0, 1, 4, 5], [2, 3, 0, 1]]], device=device)
-    cuda_idx = torch.empty(1, 2, 4, device=device, dtype=torch.int64)
-    torch_idx = torch.empty_like(cuda_idx)
-    cuda_ops.quest_map_back(large_idx, sub_pos, cuda_idx, 2, 8)
-    torch_ops.quest_map_back(large_idx, sub_pos, torch_idx, 2, 8)
-    assert torch.equal(cuda_idx, torch_idx)
 
 
 def test_block_summary_invalidate_and_cow():
@@ -382,10 +271,9 @@ def test_retriever_pads_when_candidates_are_fewer_than_final_topk():
         local_size=0,
         final_topk=20,
         full_attention_threshold=0,
-        quest_large_chunk=16,
+        chunk_size=16,
     )
     retriever = ZoomKVRetriever(cfg)
-    retriever.quest = QuestTorchOps()
     block_summary = ZoomKVBlockSummary(1, 2, 128, 16, device)
     key = torch.randn(1, 16, 2, 128, device=device, dtype=torch.bfloat16)
     block_summary.update_blocks_from_key_cache(key, torch.tensor([0], device=device))
@@ -403,7 +291,12 @@ def test_retriever_pads_when_candidates_are_fewer_than_final_topk():
 
 
 def test_zoomkv_offload_spec_merge():
-    from vllm.v1.kv_cache_interface import KVQuantMode, ZoomKVOffloadSpec
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVQuantMode,
+        ZoomKVOffloadSpec,
+    )
 
     specs = [
         ZoomKVOffloadSpec(
@@ -422,6 +315,14 @@ def test_zoomkv_offload_spec_merge():
     assert merged.sink_size == 64
     assert merged.local_size == 256
     assert merged.block_size == 16
+    config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["layer0"], kv_cache_spec=merged)
+        ],
+    )
+    assert config.needs_kv_cache_zeroing
 
 
 def test_assemble_context_into_preallocated_buffer():
@@ -463,20 +364,23 @@ def test_zoomkv_config_defaults_match_runtime_defaults():
     attn = AttentionConfig(backend=AttentionBackendEnum.ZOOMKV)
     runtime = ZoomKVRuntimeConfig()
 
-    assert attn.zoomkv_quest_large_ratio == runtime.quest_large_ratio == 0.5
-    assert attn.zoomkv_quest_small_ratio == runtime.quest_small_ratio == 0.3
-    assert attn.zoomkv_dense_ratio == runtime.dense_ratio
     assert attn.zoomkv_dense_topk == runtime.dense_topk == 8
     assert attn.zoomkv_sparse_topk == runtime.sparse_topk == 4
-    assert attn.zoomkv_quest_chunk == runtime.quest_chunk == 16
+    assert attn.zoomkv_chunk_size == runtime.chunk_size == 16
     assert attn.zoomkv_enable_offload == runtime.enable_offload is False
+    assert attn.zoomkv_offload_unit_tokens == runtime.offload_unit_tokens == 64
+    assert attn.zoomkv_chunk_candidates == runtime.chunk_candidates == 200
+    assert attn.zoomkv_dense_chunks == runtime.dense_chunks == 60
+    assert runtime.sparse_chunks == 140
+    assert runtime.kivi_width == 1040
 
 
 @pytest.mark.parametrize(
     ("max_model_len", "expected"),
-    [(17_408, 1_072), (132_000, 8_240)],
+    [(17_408, 1_068), (132_000, 8_230)],
 )
 def test_zoomkv_graph_bucket_uses_max_model_len(max_model_len, expected):
+    # Single-layer retrieval needs no parent-group rounding.
     cfg = ZoomKVRuntimeConfig(max_model_len=max_model_len)
     assert _graph_chunk_bucket(cfg, block_size=16) == expected
 
@@ -491,10 +395,10 @@ def test_zoomkv_config_rejects_offload_with_dense_fallback():
 
 
 def test_zoomkv_config_rejects_misaligned_chunks():
-    with pytest.raises(ValueError, match="zoomkv_quest_chunk must be 16"):
+    with pytest.raises(ValueError, match="zoomkv_chunk_size must be 16"):
         AttentionConfig(
             backend=AttentionBackendEnum.ZOOMKV,
-            zoomkv_quest_chunk=8,
+            zoomkv_chunk_size=8,
         )
 
 
@@ -523,15 +427,13 @@ def test_kv_cpu_pool_roundtrip():
     set_cpu_key_pool(pool)
     key = torch.randn(4, 16, 2, 128, device=device, dtype=torch.bfloat16)
     value = torch.randn(4, 16, 2, 128, device=device, dtype=torch.bfloat16)
-    sc = ZoomKVBlockSummary(4, 2, 128, 16, device)
-    sc.update_blocks_from_key_cache(key, torch.tensor([1], device=device))
     original_k = key[1].clone()
     original_v = value[1].clone()
 
     # GPU-only -> warm: CPU copy exists, GPU page intact.
     assert (
         pool.offload_blocks_bulk(
-            "layer0", key, value, sc, torch.tensor([1], device=device)
+            "layer0", key, value, torch.tensor([1], device=device)
         )
         == 1
     )
@@ -545,7 +447,7 @@ def test_kv_cpu_pool_roundtrip():
     # Re-offloading an already-mapped block is a no-op.
     assert (
         pool.offload_blocks_bulk(
-            "layer0", key, value, sc, torch.tensor([1], device=device)
+            "layer0", key, value, torch.tensor([1], device=device)
         )
         == 0
     )
@@ -558,7 +460,7 @@ def test_kv_cpu_pool_roundtrip():
     assert torch.equal(value[1], torch.zeros_like(value[1]))
     assert pool.has_cold_blocks("layer0")
 
-    # Hybrid gather reads cold tokens straight from the pinned CPU pool.
+    # Hybrid gather still covers a cold page (prefix-share / restore tests).
     bt = torch.tensor([0, 1, 2, 3], device=device, dtype=torch.int32)
     lids = torch.arange(16, 32, device=device)
     gk, gv = gather_kv_hybrid(key, value, bt, lids, 16, pool, "layer0", 1, 2)
@@ -584,6 +486,141 @@ def test_kv_cpu_pool_roundtrip():
     pool.free_gpu_blocks("layer0", [1])
     assert pool.lookup_slot("layer0", 1) is None
     assert not pool.has_cold_blocks("layer0")
+    set_cpu_key_pool(None)
+    clear_block_summaries()
+
+
+def test_kv_cpu_pool_capacity_is_per_layer():
+    if not torch.cuda.is_available():
+        return
+    from vllm.v1.attention.ops.zoomkv.offload import ZoomKVCpuKeyPool
+
+    device = torch.device("cuda")
+    pool = ZoomKVCpuKeyPool(
+        num_slots=2,
+        num_kv_heads=1,
+        head_dim=128,
+        block_size=16,
+        dtype=torch.bfloat16,
+        device=device,
+        layer_names=["layer0", "layer1"],
+        strict=True,
+    )
+    key = torch.randn(2, 16, 1, 128, device=device, dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    blocks = torch.tensor([0, 1], device=device)
+
+    assert pool.offload_blocks_bulk("layer0", key, value, blocks) == 2
+    assert pool.offload_blocks_bulk("layer1", key, value, blocks) == 2
+    assert pool.metrics.cpu_slots_in_use == 2
+
+    layer1_slot = pool.lookup_slot("layer1", 0)
+    assert int(pool.physical_to_slot["layer0"][0]) >= 0
+    assert int(pool.physical_to_slot["layer1"][0]) == layer1_slot
+    pool.free_gpu_blocks("layer0", [0])
+    assert pool.lookup_slot("layer0", 0) is None
+    assert pool.lookup_slot("layer1", 0) == layer1_slot
+    assert int(pool.physical_to_slot["layer0"][0]) == -1
+    assert int(pool.physical_to_slot["layer1"][0]) == layer1_slot
+    pool.free_gpu_blocks_all_layers([0], allocation_num_blocks=1)
+    assert pool.lookup_slot("layer0", 1) is None
+    assert pool.lookup_slot("layer1", 0) is None
+    assert pool.lookup_slot("layer1", 1) is None
+    assert bool((pool.physical_to_slot["layer0"] == -1).all())
+    assert bool((pool.physical_to_slot["layer1"] == -1).all())
+    torch.accelerator.synchronize()
+
+
+def test_retrieval_zone_waits_for_64_token_unit():
+    # sink=64 (4 blocks), local=256. seq=1040 → local_start=784 → end_b=49.
+    # Retrieval logical blocks [4, 49). 45 children; 64-token unit keeps 44.
+    assert retrieval_zone_logical_range(1040, 64, 256, 16, 64, flush=False) == (4, 48)
+    assert retrieval_zone_logical_range(1040, 64, 256, 16, 64, flush=True) == (4, 49)
+    # Too short to leave the local window: nothing to offload.
+    assert retrieval_zone_logical_range(320, 64, 256, 16, 64, flush=False) == (4, 4)
+    # 64 tokens past sink+local → exactly one unit.
+    assert retrieval_zone_logical_range(384, 64, 256, 16, 64, flush=False) == (4, 8)
+
+
+def test_filter_completed_skips_sink_and_local():
+    if not torch.cuda.is_available():
+        return
+    device = torch.device("cuda")
+    # 24 logical blocks, identity physical ids. seq=384 → zone [4, 8).
+    block_table = torch.arange(24, device=device, dtype=torch.int32).unsqueeze(0)
+    seq_lens = torch.tensor([384], device=device)
+    completed = torch.tensor([0, 3, 4, 5, 6, 7, 8, 20], device=device)
+    kept = filter_completed_for_offload(
+        completed,
+        block_table,
+        seq_lens,
+        sink_size=64,
+        local_size=256,
+        block_size=16,
+        unit_tokens=64,
+        num_reqs=1,
+    )
+    assert sorted(int(x) for x in kept.tolist()) == [4, 5, 6, 7]
+
+
+def test_gather_hot_gpu_and_cpu_topk():
+    if not torch.cuda.is_available():
+        return
+    from vllm.v1.attention.ops.zoomkv.offload import (
+        ZoomKVCpuKeyPool,
+        set_cpu_key_pool,
+    )
+
+    device = torch.device("cuda")
+    clear_block_summaries()
+    set_cpu_key_pool(None)
+    num_blocks, hkv, d = 24, 2, 128
+    pool = ZoomKVCpuKeyPool(
+        num_slots=16,
+        num_kv_heads=hkv,
+        head_dim=d,
+        block_size=16,
+        dtype=torch.bfloat16,
+        device=device,
+        layer_names=["layer0"],
+    )
+    set_cpu_key_pool(pool)
+    key = torch.randn(num_blocks, 16, hkv, d, device=device, dtype=torch.bfloat16)
+    value = torch.randn_like(key)
+    # Offload a retrieval-zone page (logical block 5 = tokens 80-95).
+    original_k = key[5].clone()
+    original_v = value[5].clone()
+    pool.offload_blocks_bulk(
+        "layer0", key, value, torch.tensor([5], device=device)
+    )
+    pool.mark_cold("layer0", key, value, [5])
+    assert torch.equal(key[5], torch.zeros_like(key[5]))
+
+    seq_len = 384
+    bt = torch.arange(num_blocks, device=device, dtype=torch.int32)
+    topk = torch.tensor([[80, 81], [80, 81]], device=device, dtype=torch.int64)
+    ctx_idx, _ = assemble_sparse_context_indices(
+        seq_len, topk, 64, 256, device, block_size=16
+    )
+    gk, gv = gather_kv_hot_and_cpu_topk(
+        key,
+        value,
+        bt,
+        ctx_idx,
+        seq_len,
+        64,
+        256,
+        16,
+        pool,
+        "layer0",
+    )
+    # First 64 tokens are sink and must still come from GPU page 0.
+    assert torch.allclose(gk[0, 0], key[0, 0, 0], atol=1e-2, rtol=1e-2)
+    # Top-K tail is the last two columns and must come from the CPU copy
+    # of cold page 5 (logical tokens 80-81 = offsets 0-1).
+    assert torch.allclose(gk[0, -2].cpu(), original_k[0, 0].cpu(), atol=1e-2, rtol=1e-2)
+    assert torch.allclose(gk[0, -1].cpu(), original_k[1, 0].cpu(), atol=1e-2, rtol=1e-2)
+    assert torch.allclose(gv[0, -2].cpu(), original_v[0, 0].cpu(), atol=1e-2, rtol=1e-2)
     set_cpu_key_pool(None)
     clear_block_summaries()
 
@@ -831,8 +868,7 @@ def test_retrieve_topk_batch_matches_serial():
         sink_size=64,
         local_size=256,
         final_topk=32,
-        quest_chunk=16,
-        quest_large_chunk=256,
+        chunk_size=16,
         full_attention_threshold=500,
     )
     retriever = ZoomKVRetriever(cfg)
@@ -1012,8 +1048,7 @@ def test_direct_physical_retrieval_matches_materialized():
         sink_size=64,
         local_size=256,
         final_topk=32,
-        quest_chunk=16,
-        quest_large_chunk=256,
+        chunk_size=16,
         full_attention_threshold=500,
     )
     retriever = ZoomKVRetriever(cfg)
@@ -1087,8 +1122,7 @@ def test_batched_sparse_backend_matches_serial_path():
         sink_size=32,
         local_size=64,
         final_topk=16,
-        quest_chunk=16,
-        quest_large_chunk=256,
+        chunk_size=16,
         full_attention_threshold=200,
         dense_fallback=False,
         enable_offload=False,
@@ -1126,7 +1160,6 @@ def test_batched_sparse_backend_matches_serial_path():
         block_size=block_size,
         device=cache_device,
         dtype=torch.bfloat16,
-        blocks_per_parent=max(1, cfg.quest_large_chunk // cfg.quest_chunk),
     )
     for b in range(cursor):
         summary.update_blocks_from_key_cache(
@@ -1285,6 +1318,7 @@ def test_gather_kv_from_topk_batch_handles_short_seq_padding():
     assert torch.equal(gv_f, gv_r)
 
 
+@pytest.mark.skip(reason="obsolete hierarchical-kernel coverage")
 def test_direct_physical_bf16_d128_specialized_kernels_match_reference():
     """Parent/sub/density BF16-D128 specialized kernels vs torch reference."""
     if not torch.cuda.is_available():
@@ -1480,8 +1514,7 @@ def test_retrieve_marks_fully_valid_direct_path():
         sink_size=64,
         local_size=256,
         final_topk=32,
-        quest_chunk=16,
-        quest_large_chunk=256,
+        chunk_size=16,
         full_attention_threshold=500,
     )
     retriever = ZoomKVRetriever(cfg)
@@ -1768,36 +1801,7 @@ def test_forward_owns_kv_cache_update_before_attention():
     assert result.shape == tensor.shape
 
 
-def test_parent_summary_invalidate_and_cow():
-    device = _device()
-    clear_block_summaries()
-    sc = get_or_create_block_summary(
-        "parent-layer",
-        num_blocks=32,
-        num_kv_heads=2,
-        head_dim=128,
-        block_size=16,
-        device=device,
-        dtype=torch.bfloat16,
-    )
-    sc.parent_valid[10] = True
-    sc.parent_first_child[10] = 3
-    sc.parent_min[10].fill_(1.0)
-    invalidate_block_summaries_for_blocks([10])
-    assert not bool(sc.parent_valid[10])
-    assert int(sc.parent_first_child[10]) == -1
-    assert float(sc.parent_min[10, 0, 0]) == 0.0
-
-    sc.parent_valid[11] = True
-    sc.parent_min[11].fill_(2.0)
-    sc.copy_blocks([(11, 12)])
-    assert bool(sc.parent_valid[12])
-    assert float(sc.parent_min[12, 0, 0]) == 2.0
-    copy_block_summaries_for_block_pairs([(12, 13)])
-    assert bool(sc.parent_valid[13])
-    clear_block_summaries()
-
-
+@pytest.mark.skip(reason="parent summaries were removed")
 def test_parent_finalize_matches_build_parent_minmax():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -1839,6 +1843,7 @@ def test_parent_finalize_matches_build_parent_minmax():
         assert torch.allclose(sc.parent_max[anchor], ref_max[0, :, p], atol=1e-3)
 
 
+@pytest.mark.skip(reason="parent summaries were removed")
 def test_parent_precomputed_scoring_matches_inline():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -1911,6 +1916,7 @@ def test_parent_precomputed_scoring_matches_inline():
     assert torch.allclose(scores_pre, scores_inline, atol=2e-2, rtol=2e-2)
 
 
+@pytest.mark.skip(reason="parent summaries were removed")
 def test_parent_stale_first_child_falls_back_to_inline():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -1965,3 +1971,194 @@ def test_parent_stale_first_child_falls_back_to_inline():
         factor,
     )
     assert torch.allclose(scores, ref, atol=2e-2, rtol=2e-2)
+
+
+def test_block_summary_has_no_parent_state():
+    device = _device()
+    clear_block_summaries()
+    sc = get_or_create_block_summary(
+        "single-chunk-layer",
+        num_blocks=32,
+        num_kv_heads=2,
+        head_dim=128,
+        block_size=16,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    assert not hasattr(sc, "parent_min")
+    assert not hasattr(sc, "parent_max")
+    assert not hasattr(sc, "parent_valid")
+
+
+def test_single_chunk_physical_fixed_shapes_and_padding():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    if not zoomkv_kernels.direct_physical_retrieval_available():
+        pytest.skip("direct physical ZoomKV extension unavailable")
+
+    device = torch.device("cuda")
+    clear_block_summaries()
+    block_size, hkv, d = 16, 2, 128
+    # Short retrieval zone: fewer than 200 chunks to exercise -inf/-1 padding.
+    n_chunks, num_blocks, batch = 48, 128, 2
+    cfg = ZoomKVRuntimeConfig(
+        sink_size=64,
+        local_size=256,
+        final_topk=100,
+        chunk_size=16,
+        chunk_candidates=200,
+        dense_chunks=60,
+        dense_topk=8,
+        sparse_topk=4,
+        full_attention_threshold=500,
+    )
+    assert cfg.kivi_width == 1040
+    retriever = ZoomKVRetriever(cfg)
+    summary = ZoomKVBlockSummary(
+        num_blocks,
+        hkv,
+        d,
+        block_size,
+        device,
+        dtype=torch.bfloat16,
+    )
+    key = torch.randn(
+        num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
+    )
+    physical_ids = torch.arange(n_chunks, device=device, dtype=torch.int32).unsqueeze(0)
+    physical_ids = physical_ids.expand(batch, n_chunks).contiguous()
+    summary.update_blocks_from_key_cache(key, physical_ids[0])
+    raw_q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+    token_offset = cfg.sink_size
+    topk = retriever._retrieve_topk_physical(
+        raw_q,
+        summary,
+        physical_ids,
+        n_chunks,
+        token_offset,
+        actual_num_chunks=torch.full(
+            (batch,), n_chunks, dtype=torch.int32, device=device
+        ),
+    )
+    assert topk.shape == (batch, hkv, cfg.final_topk)
+    assert ((topk == -1) | (topk >= token_offset)).all()
+    # Valid selected tokens must map into the retrieval zone.
+    max_tok = token_offset + n_chunks * block_size
+    valid = topk[topk >= 0]
+    assert (valid < max_tok).all()
+
+    # Compact KIVI width and dense/sparse split for the full 200-candidate case.
+    n_chunks_full = 256
+    physical_full = torch.arange(
+        n_chunks_full, device=device, dtype=torch.int32
+    ).unsqueeze(0).expand(1, n_chunks_full).contiguous()
+    summary_full = ZoomKVBlockSummary(
+        max(num_blocks, n_chunks_full),
+        hkv,
+        d,
+        block_size,
+        device,
+        dtype=torch.bfloat16,
+    )
+    key_full = torch.randn(
+        max(num_blocks, n_chunks_full),
+        block_size,
+        hkv,
+        d,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    summary_full.update_blocks_from_key_cache(key_full, physical_full[0])
+    retriever2 = ZoomKVRetriever(cfg)
+    (
+        _lengths,
+        _ks,
+        _final_ks,
+        n_cand,
+        n_dense,
+        out_width,
+    ) = retriever2._budgets(
+        torch.tensor([n_chunks_full], dtype=torch.int32, device=device),
+        n_chunks=n_chunks_full,
+        kv_heads=hkv,
+    )
+    assert n_cand == 200
+    assert n_dense == 60
+    assert out_width == 1040
+    topk_full = retriever2._retrieve_topk_physical(
+        raw_q[:1],
+        summary_full,
+        physical_full,
+        n_chunks_full,
+        token_offset,
+        actual_num_chunks=torch.tensor([n_chunks_full], dtype=torch.int32, device=device),
+    )
+    assert topk_full.shape == (1, hkv, 100)
+    assert (topk_full >= 0).all()
+
+
+def test_single_chunk_direct_matches_gathered():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    if not zoomkv_kernels.direct_physical_retrieval_available():
+        pytest.skip("direct physical ZoomKV extension unavailable")
+
+    device = torch.device("cuda")
+    clear_block_summaries()
+    block_size, hkv, d = 16, 2, 128
+    n_chunks, num_blocks, batch = 128, 256, 2
+    cfg = ZoomKVRuntimeConfig(
+        sink_size=64,
+        local_size=256,
+        final_topk=32,
+        chunk_size=16,
+        chunk_candidates=200,
+        dense_chunks=60,
+        dense_topk=8,
+        sparse_topk=4,
+        full_attention_threshold=500,
+    )
+    retriever = ZoomKVRetriever(cfg)
+    summary = ZoomKVBlockSummary(
+        num_blocks,
+        hkv,
+        d,
+        block_size,
+        device,
+        dtype=torch.bfloat16,
+    )
+    key = torch.randn(
+        num_blocks, block_size, hkv, d, device=device, dtype=torch.bfloat16
+    )
+    physical_ids = torch.stack(
+        (
+            torch.randperm(num_blocks, device=device)[:n_chunks],
+            torch.randperm(num_blocks, device=device)[:n_chunks],
+        )
+    ).to(torch.int32)
+    summary.update_blocks_from_key_cache(key, physical_ids.reshape(-1).unique())
+    raw_q = torch.randn(batch, hkv, d, device=device, dtype=torch.bfloat16)
+    token_offset = cfg.sink_size
+    direct = retriever._retrieve_topk_physical(
+        raw_q, summary, physical_ids, n_chunks, token_offset
+    )
+    packed, cmin, cmax, centroid, valid = summary.gather_batch_block_summaries(
+        physical_ids.to(torch.int64),
+        chunk_valid=None,
+        assume_valid_ids=True,
+    )
+    materialized = retriever.retrieve_topk_from_block_summaries(
+        raw_q,
+        packed,
+        cmin,
+        cmax,
+        centroid,
+        valid,
+        seq_len=token_offset + n_chunks * block_size + cfg.local_size,
+        block_size=block_size,
+        start_b=token_offset // block_size,
+    )
+    assert direct.shape == materialized.shape
+    for b in range(batch):
+        for h in range(hkv):
+            assert set(direct[b, h].tolist()) == set(materialized[b, h].tolist())

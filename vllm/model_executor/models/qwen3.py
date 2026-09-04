@@ -23,6 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Iterable
 from typing import Any
 
@@ -30,6 +31,7 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -54,6 +56,8 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
 
 logger = init_logger(__name__)
+
+_ZOOMKV_LAYER_NVTX = os.environ.get("VLLM_ZOOMKV_LAYER_NVTX", "0") == "1"
 
 
 class Qwen3Attention(nn.Module):
@@ -116,6 +120,9 @@ class Qwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
+            # Native CUDA RoPE consumes fp32 cos/sin values. A resident fp32
+            # table avoids converting the full long-context cache per layer.
+            dtype=torch.float32,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
         attn_cls = (
@@ -141,24 +148,59 @@ class Qwen3Attention(nn.Module):
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        layer_idx = extract_layer_index(prefix)
+        self._nvtx_pre = f"decode.layer.{layer_idx:02d}.attn_pre"
+        self._nvtx_o_proj = f"decode.layer.{layer_idx:02d}.o_proj"
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_push(self._nvtx_pre)
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # Add qk-norm
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
+        if qkv.is_cuda:
+            ops.fused_qk_norm_rope(
+                qkv,
+                self.num_heads,
+                self.num_kv_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.q_norm.variance_epsilon,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                positions.view(-1),
+            )
+            q, k, v = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+        else:
+            q, k, v = qkv.split(
+                [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+            # Add qk-norm
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+            )
+            q_by_head = self.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
+            k_by_head = self.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
+            q, k = self.rotary_emb(positions, q, k)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_pop()
         attn_output = self.attn(q, k, v)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_push(self._nvtx_o_proj)
         output, _ = self.o_proj(attn_output)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_pop()
         return output
 
 
@@ -212,6 +254,11 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        layer_idx = extract_layer_index(prefix)
+        self._nvtx_total = f"decode.layer.{layer_idx:02d}.total"
+        self._nvtx_input_norm = f"decode.layer.{layer_idx:02d}.input_norm"
+        self._nvtx_post_norm = f"decode.layer.{layer_idx:02d}.post_attn_norm"
+        self._nvtx_mlp = f"decode.layer.{layer_idx:02d}.mlp"
 
     def forward(
         self,
@@ -219,20 +266,33 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_push(self._nvtx_total)
+            torch.cuda.nvtx.range_push(self._nvtx_input_norm)
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_pop()
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_push(self._nvtx_post_norm)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_push(self._nvtx_mlp)
         hidden_states = self.mlp(hidden_states)
+        if _ZOOMKV_LAYER_NVTX:
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_pop()
         return hidden_states, residual
 
 
@@ -337,4 +397,13 @@ class Qwen3ForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        loaded_weights = loader.load_weights(weights)
+        # RoPE buffers are non-persistent and model dtype conversion may cast
+        # them to bf16. Native CUDA RoPE consumes fp32 and would otherwise cast
+        # the full long-context table back to fp32 once per layer/token.
+        for module in self.modules():
+            if isinstance(module, Qwen3Attention):
+                cache = module.rotary_emb.cos_sin_cache
+                if cache.dtype != torch.float32:
+                    module.rotary_emb.cos_sin_cache = cache.float()
+        return loaded_weights

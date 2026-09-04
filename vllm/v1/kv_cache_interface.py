@@ -830,4 +830,11 @@ class KVCacheConfig:
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        # ZoomKV offload keeps CPU-slot mappings and physical block summaries
+        # beyond a request's lifetime. Freshly reallocated physical blocks
+        # must therefore flow through GPUModelRunner's zero/invalidate/free
+        # hook just like stateful Mamba blocks.
+        return self.has_mamba_layers or any(
+            isinstance(g.kv_cache_spec, ZoomKVOffloadSpec)
+            for g in self.kv_cache_groups
+        )

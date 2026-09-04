@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""ZoomKV production kernel dispatch (Quest / TopK / KIVI).
+"""ZoomKV production kernel dispatch (chunk mean / Top-K / KIVI).
 
 Development keeps PyTorch / Triton reference paths.  Strict mode raises when
 a production CUDA extension is required but unavailable.
@@ -17,7 +17,6 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.ops.zoomkv.quest import QuestTorchOps, quest_bound_scores
 
 logger = init_logger(__name__)
 
@@ -66,13 +65,6 @@ def try_load_zoomkv_c() -> Any | None:
     return _ZOOMKV_C
 
 
-def _has_cuda_quest(mod: Any | None) -> bool:
-    return mod is not None and all(
-        hasattr(mod, name)
-        for name in ("quest_chunk_score", "quest_sub_chunk_score", "quest_map_back")
-    )
-
-
 def _has_cuda_rerank(mod: Any | None) -> bool:
     return mod is not None and all(
         hasattr(mod, name)
@@ -81,16 +73,12 @@ def _has_cuda_rerank(mod: Any | None) -> bool:
 
 
 _DIRECT_PHYSICAL_SYMBOLS = (
-    "quest_chunk_score_physical",
-    "quest_parent_score_physical",
-    "quest_sub_score_physical",
+    "centroid_score_physical",
     "density_score_physical",
     "kivi_physical",
     "float_topk_values_3d",
     "float_topk_3d_varlen",
     "float_topk_values_3d_varlen",
-    "quest_map_back",
-    "mask_from_topk",
 )
 
 
@@ -99,97 +87,6 @@ def direct_physical_retrieval_available() -> bool:
     mod = try_load_zoomkv_c()
     return mod is not None and all(
         hasattr(mod, name) for name in _DIRECT_PHYSICAL_SYMBOLS
-    )
-
-
-def quest_chunk_score_physical(
-    raw_q: torch.Tensor,
-    physical_ids: torch.Tensor,
-    chunk_min: torch.Tensor,
-    chunk_max: torch.Tensor,
-    valid: torch.Tensor,
-    scores: torch.Tensor,
-    n_chunks: int,
-    actual_num_chunks: torch.Tensor | None = None,
-) -> None:
-    mod = try_load_zoomkv_c()
-    if mod is None or not hasattr(mod, "quest_chunk_score_physical"):
-        raise RuntimeError("ZoomKV direct physical Quest kernel unavailable")
-    mod.quest_chunk_score_physical(
-        raw_q,
-        physical_ids,
-        chunk_min,
-        chunk_max,
-        valid,
-        scores,
-        int(n_chunks),
-        actual_num_chunks,
-    )
-
-
-def quest_parent_score_physical(
-    raw_q: torch.Tensor,
-    physical_ids: torch.Tensor,
-    chunk_min: torch.Tensor,
-    chunk_max: torch.Tensor,
-    valid: torch.Tensor,
-    scores: torch.Tensor,
-    n_chunks: int,
-    factor: int,
-    actual_num_chunks: torch.Tensor | None = None,
-    parent_min: torch.Tensor | None = None,
-    parent_max: torch.Tensor | None = None,
-    parent_valid: torch.Tensor | None = None,
-    parent_first_child: torch.Tensor | None = None,
-) -> None:
-    mod = try_load_zoomkv_c()
-    if mod is None or not hasattr(mod, "quest_parent_score_physical"):
-        raise RuntimeError("ZoomKV direct physical parent Quest kernel unavailable")
-    mod.quest_parent_score_physical(
-        raw_q,
-        physical_ids,
-        chunk_min,
-        chunk_max,
-        valid,
-        scores,
-        int(n_chunks),
-        int(factor),
-        actual_num_chunks,
-        parent_min,
-        parent_max,
-        parent_valid,
-        parent_first_child,
-    )
-
-
-def quest_sub_score_physical(
-    raw_q: torch.Tensor,
-    physical_ids: torch.Tensor,
-    chunk_min: torch.Tensor,
-    chunk_max: torch.Tensor,
-    valid: torch.Tensor,
-    large_ids: torch.Tensor,
-    scores: torch.Tensor,
-    n_selected: int,
-    factor: int,
-    n_chunks: int,
-    actual_num_chunks: torch.Tensor | None = None,
-) -> None:
-    mod = try_load_zoomkv_c()
-    if mod is None or not hasattr(mod, "quest_sub_score_physical"):
-        raise RuntimeError("ZoomKV direct physical sub-Quest kernel unavailable")
-    mod.quest_sub_score_physical(
-        raw_q,
-        physical_ids,
-        chunk_min,
-        chunk_max,
-        valid,
-        large_ids,
-        scores,
-        int(n_selected),
-        int(factor),
-        int(n_chunks),
-        actual_num_chunks,
     )
 
 
@@ -218,6 +115,30 @@ def density_score_physical(
     )
 
 
+def centroid_score_physical(
+    physical_ids: torch.Tensor,
+    centroid: torch.Tensor,
+    valid: torch.Tensor,
+    raw_q: torch.Tensor,
+    scores: torch.Tensor,
+    n_chunks: int,
+    actual_num_chunks: torch.Tensor | None = None,
+) -> None:
+    """Score every retrieval-zone child chunk with ``q · centroid``."""
+    mod = try_load_zoomkv_c()
+    if mod is None or not hasattr(mod, "centroid_score_physical"):
+        raise RuntimeError("ZoomKV centroid score kernel unavailable")
+    mod.centroid_score_physical(
+        physical_ids,
+        centroid,
+        valid,
+        raw_q,
+        scores,
+        int(n_chunks),
+        actual_num_chunks,
+    )
+
+
 def kivi_physical(
     chunk_ids: torch.Tensor,
     dense_mask: torch.Tensor,
@@ -233,10 +154,20 @@ def kivi_physical(
     out_scores: torch.Tensor,
     out_indices: torch.Tensor,
     actual_num_chunks: torch.Tensor | None = None,
+    *,
+    compact: bool = False,
+    n_dense: int = 0,
 ) -> None:
     mod = try_load_zoomkv_c()
     if mod is None or not hasattr(mod, "kivi_physical"):
         raise RuntimeError("ZoomKV direct physical KIVI kernel unavailable")
+    kwargs = {}
+    # Older wheels omit compact layout args; pack in Python instead.
+    text_sig = getattr(mod.kivi_physical, "__text_signature__", None) or ""
+    supports_compact = "compact" in text_sig or hasattr(mod, "centroid_score_physical")
+    if compact and supports_compact:
+        kwargs["compact"] = True
+        kwargs["n_dense"] = int(n_dense)
     mod.kivi_physical(
         chunk_ids,
         dense_mask,
@@ -252,22 +183,62 @@ def kivi_physical(
         out_scores,
         out_indices,
         actual_num_chunks,
+        **kwargs,
     )
+    if compact and not supports_compact:
+        _pack_padded_kivi_to_compact(
+            out_scores,
+            out_indices,
+            nk=int(chunk_ids.shape[2]),
+            n_dense=int(n_dense),
+            dense_topk=int(dense_topk),
+            sparse_topk=int(sparse_topk),
+        )
 
 
-def _make_quest_fallback(prefer_triton: bool, strict: bool):
-    if prefer_triton:
-        try:
-            from vllm.v1.attention.ops.zoomkv.quest_triton import QuestTritonOps
-
-            return QuestTritonOps()
-        except Exception as e:  # noqa: BLE001
-            if strict:
-                raise RuntimeError(f"ZoomKV Quest Triton unavailable: {e}") from e
-            logger.warning("Quest Triton unavailable (%s); using PyTorch", e)
-    if strict:
-        raise RuntimeError("ZoomKV strict mode: Quest CUDA/Triton required")
-    return QuestTorchOps()
+def _pack_padded_kivi_to_compact(
+    out_scores: torch.Tensor,
+    out_indices: torch.Tensor,
+    *,
+    nk: int,
+    n_dense: int,
+    dense_topk: int,
+    sparse_topk: int,
+) -> None:
+    """Fallback: rewrite ``nk * max(d,s)`` KIVI output into compact 1040 layout."""
+    output_slots = max(dense_topk, sparse_topk)
+    compact_w = n_dense * dense_topk + (nk - n_dense) * sparse_topk
+    padded = out_scores[..., : nk * output_slots].reshape(
+        *out_scores.shape[:2], nk, output_slots
+    )
+    padded_idx = out_indices[..., : nk * output_slots].reshape(
+        *out_indices.shape[:2], nk, output_slots
+    )
+    compact_scores = out_scores.new_full((*out_scores.shape[:2], compact_w), float("-inf"))
+    compact_idx = out_indices.new_full((*out_indices.shape[:2], compact_w), -1)
+    if n_dense > 0:
+        dense = padded[..., :n_dense, :dense_topk].reshape(
+            *out_scores.shape[:2], n_dense * dense_topk
+        )
+        dense_i = padded_idx[..., :n_dense, :dense_topk].reshape(
+            *out_indices.shape[:2], n_dense * dense_topk
+        )
+        compact_scores[..., : n_dense * dense_topk] = dense
+        compact_idx[..., : n_dense * dense_topk] = dense_i
+    if nk > n_dense:
+        sparse = padded[..., n_dense:, :sparse_topk].reshape(
+            *out_scores.shape[:2], (nk - n_dense) * sparse_topk
+        )
+        sparse_i = padded_idx[..., n_dense:, :sparse_topk].reshape(
+            *out_indices.shape[:2], (nk - n_dense) * sparse_topk
+        )
+        compact_scores[..., n_dense * dense_topk :] = sparse
+        compact_idx[..., n_dense * dense_topk :] = sparse_i
+    out_scores[..., :compact_w].copy_(compact_scores)
+    out_indices[..., :compact_w].copy_(compact_idx)
+    if out_scores.shape[-1] > compact_w:
+        out_scores[..., compact_w:].fill_(float("-inf"))
+        out_indices[..., compact_w:].fill_(-1)
 
 
 @lru_cache
@@ -311,174 +282,6 @@ def _try_load_rerank_cuda() -> Any | None:
     except Exception as e:  # noqa: BLE001
         logger.warning("ZoomKV CDS CUDA load failed: %s", e)
         return None
-
-
-def get_quest_ops(prefer_triton: bool = True, strict: bool | None = None):
-    strict = _want_strict() if strict is None else strict
-    mod = try_load_zoomkv_c()
-    if _has_cuda_quest(mod):
-        return _CudaQuestOps(
-            mod,
-            lambda: _make_quest_fallback(prefer_triton=prefer_triton, strict=strict),
-        )
-    return _make_quest_fallback(prefer_triton=prefer_triton, strict=strict)
-
-
-class _CudaQuestOps:
-    def __init__(self, mod: Any, fallback_factory) -> None:
-        self._mod = mod
-        self._fallback_factory = fallback_factory
-        self._fallback: Any | None = None
-
-    def _fallback_ops(self):
-        if self._fallback is None:
-            self._fallback = self._fallback_factory()
-        return self._fallback
-
-    @staticmethod
-    def _normalize_valid(
-        chunk_valid: torch.Tensor | None,
-        raw_q: torch.Tensor,
-        n_chunks: int,
-    ) -> torch.Tensor | None:
-        if chunk_valid is None:
-            return None
-        valid = chunk_valid
-        if valid.dtype != torch.bool or valid.device != raw_q.device:
-            valid = valid.to(device=raw_q.device, dtype=torch.bool)
-        n_chunks = int(n_chunks)
-        if valid.dim() == 1:
-            valid = (
-                valid[:n_chunks]
-                .view(1, 1, n_chunks)
-                .expand(raw_q.shape[0], raw_q.shape[1], n_chunks)
-            )
-        elif valid.dim() == 2:
-            valid = (
-                valid[:, :n_chunks]
-                .unsqueeze(0)
-                .expand(raw_q.shape[0], raw_q.shape[1], n_chunks)
-            )
-        else:
-            valid = valid[:, :, :n_chunks]
-        return valid.contiguous()
-
-    @staticmethod
-    def _can_use_cuda_scores(
-        raw_q: torch.Tensor,
-        chunk_min: torch.Tensor,
-        chunk_max: torch.Tensor,
-        scores_out: torch.Tensor,
-    ) -> bool:
-        return (
-            raw_q.is_cuda
-            and chunk_min.is_cuda
-            and chunk_max.is_cuda
-            and scores_out.is_cuda
-            and raw_q.is_floating_point()
-            and chunk_min.dtype == raw_q.dtype
-            and chunk_max.dtype == raw_q.dtype
-            and scores_out.dtype == torch.float32
-        )
-
-    def quest_chunk_score(
-        self,
-        raw_q: torch.Tensor,
-        chunk_min: torch.Tensor,
-        chunk_max: torch.Tensor,
-        scores_out: torch.Tensor,
-        n_chunks: int,
-        chunk_valid: torch.Tensor | None = None,
-    ) -> None:
-        if not self._can_use_cuda_scores(raw_q, chunk_min, chunk_max, scores_out):
-            self._fallback_ops().quest_chunk_score(
-                raw_q, chunk_min, chunk_max, scores_out, n_chunks, chunk_valid
-            )
-            return
-
-        n_chunks = int(n_chunks)
-        q = raw_q.contiguous()
-        cmin = chunk_min.contiguous()
-        cmax = chunk_max.contiguous()
-        valid = self._normalize_valid(chunk_valid, raw_q, n_chunks)
-        out = scores_out if scores_out.is_contiguous() else torch.empty_like(scores_out)
-        self._mod.quest_chunk_score(q, cmin, cmax, out, n_chunks, valid)
-        if out is not scores_out:
-            scores_out.copy_(out)
-        if scores_out.shape[-1] > n_chunks:
-            scores_out[..., n_chunks:].fill_(float("-inf"))
-
-    def quest_sub_chunk_score(
-        self,
-        raw_q: torch.Tensor,
-        chunk_min: torch.Tensor,
-        chunk_max: torch.Tensor,
-        large_idx: torch.Tensor,
-        sub_scores: torch.Tensor,
-        nk_large: int,
-        factor: int,
-    ) -> None:
-        if (
-            not self._can_use_cuda_scores(raw_q, chunk_min, chunk_max, sub_scores)
-            or not large_idx.is_cuda
-            or large_idx.dtype != torch.int64
-        ):
-            self._fallback_ops().quest_sub_chunk_score(
-                raw_q,
-                chunk_min,
-                chunk_max,
-                large_idx,
-                sub_scores,
-                nk_large,
-                factor,
-            )
-            return
-
-        nk_large = int(nk_large)
-        factor = int(factor)
-        q = raw_q.contiguous()
-        cmin = chunk_min.contiguous()
-        cmax = chunk_max.contiguous()
-        idx = large_idx.contiguous()
-        out = sub_scores if sub_scores.is_contiguous() else torch.empty_like(sub_scores)
-        self._mod.quest_sub_chunk_score(q, cmin, cmax, idx, out, nk_large, factor)
-        if out is not sub_scores:
-            sub_scores.copy_(out)
-        n_written = nk_large * factor
-        if sub_scores.shape[-1] > n_written:
-            sub_scores[..., n_written:].fill_(float("-inf"))
-
-    def quest_map_back(
-        self,
-        large_idx: torch.Tensor,
-        sub_topk_pos: torch.Tensor,
-        chunk_idx: torch.Tensor,
-        factor: int,
-        n_chunks: int,
-    ) -> None:
-        if (
-            not large_idx.is_cuda
-            or not sub_topk_pos.is_cuda
-            or not chunk_idx.is_cuda
-            or large_idx.dtype != torch.int64
-            or sub_topk_pos.dtype != torch.int64
-            or chunk_idx.dtype != torch.int64
-        ):
-            self._fallback_ops().quest_map_back(
-                large_idx, sub_topk_pos, chunk_idx, factor, n_chunks
-            )
-            return
-
-        out = chunk_idx if chunk_idx.is_contiguous() else torch.empty_like(chunk_idx)
-        self._mod.quest_map_back(
-            large_idx.contiguous(),
-            sub_topk_pos.contiguous(),
-            out,
-            int(factor),
-            int(n_chunks),
-        )
-        if out is not chunk_idx:
-            chunk_idx.copy_(out)
 
 
 def float_topk_3d(
@@ -654,12 +457,6 @@ def dense_mask_from_topk(
     return mask
 
 
-def quest_score_reference(
-    raw_q: torch.Tensor, chunk_min: torch.Tensor, chunk_max: torch.Tensor
-) -> torch.Tensor:
-    return quest_bound_scores(raw_q, chunk_min, chunk_max)
-
-
 @lru_cache
 def _try_load_h2d_cuda() -> Any | None:
     """JIT-load the K-only H2D gather kernels."""
@@ -797,3 +594,74 @@ def h2d_fill_keys_hybrid(
                 continue
             offset = logical - lb * block_size
             out_k[h, t].copy_(src_k[slot, offset].to(device=out_k.device))
+
+
+def h2d_fill_kv_hybrid(
+    src_k: torch.Tensor,
+    src_v: torch.Tensor,
+    gpu_k: torch.Tensor,
+    gpu_v: torch.Tensor,
+    logical_ids: torch.Tensor,
+    block_table: torch.Tensor,
+    physical_to_slot: torch.Tensor,
+    offloaded_mask: torch.Tensor,
+    out_k: torch.Tensor,
+    out_v: torch.Tensor,
+    strict: bool | None = None,
+) -> None:
+    """Overwrite cold-token K/V from pinned host memory in one CUDA launch."""
+    strict = _want_strict() if strict is None else strict
+    bt = block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
+    mod = try_load_zoomkv_c()
+    if mod is not None and hasattr(mod, "h2d_gather_kv_hybrid"):
+        mod.h2d_gather_kv_hybrid(
+            src_k,
+            src_v,
+            gpu_k,
+            gpu_v,
+            logical_ids,
+            bt,
+            physical_to_slot,
+            offloaded_mask,
+            out_k,
+            out_v,
+        )
+        return
+    h2d_mod = _try_load_h2d_cuda()
+    if h2d_mod is not None and hasattr(h2d_mod, "h2d_gather_kv_hybrid"):
+        h2d_mod.h2d_gather_kv_hybrid(
+            src_k,
+            src_v,
+            gpu_k,
+            gpu_v,
+            logical_ids,
+            bt,
+            physical_to_slot,
+            offloaded_mask,
+            out_k,
+            out_v,
+        )
+        return
+    if strict:
+        raise RuntimeError("ZoomKV strict mode: h2d_gather_kv_hybrid CUDA required")
+
+    # Slow reference path used only when the extension is optional.
+    block_size = src_k.shape[1]
+    for h in range(logical_ids.shape[0]):
+        for t in range(logical_ids.shape[1]):
+            logical = int(logical_ids[h, t].item())
+            if logical < 0:
+                continue
+            lb, offset = divmod(logical, block_size)
+            phys = int(bt[lb].item())
+            if phys < 0:
+                continue
+            if bool(offloaded_mask[phys].item()):
+                slot = int(physical_to_slot[phys].item())
+                if slot < 0:
+                    continue
+                out_k[h, t].copy_(src_k[slot, offset, h], non_blocking=True)
+                out_v[h, t].copy_(src_v[slot, offset, h], non_blocking=True)
+            else:
+                out_k[h, t].copy_(gpu_k[phys, offset, h])
+                out_v[h, t].copy_(gpu_v[phys, offset, h])
