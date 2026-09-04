@@ -80,8 +80,6 @@ class TrtLlmFp8ExpertsBase:
         )
         if not supported:
             return supported, reason
-        # FlashInfer >= 0.6.18 applies gemm1_alpha/beta/clamp_limit only for the
-        # block-scaled kernels, and only with a SwiGLU activation.
         if (
             moe_config.swiglu_limit is not None
             or moe_config.swiglu_alpha is not None
