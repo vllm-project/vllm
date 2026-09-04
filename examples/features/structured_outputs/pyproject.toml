@@ -5,4 +5,5 @@ dependencies = ["openai==1.78.1", "pydantic==2.11.4"]
 version = "0.0.0"
 
 [project.scripts]
+chimera-edit-program = "chimera_edit_program:main"
 structured-outputs = "structured_outputs:main"
