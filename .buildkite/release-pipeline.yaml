@@ -1034,7 +1034,7 @@ steps:
             allow_failure: false
         agents:
           queue: cpu_queue_release
-        timeout_in_minutes: 60
+        timeout_in_minutes: 180
         commands:
           - |
             set -euo pipefail
