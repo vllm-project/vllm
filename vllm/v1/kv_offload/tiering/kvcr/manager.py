@@ -28,7 +28,7 @@ from kvcr.config import (
     KVCRBackendConfigs,
     KVCRConfig,
     KVCRGuardConfig,
-    LocalDramInfo,
+    LocalDramOptions,
     RemoteFWDramOptions,
 )
 from kvcr.control_channels import ZmqPeerControlChannel
@@ -292,6 +292,8 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
         compatibility_digest: str | None = None,
         policy: str | None = None,
         g3: dict[str, Any] | None = None,
+        local_dram_backend: str = "UCX",
+        remote_fw_dram_backend: str = "UCX",
     ) -> None:
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         selected_policy = _resolve_policy(policy)
@@ -363,7 +365,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 "local DRAM inventory will not be published"
             )
         local_mapping: mmap.mmap | None = None
-        local_dram: LocalDramInfo | None = None
+        local_dram: LocalDramOptions | None = None
         if secondary_g2_slots:
             if kvcr_service_socket_path is not None:
                 logger.warning(
@@ -374,15 +376,16 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                 local_mapping = mmap.mmap(
                     -1, secondary_g2_slots * self._primary_row_stride
                 )
-                local_dram = LocalDramInfo(
+                local_dram = LocalDramOptions(
                     address=ctypes.addressof(ctypes.c_char.from_buffer(local_mapping)),
                     length=len(local_mapping),
                     slot_count=secondary_g2_slots,
+                    backend=local_dram_backend,
                 )
         guard_config = (
             KVCRGuardConfig(
                 kvcr_service_socket_path=kvcr_service_socket_path,
-                pool_index=dp_local_rank,
+                guard_index=dp_local_rank,
                 row_stride=self._primary_row_stride,
                 compatibility_digest=compatibility_digest,
             )
@@ -429,6 +432,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
                         eager_ctrl_connect=eager_ctrl_connect,
                         opportunistic_query=opportunistic_query,
                         metadata_retry_interval_ms=metadata_retry_interval_ms,
+                        backend=remote_fw_dram_backend,
                     ),
                 ),
                 guard_config,
