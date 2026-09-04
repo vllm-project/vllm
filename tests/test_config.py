@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
+import torch
 from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
@@ -423,6 +424,24 @@ def test_dflash2_draft_forces_v2_model_runner():
             speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
         )
     )
+
+
+def test_dflash2_draft_rejects_float16():
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.float16),
+        speculative_config=SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(
+                architectures=["DFlash2DraftModel"],
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="DFlash2 speculative drafts.*float16"):
+        VllmConfig._verify_dflash2_dtype(config)
+
+    config.model_config.dtype = torch.bfloat16
+    VllmConfig._verify_dflash2_dtype(config)
 
 
 @pytest.mark.parametrize(

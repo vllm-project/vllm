@@ -695,6 +695,17 @@ class VllmConfig:
             return False
         return "DFlash2DraftModel" in (draft_config.architectures or [])
 
+    def _verify_dflash2_dtype(self) -> None:
+        if (
+            VllmConfig._is_dflash2_draft(self)
+            and self.model_config is not None
+            and self.model_config.dtype == torch.float16
+        ):
+            raise ValueError(
+                "DFlash2 speculative drafts do not support float16 because their "
+                "residual stream can overflow. Use --dtype bfloat16 instead."
+            )
+
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
         spec = self.speculative_config
@@ -1092,6 +1103,7 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._verify_dflash2_dtype()
 
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
