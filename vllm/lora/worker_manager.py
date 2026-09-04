@@ -155,7 +155,12 @@ class WorkerLoRAManager:
             target_modules = self.lora_config.target_modules
             if target_modules is not None and not any(
                 is_in_target_modules(
-                    module_name, target_modules, packed_modules_mapping
+                    module_name,
+                    target_modules,
+                    packed_modules_mapping,
+                    module_name_prefix=(
+                        "model." if self._adapter_manager.is_pooling_model else None
+                    ),
                 )
                 for module_name in lora.loras
             ):
