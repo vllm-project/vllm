@@ -2391,6 +2391,40 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
+        """Return a bounded snapshot of in-flight request queues."""
+        now = time.time()
+        remaining = max(0, min(limit, 1000))
+        queues = []
+
+        for name, requests in (
+            ("running", self.running),
+            ("waiting", self.waiting),
+            ("skipped_waiting", self.skipped_waiting),
+        ):
+            entries = []
+            for request in requests:
+                if remaining == 0:
+                    break
+                entries.append(
+                    {
+                        "request_id": request.request_id,
+                        "status": request.status.name,
+                        "age_seconds": round(max(0.0, now - request.arrival_time), 3),
+                        "prompt_tokens": request.num_prompt_tokens,
+                        "output_tokens": request.num_output_tokens,
+                    }
+                )
+                remaining -= 1
+            queues.append(
+                {"name": name, "num_requests": len(requests), "requests": entries}
+            )
+
+        return {
+            "data_parallel_rank": self.parallel_config.data_parallel_rank,
+            "queues": queues,
+        }
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage

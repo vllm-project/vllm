@@ -996,6 +996,9 @@ class EngineCore:
         """Return the latest committed weight version."""
         return self._weight_version
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
+        return self.scheduler.get_inflight_queue_diagnostics(limit)
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 
