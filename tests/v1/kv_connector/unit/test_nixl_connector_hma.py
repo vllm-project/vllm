@@ -456,6 +456,69 @@ def test_read_blocks_for_req_expands_remote_ids(
 
 
 @pytest.mark.cpu_test
+def test_divergent_regions_notify_prefill_when_decode_request_is_aborted():
+    """An aborted decode request must release remote KV without local blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+        NixlPullConnectorWorker,
+    )
+
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._engine_last_active = {}
+    worker._recving_transfers = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker._has_mamba = False
+    worker._hisparse_destination = None
+    worker.use_mla = True
+    worker.dcp_size = 1
+    worker.region_group_ids = [0, 1]
+
+    remote_engine_id = "remote-engine"
+    remote_info = MagicMock()
+    remote_info.remote_block_size = 16
+    remote_info.remote_dcp_size = 1
+    remote_info.remote_physical_blocks_per_logical = 1
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = remote_info
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+
+    plan = MagicMock()
+    plan.all_source_ranks = (0,)
+    plan.local_consumers = 1
+    worker.tp_mappings = {remote_engine_id: plan}
+    worker.dst_region_group_ids = {remote_engine_id: [0]}
+    worker.src_xfer_handles_by_block_size = {16: 1}
+    worker.dst_xfer_side_handles = {remote_engine_id: {0: 2}}
+    worker._remote_agents = {remote_engine_id: {(0, 0): "remote-agent"}}
+    worker.nixl_wrapper = MagicMock()
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="aborted-request",
+        local_block_ids=[],
+        kv_transfer_params={
+            "remote_block_ids": [[3, 4]],
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+    )
+
+    worker._read_blocks_for_req(
+        "aborted-request", metadata.reqs_to_recv["aborted-request"]
+    )
+
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "remote-agent", notif_msg=b"prefill-request:1"
+    )
+
+
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
     "local_block_ids,remote_block_ids,"
