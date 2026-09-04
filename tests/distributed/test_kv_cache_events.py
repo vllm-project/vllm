@@ -46,10 +46,33 @@ class _LegacyBlockRemoved(
     group_idx: int | None = None
 
 
+class _PreSessionBlockStored(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,  # type: ignore[call-arg]
+    tag="BlockStored",  # type: ignore[call-arg]
+):
+    """BlockStored wire schema before session_id was added."""
+
+    block_hashes: list[bytes]
+    parent_block_hash: bytes | None
+    token_ids: list[int]
+    block_size: int
+    lora_id: int | None
+    medium: str | None
+    lora_name: str | None
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    group_idx: int | None = None
+    kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
+    locality: str | None = None
+
+
 def _make_block_stored(
     group_idx: int | None = None,
     kv_cache_spec_sliding_window: int | None = None,
     locality: str | None = None,
+    session_id: str | None = None,
 ) -> BlockStored:
     return BlockStored(
         block_hashes=[_FAKE_HASH],
@@ -62,6 +85,7 @@ def _make_block_stored(
         group_idx=group_idx,
         kv_cache_spec_sliding_window=kv_cache_spec_sliding_window,
         locality=locality,
+        session_id=session_id,
     )
 
 
@@ -103,6 +127,12 @@ def test_block_stored_hash_same_for_equal_group_idx():
     event_a = _make_block_stored(group_idx=1)
     event_b = _make_block_stored(group_idx=1)
     assert hash(event_a) == hash(event_b)
+
+
+def test_block_stored_hash_differs_by_session_id():
+    event_a = _make_block_stored(session_id="session-a")
+    event_b = _make_block_stored(session_id="session-b")
+    assert hash(event_a) != hash(event_b)
 
 
 @pytest.mark.parametrize("group_idx", [1, 2, 3])
@@ -183,3 +213,38 @@ def test_block_removed_locality_is_wire_compatible():
     new_payload = msgspec.msgpack.encode(_make_block_removed(locality="REMOTE"))
     assert msgspec.msgpack.decode(new_payload)["locality"] == "REMOTE"
     assert msgspec.msgpack.decode(new_payload, type=_LegacyBlockRemoved).medium == "GPU"
+
+
+def test_block_stored_session_id_is_wire_compatible():
+    pre_session = _PreSessionBlockStored(
+        block_hashes=[_FAKE_HASH],
+        parent_block_hash=None,
+        token_ids=[1, 2, 3, 4],
+        block_size=4,
+        lora_id=None,
+        medium="GPU",
+        lora_name=None,
+        group_idx=2,
+        kv_cache_spec_sliding_window=128,
+        locality="LOCAL",
+    )
+    pre_session_payload = msgspec.msgpack.encode(pre_session)
+    assert (
+        msgspec.msgpack.encode(
+            _make_block_stored(
+                group_idx=2,
+                kv_cache_spec_sliding_window=128,
+                locality="LOCAL",
+            )
+        )
+        == pre_session_payload
+    )
+    assert (
+        msgspec.msgpack.decode(pre_session_payload, type=BlockStored).session_id is None
+    )
+
+    new_payload = msgspec.msgpack.encode(_make_block_stored(session_id="session-1"))
+    assert msgspec.msgpack.decode(new_payload)["session_id"] == "session-1"
+    assert (
+        msgspec.msgpack.decode(new_payload, type=_PreSessionBlockStored).medium == "GPU"
+    )
