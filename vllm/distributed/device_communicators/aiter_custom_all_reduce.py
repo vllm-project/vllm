@@ -22,10 +22,30 @@ class AiterCustomAllreduce:
 
     @classmethod
     def effective_max_size(cls) -> int:
+        """Max input byte size eligible for AITER custom allreduce.
+
+        This has to agree with what AITER accepts at runtime, which is
+        ``min(_car_max_size, max_size / 2)``. ``_car_max_size`` comes from
+        ``AITER_CUSTOM_AR_MAX_SIZE`` and defaults to 64 MiB independently of
+        the registered pool, so the two can disagree.
+
+        The compile range of the fused allreduce+RMSNorm pass is derived from
+        this value. If it exceeds what ``should_custom_ar()`` will accept, the
+        pass gets compiled for message sizes AITER rejects,
+        ``custom_fused_ar_rms()`` returns ``None``, and
+        ``_rocm_aiter_fused_allreduce_rmsnorm_impl`` asserts on it -- the
+        server fails to start instead of falling back to RCCL.
         """
-        Max input byte size eligible for AITER custom allreduce.
-        """
-        return cls.MAX_SIZE // 2
+        two_shot_limit = cls.MAX_SIZE // 2
+        try:
+            # Private, but it is the only place the env var semantics live;
+            # duplicating them here would be the more fragile option.
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                _resolve_car_max_size,
+            )
+        except ImportError:
+            return two_shot_limit
+        return min(two_shot_limit, _resolve_car_max_size(cls.MAX_SIZE))
 
     def __init__(
         self,
