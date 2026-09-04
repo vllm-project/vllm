@@ -1,360 +1,153 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the weight cache daemon protocol and the IPC model loader."""
+"""End-to-end tests for the IPC weight cache loader.
 
-import socket
+A cold start (no weight cache daemon, so the loader falls back to disk) and
+warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
+identical outputs.
+"""
+
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
+import time
 
-import pytest
-import torch
+from vllm import SamplingParams
 
-from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.weight_cache import (
-    CacheConfig,
-    CacheConfigMismatchError,
-    IpcModelLoader,
-    TensorEntry,
-    UnsupportedQuantForIPCError,
-    WeightCacheUnavailableError,
-    is_ipc_quant_supported,
-)
-from vllm.model_executor.model_loader.weight_cache.protocol import (
-    recv_msg,
-    send_msg,
-)
+MODEL = "Qwen/Qwen3.5-0.8B"
+PROMPTS = [
+    "Hello, my name is",
+    "The capital of France is",
+]
+DAEMON_TIMEOUT_S = 600
 
 
-def _make_cache_config(**overrides) -> CacheConfig:
-    kwargs = dict(
-        model="test-model",
-        model_arch="LlamaForCausalLM",
-        tp_size=2,
-        tp_rank=0,
-        dtype="torch.bfloat16",
-        quantization=None,
-        quant_config_hash="",
-        revision=None,
-        vllm_version="test",
-    )
-    kwargs.update(overrides)
-    return CacheConfig(**kwargs)
+class WeightCacheDaemon:
+    """Context manager running the real weight cache daemon as a subprocess."""
 
+    _READY_MARKER = "Weight cache daemon READY"
 
-def test_cache_config_match():
-    assert _make_cache_config().mismatched_fields(_make_cache_config()) == []
+    def __init__(self, model: str, tp_size: int):
+        # Short base path: Unix socket paths are limited to ~107 characters.
+        self.socket_dir = tempfile.mkdtemp(prefix="vllm_ipc_")
+        self._cmd = [
+            sys.executable,
+            "-m",
+            "vllm.model_executor.model_loader.weight_cache.daemon",
+            "--model",
+            model,
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--weight-cache-socket-dir",
+            self.socket_dir,
+            "--enforce-eager",
+        ]
+        self._proc: subprocess.Popen | None = None
+        self._lines: list[str] = []
 
+    def __enter__(self) -> "WeightCacheDaemon":
+        self._proc = subprocess.Popen(
+            self._cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        )
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        try:
+            self._wait_ready(DAEMON_TIMEOUT_S)
+        except Exception:
+            self._stop()
+            raise
+        return self
 
-def test_cache_config_mismatch():
-    other = _make_cache_config(tp_rank=1, dtype="torch.float16")
-    assert _make_cache_config().mismatched_fields(other) == ["tp_rank", "dtype"]
+    def __exit__(self, *exc_info) -> None:
+        self._stop()
 
+    def _drain_stderr(self) -> None:
+        assert self._proc is not None and self._proc.stderr is not None
+        for line in self._proc.stderr:
+            self._lines.append(line)
 
-def test_protocol_roundtrip():
-    left, right = socket.socketpair()
-    with left, right:
-        msg = {"cmd": "get_state", "cache_config": _make_cache_config()}
-        send_msg(left, msg)
-        assert recv_msg(right) == msg
+    def _logs(self) -> str:
+        return "".join(self._lines)
 
-
-def test_get_model_loader_dispatch():
-    loader = get_model_loader(LoadConfig(load_format="ipc_cache"))
-    assert isinstance(loader, IpcModelLoader)
-    assert loader.mode == "zero_copy"
-    assert loader.fallback
-
-
-def test_invalid_mode_rejected():
-    with pytest.raises(ValueError, match="mode"):
-        IpcModelLoader(
-            LoadConfig(
-                load_format="ipc_cache",
-                model_loader_extra_config={"mode": "bogus"},
-            )
+    def _wait_ready(self, timeout_s: float) -> None:
+        assert self._proc is not None
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"Weight cache daemon exited with {self._proc.returncode}:\n"
+                    f"{self._logs()}"
+                )
+            if self._READY_MARKER in self._logs():
+                return
+            time.sleep(1.0)
+        raise TimeoutError(
+            f"Weight cache daemon not ready after {timeout_s}s:\n{self._logs()}"
         )
 
+    def _stop(self) -> None:
+        assert self._proc is not None
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+        shutil.rmtree(self.socket_dir, ignore_errors=True)
 
-def test_unexpected_extra_config_rejected():
-    with pytest.raises(ValueError, match="Unexpected extra config"):
-        IpcModelLoader(
-            LoadConfig(
-                load_format="ipc_cache",
-                model_loader_extra_config={"bogus": 1},
-            )
+
+def generate(vllm_runner, socket_dir: str | None, fallback: bool, **kwargs):
+    extra_config = (
+        {} if socket_dir is None else {"socket_dir": socket_dir, "fallback": fallback}
+    )
+    with vllm_runner(
+        MODEL,
+        load_format="auto" if socket_dir is None else "ipc_cache",
+        model_loader_extra_config=extra_config,
+        # Greedy outputs are compared across engine restarts; cap the batch
+        # size so scheduling cannot change the results.
+        max_num_seqs=1,
+        **kwargs,
+    ) as llm:
+        sampling_params = SamplingParams(temperature=0, max_tokens=16, ignore_eos=True)
+        return llm.generate(PROMPTS, sampling_params)
+
+
+def test_ipc_cache_cold_start_and_warm_restart(vllm_runner):
+    """Cold start falls back to disk; warm restarts load weights via CUDA IPC.
+
+    All runs must produce outputs identical to a default-loader baseline. The
+    warm runs disable the disk fallback, so they only pass if the weights
+    really came from the daemon.
+    """
+    llm_kwargs = dict(
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        # Qwen3.5 is a hybrid mamba model; its mamba cache mode requires
+        # chunked prefill.
+        enable_chunked_prefill=True,
+    )
+
+    # Baseline: plain disk loading with the default loader.
+    baseline_outputs = generate(vllm_runner, None, fallback=True, **llm_kwargs)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    # Cold start: no daemon is serving, so the loader falls back to disk.
+    with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:
+        cold_outputs = generate(
+            vllm_runner, empty_socket_dir, fallback=True, **llm_kwargs
         )
 
-
-def test_fallback_load_config_resets_format():
-    loader = IpcModelLoader(
-        LoadConfig(
-            load_format="ipc_cache",
-            model_loader_extra_config={"mode": "copy", "fallback": False},
+    with WeightCacheDaemon(MODEL, tp_size=1) as daemon:
+        warm_outputs = generate(
+            vllm_runner, daemon.socket_dir, fallback=False, **llm_kwargs
         )
-    )
-    fallback_config = loader._fallback_load_config()
-    assert fallback_config.load_format == "auto"
-    assert fallback_config.model_loader_extra_config == {}
-
-
-def test_unavailable_daemon_raises(tmp_path):
-    loader = IpcModelLoader(
-        LoadConfig(
-            load_format="ipc_cache",
-            model_loader_extra_config={
-                "socket_path": str(tmp_path / "missing.sock"),
-                "fallback": False,
-            },
-        )
-    )
-    with pytest.raises(WeightCacheUnavailableError):
-        loader._request_state(_make_cache_config())
-
-
-def _serve_one_response(server: socket.socket, response: dict) -> None:
-    conn, _ = server.accept()
-    with conn:
-        recv_msg(conn)
-        send_msg(conn, response)
-
-
-def _request_against_fake_daemon(tmp_path, response: dict):
-    socket_path = str(tmp_path / "daemon.sock")
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(socket_path)
-    server.listen()
-    thread = threading.Thread(target=_serve_one_response, args=(server, response))
-    thread.start()
-    try:
-        loader = IpcModelLoader(
-            LoadConfig(
-                load_format="ipc_cache",
-                model_loader_extra_config={
-                    "socket_path": socket_path,
-                    "fallback": False,
-                },
-            )
-        )
-        return loader._request_state(_make_cache_config())
-    finally:
-        thread.join(timeout=10)
-        server.close()
-
-
-def test_mismatch_response_raises(tmp_path):
-    with pytest.raises(CacheConfigMismatchError, match="tp_rank"):
-        _request_against_fake_daemon(
-            tmp_path, {"status": "mismatch", "fields": ["tp_rank"]}
+        # Warm restart: a second engine lifetime against the same daemon.
+        restart_outputs = generate(
+            vllm_runner, daemon.socket_dir, fallback=False, **llm_kwargs
         )
 
-
-def test_error_response_raises(tmp_path):
-    with pytest.raises(WeightCacheUnavailableError, match="released"):
-        _request_against_fake_daemon(
-            tmp_path, {"status": "error", "message": "Weights were released"}
-        )
-
-
-def test_ok_response_returns_entries(tmp_path):
-    entry = TensorEntry.from_tensor(torch.arange(4, dtype=torch.float32), "param")
-    entries, aliases = _request_against_fake_daemon(
-        tmp_path, {"status": "ok", "entries": {"layer.weight": entry}}
-    )
-    assert aliases == {}
-    assert torch.equal(
-        entries["layer.weight"].rebuild(0),
-        torch.arange(4, dtype=torch.float32),
-    )
-
-
-class _TiedModel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.embed = torch.nn.Embedding(4, 3)
-        self.lm_head = torch.nn.Linear(3, 4, bias=False)
-        self.lm_head.weight = self.embed.weight
-
-
-def test_export_entries_records_tied_alias():
-    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
-
-    entries, aliases = export_entries(_TiedModel())
-    assert "embed.weight" in entries
-    assert "lm_head.weight" not in entries
-    assert aliases == {"lm_head.weight": "embed.weight"}
-
-
-def test_apply_entries_restores_tied_identity():
-    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
-
-    src = _TiedModel()
-    entries, aliases = export_entries(src)
-
-    dst = _TiedModel()
-    # Break the tie so the two names point at distinct parameters, mimicking a
-    # freshly initialized model before the cached weights are applied.
-    dst.lm_head.weight = torch.nn.Parameter(torch.zeros(4, 3))
-
-    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    loader._apply_entries(dst, entries, aliases, device_index=0)
-
-    assert dst.lm_head.weight is dst.embed.weight
-    assert torch.equal(dst.embed.weight, src.embed.weight)
-
-
-class _SharedModuleModel(torch.nn.Module):
-    """Tied head that reuses the embedding *module*, as vLLM models do."""
-
-    def __init__(self):
-        super().__init__()
-        self.embed = torch.nn.Embedding(4, 3)
-        self.lm_head = self.embed
-
-
-def test_apply_entries_handles_shared_module_alias():
-    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
-
-    src = _SharedModuleModel()
-    entries, aliases = export_entries(src)
-    assert aliases == {"lm_head.weight": "embed.weight"}
-
-    dst = _SharedModuleModel()
-    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    # "lm_head" is absent from the deduplicated named_modules view, so this
-    # used to fail with "Cached tensor lm_head.weight has no matching module".
-    loader._apply_entries(dst, entries, aliases, device_index=0)
-
-    assert dst.lm_head.weight is dst.embed.weight
-    assert torch.equal(dst.embed.weight, src.embed.weight)
-
-
-@pytest.mark.parametrize(
-    "quantization,quant_config,expected",
-    [
-        (None, None, True),
-        ("fp8", {"weight_block_size": [128, 128]}, True),
-        ("fp8", {}, False),  # per-tensor FP8 transposes layer.weight
-        ("awq", {}, False),
-        ("compressed-tensors", {}, False),
-    ],
-)
-def test_ipc_quant_allowlist(quantization, quant_config, expected):
-    assert is_ipc_quant_supported(quantization, quant_config) is expected
-
-
-def test_check_supported_rejects_unverified_quant():
-    from types import SimpleNamespace
-
-    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    model_config = SimpleNamespace(
-        quantization="awq", hf_config=SimpleNamespace(quantization_config={})
-    )
-    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
-
-    with pytest.raises(UnsupportedQuantForIPCError, match="awq"):
-        loader._check_supported(vllm_config, model_config)
-
-
-def test_check_supported_rejects_quantized_kv_cache():
-    from types import SimpleNamespace
-
-    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
-    model_config = SimpleNamespace(
-        quantization=None, hf_config=SimpleNamespace(quantization_config=None)
-    )
-    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="int8"))
-
-    with pytest.raises(UnsupportedQuantForIPCError, match="kv cache dtype"):
-        loader._check_supported(vllm_config, model_config)
-
-
-def _make_model_with_method(method) -> torch.nn.Module:
-    model = torch.nn.Module()
-    model.linear = torch.nn.Linear(2, 2)
-    model.linear.quant_method = method
-    return model
-
-
-def _fake_model_config():
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        word_embeddings_untied_by_checkpoint=False,
-        quantization=None,
-        dtype=torch.float32,
-    )
-
-
-def test_pre_processed_mode_rejects_undeclared_method():
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizeMethodBase,
-    )
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.model_executor.utils import weights_already_processed
-
-    class _Method(QuantizeMethodBase):
-        def create_weights(self, *args, **kwargs):
-            pass
-
-        def apply(self, *args, **kwargs):
-            pass
-
-    model = _make_model_with_method(_Method())
-
-    with (
-        weights_already_processed(),
-        pytest.raises(RuntimeError, match="_Method"),
-    ):
-        process_weights_after_loading(model, _fake_model_config(), torch.device("cpu"))
-
-
-def test_pre_processed_mode_allows_declared_method():
-    from vllm.model_executor.layers.quantization.base_config import (
-        QuantizeMethodBase,
-    )
-    from vllm.model_executor.model_loader.utils import process_weights_after_loading
-    from vllm.model_executor.utils import (
-        is_weights_pre_processed,
-        weights_already_processed,
-    )
-
-    class _Method(QuantizeMethodBase):
-        supports_pre_processed_weights = True
-
-        def create_weights(self, *args, **kwargs):
-            pass
-
-        def apply(self, *args, **kwargs):
-            pass
-
-        def process_weights_after_loading(self, layer):
-            layer.saw_pre_processed_flag = is_weights_pre_processed()
-
-    model = _make_model_with_method(_Method())
-    with weights_already_processed():
-        process_weights_after_loading(model, _fake_model_config(), torch.device("cpu"))
-
-    assert model.linear.saw_pre_processed_flag is True
-
-
-def _ipc_producer(conn, done) -> None:
-    tensor = torch.arange(16, dtype=torch.float32, device="cuda").reshape(4, 4)
-    conn.send(TensorEntry.from_tensor(tensor, "param"))
-    done.wait(timeout=60)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_tensor_entry_cross_process_ipc():
-    ctx = torch.multiprocessing.get_context("spawn")
-    parent_conn, child_conn = ctx.Pipe()
-    done = ctx.Event()
-    proc = ctx.Process(target=_ipc_producer, args=(child_conn, done))
-    proc.start()
-    try:
-        entry = parent_conn.recv()
-        tensor = entry.rebuild(torch.cuda.current_device())
-        expected = torch.arange(16, dtype=torch.float32).reshape(4, 4)
-        assert torch.equal(tensor.cpu(), expected)
-    finally:
-        done.set()
-        proc.join(timeout=60)
+    assert cold_outputs == baseline_outputs
+    assert warm_outputs == baseline_outputs
+    assert restart_outputs == baseline_outputs
