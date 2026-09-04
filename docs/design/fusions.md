@@ -1,9 +1,10 @@
-# Fusion torch.compile passes
+# Fusions
 
-vLLM applies a set of kernel/operator fusions at compile time (via custom [`torch.compile`](torch_compile.md) Inductor passes)
-to separate optimizations from model definitions and avoid breaking layer abstractions in model code.
-These fusions are controlled by fields in [`PassConfig`][vllm.config.compilation.PassConfig] and are automatically enabled
-at appropriate [optimization levels](optimization_levels.md).
+This page covers kernel/operator fusions controlled by fields in
+[`PassConfig`][vllm.config.compilation.PassConfig]. vLLM applies them either
+explicitly in model definitions or through custom
+[`torch.compile`](torch_compile.md) Inductor passes; supported configurations
+may enable them at the documented [optimization levels](optimization_levels.md).
 
 ## Quick Reference
 
@@ -23,7 +24,7 @@ or just on the low or high end.
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
 | [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
-| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER); CUDA opt-in   | 2-4% (ROCm)        | No        | Low          |
+| [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER); CUDA opt-in   | 2-4%               | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
 | [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
@@ -43,7 +44,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
-| `fuse_rope_kvcache`          | FP16/BF16                                | FP16/BF16, FP8 static‡                   | FP16/BF16                                | FP16/BF16     | FP16/BF16                                |
+| `fuse_rope_kvcache`          | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
 | `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
@@ -59,12 +60,6 @@ for per-backend details.
 † `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
 other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
 SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
-
-‡ `fuse_rope_kvcache` reaches the FP8 KV-cache path on SM90 only when using
-FlashAttention 4, whose native FP16/BF16 query path does not require separate
-query quantization. The default SM90 FlashAttention 3 path and the SM100 FP8
-path use query quantization and retain the unfused model path. The CUDA operator
-itself supports writing FP8 cache entries.
 
 ## Enabling / Disabling Fusions
 
@@ -189,11 +184,16 @@ a single kernel, avoiding separate reads and writes of the key and value tensors
 
 The Llama model definition uses a manual call site on supported NVIDIA
 FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
-K/V directly to the paged cache before attention. Unsupported layouts, quantization,
-parallelism, and long token ranges retain the ordinary RoPE and cache-update path.
-Profiling runs without a layer slot mapping perform ordinary RoPE and skip the cache
-write; attention is also skipped because those runs have no attention metadata. CUDA
-does not register the legacy graph pass for this flag.
+K/V directly to the paged cache before attention. The CUDA kernel consumes logical
+cache views and their strides, so it supports every physical KV-cache layout advertised
+by FlashAttention. Unsupported cache formats, attention variants, parallelism, and long
+token ranges retain the ordinary RoPE and cache-update path. Profiling runs without a
+layer slot mapping perform ordinary RoPE and skip the cache write; attention is also
+skipped because those runs have no attention metadata. CUDA does not register the
+legacy graph pass for this flag.
+
+The CUDA model path requires unquantized Q/K/V and cache storage and is not
+combined with `fuse_attn_quant`. Those configurations retain the ordinary path.
 
 ROCm model definitions continue to use the compiler pass and require the
 `rotary_embedding` and `kv_cache` update ops to be visible in the same graph,

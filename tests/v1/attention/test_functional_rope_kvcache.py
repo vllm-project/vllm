@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from transformers import Qwen3Config
 
 import vllm.config
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    dense_kv_cache_views,
+)
 from vllm.compilation.passes.fusion.rope_kvcache_fusion import (
     RopeKVCacheFusionPass,
 )
@@ -25,8 +31,50 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 _LAYER_NAME = "model.layers.0.self_attn.attn"
+
+
+def test_missing_slot_mapping_falls_back_to_rope_only(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm import _custom_ops
+
+    head_sizes = []
+    monkeypatch.setattr(
+        _custom_ops,
+        "rotary_embedding",
+        lambda _positions, _query, _key, head_size, *_args, **_kwargs: (
+            head_sizes.append(head_size)
+        ),
+    )
+
+    query = torch.randn(1, 4 * 64)
+    key = torch.randn(1, 2 * 64)
+    value = torch.randn_like(key)
+    layer = SimpleNamespace(
+        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: True),
+        rope_kvcache_fusion_max_token_num=256,
+        head_size=64,
+    )
+    query_out = torch.empty_like(query, memory_format=torch.contiguous_format)
+    Attention._rope_and_kv_cache_update_q_out(
+        layer,
+        query,
+        key,
+        value,
+        query_out,
+        torch.empty(1, dtype=torch.int64),
+        torch.empty(1, 1),
+        True,
+        torch.empty(1),
+        None,
+    )
+
+    torch.testing.assert_close(query_out, query)
+    assert query_out.data_ptr() != query.data_ptr()
+    assert head_sizes == [64]
 
 
 class _FunctionalRoPEAttention(torch.nn.Module):
@@ -107,6 +155,7 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
             ),
         ),
     )
+    vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
     assert "vllm::unified_attention_with_output" in (
         vllm_config.compilation_config.splitting_ops or []
     )
@@ -127,20 +176,25 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
             device=device,
             arange_block_indices=True,
         )
+        cache_spec = model.attn.get_kv_cache_spec(vllm_config)
+        assert cache_spec is not None
         builder = model.backend.get_builder_cls()(
-            model.attn.get_kv_cache_spec(vllm_config),
+            cache_spec,
             [_LAYER_NAME],
             vllm_config,
             device,
         )
         metadata = builder.build(0, common_metadata)
-        cache_shape = model.backend.get_kv_cache_shape(
-            1, 16, model.num_kv_heads, model.head_size
+        cache_storage = torch.zeros(
+            cache_spec.page_size_bytes, dtype=torch.int8, device=device
         )
-        order = model.backend.get_kv_cache_stride_order()
-        cache = torch.zeros(
-            tuple(cache_shape[index] for index in order), dtype=dtype
-        ).permute(*(order.index(index) for index in range(len(order))))
+        cache = dense_kv_cache_views(
+            cache_storage,
+            cache_spec,
+            num_blocks=1,
+            num_layers=1,
+            layout=KVCacheLayout.LBNHC,
+        )[0]
 
         def run(call):
             model.attn.kv_cache = cache.clone()

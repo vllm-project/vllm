@@ -77,8 +77,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
     vllm_flash_attn_version: int | None
 
     def fused_rope_kvcache_q_out_supported(self) -> bool:
-        # This backend packs K and V with different head dimensions and uses a
-        # distinct Triton cache writer.
+        # DiffKV uses a distinct cache writer for unequal K/V head dimensions.
         return False
 
     def __init__(self, *args, **kwargs) -> None:

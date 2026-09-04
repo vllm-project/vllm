@@ -650,10 +650,7 @@ void fused_rope_and_reshape_cache_flash_q_out(
     const torch::stable::Tensor& positions,
     const torch::stable::Tensor& cos_sin_cache, bool is_neox,
     torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
-    const torch::stable::Tensor& slot_mapping,
-    const torch::stable::Tensor& k_scale, const torch::stable::Tensor& v_scale,
-    const std::string& kv_cache_dtype);
-
+    const torch::stable::Tensor& slot_mapping);
 #endif
 
 // Just for unittest

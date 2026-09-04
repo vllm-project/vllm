@@ -68,7 +68,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -1262,7 +1262,7 @@ class FlashAttentionImpl(AttentionImpl):
             current_platform.is_cuda()
             and self.attn_type == AttentionType.DECODER
             and self.dcp_world_size == 1
-            and self.kv_cache_dtype != "nvfp4"
+            and self.kv_quant_mode == KVQuantMode.NONE
         )
 
     def do_rope_and_kv_cache_update_q_out(
@@ -1287,11 +1287,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)).
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        key_cache = canonicalize_singleton_dim_strides(key_cache)
-        value_cache = canonicalize_singleton_dim_strides(value_cache)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         _custom_ops.fused_rope_and_reshape_cache_flash_q_out(
             query,
@@ -1304,9 +1299,6 @@ class FlashAttentionImpl(AttentionImpl):
             key_cache,
             value_cache,
             layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
-            self.kv_cache_dtype,
         )
 
     def _forward_with_dcp(

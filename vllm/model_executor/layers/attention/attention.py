@@ -486,32 +486,14 @@ class Attention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
-    ) -> torch.Tensor:
-        return self._forward(
-            query,
-            key,
-            value,
-            output_shape=output_shape,
-            output_dtype=output_dtype,
-            update_kv_cache=True,
-        )
-
-    def _forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        value: torch.Tensor | None,
-        output_shape: torch.Size | None = None,
-        output_dtype: torch.dtype | None = None,
         *,
-        update_kv_cache: bool,
         encoded_layer_name: LayerNameType | None = None,
     ) -> torch.Tensor:
         """
@@ -563,8 +545,7 @@ class Attention(nn.Module, AttentionLayerBase):
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.
             if (
-                update_kv_cache
-                and not self.attn_backend.forward_includes_kv_cache_update
+                not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
                 and key is not None
                 and value is not None
@@ -582,14 +563,15 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
+            # The fused path reuses its encoded handle to avoid a duplicate
+            # hoisted graph input for every attention layer.
             encoded = (
                 encoded_layer_name
                 if encoded_layer_name is not None
                 else _encode_layer_name(self.layer_name)
             )
             if (
-                update_kv_cache
-                and not self.attn_backend.forward_includes_kv_cache_update
+                not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
                 and key is not None
                 and value is not None
@@ -622,8 +604,6 @@ class Attention(nn.Module, AttentionLayerBase):
             and self.head_size_v == self.head_size
             and self.query_quant is None
             and not self._fuse_attn_quant
-            and self._k_scale.numel() == 1
-            and self._v_scale.numel() == 1
             and isinstance(rotary_emb, RotaryEmbedding)
             and type(rotary_emb).forward is RotaryEmbedding.forward
             and type(rotary_emb).forward_cuda is RotaryEmbedding.forward_cuda
@@ -641,8 +621,6 @@ class Attention(nn.Module, AttentionLayerBase):
         key: torch.Tensor,
         value: torch.Tensor,
         rotary_emb: "RotaryEmbedding",
-        output_shape: torch.Size | None = None,
-        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """Run attention after writing rotated Q and K/V cache in one op."""
         query = query.view(-1, self.num_heads, self.head_size)
@@ -675,13 +653,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 encoded,
             )
 
-        return self._forward(
+        return self.forward(
             query_out,
             None,
             None,
-            output_shape=output_shape,
-            output_dtype=output_dtype,
-            update_kv_cache=False,
             encoded_layer_name=encoded,
         )
 
@@ -698,10 +673,14 @@ class Attention(nn.Module, AttentionLayerBase):
         layer_slot_mapping: torch.Tensor | None,
     ) -> None:
         impl = self.impl
+        assert impl.fused_rope_kvcache_q_out_supported(), (
+            "The attention backend does not support cache-only fused RoPE."
+        )
+        # This is the final dynamic guard before native mutation; callers other
+        # than Llama's model-side fast path must retain the token threshold.
         if (
             layer_slot_mapping is not None
             and query.shape[0] <= self.rope_kvcache_fusion_max_token_num
-            and impl.fused_rope_kvcache_q_out_supported()
         ):
             impl.do_rope_and_kv_cache_update_q_out(
                 self,
@@ -829,7 +808,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
 def get_attention_context(
     layer_name: str,
-) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
+) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor | None]:
     """Extract attention context for a given layer.
 
     This helper function extracts the attention metadata, attention layer
@@ -844,10 +823,11 @@ def get_attention_context(
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
         - kv_cache: The KV cache tensor for current forward pass
-        - slot_mapping: The slot mapping for this specific layer
+        - slot_mapping: The slot mapping for this specific layer, or None when
+            the current forward does not update its cache
 
-        Note: attn_metadata may be None, but attn_layer and kv_cache are always
-        extracted from the forward context.
+        Note: attn_metadata and slot_mapping may be None, but attn_layer and
+        kv_cache are always extracted from the forward context.
     """
     forward_context: ForwardContext = get_forward_context()
     attn_metadata_raw = forward_context.attn_metadata
@@ -888,7 +868,9 @@ def fused_rope_and_unified_kv_cache_update_q_out(
     assert layer_slot_mapping is not None or attn_metadata is None, (
         "Decoder attention metadata requires a per-layer slot mapping."
     )
-    attn_layer = cast(Attention, attn_layer)
+    assert isinstance(attn_layer, Attention), (
+        "Manual RoPE/cache fusion requires a standard Attention layer."
+    )
     attn_layer._rope_and_kv_cache_update_q_out(
         query,
         key,

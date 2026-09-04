@@ -323,6 +323,17 @@ def test_splitting_ops_dynamic():
 
 
 @pytest.mark.parametrize(
+    ("is_cuda_alike", "expected_enabled"),
+    [(True, True), (False, False)],
+)
+def test_rope_kvcache_platform_support(is_cuda_alike: bool, expected_enabled: bool):
+    with patch.object(current_platform, "is_cuda_alike", return_value=is_cuda_alike):
+        config = PassConfig(fuse_rope_kvcache=True)
+
+    assert config.fuse_rope_kvcache is expected_enabled
+
+
+@pytest.mark.parametrize(
     ("is_rocm", "expected_enabled"),
     [(False, True), (True, False)],
 )

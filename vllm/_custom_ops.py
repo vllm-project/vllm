@@ -2968,9 +2968,6 @@ def fused_rope_and_reshape_cache_flash_q_out(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    kv_cache_dtype: str,
 ) -> None:
     torch.ops._C_cache_ops.fused_rope_and_reshape_cache_flash_q_out(
         query,
@@ -2983,9 +2980,6 @@ def fused_rope_and_reshape_cache_flash_q_out(
         key_cache,
         value_cache,
         slot_mapping,
-        k_scale,
-        v_scale,
-        kv_cache_dtype,
     )
 
 

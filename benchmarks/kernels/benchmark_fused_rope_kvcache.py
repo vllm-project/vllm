@@ -5,7 +5,8 @@
 Each CUDA-event sample times the caller-owned Q-out operator and the equivalent
 ``rotary_embedding`` plus ``reshape_and_cache_flash`` composition. The paths
 use independent copies of the same packed inputs, and their order is balanced
-then shuffled to limit first-run and clock drift bias.
+then shuffled to limit first-run and clock drift bias. Cache views come from
+the standard allocator and cover every current ``KVCacheLayout`` by default.
 """
 
 from __future__ import annotations
@@ -24,9 +25,13 @@ from tabulate import tabulate
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import (
-    canonicalize_singleton_dim_strides,
-    set_random_seed,
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    KVCacheTensor,
+    compute_layout_strides,
+    create_kv_cache_views,
 )
 
 MAX_POS = 4096
@@ -37,6 +42,7 @@ SEED = 0
 class Case:
     q_heads: int
     kv_heads: int
+    head_size: int = 128
     rope_tokens: int = 1
     cache_tokens: int = 1
 
@@ -44,7 +50,7 @@ class Case:
 CASES = {
     "mha": Case(32, 32),
     "gqa": Case(32, 8),
-    "tinyllama-gqa": Case(32, 4),
+    "tinyllama-gqa": Case(32, 4, head_size=64),
     "mqa": Case(32, 1),
     "padded-gqa": Case(32, 8, rope_tokens=8, cache_tokens=5),
 }
@@ -56,7 +62,7 @@ Operation = Callable[[], None]
 
 
 def _make_cache_views(
-    layout: str,
+    layout: KVCacheLayout,
     num_blocks: int,
     block_size: int,
     num_kv_heads: int,
@@ -64,43 +70,46 @@ def _make_cache_views(
     dtype: torch.dtype,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if layout == "NHD":
-        physical_cache = torch.zeros(
-            num_blocks,
-            block_size,
-            num_kv_heads,
-            2 * head_size,
-            dtype=dtype,
-            device=device,
-        )
-        packed_cache = physical_cache.permute(0, 2, 1, 3)
-    elif layout == "HND":
-        packed_cache = torch.zeros(
-            num_blocks,
-            num_kv_heads,
-            block_size,
-            2 * head_size,
-            dtype=dtype,
-            device=device,
-        )
-    else:
-        raise ValueError(f"Unknown KV-cache layout: {layout}")
+    num_layers = 1 if layout.is_layer_compact else 2
+    cache_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+    )
+    physical_cache = torch.zeros(
+        num_layers * num_blocks * cache_spec.page_size_bytes,
+        dtype=torch.int8,
+        device=device,
+    )
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        cache_spec, num_blocks, num_layers, layout
+    )
+    cache_tensor = KVCacheTensor(
+        size=physical_cache.numel(),
+        layers=[str(index) for index in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    packed_cache = create_kv_cache_views(
+        physical_cache,
+        cache_spec,
+        num_blocks,
+        layout,
+        cache_tensor,
+    )[-1]
 
     key_cache, value_cache = packed_cache.transpose(1, 2).split(head_size, dim=-1)
-    return (
-        canonicalize_singleton_dim_strides(key_cache),
-        canonicalize_singleton_dim_strides(value_cache),
-    )
+    return key_cache, value_cache
 
 
 def _make_operations(
     case: Case,
-    layout: str,
+    layout: KVCacheLayout,
     head_size: int,
     block_size: int,
     num_blocks: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
     is_neox: bool,
     seed: int,
     device: torch.device,
@@ -128,9 +137,7 @@ def _make_operations(
     cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(dtype)
     positions = torch.randperm(MAX_POS, device=device)[: case.rope_tokens]
     slot_mapping = torch.randperm(num_slots, device=device)[: case.cache_tokens]
-    cache_dtype = dtype if kv_cache_dtype == "auto" else current_platform.fp8_dtype()
-    k_scale = torch.ones(1, dtype=torch.float32, device=device)
-    v_scale = torch.ones(1, dtype=torch.float32, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
 
     def make_state() -> tuple[
         torch.Tensor,
@@ -157,7 +164,7 @@ def _make_operations(
             block_size,
             case.kv_heads,
             head_size,
-            cache_dtype,
+            dtype,
             device,
         )
         return query, key, value, key_cache, value_cache
@@ -197,9 +204,6 @@ def _make_operations(
             q_out_key_cache,
             q_out_value_cache,
             slot_mapping,
-            k_scale,
-            v_scale,
-            kv_cache_dtype,
         )
 
     def unfused() -> None:
@@ -217,9 +221,9 @@ def _make_operations(
             unfused_key_cache,
             unfused_value_cache,
             slot_mapping,
-            kv_cache_dtype,
-            k_scale,
-            v_scale,
+            "auto",
+            scale,
+            scale,
         )
 
     return {
@@ -313,15 +317,16 @@ def main(args) -> None:
     raw_results = []
     for case_name in args.cases:
         case = CASES[case_name]
-        for layout in args.layouts:
+        head_size = args.head_size or case.head_size
+        for layout_name in args.layouts:
+            layout = KVCacheLayout[layout_name]
             operations = _make_operations(
                 case,
                 layout,
-                args.head_size,
+                head_size,
                 args.block_size,
                 args.num_blocks,
                 DTYPES[args.dtype],
-                args.kv_cache_dtype,
                 args.rope_style == "neox",
                 args.seed,
                 device,
@@ -340,10 +345,11 @@ def main(args) -> None:
             rows.append(
                 [
                     case_name,
-                    layout,
+                    layout.name,
                     case.rope_tokens,
                     case.cache_tokens,
                     f"{case.q_heads}/{case.kv_heads}",
+                    head_size,
                     _summary(samples_us["unfused"]),
                     _summary(samples_us["q_out"]),
                     _summary(versus_unfused),
@@ -352,7 +358,8 @@ def main(args) -> None:
             raw_results.append(
                 {
                     "case": case_name,
-                    "layout": layout,
+                    "layout": layout.name,
+                    "head_size": head_size,
                     "orders": orders,
                     "q_out_us": samples_us["q_out"],
                     "unfused_us": samples_us["unfused"],
@@ -361,8 +368,8 @@ def main(args) -> None:
 
     print(
         f"Device: {current_platform.get_device_name()}\n"
-        f"dtype={args.dtype} cache={args.kv_cache_dtype} "
-        f"head_size={args.head_size} rope={args.rope_style} "
+        f"dtype={args.dtype} head_size={args.head_size or 'per-case'} "
+        f"rope={args.rope_style} "
         f"warmup={args.warmup} samples={args.samples} "
         f"repeats/sample={args.repeats}"
     )
@@ -375,6 +382,7 @@ def main(args) -> None:
                 "T",
                 "slots",
                 "Q/KV heads",
+                "D",
                 "unfused median [p10, p90] (us)",
                 "Q-out fused median [p10, p90] (us)",
                 "Q-out vs unfused [p10, p90]",
@@ -393,20 +401,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--layouts",
         nargs="+",
-        choices=["NHD", "HND"],
-        default=["NHD", "HND"],
+        choices=[layout.name for layout in KVCacheLayout],
+        default=[layout.name for layout in KVCacheLayout],
     )
     parser.add_argument("--dtype", choices=list(DTYPES), default="bfloat16")
-    parser.add_argument(
-        "--kv-cache-dtype",
-        choices=["auto", "fp8_e4m3"],
-        default="auto",
-    )
     parser.add_argument(
         "--head-size",
         type=int,
         choices=[64, 80, 96, 112, 120, 128, 192, 256],
-        default=128,
+        default=None,
+        help="Override the per-case head size.",
     )
     parser.add_argument("--rope-style", choices=["neox", "interleaved"], default="neox")
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)

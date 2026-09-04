@@ -990,11 +990,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     bool is_neox,"
       "                     Tensor! key_cache,"
       "                     Tensor! value_cache,"
-      "                     Tensor slot_mapping,"
-      "                     Tensor k_scale,"
-      "                     Tensor v_scale,"
-      "                     str kv_cache_dtype) -> ()");
-
+      "                     Tensor slot_mapping) -> ()");
 #endif
 
   // Convert the key and value cache to fp8 data type.
