@@ -150,6 +150,9 @@ def _is_nvfp4_quant_group(group: object) -> bool:
         and bool(weights.get("symmetric", True))
         and acts.get("num_bits") == 4
         and acts.get("type") == "float"
+        and acts.get("strategy") == "tensor_group"
+        and acts.get("group_size") == 16
+        and bool(acts.get("symmetric", True))
     )
 
 class ModelConfig:

@@ -83,6 +83,21 @@ def test_group_mxfp4_not_matched():
     assert not _is_nvfp4_quant_group(group)
 
 
+def test_group_activation_layout_must_also_match():
+    # upstream requires _is_nvfp4_format on input_quant as well ("For NVFP4
+    # weights, input quantization must also be NVFP4 format"); a group with
+    # nvfp4 weights but group/32 activations must not match.
+    base = {k: v for k, v in NVFP4_GROUP.items() if k != "format"}
+    wrong_strategy = dict(
+        base, input_activations=dict(base["input_activations"], strategy="group")
+    )
+    assert not _is_nvfp4_quant_group(wrong_strategy)
+    wrong_group_size = dict(
+        base, input_activations=dict(base["input_activations"], group_size=32)
+    )
+    assert not _is_nvfp4_quant_group(wrong_group_size)
+
+
 def test_group_preset_name_value_does_not_crash():
     # compressed-tensors allows {"NVFP4": ["Linear"]}-style preset groups;
     # vLLM cannot load those configs, so they must simply not match.
