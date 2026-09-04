@@ -97,6 +97,8 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import (
     get_num_workspace_ubatches,
     init_workspace_manager,
+    is_workspace_manager_initialized,
+    lock_workspace,
 )
 
 from ...model_executor.model_loader import TensorizerLoader
@@ -835,6 +837,14 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        # Warmup is over on every path that reaches here. A completed capture
+        # locks the workspace itself, but capture_model() returns early when
+        # both capture modes are disabled and is skipped entirely under
+        # enforce_eager, so those paths would start serving with the workspace
+        # still growable past the capacity KV sizing was told to expect.
+        if is_workspace_manager_initialized():
+            lock_workspace()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (

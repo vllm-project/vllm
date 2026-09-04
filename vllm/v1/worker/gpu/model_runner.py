@@ -173,7 +173,6 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import (
     PersistentWorkspaceLease,
     current_workspace_manager,
-    lock_workspace,
     use_workspace_lane,
     use_workspace_ubatch_id,
 )
@@ -1346,7 +1345,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             elapsed_time,
             cuda_graph_size / (1 << 30),
         )
-        lock_workspace()
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:

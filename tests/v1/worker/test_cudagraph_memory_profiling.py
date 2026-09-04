@@ -1798,7 +1798,7 @@ def test_v2_teardown_profiling_state_releases_builder_refs(monkeypatch):
     assert builder_ref() is None
 
 
-def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch):
+def test_v2_capture_reserves_workspace_before_measurement(monkeypatch):
     from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -1887,19 +1887,14 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
         "get_memory_info",
         get_memory_info,
     )
-    monkeypatch.setattr(
-        gpu_model_runner_v2,
-        "lock_workspace",
-        lambda: events.append("lock"),
-    )
-
     assert runner.capture_model() == 1_000
+    # The lock moved to the worker's warmup completion, which is the only
+    # path every configuration reaches; see gpu_worker.compile_or_warm_up_model.
     assert events == [
         "builder_reserve",
         "memory_info",
         "capture",
         "memory_info",
-        "lock",
     ]
 
 

@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 
+import vllm.utils.jit_monitor as jit_monitor
 import vllm.v1.worker.gpu_worker as gpu_worker_module
 from vllm.config.parallel import ParallelConfig
 from vllm.utils.mem_constants import GiB_bytes
@@ -82,6 +84,80 @@ def test_initialize_kv_cache_finalizes_persistent_workspace(
     if profile_persistent_workspace:
         expected_events.append("reserve_workspace")
     assert events == expected_events
+
+
+def _record_capture(events: list[str]) -> int:
+    events.append("capture")
+    return 0
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_warmup_locks_the_workspace_on_every_path(monkeypatch, enforce_eager):
+    """Serving must never start with a growable workspace.
+
+    capture_model() locks it when it captures, but it returns early when both
+    capture modes are disabled and it is skipped entirely under enforce_eager,
+    so the lock belongs on the warmup path every configuration reaches.
+    """
+    from vllm.config.compilation import CompilationMode
+
+    events: list[str] = []
+    worker = object.__new__(Worker)
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(mode=CompilationMode.NONE)
+    )
+    worker.compilation_config = SimpleNamespace(
+        mode=CompilationMode.NONE,
+        backend="eager",
+        compilation_time=0.0,
+        encoder_compilation_time=0.0,
+    )
+    worker.model_config = SimpleNamespace(enforce_eager=enforce_eager, seed=0)
+    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=1)
+    worker.observability_config = SimpleNamespace(
+        jit_monitor_mode="warn", jit_monitor_verbose=False
+    )
+    worker.device = torch.device("cpu")
+    worker.use_v2_model_runner = True
+    worker.model_runner = SimpleNamespace(
+        lora_config=None,
+        maybe_remove_all_loras=lambda cfg: None,
+        capture_model=lambda: _record_capture(events),
+    )
+    worker.execute_model = None
+    worker.sample_tokens = None
+
+    monkeypatch.setattr(gpu_worker_module, "kernel_warmup", lambda w: None)
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "requires_persistent_attention_workspace_profiling",
+        lambda config: False,
+    )
+    monkeypatch.setattr(
+        gpu_worker_module, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        gpu_worker_module, "lock_workspace", lambda: events.append("lock")
+    )
+    monkeypatch.setattr(gpu_worker_module, "warmup_kernels", lambda *a, **k: None)
+    monkeypatch.setattr(gpu_worker_module, "set_random_seed", lambda seed: None)
+    monkeypatch.setattr(gpu_worker_module, "freeze_gc_heap", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker_module, "maybe_attach_gc_debug_callback", lambda: None
+    )
+    monkeypatch.setattr(gpu_worker_module, "enable_gpu_sync_check", lambda: None)
+    monkeypatch.setattr(
+        gpu_worker_module, "set_torch_threads_for_runtime", lambda: None
+    )
+    # compile_or_warm_up_model imports these lazily, so the patch has to land
+    # on the defining module rather than on gpu_worker.
+    monkeypatch.setattr(jit_monitor, "activate", lambda **kwargs: None)
+
+    worker.compile_or_warm_up_model()
+
+    assert "lock" in events
+    if enforce_eager:
+        assert "capture" not in events
 
 
 @pytest.mark.parametrize(
