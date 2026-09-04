@@ -895,6 +895,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     torch.accelerator.synchronize()
     if hasattr(runner.model_state, "_mamba_ctx"):
         runner.model_state._mamba_ctx = None
+    runner.close_kv_cache()
     # Invalidate the align-mode Mamba group metadata cached from the
     # profiling KVCacheConfig: the real (e.g. PP-projected) config may
     # place Mamba layers into a different group layout, so it must be
@@ -903,8 +904,6 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
         runner.model_state._mamba_group_ids = []
     if hasattr(runner.model_state, "_mamba_spec"):
         runner.model_state._mamba_spec = None
-    if hasattr(runner, "kv_caches"):
-        runner.kv_caches.clear()
     if hasattr(runner, "attn_groups"):
         runner.attn_groups.clear()
     if hasattr(runner, "kv_cache_config"):

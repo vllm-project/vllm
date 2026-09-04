@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -24,8 +24,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
+    KVCache,
     add_kv_sharing_layers_to_kv_cache_groups,
-    allocate_kv_cache,
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
@@ -203,7 +203,7 @@ def get_query_lens_mismatch_unsupported_backend(
 
 
 def init_kv_cache(
-    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
+    kv_cache: KVCache,
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -211,16 +211,14 @@ def init_kv_cache(
     vllm_config: VllmConfig,
     kv_cache_allocation_context: AbstractContextManager | None = None,
 ) -> dict[str, Any]:
-    allocation_context = kv_cache_allocation_context or nullcontext()
-    with allocation_context:
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            device,
-            vllm_config.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-        )
-    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
-        kv_caches[layer_name] = kv_caches[target]
+    kv_caches = kv_cache.allocate(
+        kv_cache_config,
+        device,
+        vllm_config.cache_config.get_resolved_kv_cache_layout(),
+        kernel_block_sizes,
+        shared_layers=get_shared_kv_cache_layers(vllm_config),
+        allocation_context=kv_cache_allocation_context,
+    )
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
     # decoder layer, so a layer name carries two integers (layer + module index).
     num_attn_module = (
@@ -229,13 +227,18 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(
-        kv_caches,
-        forward_context,
-        runner_kv_caches,
-        num_attn_module,
-        kv_cache_groups=kv_cache_config.kv_cache_groups,
-    )
+    try:
+        bind_kv_cache(
+            kv_caches,
+            forward_context,
+            kv_cache.tensors,
+            num_attn_module,
+            pcp_symm_mem_domain=kv_cache.pcp_domain,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
+        )
+    except Exception:
+        kv_cache.close()
+        raise
     return kv_caches
 
 

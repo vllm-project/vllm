@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -17,9 +20,56 @@ try:
 
     symm_mem_available = True
 except ImportError:
+    torch_symm_mem = None  # type: ignore[assignment]
     symm_mem_available = False
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True, eq=False)
+class SymmetricMemoryAllocation:
+    """A local symmetric-memory allocation and its rendezvoused handle."""
+
+    storage: torch.Tensor
+    handle: Any
+
+
+def allocate_symmetric_memory(
+    shape: tuple[int, ...] | int,
+    dtype: torch.dtype,
+    device: torch.device,
+    group: ProcessGroup,
+) -> SymmetricMemoryAllocation:
+    storage = allocate_symmetric_memory_storage(shape, dtype, device)
+    handle = rendezvous_symmetric_memory(storage, group)
+    return SymmetricMemoryAllocation(storage=storage, handle=handle)
+
+
+def allocate_symmetric_memory_storage(
+    shape: tuple[int, ...] | int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    if torch_symm_mem is None:
+        raise RuntimeError("torch.distributed._symmetric_memory is unavailable")
+
+    storage = torch_symm_mem.empty(shape, dtype=dtype, device=device)
+    storage.zero_()
+    torch.accelerator.synchronize()
+    return storage
+
+
+def rendezvous_symmetric_memory(
+    storage: torch.Tensor,
+    group: ProcessGroup,
+) -> Any:
+    if torch_symm_mem is None:
+        raise RuntimeError("torch.distributed._symmetric_memory is unavailable")
+
+    handle = torch_symm_mem.rendezvous(storage, group)
+    if not handle.buffer_ptrs_dev or not all(handle.buffer_ptrs):
+        raise RuntimeError("Symmetric-memory peer pointers are unavailable")
+    return handle
 
 
 class SymmMemCommunicator:
