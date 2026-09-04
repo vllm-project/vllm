@@ -268,6 +268,10 @@ class PPHandler:
 
     def _wait_for_receive(self, event: torch.cuda.Event) -> None:
         """Wait on the main stream and measure a genuinely unready receive."""
+        if self.collect_recv_wait_stats:
+            # Keep diagnostic runs bounded instead of retaining two CUDA events
+            # for every historical hard wait until shutdown.
+            self._collect_completed_wait_timings()
         if (
             self.recv_launch_delay
             and self.collect_recv_wait_stats
