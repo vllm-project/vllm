@@ -277,7 +277,10 @@ class FlashAttentionBackend(AttentionBackend):
                 supports_fa4_hd256=True,
             )
         ):
-            return "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
+            return (
+                "FP8 KV cache requires FA3 on SM90, FA4 with head_size=512 "
+                "on SM90, or FA4 on SM100"
+            )
         if (
             use_mm_prefix
             and get_flash_attn_version(

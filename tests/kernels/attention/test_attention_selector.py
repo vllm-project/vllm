@@ -586,6 +586,24 @@ def _blackwell(vllm_config=None):
         yield
 
 
+@contextmanager
+def _hopper(vllm_config=None):
+    platform = MagicMock()
+    platform.is_xpu.return_value = False
+    platform.is_rocm.return_value = False
+    platform.get_device_capability.return_value = DeviceCapability(9, 0)
+    platform.is_device_capability_family.side_effect = lambda family: family == 90
+    with (
+        patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
+        patch(
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
+            return_value=True,
+        ),
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=vllm_config),
+    ):
+        yield
+
+
 def _hd256_config(
     *,
     is_mm_prefix_lm=False,
@@ -604,6 +622,37 @@ def _hd256_config(
     vllm_config.cache_config.cache_dtype = cache_dtype
     vllm_config.parallel_config.decode_context_parallel_size = dcp_size
     return vllm_config
+
+
+@pytest.mark.parametrize(
+    "head_size,expected_supported",
+    [
+        (256, True),
+        (384, False),
+        (512, True),
+    ],
+)
+def test_sm90_fp8_kv_head_size_support(head_size, expected_supported):
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    with _hopper():
+        error = FlashAttentionBackend.supports_combination(
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(9, 0),
+        )
+
+    if expected_supported:
+        assert error is None
+    else:
+        assert error is not None
+        assert "head_size=512 on SM90" in error
 
 
 @blackwell_only
