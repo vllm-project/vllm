@@ -50,16 +50,30 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     )
     target_inner = target_language_model.model
     if pp_group.world_size != 1:
+        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+            get_eagle3_aux_layers_from_config,
+        )
+
         start_layer = target_inner.start_layer
         end_layer = target_inner.end_layer
-        aux_layers = tuple(
-            layer + 1 for layer in draft_model_config.hf_config.dspark_target_layer_ids
-        )
-        if any(layer <= start_layer or layer > end_layer for layer in aux_layers):
+        # Same fallback chain the target model's aux taps are configured with:
+        # covers dspark_target_layer_ids (DeepSeek-V4) and the speculators-format
+        # fields (eagle_aux_hidden_state_layer_ids / target_layer_ids, e.g. K3).
+        aux_layers = get_eagle3_aux_layers_from_config(speculative_config)
+        if aux_layers is None:
             raise ValueError(
-                "DSpark prefill materialization requires every auxiliary hidden "
-                "state on the last pipeline stage. "
-                f"Stage owns ({start_layer}, {end_layer}], requested {aux_layers}."
+                "DSpark draft config declares no auxiliary target-layer taps."
+            )
+        # Models with PP aux transport (e.g. Kimi-K3) forward taps captured on
+        # earlier stages to the last stage, so their taps may live anywhere.
+        if not getattr(
+            target_inner, "supports_pp_aux_hidden_state_transport", False
+        ) and any(layer <= start_layer or layer > end_layer for layer in aux_layers):
+            raise ValueError(
+                "DSpark prefill materialization requires every auxiliary "
+                "hidden state on the last pipeline stage. "
+                f"Stage owns ({start_layer}, {end_layer}], requested "
+                f"{aux_layers}."
             )
 
     from vllm.compilation.backends import set_model_tag
