@@ -283,7 +283,12 @@ class Scheduler(SchedulerInterface):
                     if speculative_config.use_multi_module_mtp()
                     else 1
                 )
-            self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
+            # Follow the narrowed use_eagle: a DSpark prefill-only producer
+            # never does the EAGLE-style read-ahead, so it must not drop its
+            # trailing prefix-cache block either.
+            self.use_eagle_block_drop = (
+                self.use_eagle and speculative_config.use_eagle_block_drop()
+            )
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
                     "EAGLE trailing prefix-cache block dropping is disabled. "

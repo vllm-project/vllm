@@ -1522,8 +1522,7 @@ class SpeculativeConfig:
         if self.is_dspark_prefill_only():
             # is_dspark_prefill_only() implies target_kv_transfer_config is set.
             assert self.target_kv_transfer_config is not None
-            connector = self.target_kv_transfer_config.kv_connector
-            if connector is not None and "Nixl" in connector:
+            if self.target_kv_transfer_config.has_connector("NixlConnector"):
                 raise NotImplementedError(
                     "DSpark prefill materialization with pipeline parallelism "
                     "requires a connector that transfers named per-layer KV "
