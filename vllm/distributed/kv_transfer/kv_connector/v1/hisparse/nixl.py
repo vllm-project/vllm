@@ -29,13 +29,11 @@ class HiSparseNixlDestination:
         assert host_num_blocks is not None
         self.host_num_blocks = host_num_blocks
         self.host_regions: list[tuple[int, int] | None] = []
-        self._registration_ranges: dict[int, int] = {}
         self._descriptor_offsets: list[int | None] = []
         self._xfer_handle: int | None = None
 
     def reset_regions(self) -> None:
         self.host_regions.clear()
-        self._registration_ranges.clear()
         self._descriptor_offsets.clear()
         self._xfer_handle = None
 
@@ -75,22 +73,12 @@ class HiSparseNixlDestination:
                 f"host={stride}, gpu={region_block_len}"
             )
         self.host_regions.append((host_cache.data_ptr(), stride))
-        storage = host_cache.untyped_storage()
-        self._registration_ranges[storage.data_ptr()] = storage.nbytes()
 
-    def register_host_memory(self, worker: NixlBaseConnectorWorker) -> None:
-        registration_data = [
-            (address, length, 0, "")
-            for address, length in self._registration_ranges.items()
-        ]
-        registration_descs = worker.nixl_wrapper.get_reg_descs(
-            registration_data, "DRAM"
-        )
-        worker.nixl_wrapper.register_memory(
-            registration_descs, backends=worker.nixl_backends
-        )
-        worker._registered_descs.append(registration_descs)
-
+    def prepare_host_descriptors(
+        self,
+        worker: NixlBaseConnectorWorker,
+        registered_ranges: list[tuple[int, int]],
+    ) -> None:
         blocks: list[tuple[int, int, int]] = []
         for region in self.host_regions:
             if region is None:
@@ -98,13 +86,21 @@ class HiSparseNixlDestination:
                 continue
             base, stride = region
             self._descriptor_offsets.append(len(blocks))
+            end = base + self.host_num_blocks * stride
+            if not any(
+                start <= base and end <= stop for start, stop in registered_ranges
+            ):
+                raise RuntimeError(
+                    "HiSparse host destination is outside NIXL-registered DRAM: "
+                    f"destination=({base}, {end}), ranges={registered_ranges}"
+                )
             blocks.extend(
                 (base + block_id * stride, stride, 0)
                 for block_id in range(self.host_num_blocks)
             )
         descs = worker.nixl_wrapper.get_xfer_descs(blocks, "DRAM")
         self._xfer_handle = worker.nixl_wrapper.prep_xfer_dlist(
-            "NIXL_INIT_AGENT", descs
+            "NIXL_INIT_AGENT", descs, backends=worker.nixl_backends
         )
 
     def release(self, worker: NixlBaseConnectorWorker) -> None:
