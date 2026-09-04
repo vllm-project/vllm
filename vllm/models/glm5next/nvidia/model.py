@@ -22,8 +22,8 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -314,18 +314,19 @@ class Glm5NextMoE(nn.Module):
 
         router_logits, _ = self.gate(hidden_states)
         if self.use_mega_moe:
-            topk_weights, topk_ids = fused_topk_bias(
+            topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
+                topk=self.config.num_experts_per_tok,
+                renormalize=self.config.moe_renormalize,
+                num_expert_group=self.config.n_group,
+                topk_group=self.config.topk_group,
                 scoring_func=self.config.scoring_func,
                 e_score_correction_bias=(
                     self.gate.e_score_correction_bias.data
                     if self.gate.e_score_correction_bias is not None
                     else None
                 ),
-                topk=self.config.num_experts_per_tok,
-                renormalize=self.config.moe_renormalize,
-                indices_type=torch.int64,
                 routed_scaling_factor=self.routed_scaling_factor,
             )
             final_hidden_states = self.experts(

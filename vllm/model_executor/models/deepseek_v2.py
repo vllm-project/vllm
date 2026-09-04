@@ -58,8 +58,8 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -476,18 +476,19 @@ class DeepseekV2MoE(nn.Module):
 
         if self.use_mega_moe:
             router_logits, _ = self.gate(hidden_states)
-            topk_weights, topk_ids = fused_topk_bias(
+            topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
+                topk=self.config.num_experts_per_tok,
+                renormalize=self.config.norm_topk_prob,
+                num_expert_group=getattr(self.config, "n_group", 1),
+                topk_group=getattr(self.config, "topk_group", 1),
                 scoring_func=getattr(self.config, "scoring_func", "softmax"),
                 e_score_correction_bias=(
                     self.gate.e_score_correction_bias.data
                     if self.gate.e_score_correction_bias is not None
                     else None
                 ),
-                topk=self.config.num_experts_per_tok,
-                renormalize=self.config.norm_topk_prob,
-                indices_type=torch.int64,
                 routed_scaling_factor=self.routed_scaling_factor,
             )
             final_hidden_states = self.experts(
