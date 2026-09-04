@@ -11,13 +11,11 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 import torch
 import torch.distributed as dist
-from torch.distributed import TCPStore
+from torch.distributed import PrefixStore, TCPStore
+from torch.distributed.distributed_c10d import Backend, _get_default_timeout
 
-from vllm.distributed import (
-    stateless_destroy_torch_distributed_process_group,
-    stateless_init_torch_distributed_process_group,
-)
-from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.utils import init_gloo_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -274,7 +272,7 @@ class EngineCoreSentinel:
         num_clients: int,
     ) -> None:
         """Rebuild dp_store when the old store master was removed."""
-        timeout = get_cpu_distributed_timeout_or_none()
+        timeout = self.parallel_config.cpu_distributed_timeout
         if timeout is None:
             timeout = timedelta(seconds=self.engine_recovery_timeout_sec)
         engine = cast("DPEngineCoreProc", self.engine)
@@ -330,7 +328,6 @@ class EngineCoreSentinel:
         recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
         params.update(
             self._reinit_engine_groups(
-                master_ip,
                 params["dp_group_rank"],
                 len(alive),
                 recovery_round,
@@ -393,7 +390,7 @@ class EngineCoreSentinel:
         return FaultToleranceResult(request_id=ft_request.request_id, success=True)
 
     def _reinit_engine_groups(
-        self, master_ip: str, dense_rank: int, dense_size: int, recovery_round: str
+        self, dense_rank: int, dense_size: int, recovery_round: str
     ) -> dict:
         """Reinit the engine DP group and coordinate fresh ports for the
         worker DP/EP/EPLB groups. Returns worker params."""
@@ -415,20 +412,16 @@ class EngineCoreSentinel:
             )[0],
         }
 
-        engine_port = self._coordinate_ports(
-            "ft_engine_dp_port", dense_rank, recovery_round
-        )[0]
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
-        engine.dp_group, engine.dp_store = (
-            stateless_init_torch_distributed_process_group(
-                master_ip,
-                engine_port,
-                dense_rank,
-                dense_size,
-                backend="gloo",
-                return_store=True,
-                timeout=self.parallel_config.cpu_distributed_timeout,
-            )
+        prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
+        timeout = self.parallel_config.cpu_distributed_timeout
+        if timeout is None:
+            timeout = _get_default_timeout(Backend.GLOO)
+        engine.dp_group = init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=dense_rank,
+            group_size=dense_size,
+            timeout=timeout,
         )
         return worker_params
 
