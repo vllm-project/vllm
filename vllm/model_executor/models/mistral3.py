@@ -196,6 +196,7 @@ class Mistral3HFEncoderInfo(PixtralHFEncoderInfo):
             image_height = math.floor(image_height / ratio)
 
         patch_size = self.vision_config.patch_size
+        assert isinstance(self.hf_config, Mistral3Config)
         spatial_merge_size = self.hf_config.spatial_merge_size
 
         # The HF processor rounds each dimension up to the vision patch size
@@ -216,7 +217,7 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(
         self,
         mm_processor_kwargs: Mapping[str, object] | None = None,
-    ) -> Mistral3HFEncoderInfo:
+    ) -> PixtralHFEncoderInfo:
         processor = self.get_hf_processor()
         size = processor.image_processor.size
         merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
