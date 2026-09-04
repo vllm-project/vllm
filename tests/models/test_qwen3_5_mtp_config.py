@@ -73,3 +73,23 @@ def test_mtp_override_extracts_n_predict_from_multimodal_wrapper(
     assert cfg.model_type == "qwen3_5_mtp"
     assert cfg.architectures == [expected_arch]
     assert cfg.n_predict == 2
+
+
+@pytest.mark.parametrize(
+    "model_type,expected_arch",
+    [
+        ("qwen3_5", "Qwen3_5MTP"),
+        ("qwen3_5_moe", "Qwen3_5MoeMTP"),
+    ],
+)
+def test_mtp_override_top_level_precedence_over_nested_text_config(
+    model_type: str, expected_arch: str
+) -> None:
+    """Verify that an explicit top-level mtp_num_hidden_layers takes precedence
+    over a nested text_config value."""
+    cfg = _multimodal_wrapper_mtp_config(model_type, mtp_layers=2)
+    cfg.mtp_num_hidden_layers = 3
+    overridden = SpeculativeConfig.hf_config_override(cfg)
+    assert overridden.model_type == "qwen3_5_mtp"
+    assert overridden.architectures == [expected_arch]
+    assert overridden.n_predict == 3

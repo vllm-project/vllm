@@ -891,7 +891,7 @@ class SpeculativeConfig:
             hf_config.model_type = "qwen3_5_mtp"
             try:
                 text_config = get_hf_text_config(hf_config)
-            except Exception:
+            except AttributeError:
                 text_config = getattr(hf_config, "text_config", None)
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             if n_predict is None and text_config is not None:
