@@ -3,21 +3,21 @@
 
 from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    CacheConfig,
     CacheConfigMismatchError,
     TensorEntry,
     UnsupportedQuantForIPCError,
+    WeightCacheKey,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     is_ipc_quant_supported,
 )
 
 __all__ = [
-    "CacheConfig",
     "CacheConfigMismatchError",
     "IpcModelLoader",
     "TensorEntry",
     "UnsupportedQuantForIPCError",
+    "WeightCacheKey",
     "WeightCacheUnavailableError",
     "check_ipc_quant_support",
     "is_ipc_quant_supported",

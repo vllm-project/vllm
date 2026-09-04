@@ -20,10 +20,10 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    CacheConfig,
     CacheConfigMismatchError,
     TensorEntry,
     UnsupportedQuantForIPCError,
+    WeightCacheKey,
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     get_physical_device_id,
@@ -102,7 +102,7 @@ class IpcModelLoader(BaseModelLoader):
         expected to already be in the post-quantized layout (e.g. previously
         loaded through this loader).
         """
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         entries, _ = self._fetch_entries(model_config)
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
@@ -138,7 +138,7 @@ class IpcModelLoader(BaseModelLoader):
             logger.exception(
                 "Weight cache IPC loading failed; falling back to disk loading"
             )
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
         return self._fallback_load(vllm_config, model_config, prefix)
 
     def _build_model(
@@ -159,7 +159,7 @@ class IpcModelLoader(BaseModelLoader):
         device_index = (
             target_device.index
             if target_device.index is not None
-            else torch.cuda.current_device()
+            else torch.accelerator.current_device_index()
         )
         with set_default_torch_dtype(model_config.dtype):
             with torch.device("meta"):
@@ -267,7 +267,7 @@ class IpcModelLoader(BaseModelLoader):
             get_tensor_model_parallel_world_size,
         )
 
-        cache_config = CacheConfig.from_model_config(
+        cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
@@ -275,7 +275,7 @@ class IpcModelLoader(BaseModelLoader):
         return self._request_state(cache_config)
 
     def _request_state(
-        self, cache_config: CacheConfig
+        self, cache_config: WeightCacheKey
     ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
         with self._connect(self.state_timeout_s) as conn:
             send_msg(conn, {"cmd": "get_state", "cache_config": cache_config})
@@ -283,7 +283,7 @@ class IpcModelLoader(BaseModelLoader):
         status = response.get("status")
         if status == "mismatch":
             raise CacheConfigMismatchError(
-                f"CacheConfig mismatch on fields: {response.get('fields')}"
+                f"WeightCacheKey mismatch on fields: {response.get('fields')}"
             )
         if status != "ok":
             raise WeightCacheUnavailableError(
@@ -318,7 +318,7 @@ class IpcModelLoader(BaseModelLoader):
     def _resolve_socket_path(self) -> str:
         if self.socket_path is not None:
             return self.socket_path
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         gpu_id = get_physical_device_id(device_index)
         if gpu_id is None:
             raise WeightCacheUnavailableError(
@@ -330,7 +330,9 @@ class IpcModelLoader(BaseModelLoader):
     def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
         if daemon_uuid is None:
             return
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(
+            torch.accelerator.current_device_index()
+        )
         local_uuid = str(props.uuid)
         if daemon_uuid != local_uuid:
             raise CacheConfigMismatchError(

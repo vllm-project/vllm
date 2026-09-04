@@ -379,6 +379,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # registered that parameter.
             if not self.act_q_static and not hasattr(layer, "input_scale"):
                 layer.input_scale = None
+            # Marlin reads marlin_input_dtype in apply_weights; it lives on the
+            # method (not exported with the weights), so restore it here too.
+            if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
+                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
             return
 
         if self.use_marlin:

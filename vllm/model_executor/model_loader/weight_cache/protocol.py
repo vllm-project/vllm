@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CacheConfig fingerprinting and socket protocol for the weight cache daemon.
+"""WeightCacheKey fingerprinting and socket protocol for the weight cache daemon.
 
 The protocol uses pickle over a Unix domain socket and is only intended for
 communication between trusted local processes owned by the same user. The
@@ -11,6 +11,7 @@ and are not group/world accessible before trusting them, so a different local
 user cannot pre-plant a malicious socket at a predictable path.
 """
 
+import glob
 import json
 import os
 import pickle
@@ -247,15 +248,57 @@ def _hash_quant_config(quant_config: Any) -> str:
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
+def _safetensors_header(path: str) -> bytes:
+    """Return the raw safetensors header (length prefix + JSON) of a file.
+
+    The header carries tensor names, dtypes, shapes and byte offsets, so it is
+    a content fingerprint of the shard without reading any weight bytes.
+    """
+    with open(path, "rb") as f:
+        size_bytes = f.read(8)
+        (header_len,) = struct.unpack("<Q", size_bytes)
+        return size_bytes + f.read(header_len)
+
+
+def hash_checkpoint(model: str) -> str | None:
+    """Fingerprint checkpoint content from local safetensors metadata.
+
+    Hashes each shard's safetensors header so a daemon and an engine pointing
+    at identical weights in different directories produce the same key. Returns
+    None when local safetensors files can't be located (e.g. an undownloaded
+    Hugging Face repo id), leaving the caller to fall back to the model path.
+    """
+    if not os.path.isdir(model):
+        return None
+    from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        filter_duplicate_safetensors_files,
+    )
+
+    files = glob.glob(os.path.join(model, "*.safetensors"))
+    if os.path.isfile(os.path.join(model, SAFE_WEIGHTS_INDEX_NAME)):
+        files = filter_duplicate_safetensors_files(
+            files, model, SAFE_WEIGHTS_INDEX_NAME
+        )
+    if not files:
+        return None
+    hasher = safe_hash(b"", usedforsecurity=False)
+    for path in sorted(files, key=os.path.basename):
+        hasher.update(os.path.basename(path).encode())
+        hasher.update(_safetensors_header(path))
+    return hasher.hexdigest()
+
+
 @dataclass(frozen=True)
-class CacheConfig:
+class WeightCacheKey:
     """Fingerprint of the cached weights.
 
     Any mismatch between the daemon's and the engine's fingerprint means the
     cached weights cannot be reused and the engine must load from disk.
     """
 
-    model: str
+    checkpoint: str
     model_arch: str
     tp_size: int
     tp_rank: int
@@ -268,18 +311,24 @@ class CacheConfig:
     @classmethod
     def from_model_config(
         cls, model_config: ModelConfig, tp_size: int, tp_rank: int
-    ) -> "CacheConfig":
+    ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
         Must be called before weight loading: process_weights_after_loading
         may mutate hf_config.quantization_config, which would change the hash
         between the daemon and the engine.
+
+        The checkpoint is identified by a hash of its safetensors metadata when
+        the weights are available locally, so a daemon and engine referencing
+        identical weights in different directories still match; otherwise it
+        falls back to the model path.
         """
         hf_config = model_config.hf_config
         arch = ",".join(getattr(hf_config, "architectures", None) or [])
         quant_config = getattr(hf_config, "quantization_config", None)
+        checkpoint = hash_checkpoint(model_config.model) or model_config.model
         return cls(
-            model=model_config.model,
+            checkpoint=checkpoint,
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
@@ -290,7 +339,7 @@ class CacheConfig:
             vllm_version=vllm.version.__version__,
         )
 
-    def mismatched_fields(self, other: "CacheConfig") -> list[str]:
+    def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
         return [
             f.name
             for f in fields(self)

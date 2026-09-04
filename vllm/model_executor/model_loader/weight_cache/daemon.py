@@ -22,6 +22,7 @@ are rejected at launch.
 """
 
 import contextlib
+import fcntl
 import multiprocessing
 import os
 import queue
@@ -39,8 +40,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    CacheConfig,
     TensorEntry,
+    WeightCacheKey,
+    WeightCacheUnavailableError,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -130,7 +132,7 @@ class WeightCacheDaemon:
         self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
-        self.cache_config = CacheConfig.from_model_config(
+        self.cache_config = WeightCacheKey.from_model_config(
             vllm_config.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
@@ -140,7 +142,7 @@ class WeightCacheDaemon:
         from vllm.model_executor.model_loader import get_model
 
         tp_size = self.cache_config.tp_size
-        torch.cuda.set_device(self.tp_rank)
+        torch.accelerator.set_device_index(self.tp_rank)
         init_distributed_environment(
             world_size=tp_size,
             rank=self.tp_rank,
@@ -177,6 +179,9 @@ class WeightCacheDaemon:
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
         )
+        # Hold an exclusive per-GPU lock for the daemon's lifetime so a second
+        # daemon cannot remove this daemon's live socket and hijack the path.
+        lock_fd = self._acquire_gpu_lock(socket_path)
         if os.path.exists(socket_path):
             os.unlink(socket_path)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -210,9 +215,28 @@ class WeightCacheDaemon:
             server.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
+            os.close(lock_fd)
+
+    def _acquire_gpu_lock(self, socket_path: str) -> int:
+        """Take an exclusive lock guarding this GPU's socket path.
+
+        The lock is advisory and released automatically when the daemon exits
+        (or crashes), so a stale socket is only ever removed by whoever owns
+        the lock. A running daemon holding it makes a second daemon fail fast
+        instead of clobbering the live socket.
+        """
+        lock_fd = os.open(f"{socket_path}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(lock_fd)
+            raise WeightCacheUnavailableError(
+                f"Another weight cache daemon already owns {socket_path}"
+            ) from e
+        return lock_fd
 
     def _socket_path(self) -> str:
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         gpu_id = get_physical_device_id(device_index)
         if gpu_id is None:
             gpu_id = device_index
@@ -239,12 +263,12 @@ class WeightCacheDaemon:
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
         client_config = request.get("cache_config")
-        if not isinstance(client_config, CacheConfig):
+        if not isinstance(client_config, WeightCacheKey):
             send_msg(conn, {"status": "error", "message": "Missing cache_config"})
             return
         mismatched = self.cache_config.mismatched_fields(client_config)
         if mismatched:
-            logger.warning("CacheConfig mismatch on fields: %s", mismatched)
+            logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
         if not self.entries:
@@ -264,12 +288,14 @@ class WeightCacheDaemon:
         self.entries.clear()
         self.aliases.clear()
         self.model = None
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
         send_msg(conn, {"status": "ok"})
 
     def _gpu_uuid(self) -> str:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(
+            torch.accelerator.current_device_index()
+        )
         return str(props.uuid)
 
 
