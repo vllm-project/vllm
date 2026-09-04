@@ -5,6 +5,7 @@ import math
 import time
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from tests.v1.engine.utils import (
@@ -33,6 +34,7 @@ from vllm.v1.engine.output_processor import (
     RequestState,
 )
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.outputs import SamplingMaskLists
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -58,6 +60,31 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
     assert len(output.logprobs) == 0
+
+
+def test_completion_output_preserves_each_sampling_mask_position() -> None:
+    state = RequestState.__new__(RequestState)
+    state.detokenizer = MagicMock()
+    state.detokenizer.get_next_output_text.return_value = ""
+    state.logprobs_processor = MagicMock()
+    state.logprobs_processor.logprobs = None
+    state.logprobs_processor.cumulative_logprob = None
+    state.output_kind = RequestOutputKind.DELTA
+    state.request_index = 0
+    state.sampling_mask_chunks = [
+        SamplingMaskLists(
+            token_ids=np.array([10, 11, 20]),
+            offsets=np.array([0, 2, 3]),
+        ),
+        SamplingMaskLists(token_ids=np.array([30, 31, 32])),
+    ]
+    state.routed_experts_chunks = []
+    state.spec_decode_metrics = None
+
+    output = state._new_completion_output([1, 2, 3], FinishReason.LENGTH, None)
+
+    assert output.sampling_mask is not None
+    assert output.sampling_mask.token_ids == [[10, 11], [20], [30, 31, 32]]
 
 
 def _ref_convert_id_to_token(

@@ -55,6 +55,103 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def _sampling_replay_config(
+    *,
+    return_sampling_mask: bool = True,
+    use_v2_model_runner: bool = True,
+    speculative_method: str | None = None,
+    rejection_sample_method: str = "standard",
+    adaptive: bool = False,
+    is_diffusion: bool = False,
+    logits_processors: list[str] | None = None,
+    logprobs_mode: str = "processed_logprobs",
+):
+    speculative_config = None
+    if speculative_method is not None:
+        speculative_config = SimpleNamespace(
+            method=speculative_method,
+            enable_adaptive_verification=adaptive,
+            rejection_sample_method=rejection_sample_method,
+        )
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            return_sampling_mask=return_sampling_mask,
+            is_diffusion=is_diffusion,
+            logits_processors=logits_processors or [],
+            logprobs_mode=logprobs_mode,
+        ),
+        use_v2_model_runner=use_v2_model_runner,
+        speculative_config=speculative_config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (_sampling_replay_config(), None),
+        (_sampling_replay_config(speculative_method="mtp"), None),
+        (
+            _sampling_replay_config(
+                return_sampling_mask=False, speculative_method="dflash"
+            ),
+            None,
+        ),
+        (
+            _sampling_replay_config(speculative_method="mtp", adaptive=True),
+            "requires fixed verification boundaries",
+        ),
+        (
+            _sampling_replay_config(speculative_method="eagle"),
+            "currently supports only the MTP speculative method",
+        ),
+        (
+            _sampling_replay_config(speculative_method="dflash"),
+            "currently supports only the MTP speculative method",
+        ),
+        (
+            _sampling_replay_config(speculative_method="dspark"),
+            "currently supports only the MTP speculative method",
+        ),
+        (
+            _sampling_replay_config(
+                speculative_method="mtp",
+                rejection_sample_method="synthetic",
+            ),
+            "only rejection_sample_method='standard'",
+        ),
+        (
+            _sampling_replay_config(
+                speculative_method="mtp",
+                rejection_sample_method="block",
+            ),
+            "only rejection_sample_method='standard'",
+        ),
+        (
+            _sampling_replay_config(is_diffusion=True),
+            "does not support diffusion models",
+        ),
+        (
+            _sampling_replay_config(logits_processors=["custom"]),
+            "does not support custom logits processors",
+        ),
+        (
+            _sampling_replay_config(logprobs_mode="raw_logprobs"),
+            "requires logprobs_mode='processed_logprobs'",
+        ),
+        (
+            _sampling_replay_config(use_v2_model_runner=False),
+            "requires Model Runner V2",
+        ),
+    ],
+)
+def test_sampling_replay_config(config, message):
+    if message is None:
+        VllmConfig._verify_sampling_replay_config(config)
+    else:
+        with pytest.raises(ValueError, match=message):
+            VllmConfig._verify_sampling_replay_config(config)
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

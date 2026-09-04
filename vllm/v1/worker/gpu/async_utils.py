@@ -120,6 +120,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
+        defer_sampling_mask_copy: bool = False,
         check_ep_fault: bool = False,
         routed_experts: RoutedExpertsTensors | None = None,
     ):
@@ -132,6 +133,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.routed_experts = routed_experts
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
+        self.sampling_mask_copy_event: torch.cuda.Event | None = None
+        self.deferred_sampling_mask_tensors: SamplingMaskTensors | None = None
         self._has_fault: torch.Tensor | None = None
 
         with stream(copy_stream, main_stream):
@@ -149,9 +152,14 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
             self.sampling_mask_tensors: SamplingMaskTensors | None = None
             if sampler_output.sampling_mask_tensors is not None:
-                self.sampling_mask_tensors = (
-                    sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
-                )
+                if defer_sampling_mask_copy:
+                    self.deferred_sampling_mask_tensors = (
+                        sampler_output.sampling_mask_tensors
+                    )
+                else:
+                    self.sampling_mask_tensors = (
+                        sampler_output.sampling_mask_tensors.to_cpu_nonblocking()
+                    )
             self.routed_experts_cpu: RoutedExpertsTensors | None = None
             if routed_experts is not None:
                 self.routed_experts_cpu = routed_experts.to_cpu_nonblocking()
@@ -164,8 +172,27 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
 
+    def copy_deferred_sampling_masks(
+        self,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ) -> None:
+        """Start the mask D2H after speculative proposal collectives finish."""
+        if self.deferred_sampling_mask_tensors is None:
+            return
+        self.sampling_mask_copy_event = torch.cuda.Event(blocking=True)
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.sampling_mask_tensors = (
+                self.deferred_sampling_mask_tensors.to_cpu_nonblocking()
+            )
+            self.sampling_mask_copy_event.record(copy_stream)
+        self.deferred_sampling_mask_tensors = None
+
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.sampling_mask_copy_event is not None:
+            self.sampling_mask_copy_event.synchronize()
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -179,7 +206,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
         if self.sampling_mask_tensors is not None:
             self.model_runner_output.sampling_masks = (
-                self.sampling_mask_tensors.tolists()
+                self.sampling_mask_tensors.tolists(self.num_sampled_tokens_np)
             )
 
         if self.num_nans is not None:

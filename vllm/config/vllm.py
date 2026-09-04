@@ -1054,10 +1054,26 @@ class VllmConfig:
             return
         if not self.use_v2_model_runner:
             raise ValueError("sampling distribution replay requires Model Runner V2")
-        if self.speculative_config is not None:
-            raise ValueError(
-                "sampling distribution replay does not support speculative decoding"
-            )
+        speculative_config = self.speculative_config
+        if speculative_config is not None:
+            if speculative_config.enable_adaptive_verification:
+                raise ValueError(
+                    "sampling distribution replay with speculative decoding "
+                    "requires fixed verification boundaries; disable adaptive "
+                    "verification"
+                )
+            if speculative_config.method != "mtp":
+                raise ValueError(
+                    "sampling distribution replay with speculative decoding "
+                    "currently supports only the MTP speculative method; got "
+                    f"{speculative_config.method!r}"
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "sampling distribution replay with speculative decoding "
+                    "currently supports only rejection_sample_method='standard'; "
+                    f"got {speculative_config.rejection_sample_method!r}"
+                )
         if model_config.is_diffusion:
             raise ValueError(
                 "sampling distribution replay does not support diffusion models"
