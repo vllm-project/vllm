@@ -6,4 +6,4 @@ This example contains scripts that demonstrate the disaggregated serving feature
 
 - `disagg_proxy_demo.py` - Demonstrates XpYd (X prefill instances, Y decode instances).
 - `kv_events.sh` - Demonstrates KV cache event publishing.
-- `mooncake_connector` - A proxy demo for MooncakeConnector.
+- [`../mooncake_connector/`](../mooncake_connector/) — MooncakeConnector proxy demo (`run_mooncake_connector.sh`, `mooncake_connector_proxy.py`).
