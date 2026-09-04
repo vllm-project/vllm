@@ -97,6 +97,49 @@ def test_extract_reasoning_with_generation_prefix_consumed():
     assert content == "answer"
 
 
+def test_extract_reasoning_with_generation_prefix_consumed_before_tools():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+    )
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"step{TOOLS_OPEN}tool call",
+        request,
+    )
+
+    assert reasoning == "step"
+    assert content == f"{TOOLS_OPEN}tool call"
+
+
+def test_parse_generation_prefix_consumed_before_tools_reaches_tool_parser():
+    parser = ReasoningAndToolParser(DummyTokenizer())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+    )
+    output = (
+        f"step{TOOLS_OPEN}"
+        '<|open|>call tool="read_file" index="0"<|sep|>'
+        '<|open|>argument key="path" type="string"<|sep|>README.md'
+        f"{CLOSE}argument{SEP}{CLOSE}call{SEP}{CLOSE}tools{SEP}"
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output, request, enable_auto_tools=True
+    )
+
+    assert reasoning == "step"
+    assert content is None
+    assert tool_calls is not None
+    assert tool_calls[0].name == "read_file"
+
+
 def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     parser = ReasoningOnlyParser(DummyTokenizer())
     request = ChatCompletionRequest(model="test-model", messages=[])
