@@ -406,5 +406,7 @@ def test_w8a8_block_fp8_b12x_matmul(M, N, K):
         ref_out.float().flatten(),
         dim=0,
     )
-    assert rel_diff < 0.002
-    assert cosine >= 0.9999
+    # Four-way split-K uses atomic BF16 reductions, so nondeterministic atomic
+    # ordering can flap an output between adjacent BF16 values one ULP apart.
+    assert rel_diff < 0.003
+    assert cosine >= 0.99999

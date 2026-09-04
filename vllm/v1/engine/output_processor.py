@@ -411,12 +411,17 @@ class RequestState:
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
-            logprobs = logprobs[-len(token_ids) :]
+            num_new_tokens = len(token_ids)
+            # Avoid [-0:], which returns the full accumulated history when a
+            # delta contains no new token IDs. [:0] preserves the concrete
+            # list or FlatLogprobs representation while returning no entries.
+            logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
 
         sampling_mask = None
         if finished and self.sampling_mask_chunks:
-            merged = SamplingMaskLists.merge(self.sampling_mask_chunks)
-            sampling_mask = SamplingMask(merged.to_nested_list())
+            sampling_mask = SamplingMask(
+                [chunk.token_ids.tolist() for chunk in self.sampling_mask_chunks]
+            )
 
         # Concatenate routed experts on finish
         routed_experts = None
@@ -462,6 +467,20 @@ class OutputProcessor:
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
+
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.request_states
+
+    def get_num_queued_tokens(self) -> int:
+        """Total prompt tokens of requests currently in the prefill phase.
+
+        Uses ``prompt_len`` rather than remaining prefill work because the
+        scheduler's ``num_computed_tokens`` is not propagated to the API
+        server until prefill completes.  See ``SchedulerConfig`` docs.
+        """
+        return sum(
+            req.prompt_len for req in self.request_states.values() if req.is_prefilling
+        )
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
