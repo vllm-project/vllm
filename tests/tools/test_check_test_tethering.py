@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the test-tethering pre-commit check.
 
-The check answers one question - "does any job in ``.buildkite/test_areas/``
-collect this test file?" - by parsing job ``commands`` as shell. The risk that
+The check answers one question - "does any Buildkite job (in
+``.buildkite/test_areas/`` or the legacy ``.buildkite/test-amd.yaml``) collect
+this test file?" - by parsing job ``commands`` as shell. The risk that
 matters is a *false tether*: a misparse that invents coverage makes the gate
 pass while the test still never runs, which is the exact failure the check
 exists to catch. So the parser cases below pin both directions, and
@@ -294,6 +295,8 @@ def _write_area(tmp_path, monkeypatch, body: str):
     area_dir.mkdir(exist_ok=True)
     (area_dir / "synthetic.yaml").write_text(textwrap.dedent(body))
     monkeypatch.setattr(mod, "TEST_AREAS_DIR", area_dir)
+    # Keep the real test-amd.yaml out of these isolated parsing tests.
+    monkeypatch.setattr(mod, "TEST_AMD_YAML", tmp_path / "no-such-test-amd.yaml")
     # The yaml-error path reports a repo-relative name, so REPO_ROOT has to
     # contain the synthetic area too.
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
@@ -325,6 +328,40 @@ def test_singular_command_key_is_collected(tmp_path, monkeypatch):
         """,
     )
     assert is_tethered("kernels/test_a.py", selections)
+
+
+def test_test_amd_yaml_coverage_counts_as_tethered(tmp_path, monkeypatch):
+    """A test wired only into the legacy test-amd.yaml is still run by CI."""
+    mod = checker
+    (tmp_path / "test_areas").mkdir()
+    amd_yaml = tmp_path / "test-amd.yaml"
+    amd_yaml.write_text(
+        textwrap.dedent(
+            """
+            steps:
+            - label: ":amd: (MI300) Quantization"
+              commands:
+              - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/
+              - pytest -v -s rocm/test_moe_weight_replay.py
+            """
+        )
+    )
+    monkeypatch.setattr(mod, "TEST_AREAS_DIR", tmp_path / "test_areas")
+    monkeypatch.setattr(mod, "TEST_AMD_YAML", amd_yaml)
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    selections = load_selections()
+    assert is_tethered("rocm/test_moe_weight_replay.py", selections)
+    assert is_tethered("quantization/test_foo.py", selections)
+
+
+def test_missing_test_amd_yaml_is_not_fatal(tmp_path, monkeypatch):
+    """When the migration finally deletes test-amd.yaml, the checker still runs."""
+    mod = checker
+    (tmp_path / "test_areas").mkdir()
+    monkeypatch.setattr(mod, "TEST_AREAS_DIR", tmp_path / "test_areas")
+    monkeypatch.setattr(mod, "TEST_AMD_YAML", tmp_path / "gone.yaml")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    assert load_selections() == []
 
 
 def test_step_level_ignore_is_honored(tmp_path, monkeypatch):
@@ -479,7 +516,7 @@ def fake_repo(tmp_path, monkeypatch):
 def test_untethered_changed_file_fails(fake_repo, capsys):
     rc = run_changed_files_check(["tests/kernels/test_new.py"], [], set())
     assert rc == 1
-    assert "is not run by any job" in capsys.readouterr().out
+    assert "is not run by any Buildkite job" in capsys.readouterr().out
 
 
 def test_tethered_changed_file_passes(fake_repo):
