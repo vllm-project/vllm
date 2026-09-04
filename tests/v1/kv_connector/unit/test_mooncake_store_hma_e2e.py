@@ -347,6 +347,16 @@ def test_recv_skips_swa_blocks_before_window():
     swa_hashes = {k.rsplit("@", 1)[-1] for k in swa_keys}
     assert swa_hashes == {hs[2].hex(), hs[3].hex()}
 
+    requested_keys.clear()
+    req.req_id = "r1"
+    assert req.load_spec is not None
+    req.load_spec.load_group_ids = (0,)
+    recv.request_queue.put(req)
+    recv._handle_request(recv.request_queue.get())
+
+    assert requested_keys
+    assert all("@group:0" in key for key in requested_keys)
+
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens

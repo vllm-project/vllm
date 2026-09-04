@@ -2,21 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeLookupResult,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
+    TailKeyBoundary,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.sched.output import KVConnectorBlockState
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 
 def _make_bare_scheduler(
@@ -50,6 +55,7 @@ def _make_bare_scheduler(
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
+    scheduler._range_load_group_ids = (0,)
     return scheduler
 
 
@@ -98,7 +104,7 @@ def _make_decode_scheduler_output(
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
-        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
+        kv_connector_block_state=_make_connector_block_state(),
     )
 
 
@@ -211,6 +217,98 @@ def test_update_state_excludes_nontransfer_groups():
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
 
     assert scheduler._unfinished_requests["req-1"][1] == ([1, 2],)
+
+
+def test_range_load_group_ids_use_transfer_group_indices():
+    groups = [
+        SimpleNamespace(kv_cache_spec=object(), enable_kv_transfer=False),
+        SimpleNamespace(kv_cache_spec=object(), enable_kv_transfer=True),
+        SimpleNamespace(
+            kv_cache_spec=MambaSpec(
+                block_size=16,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+            enable_kv_transfer=True,
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both",
+            kv_connector_extra_config={},
+        ),
+        kv_events_config=None,
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            world_size=1,
+        ),
+    )
+
+    module = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler"
+    with (
+        patch(f"{module}.LookupKeyClient"),
+        patch(f"{module}.resolve_kv_cache_block_sizes", return_value=(16, 16)),
+        patch(f"{module}.partial_hash_hits_enabled", return_value=False),
+    ):
+        scheduler = MooncakeStoreScheduler(vllm_config, kv_cache_config)
+
+    assert scheduler._boundary_state_group_ids == frozenset({2})
+    assert scheduler._range_load_group_ids == (0,)
+
+
+def test_range_load_trims_payload_clears_stale_store_key_boundary():
+    scheduler = _make_bare_scheduler()
+    scheduler.load_specs["req-1"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=1584,
+        can_load=False,
+        tail_key_boundaries=(
+            TailKeyBoundary(0, 1584),
+            TailKeyBoundary(1, 1600),
+        ),
+    )
+    request = SimpleNamespace(request_id="req-1")
+    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2, 3, 4], [9, 10]))
+
+    scheduler.update_state_after_alloc_for_range(
+        request,
+        blocks,
+        KVLoadRange(0, 1568, is_terminal=False),
+    )
+
+    load_spec = scheduler.load_specs["req-1"]
+    assert load_spec.kvpool_cached_tokens == 1568
+    assert load_spec.load_group_ids == (0,)
+    assert load_spec.tail_key_boundaries == ()
+    assert load_spec.can_load is True
+
+
+def test_nonterminal_range_skips_state_for_pure_recurrent_model():
+    scheduler = _make_bare_scheduler()
+    scheduler._range_load_group_ids = ()
+    scheduler.load_specs["req-1"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=64,
+        can_load=False,
+    )
+
+    scheduler.update_state_after_alloc_for_range(
+        SimpleNamespace(request_id="req-1"),
+        SimpleNamespace(get_block_ids=lambda: ([9],)),
+        KVLoadRange(0, 32, is_terminal=False),
+    )
+
+    load_spec = scheduler.load_specs["req-1"]
+    assert scheduler.supports_load_range
+    assert load_spec.load_group_ids == ()
+    assert load_spec.kvpool_cached_tokens == 32
+    assert load_spec.can_load
 
 
 def _setup_decode_request(
