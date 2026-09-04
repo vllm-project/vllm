@@ -982,7 +982,7 @@ steps:
         depends_on: ~
         agents:
           queue: cpu_queue_release
-        timeout_in_minutes: 180
+        timeout_in_minutes: 360
         commands:
           - |
             set -euo pipefail
