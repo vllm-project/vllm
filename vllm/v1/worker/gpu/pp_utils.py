@@ -78,6 +78,7 @@ class PPHandler:
         self.broadcast_stream = torch.cuda.Stream(device)
 
         self.requested_recv_launch_delay = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV
+        self.collect_recv_wait_stats = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS
         if not 0 <= self.requested_recv_launch_delay < pp_group.world_size:
             raise ValueError(
                 "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must satisfy "
@@ -267,8 +268,11 @@ class PPHandler:
 
     def _wait_for_receive(self, event: torch.cuda.Event) -> None:
         """Wait on the main stream and measure a genuinely unready receive."""
-        self._collect_completed_wait_timings()
-        if self.recv_launch_delay and not event.query():
+        if (
+            self.recv_launch_delay
+            and self.collect_recv_wait_stats
+            and not event.query()
+        ):
             self.num_unready_at_consume += 1
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
@@ -283,13 +287,14 @@ class PPHandler:
         """Log end-of-run diagnostics after the device has synchronized."""
         if self.is_last_rank or not self.deferred_collectives_active:
             return
-        self._collect_completed_wait_timings(force=True)
+        if self.collect_recv_wait_stats:
+            self._collect_completed_wait_timings(force=True)
         logger.info(
             "Deferred PP sampled-token receive stats: launches=%d, "
             "idle_boundaries=%d, idle_flushes=%d, idle_flushed_receives=%d, "
             "consume_fallbacks=%d, unready_at_consume=%d, "
             "measured_consume_waits=%d, total_consume_wait_ms=%.3f, "
-            "max_consume_wait_ms=%.3f",
+            "max_consume_wait_ms=%.3f, wait_timing_enabled=%s",
             self.num_deferred_recv_launches,
             self.num_idle_boundaries,
             self.num_idle_flushes,
@@ -299,6 +304,7 @@ class PPHandler:
             self.num_measured_consume_waits,
             self.total_consume_wait_ms,
             self.max_consume_wait_ms,
+            self.collect_recv_wait_stats,
         )
 
     def get_prev_sampled_outputs(

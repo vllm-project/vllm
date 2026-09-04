@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_PP_DEFER_SAMPLED_TOKEN_RECV: int = 0
+    VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -888,6 +889,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # non-last-rank sampled-token receives by this many scheduler steps.
     # The default of 0 preserves immediate receive posting.
     "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV": get_pp_defer_sampled_token_recv,
+    # Collect CUDA-event timing for deferred sampled-token receive waits.
+    # Disabled by default so performance comparisons measure receive placement
+    # rather than event-query/timing overhead.
+    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS": lambda: bool(
+        int(os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS", "0"))
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (

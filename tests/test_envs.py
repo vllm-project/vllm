@@ -99,6 +99,15 @@ def test_pp_defer_sampled_token_recv_requires_integer(
         environment_variables["VLLM_PP_DEFER_SAMPLED_TOKEN_RECV"]()
 
 
+@pytest.mark.parametrize(("value", "expected"), [("0", False), ("1", True)])
+def test_pp_defer_sampled_token_recv_stats(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS", value)
+
+    assert environment_variables["VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS"]() is expected
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
