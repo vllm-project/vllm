@@ -26,7 +26,7 @@ impl Step3p5ReasoningParser {
     /// Create a Step3p5 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>")?,
             pending_reasoning_newline: None,
             just_ended_reasoning: false,
         })

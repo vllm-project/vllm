@@ -24,20 +24,14 @@ pub(crate) struct DelimitedReasoningParser {
     end_token: String,
     start_token_id: u32,
     end_token_id: u32,
-    default_in_reasoning: bool,
 }
 
 impl DelimitedReasoningParser {
     /// Create one delimited parser state machine.
-    ///
-    /// `default_in_reasoning` is only used when prompt initialization sees no
-    /// reasoning boundary token at all. If the prompt contains either the
-    /// start or end delimiter, that prompt boundary always wins.
     pub(crate) fn new(
         tokenizer: DynTokenizer,
         start_token: impl Into<String>,
         end_token: impl Into<String>,
-        default_in_reasoning: bool,
     ) -> Result<Self> {
         let start_token = start_token.into();
         let end_token = end_token.into();
@@ -54,13 +48,12 @@ impl DelimitedReasoningParser {
 
         Ok(Self {
             tokenizer,
-            current_in_reasoning: default_in_reasoning,
+            current_in_reasoning: false,
             buffer: DecodedText::default(),
             start_token,
             end_token,
             start_token_id,
             end_token_id,
-            default_in_reasoning,
         })
     }
 
@@ -72,7 +65,7 @@ impl DelimitedReasoningParser {
             self.end_token_id,
             self.tokenizer.as_ref(),
         )
-        .unwrap_or(self.default_in_reasoning);
+        .unwrap_or(false);
     }
 
     /// Return whether the parser is currently inside a reasoning section.

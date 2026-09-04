@@ -27,7 +27,7 @@ impl MiniMaxM3ReasoningParser {
     /// Create a MiniMax M3 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, M3_THINK_START, M3_THINK_END, false)?,
+            inner: DelimitedReasoningParser::new(tokenizer, M3_THINK_START, M3_THINK_END)?,
             at_response_start: true,
             leading_end_buffer: DecodedText::default(),
         })
