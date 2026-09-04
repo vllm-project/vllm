@@ -33,6 +33,7 @@ def make_request(
     prompt_token_ids: list[int],
     hash_block_size: int,
     hash_fn: Callable,
+    session_id: str | None = None,
 ) -> Request:
     sampling_params = SamplingParams(max_tokens=17)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
@@ -42,6 +43,7 @@ def make_request(
         sampling_params=sampling_params,
         pooling_params=None,
         block_hasher=get_request_block_hasher(hash_block_size, hash_fn),
+        session_id=session_id,
     )
 
 
@@ -123,6 +125,7 @@ def test_cache_partial_block_kv_cache_events():
         prompt_token_ids=list(range(hash_block_size * 2)),
         hash_block_size=hash_block_size,
         hash_fn=sha256,
+        session_id="agent-session-partial",
     )
 
     block = pool.get_new_blocks(1)[0]
@@ -148,6 +151,7 @@ def test_cache_partial_block_kv_cache_events():
     assert stored_event.token_ids == req.all_token_ids[hash_block_size:]
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
+    assert stored_event.session_id == "agent-session-partial"
 
     duplicate_entry_hash = pool.cache_partial_block(
         request=req,
