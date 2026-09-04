@@ -46,20 +46,11 @@ def parser(mock_tokenizer):
 
 class TestUnclosedParameterFlush:
     def test_unclosed_parameter_still_streams_valid_json(self, parser, mock_request):
-        """A tool call cut off mid-parameter must not stream unparsable JSON.
+        """A tool call reopened mid-parameter must still stream parsable JSON.
 
-        ``_safe_arg_prefix`` streams unterminated string values on the
-        understanding that the flush closes them. When the model reopens a tool
-        call without closing the current parameter, the non-partial
-        re-derivation drops that parameter, so it is neither longer than nor a
-        prefix of what was already streamed. ``_flush_arg_converter`` then had
-        nothing to append and the stream ended with ``finish_reason`` set while
-        ``arguments`` was still cut off mid-string, which no JSON parser
-        accepts. Observed in production on Qwen3.8-27B at temperature 1.0.
-
-        Fed one character at a time because that is the worst case for the
-        prefix invariant, and because the boundary that triggers this lands
-        inside a literal the incremental lexer would otherwise hold.
+        The flush re-derives without the open parameter, so it cannot extend
+        the streamed prefix; the prefix has to be closed instead. Fed one
+        character at a time, the worst case for the prefix invariant.
         """
         raw = (
             "<tool_call>\n<function=write_file>\n"
@@ -80,14 +71,7 @@ class TestUnclosedParameterFlush:
         json.loads(args)
 
     def test_truncated_parameter_still_streams_valid_json(self, parser, mock_request):
-        """The same defect with no stray markup: generation simply stops.
-
-        This is the common trigger. A length stop, a stop string or a client
-        disconnect ends the stream partway through a parameter value, with no
-        second ``<tool_call>`` and nothing malformed in the model output. The
-        flush re-derives without the still-open parameter and again has nothing
-        to append, so the client is handed a string that was never closed.
-        """
+        """The common trigger: generation simply stops inside a parameter."""
         raw = (
             "<tool_call>\n<function=write_file>\n"
             "<parameter=path>\nREADME.md\n</parameter>\n"
