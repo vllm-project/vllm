@@ -1099,7 +1099,9 @@ def emit_simple_tool_call_done(
         ),
     )
     state.output_index += 1
+    state.tool_call_name = None
     state.tool_call_namespace = None
+    state.tool_call_index = None
     state.current_state = _StateType.NONE
     return events
 
@@ -1119,13 +1121,13 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
     compound DeltaMessage must be split before entering the state machine.
 
     Ordering:
-    - If tool_calls contains an in-flight argument continuation (the first
-      DeltaToolCall carries function.name as None), it belongs to an ongoing
-      tool call that preceded any following content or reasoning in the same
-      step. Emitting tool_calls first allows the open tool call to consume its
-      remaining arguments before transitioning and closing the item.
-    - Otherwise (e.g. a newly starting tool call with a function name),
-      reasoning and content precede tool_calls as usual.
+    - Tool call groups are classified per index:
+      * Continuation/tail groups (where the group's first DeltaToolCall has
+        function.name as None) belong to an ongoing tool call that preceded any
+        subsequent reasoning or content. They are emitted first.
+      * Reasoning and content deltas are emitted in the middle.
+      * Newly starting tool call groups (where function.name is provided) follow
+        reasoning and content as usual.
     """
     has_reasoning = delta.reasoning is not None
     has_content = delta.content is not None
@@ -1138,31 +1140,27 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
     ):
         return [delta]
 
-    tool_deltas: list[DeltaMessage] = []
+    continuation_deltas: list[DeltaMessage] = []
+    new_call_deltas: list[DeltaMessage] = []
     if has_tools:
         groups: dict[int | None, list[DeltaToolCall]] = {}
         for tc in delta.tool_calls:
             groups.setdefault(tc.index, []).append(tc)
         for tcs in groups.values():
-            tool_deltas.append(DeltaMessage(tool_calls=tcs))
-
-    is_tool_tail = (
-        has_tools
-        and delta.tool_calls[0].function is not None
-        and delta.tool_calls[0].function.name is None
-    )
+            if tcs and tcs[0].function is not None and tcs[0].function.name is None:
+                continuation_deltas.append(DeltaMessage(tool_calls=tcs))
+            else:
+                new_call_deltas.append(DeltaMessage(tool_calls=tcs))
 
     deltas: list[DeltaMessage] = []
-    if is_tool_tail:
-        deltas.extend(tool_deltas)
+    deltas.extend(continuation_deltas)
 
     if has_reasoning:
         deltas.append(DeltaMessage(reasoning=delta.reasoning))
     if has_content:
         deltas.append(DeltaMessage(content=delta.content))
 
-    if not is_tool_tail:
-        deltas.extend(tool_deltas)
+    deltas.extend(new_call_deltas)
 
     return deltas or [delta]
 

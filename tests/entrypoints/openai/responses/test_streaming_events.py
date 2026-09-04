@@ -70,6 +70,24 @@ class TestSplitDelta:
         assert result[1].content == "answer"
         assert result[2].tool_calls == [tc_new]
 
+    def test_mixed_continuation_and_new_tool_calls_ordering(self) -> None:
+        """Verify that when a DeltaMessage contains both a continuation group
+        and a new tool call group, continuation precedes content and the new
+        call follows content."""
+        tc_tail = _make_tool_call(0, arguments='{"tail":1}')
+        tc_new = _make_tool_call(1, name="calc", arguments='{"x":2}')
+        delta = DeltaMessage(
+            reasoning="think",
+            content="answer",
+            tool_calls=[tc_tail, tc_new],
+        )
+        result = split_delta(delta)
+        assert len(result) == 4
+        assert result[0].tool_calls == [tc_tail]
+        assert result[1].reasoning == "think"
+        assert result[2].content == "answer"
+        assert result[3].tool_calls == [tc_new]
+
 
 def _run_through_processor(
     processor: SimpleStreamingEventProcessor,
@@ -190,3 +208,29 @@ class TestProcessorCompoundDeltas:
         events = processor.open(_StateType.TOOL_CALL, tc)
         assert len(events) == 1
         assert events[0].item.name == "unknown"
+
+    def test_closed_tool_call_does_not_leak_name_to_subsequent_nameless_tool_call(
+        self,
+    ) -> None:
+        """Verify that when a tool call closes and content follows, a subsequent
+        isolated nameless tool call open falls back to 'unknown' rather than
+        leaking the previous tool call name."""
+        processor = SimpleStreamingEventProcessor()
+
+        # Step 1: Open and complete a named tool call
+        step1 = DeltaMessage(
+            tool_calls=[_make_tool_call(0, name="named_tool", arguments="{}")]
+        )
+        _run_through_processor(processor, step1)
+
+        # Step 2: Content closes tool call and opens content
+        step2 = DeltaMessage(content="Here is some text.")
+        _run_through_processor(processor, step2)
+        assert processor.state.current_state == _StateType.CONTENT
+        assert processor.state.tool_call_name is None
+
+        # Step 3: Isolated nameless tool call arrives
+        tc_nameless = _make_tool_call(1, arguments='{"key":"val"}')
+        events3 = processor.open(_StateType.TOOL_CALL, tc_nameless)
+        assert len(events3) == 1
+        assert events3[0].item.name == "unknown"
