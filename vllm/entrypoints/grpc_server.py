@@ -43,6 +43,7 @@ import uvloop
 
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.grpc_options import grpc_server_options
 from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -51,31 +52,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
-
-
-def grpc_server_options() -> list[tuple[str, int | bool]]:
-    """Channel arguments for the vLLM gRPC server.
-
-    A non-streaming ``Generate`` sends no DATA frames while the engine decodes,
-    so every client keepalive or BDP probe PING that lands in that window is
-    judged only by the two ping-tolerance options below. Both are needed:
-    ``min_ping_interval_without_data_ms`` is the floor a PING must clear to be
-    "good", and ``max_ping_strikes`` is how many bad PINGs are forgiven before
-    gRPC Core sends ``GOAWAY(ENHANCE_YOUR_CALM, "too_many_pings")`` and fails
-    every in-flight RPC on the connection. Strikes never reset, so any finite
-    budget is eventually spent on a long-lived channel; ``0`` disables the
-    check, matching the SGLang/TokenSpeed/MLX servicers in smg-grpc-servicer.
-    """
-    return [
-        ("grpc.max_send_message_length", -1),
-        ("grpc.max_receive_message_length", -1),
-        # GRPC_ARG_HTTP2_MIN_RECV_PING_INTERVAL_WITHOUT_DATA_MS. The string
-        # value has no "recv"; the previous key was silently ignored, leaving
-        # the 300s default in force.
-        ("grpc.http2.min_ping_interval_without_data_ms", 10000),
-        ("grpc.http2.max_ping_strikes", 0),
-        ("grpc.keepalive_permit_without_calls", True),
-    ]
 
 
 async def serve_grpc(args: argparse.Namespace):

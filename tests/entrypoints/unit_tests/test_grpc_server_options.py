@@ -1,22 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Guards the ping-tolerance channel args of the vLLM gRPC server.
-
-A non-streaming ``Generate`` sends no DATA frames while decoding, so the
-server's tolerance for client PINGs is the only thing keeping a long request
-alive. gRPC Core silently ignores unknown channel-arg keys, so a misspelt key
-cannot be caught at runtime; these tests pin the exact strings from
-``include/grpc/impl/channel_arg_names.h``.
+"""gRPC Core silently ignores unknown channel-arg keys, so a misspelt key
+cannot be caught at runtime; these tests pin the exact strings. The options
+live in a module with no optional-extra imports so they run in CI without
+``smg-grpc-servicer``.
 """
 
 import pytest
 
-grpc_server = pytest.importorskip("vllm.entrypoints.grpc_server")
+from vllm.entrypoints.grpc_options import grpc_server_options
 
 
 @pytest.fixture
 def options() -> dict[str, int | bool]:
-    opts = grpc_server.grpc_server_options()
+    opts = grpc_server_options()
     assert len(opts) == len(dict(opts)), "duplicate channel-arg keys"
     return dict(opts)
 
