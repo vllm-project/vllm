@@ -121,8 +121,10 @@ class IpcModelLoader(BaseModelLoader):
         # Unsupported quantization is a permanent misconfiguration rather than a
         # transient daemon outage, so it is raised even when fallback is on.
         self._check_supported(vllm_config, model_config)
+        state_fetched = False
         try:
             entries, aliases = self._fetch_entries(model_config)
+            state_fetched = True
             return self._build_model(
                 vllm_config, model_config, prefix, entries, aliases
             )
@@ -138,6 +140,11 @@ class IpcModelLoader(BaseModelLoader):
             logger.exception(
                 "Weight cache IPC loading failed; falling back to disk loading"
             )
+            # _build_model failed after fetching state without reaching its
+            # copy-mode release, so the daemon still holds the full cache;
+            # release it so the disk fallback does not OOM against it.
+            if state_fetched and self.mode == "copy":
+                self._send_release()
             torch.accelerator.empty_cache()
         return self._fallback_load(vllm_config, model_config, prefix)
 
