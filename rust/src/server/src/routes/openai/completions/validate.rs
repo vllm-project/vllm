@@ -28,11 +28,20 @@ pub(super) fn validate_request(request: &CompletionRequest) -> Result<(), ApiErr
         );
     }
 
-    if request.stream && request.prompt_logprobs.is_some_and(|n| n > 0 || n == -1) {
-        bail_invalid_request!(
-            param = "prompt_logprobs",
-            "`prompt_logprobs` are not available when `stream=true`."
-        );
+    if let Some(prompt_logprobs) = request.prompt_logprobs {
+        if request.stream {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` are not available when `stream=true`."
+            );
+        }
+
+        if prompt_logprobs < 0 && prompt_logprobs != -1 {
+            bail_invalid_request!(
+                param = "prompt_logprobs",
+                "`prompt_logprobs` must be a non-negative value or -1."
+            );
+        }
     }
 
     if request.logprob_token_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -196,6 +205,18 @@ mod tests {
     fn validate_request_rejects_streaming_prompt_logprobs() {
         let request = CompletionRequest {
             prompt_logprobs: Some(1),
+            ..base_request()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validate_request_rejects_streaming_prompt_logprobs_zero() {
+        // prompt_logprobs=0 is a meaningful, explicit request (not "unset"),
+        // so it must be rejected under stream=true just like any other
+        // prompt_logprobs value.
+        let request = CompletionRequest {
+            prompt_logprobs: Some(0),
             ..base_request()
         };
         assert!(validate_request(&request).is_err());
