@@ -614,6 +614,19 @@ def get_paged_mqa_logits_metadata(
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
+        # The indexer gates this call on has_deep_gemm(), which only checks that
+        # the module *spec* exists (the vendored copy ships in the wheel), so on
+        # SM12x it fires even when DeepGEMM cannot actually import/run. Return
+        # empty scheduling metadata on the Triton sparse-MLA path instead of
+        # raising: _fp8_paged_mqa_logits_sm12x self-schedules and ignores it, and
+        # the metadata and logits impls go None together in _lazy_init, so this
+        # is symmetric with the fp8_fp4_paged_mqa_logits fallback. The [0, 2]
+        # int32 shape matches the real [slots + 1, 2] return so the indexer's
+        # buffer slice+copy is a no-op.
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            return torch.empty((0, 2), dtype=torch.int32, device=context_lens.device)
         return _missing()
     next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
     num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
