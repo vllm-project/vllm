@@ -1059,10 +1059,13 @@ class ParserEngine(Parser):
         if in_string:
             suffix += '"'
         else:
-            # A dangling separator has no value to close; ``null`` is the one
-            # placeholder every schema type accepts. An object cannot be
-            # completed after a comma without inventing a key, so that case
-            # falls through to the parse check below and yields no suffix.
+            # A dangling separator has no value to close. ``null`` is used
+            # purely to make the prefix PARSE: the client is being handed a
+            # truncated call either way, and a null placeholder may still fail
+            # the tool's schema, which is strictly better than arguments no
+            # JSON parser accepts. An object cannot be completed after a comma
+            # without inventing a key, so that case falls through to the parse
+            # check below and yields no suffix.
             tail = prefix.rstrip()
             if tail.endswith(":") or (
                 tail.endswith(",") and stack and stack[-1] == "]"
