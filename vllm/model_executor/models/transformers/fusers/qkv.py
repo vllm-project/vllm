@@ -45,7 +45,7 @@ class QKVFuser(StackedFuser):
     v_name: str
     o_name: str | None
     merged_name: ClassVar[str] = "qkv_proj"
-    merged_cls: ClassVar[str] = "QKVParallelLinear"
+    merged_cls_name: ClassVar[str] = "QKVParallelLinear"
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:

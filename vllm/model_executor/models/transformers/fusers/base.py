@@ -124,14 +124,14 @@ class StackedFuser(RewriteFuser):
 
     merged_name: ClassVar[str]
     """Attribute name of the merged module created by `update_attrs`."""
-    merged_cls: ClassVar[str]
+    merged_cls_name: ClassVar[str]
     """Name of the vLLM class the merged projection becomes (for logging)."""
 
     def info(self, name: str) -> str:
         sources = " + ".join(shard for shard, _ in self.shards)
         return (
             f"Fused: {sources} ({name}: {self.source_cls}) -> "
-            f"{self.merged_name} ({self.merged_cls})"
+            f"{self.merged_name} ({self.merged_cls_name})"
         )
 
     @property
