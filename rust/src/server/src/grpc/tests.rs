@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -23,6 +24,7 @@ use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatu
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::server::health_reporter;
 use tower::service_fn;
+use vllm_chat::multimodal::{MmLimitModality, MmLimitPerPrompt, MmLimitSpec};
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
@@ -33,11 +35,16 @@ use vllm_engine_core_client::mock_engine::{
 };
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::multimodal::{
+    MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+};
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
@@ -49,6 +56,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
+use super::inference::salt_multimodal_identifiers_for_lora;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -62,6 +70,26 @@ use crate::tls_tests::{TestCerts, server_tls};
 // ========================================================================================
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+#[test]
+fn lora_salts_multimodal_encoder_cache_identifiers() {
+    let features = vec![MmFeatureSpec {
+        data: None,
+        modality: "image".to_string(),
+        identifier: "content-hash".to_string(),
+        mm_position: PlaceholderRange {
+            offset: 1,
+            length: 2,
+            is_embed: None,
+        },
+        mm_hash: Some("processor-hash".to_string()),
+    }];
+
+    let salted = salt_multimodal_identifiers_for_lora(Some(features), "adapter")
+        .expect("features should remain present");
+    assert_eq!(salted[0].identifier, "adapter:content-hash");
+    assert_eq!(salted[0].mm_hash.as_deref(), Some("processor-hash"));
+}
 
 fn boxed_test_future<'a>(future: impl Future<Output = ()> + Send + 'a) -> TestFuture<'a> {
     Box::pin(future)
@@ -268,6 +296,12 @@ const QWEN_IMAGE_TOKEN_ID: u32 = 151655;
 const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
+    multimodal_backend_with_limits(Default::default())
+}
+
+fn multimodal_backend_with_limits(
+    limit_mm_per_prompt: MmLimitPerPrompt,
+) -> Arc<dyn ChatTextBackend> {
     let config_path = std::env::temp_dir().join(format!(
         "vllm-grpc-qwen-config-{}.json",
         uuid::Uuid::new_v4()
@@ -285,7 +319,7 @@ fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
             ..Default::default()
         },
         Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
-        Default::default(),
+        limit_mm_per_prompt,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -692,6 +726,99 @@ async fn unary_generate_with_token_ids_prompt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn generate_methods_round_trip_large_routed_experts_payload() {
+    let expected = vec![0x5a; 6 * 1024 * 1024 + 1];
+    let engine_payload = expected.clone();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-routed-experts",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    for _ in 0..2 {
+                        let add = recv_engine_message(dealer).await;
+                        let request: EngineCoreRequest =
+                            rmp_serde::from_slice(&add[1]).expect("decode request");
+                        assert_eq!(
+                            request
+                                .sampling_params
+                                .as_ref()
+                                .expect("sampling params")
+                                .routed_experts_prompt_start,
+                            2
+                        );
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![EngineCoreOutput {
+                                    request_id: request.request_id,
+                                    new_token_ids: vec![b'h' as u32, b'i' as u32],
+                                    finish_reason: Some(EngineCoreFinishReason::Length),
+                                    routed_experts_payload: Some(OpaqueData::new(
+                                        engine_payload.clone(),
+                                    )),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel).max_decoding_message_size(8 * 1024 * 1024);
+    let request = |request_id: &str| pb::GenerateRequest {
+        request_id: request_id.to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        response: Some(pb::ResponseOptions {
+            routed_experts_prompt_start: Some(2),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let response = client
+        .generate(request("test-routed-experts-unary"))
+        .await
+        .expect("unary routed-experts generate")
+        .into_inner();
+
+    assert_eq!(
+        response.outputs.expect("outputs").routed_experts.expect("routed experts").data,
+        expected
+    );
+
+    let mut stream = client
+        .generate_stream(request("test-routed-experts-stream"))
+        .await
+        .expect("stream routed-experts generate")
+        .into_inner();
+    let mut streamed_payload = None;
+    while let Some(response) = stream.message().await.expect("stream response") {
+        if let Some(payload) = response.outputs.and_then(|output| output.routed_experts) {
+            streamed_payload = Some(payload.data);
+        }
+    }
+    assert_eq!(streamed_payload, Some(expected));
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_prepares_multimodal_input_for_engine_core() {
     let (inference_service, control_service, engine_health, engine_task) =
         setup_grpc_service_with_backend(
@@ -754,6 +881,205 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
         .expect("multimodal generate");
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_forwards_preprocessed_multimodal_features() {
+    let kwargs = BTreeMap::from([(
+        "pixel_values".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                "uint8",
+                vec![3],
+                vec![1, 2, 3],
+            ))),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+        },
+    )]);
+    let encoded_kwargs = rmp_serde::to_vec_named(&kwargs).expect("encode multimodal kwargs");
+    let expected_kwargs = kwargs.clone();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-multimodal",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            move |request| {
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some(&[11, 99, 99, 12][..])
+                );
+                let features = request.mm_features.as_ref().expect("multimodal features");
+                assert_eq!(features.len(), 1);
+                let feature = &features[0];
+                assert_eq!(feature.modality, "image");
+                assert_eq!(feature.identifier, "image-hash-a");
+                assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+                assert_eq!(feature.mm_position.offset, 1);
+                assert_eq!(feature.mm_position.length, 2);
+                assert_eq!(feature.data.as_ref(), Some(&expected_kwargs));
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    client
+        .generate(pb::GenerateRequest {
+            request_id: "test-preprocessed-multimodal".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 99, 99, 12],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: Some(encoded_kwargs),
+                        identifier: "image-hash-a".to_string(),
+                        offset: 1,
+                        length: 2,
+                        mm_hash: Some("image-hash-a".to_string()),
+                        is_embed: Vec::new(),
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            }],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("preprocessed multimodal generate");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+fn preprocessed_grpc_media(
+    modality: pb::Modality,
+    identifier: &str,
+    offset: u64,
+    length: u64,
+) -> pb::MediaItem {
+    let kwargs = BTreeMap::from([(
+        "pixel_values".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                "uint8",
+                vec![1],
+                vec![1],
+            ))),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+        },
+    )]);
+    pb::MediaItem {
+        modality: modality as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs: Some(rmp_serde::to_vec_named(&kwargs).expect("encode kwargs")),
+                identifier: identifier.to_string(),
+                offset,
+                length,
+                mm_hash: Some(identifier.to_string()),
+                is_embed: Vec::new(),
+            },
+        )),
+        mime_type: String::new(),
+        uuid: String::new(),
+    }
+}
+
+fn preprocessed_grpc_request(media: Vec<pb::MediaItem>) -> pb::GenerateRequest {
+    pb::GenerateRequest {
+        request_id: "test-preprocessed-validation".to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: vec![11, 99, 99, 12],
+        })),
+        media,
+        stopping: Some(pb::StoppingCriteria {
+            max_new_tokens: 10,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_rejects_preprocessed_features_for_text_only_model() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-text-only",
+            default_stream_output_specs(),
+            Arc::new(FakeTextBackend),
+            |_| {},
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let status = client
+        .generate(preprocessed_grpc_request(vec![preprocessed_grpc_media(
+            pb::Modality::Image,
+            "image-a",
+            1,
+            2,
+        )]))
+        .await
+        .expect_err("text-only models must reject preprocessed features");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_enforces_preprocessed_multimodal_limits() {
+    let limits = MmLimitPerPrompt::from([(MmLimitModality::Image, MmLimitSpec::Count(1))]);
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-limit",
+            default_stream_output_specs(),
+            multimodal_backend_with_limits(limits),
+            |_| {},
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let status = client
+        .generate(preprocessed_grpc_request(vec![
+            preprocessed_grpc_media(pb::Modality::Image, "image-a", 0, 1),
+            preprocessed_grpc_media(pb::Modality::Image, "image-b", 2, 1),
+        ]))
+        .await
+        .expect_err("preprocessed features must respect modality limits");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
     server_task.abort();
 }
 

@@ -114,6 +114,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        routed_experts_prompt_start,
     } = sampling_params;
 
     validate_logprobs(
@@ -150,6 +151,13 @@ pub fn lower_sampling_params(
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
+    let routed_experts_prompt_start = routed_experts_prompt_start.unwrap_or(0);
+    if routed_experts_prompt_start >= prompt_len {
+        return Err(Error::InvalidRoutedExpertsPromptStart {
+            start: routed_experts_prompt_start,
+            prompt_len,
+        });
+    }
 
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
@@ -188,7 +196,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
-        routed_experts_prompt_start: 0,
+        routed_experts_prompt_start,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -430,6 +438,35 @@ mod tests {
             Error::MinTokensExceedsMaxTokens {
                 min_tokens: 5,
                 max_tokens: 4,
+            }
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_routed_experts_prompt_start() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                routed_experts_prompt_start: Some(2),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect("prompt suffix starts inside prompt");
+        assert_eq!(params.routed_experts_prompt_start, 2);
+
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                routed_experts_prompt_start: Some(3),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .expect_err("prompt end is outside routed-experts data");
+        assert!(matches!(
+            error,
+            Error::InvalidRoutedExpertsPromptStart {
+                start: 3,
+                prompt_len: 3
             }
         ));
     }

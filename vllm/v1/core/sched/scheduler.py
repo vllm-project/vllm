@@ -71,6 +71,22 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+def _take_routed_experts_block_ids(
+    enabled: bool,
+    snapshots: dict[str, deque[list[int]]],
+    request_id: str,
+) -> list[int]:
+    if not enabled:
+        return []
+    request_snapshots = snapshots.get(request_id)
+    if not request_snapshots:
+        return []
+    block_ids = request_snapshots.popleft()
+    if not request_snapshots:
+        snapshots.pop(request_id, None)
+    return block_ids
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -369,6 +385,8 @@ class Scheduler(SchedulerInterface):
             vllm_config.model_config.enable_return_routed_experts
         )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
+        # Block-ID snapshots are empty when routed-experts capture is disabled.
+        self._re_block_ids: dict[str, deque[list[int]]] = {}
 
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -380,10 +398,9 @@ class Scheduler(SchedulerInterface):
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
             )
-            # Block-ID snapshot taken at schedule time (before forward),
+            # Block-ID snapshots are taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
-            self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1485,18 +1502,13 @@ class Scheduler(SchedulerInterface):
         # Snapshot block IDs for routed experts before forward starts.
         # A concurrent schedule() may preempt requests and free blocks
         # before update_from_output runs; the snapshot survives that.
-        # Use update() to preserve entries from the previous step that
-        # have not yet been consumed by update_from_output (async
-        # scheduling may call _update_after_schedule again before the
-        # prior update_from_output runs).
+        # Keep a FIFO per request because async scheduling may enqueue
+        # another step before the prior output is processed.
         if self.enable_return_routed_experts:
             gid = self.routed_experts_mgr.attn_gid
-            self._re_block_ids.update(
-                {
-                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
-                    for rid in num_scheduled_tokens
-                }
-            )
+            for rid in num_scheduled_tokens:
+                block_ids = self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
+                self._re_block_ids.setdefault(rid, deque()).append(block_ids)
 
         # Clear the finished and preempted request IDs.
         # NOTE: We shouldn't just clear() here because it will also affect
@@ -1874,6 +1886,11 @@ class Scheduler(SchedulerInterface):
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
+            block_ids = _take_routed_experts_block_ids(
+                self.enable_return_routed_experts,
+                self._re_block_ids,
+                req_id,
+            )
             request = self.requests.get(req_id)
             output_is_stale = False
             if request is not None:
@@ -2018,7 +2035,6 @@ class Scheduler(SchedulerInterface):
             ):
                 req_offset = routing_offsets[req_id]
                 end = req_offset + num_tokens_scheduled
-                block_ids = self._re_block_ids.pop(req_id, [])
                 if num_output_tokens_before == 0:
                     # Prefill completed: read full prompt routing from
                     # slot buffer using the block-ID snapshot taken at
@@ -2061,10 +2077,26 @@ class Scheduler(SchedulerInterface):
                     )
 
             finish_reason = None
+            routed_experts_payload = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
+                if (
+                    finish_reason is not None
+                    and self.enable_return_routed_experts
+                ):
+                    prompt_start = (
+                        request.sampling_params.routed_experts_prompt_start
+                        if request.sampling_params is not None
+                        else 0
+                    )
+                    routed_experts_payload = self.routed_experts_mgr.serialize_terminal(
+                        block_ids,
+                        max(0, request.num_tokens - 1),
+                        prompt_start,
+                        current_step_captured=routing_data is not None,
+                    )
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
@@ -2117,6 +2149,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        routed_experts_payload=routed_experts_payload,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

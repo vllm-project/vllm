@@ -233,6 +233,10 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # Complete terminal routed-experts payload for format-agnostic frontends.
+    # Appended last so `array_like` positional serialization stays compatible.
+    routed_experts_payload: bytes | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

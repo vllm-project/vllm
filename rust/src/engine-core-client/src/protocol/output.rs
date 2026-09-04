@@ -13,6 +13,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::opaque_data::OpaqueData;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -131,6 +132,10 @@ pub struct EngineCoreOutput {
     /// the Rust frontend does not yet surface it in responses.
     #[serde(default)]
     pub spec_decode_metrics: Option<OpaqueValue>,
+    /// Complete terminal payload produced by engine-core. Its format belongs
+    /// to the producer and consumer; the Rust frontend only transports it.
+    #[serde(default)]
+    pub routed_experts_payload: Option<OpaqueData>,
 }
 
 impl EngineCoreOutput {
@@ -441,6 +446,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            routed_experts_payload: None,
                         },
                     ],
                     scheduler_stats: None,
