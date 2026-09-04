@@ -4433,6 +4433,161 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
     assert retained(0, 0, block_size) == {14}
 
 
+def test_swa_reachable_block_mask_with_dcp_scaling():
+    """DCP shards each block's KV across ranks, scaling the effective block size.
+    Verify that dcp_world_size > 1 scales block size in reachability calculations,
+    producing different masks than dcp_world_size=1."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+    sliding_window = 32  # need = cdiv(31, 16) = 2
+
+    def get_mask(dcp_world_size):
+        spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window,
+        )
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,  # alignment constraint
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: 1 state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # With dcp_world_size=1: effective block_size = 16
+    # per_segment = 64 // 16 = 4 blocks per segment
+    # need = 2, so 2 < 4 -> sparse retention with coarser granularity
+    mask_no_dcp = get_mask(dcp_world_size=1)
+
+    # With dcp_world_size=2: effective block_size = 32
+    # per_segment = 64 // 32 = 2 blocks per segment
+    # need = 2, so 2 >= 2 -> different retention granularity
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    # DCP scaling changes block_size, altering segment granularity
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    # Different DCP world sizes should produce different masks
+    assert mask_no_dcp != mask_with_dcp, (
+        "DCP scaling should change retention granularity"
+    )
+
+
+@pytest.mark.parametrize(
+    "block_size,dcp_world_size,alignment_tokens",
+    [
+        (16, 1, 24),  # 24 % 16 != 0
+        (16, 3, 64),  # effective block_size 48; 64 % 48 != 0
+    ],
+)
+def test_swa_reachable_block_mask_sub_block_alignment_is_dense(
+    block_size, dcp_world_size, alignment_tokens
+):
+    """The mask is block-granular, so a sub-block alignment_tokens (not a
+    multiple of the DCP-scaled block size) cannot be represented exactly. This
+    happens for hybrid offloading (e.g. Gemma), where alignment_tokens is the
+    full-attention chunk size and need not divide the SWA block size. The mask
+    must fall back to dense (None) rather than raise."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=16,
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=alignment_tokens,
+        reachable_boundaries=(),
+        dcp_world_size=dcp_world_size,
+    )
+    assert mask is None
+
+
+def test_mamba_reachable_block_mask_ignores_dcp():
+    """Mamba uses TP, not DCP: each rank holds the full recurrent state, so a
+    state block spans kv_cache_spec.block_size tokens regardless of DCP. The
+    mask must not scale by dcp_world_size, so retention granularity is
+    identical for any DCP world size."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def get_mask(dcp_world_size):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,  # sparse: one state per 64-token segment
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # block_size stays 16 regardless of DCP: per_segment = 64 // 16 = 4.
+    mask_no_dcp = get_mask(dcp_world_size=1)
+    mask_with_dcp = get_mask(dcp_world_size=2)
+
+    assert mask_no_dcp is not None
+    assert mask_with_dcp is not None
+    assert mask_no_dcp == mask_with_dcp, "DCP must not change Mamba retention"
+
+
+def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
+    """A large DCP world size must not scale the Mamba block size, so it can
+    never collapse sparse retention into dense caching."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    spec = MambaSpec(
+        block_size=8,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def get_mask(dcp_world_size):
+        return MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=16,
+            alignment_tokens=64,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=64,
+            reachable_boundaries=(255,),
+            dcp_world_size=dcp_world_size,
+        )
+
+    # block_size stays 8 regardless of DCP: per_segment = 64 // 8 = 8, sparse.
+    mask_no_dcp = get_mask(dcp_world_size=1)
+    mask_large_dcp = get_mask(dcp_world_size=16)
+
+    assert mask_no_dcp is not None, "Sparse retention expected"
+    assert mask_large_dcp is not None, "Large DCP must not force dense caching"
+    assert mask_no_dcp == mask_large_dcp, "DCP must not change Mamba retention"
+
+
 def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
     must stay reusable under ``prefix_cache_retention_interval=0``. Without
