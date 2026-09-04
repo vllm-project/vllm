@@ -1566,6 +1566,27 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
+- label: ":amd: (MI300) MLA Prefill Backend Correctness (AITER FA)" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - tests/v1/attention/test_mla_backends.py
+  commands:
+  # AiterFlashAttnPrefillBackend.is_available() is gated on VLLM_ROCM_USE_AITER,
+  # evaluated at collection time, so the ROCM_AITER_FA prefill cases skip on every
+  # other AMD job. Enable AITER here to actually exercise that backend; the
+  # FLASH_ATTN prefill fallback stays covered by the default V1 Attention Shard job.
+  - rocm-smi
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py -k "backend_correctness and ROCM_AITER_FA"
+
 - label: ":amd: (MI300) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -3541,6 +3562,27 @@ steps:
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
+
+- label: ":amd: (MI355) MLA Prefill Backend Correctness (AITER FA)" # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/attention/backends/mla/
+  - vllm/platforms/rocm.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - tests/v1/attention/test_mla_backends.py
+  commands:
+  # AiterFlashAttnPrefillBackend.is_available() is gated on VLLM_ROCM_USE_AITER,
+  # evaluated at collection time, so the ROCM_AITER_FA prefill cases skip on every
+  # other AMD job. Enable AITER here to actually exercise that backend; the
+  # FLASH_ATTN prefill fallback stays covered by the default V1 Attention Shard job.
+  - rocm-smi
+  - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py -k "backend_correctness and ROCM_AITER_FA"
 
 - label: ":amd: (MI355) Attention Kernels Shard %N" # TBD
   timeout_in_minutes: 40

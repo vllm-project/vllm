@@ -334,7 +334,12 @@ if current_platform.is_cuda():
         ]
     )
 elif current_platform.is_rocm():
-    PREFILL_BACKENDS_TO_TEST.append(MLAPrefillBackendEnum.ROCM_AITER_FA)
+    PREFILL_BACKENDS_TO_TEST.extend(
+        [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+    )
 
 MLA_DIMENSIONS_TO_TEST = [
     ("deepseek", 128, 128),
@@ -1412,6 +1417,7 @@ def _run_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
     chunked_prefill_workspace_size: int | None = None,
+    rtol_override: float | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -1767,7 +1773,7 @@ def _run_backend_correctness(
         kv_cache_per_block_size[block_size] = kv_cache
 
     # 4. Run vLLM backends and compare
-    rtol = 1e-2
+    rtol = rtol_override if rtol_override is not None else 1e-2
     atol = {
         "auto": 1e-2,
         "fp8": 1.5e-1,
@@ -1905,6 +1911,20 @@ def test_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
 ):
+    if (
+        batch_spec_name.startswith("spec_decode")
+        and current_platform.is_rocm()
+        and kv_cache_dtype == "auto"
+        and BATCH_SPECS[batch_spec_name].query_lens[0] > 4
+    ):
+        # ROCM_AITER_MLA (in BACKENDS_TO_TEST on ROCm, bf16 KV only) has no
+        # persistent MLA-decode kernel for query_len > 4 on gfx942; aiter's
+        # get_heuristic_kernel_mla raises (ROCm/aiter#5297). query_len <= 4 and
+        # the fp8 KV paths (TRITON_MLA only) still run. See vllm#55609.
+        pytest.skip(
+            "ROCM_AITER_MLA has no persistent MLA-decode kernel for "
+            "query_len > 4 on gfx942 (ROCm/aiter#5297). See vllm#55609."
+        )
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
@@ -1936,6 +1956,15 @@ def test_chunked_context_backend_correctness(
     kv_cache_dtype: str,
 ):
     """Split, packed, and context-free requests match the SDPA reference."""
+    rtol_override = None
+    if current_platform.is_rocm() and v_head_dim == 256 and kv_cache_dtype == "auto":
+        # bf16 output at v_head_dim=256: the chunked-context online-softmax
+        # merge is a reordered reduction vs the single-pass SDPA reference, so
+        # they can disagree by ~1 ULP; rounding to adjacent bf16 grid points
+        # then makes that a 2-ULP output gap (0.03125 at magnitude ~2), above
+        # the default rtol/atol=1e-2. Not backend-specific (both decode
+        # backends show the same diff). See vllm#55609.
+        rtol_override = 2e-2
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
@@ -1950,4 +1979,5 @@ def test_chunked_context_backend_correctness(
         qk_nope_head_dim=qk_nope_head_dim,
         v_head_dim=v_head_dim,
         chunked_prefill_workspace_size=1024,
+        rtol_override=rtol_override,
     )
