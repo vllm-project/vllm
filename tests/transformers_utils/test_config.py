@@ -372,6 +372,61 @@ def test_cross_encoder_rejects_left_padded_cls_pooling(tmp_path):
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
 
 
+@pytest.mark.parametrize(
+    ("transformer_task", "module_output_name", "post_processing_type"),
+    [
+        ("sequence-classification", "scores", None),
+        (
+            "text-generation",
+            "causal_logits",
+            "sentence_transformers.cross_encoder.modules.logit_score.LogitScore",
+        ),
+    ],
+    ids=["sequence-classification", "logit-score"],
+)
+def test_non_pooled_cross_encoder_topologies_are_not_claimed(
+    tmp_path,
+    transformer_task,
+    module_output_name,
+    post_processing_type,
+):
+    _write_sentence_transformers_cross_encoder(tmp_path)
+
+    transformer_config_path = tmp_path / "sentence_bert_config.json"
+    transformer_config = json.loads(transformer_config_path.read_text(encoding="utf-8"))
+    transformer_config.update(
+        {
+            "transformer_task": transformer_task,
+            "module_output_name": module_output_name,
+            "modality_config": {
+                "text": {
+                    "method": "forward",
+                    "method_output_name": "logits",
+                }
+            },
+        }
+    )
+    transformer_config_path.write_text(json.dumps(transformer_config), encoding="utf-8")
+
+    modules_path = tmp_path / "modules.json"
+    modules = json.loads(modules_path.read_text(encoding="utf-8"))[:1]
+    if post_processing_type is not None:
+        modules.append(
+            {
+                "idx": 1,
+                "name": "1",
+                "path": "1_LogitScore",
+                "type": post_processing_type,
+            }
+        )
+    modules_path.write_text(json.dumps(modules), encoding="utf-8")
+
+    assert (
+        get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
+        is None
+    )
+
+
 def test_unsupported_pooled_sentence_transformers_cross_encoder_fails_closed(
     tmp_path,
 ):
