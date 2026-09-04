@@ -56,6 +56,35 @@ def test_frame_size_hwc_chw(frame):
 
 
 @pytest.mark.parametrize(
+    "frames",
+    [
+        [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(2)],
+        [torch.zeros((H, W, 3), dtype=torch.uint8) for _ in range(2)],
+    ],
+)
+def test_parse_video_frame_list_as_single_video(frames):
+    """A list of decoded frames must represent one video item."""
+    items = MultiModalDataParser().parse_mm_data({"video": frames})["video"]
+
+    assert items.get_count() == 1
+    video = items.get(0)
+    assert isinstance(video, np.ndarray)
+    np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
+
+
+def test_parse_video_frame_list_checks_all_frame_dimensions():
+    """Only a list whose every array is 3-D represents one video item."""
+    frames = [
+        np.zeros((H, W, 3), dtype=np.uint8),
+        np.zeros((2, H, W, 3), dtype=np.uint8),
+    ]
+
+    items = MultiModalDataParser().parse_mm_data({"video": frames})["video"]
+
+    assert items.get_count() == 2
+
+
+@pytest.mark.parametrize(
     "modality,processor_cls",
     [
         ("image", ImageProcessorItems),
