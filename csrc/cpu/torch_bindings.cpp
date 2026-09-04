@@ -687,8 +687,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__))
+
 #if (defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
      !defined(__APPLE__)) ||                                   \
     defined(__powerpc64__)
