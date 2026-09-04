@@ -19,6 +19,50 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## Experimental ZoomKV v0.20 branch
+
+This branch adds an experimental ZoomKV backend for sparse long-context decode
+on top of vLLM v0.20.0. It is a performance-testing branch, not a
+production-validated vLLM release.
+
+Compared with upstream vLLM, this branch adds ZoomKV attention configuration,
+decode routing, retrieval and paged-attention kernels, CUDA extension bindings,
+tests, profiling tools, and launch examples. It supports a GPU-only sparse path
+and an optional pinned-CPU K+V offload path for regular full-attention layers.
+Unsupported shapes, short contexts, and dense readers fall back to dense
+attention; local and GDN layers are unchanged.
+
+### What changed in the latest ZoomKV build
+
+The current implementation (`baf1e1d3e`) differs from the previous published
+ZoomKV build (`b3cb5f4d1`) in these main areas:
+
+| Area | Previous build | Current build |
+| --- | --- | --- |
+| Retrieval | Hierarchical Quest parent/child selection | One 16-token chunk-mean pass, Top-200 chunks, KIVI 8/4 token selection, then final Top-100 tokens |
+| CPU offload | Not directly usable as the current performance mode | Full-precision K+V pinned-host offload with explicit warm, cold, restore, free, and reuse handling |
+| Transfer/page layout | GPU pages only defined the storage unit | GPU pages remain 16 tokens; asynchronous D2H migration uses completed 64-token logical units |
+| Gather path | Older logical/physical lookup and gather flow | Persistent `physical_to_slot` mapping, direct physical retrieval, and one hybrid K+V gather kernel |
+| CUDA data access | General gather path | 16-byte vectorized UVA loads for supported head dimensions 128 and 256, with fallback paths |
+| Hybrid-cache safety | Block expansion/reuse edge cases remained | Physical block expansion, CPU-slot reuse, invalidation, and dense-read restore handling are fixed |
+| Qwen3 hot path | Standard QK-norm/RoPE flow | Direct fused QK-norm/RoPE call and resident FP32 long-context RoPE cache |
+
+The old hierarchical Quest configuration fields are removed and must not be
+passed. The current performance template uses a 16-token page, 64-token
+offload unit, 64 sink tokens, a 256-token local window, and a dense-routing
+threshold of 3072 tokens.
+
+Current same-machine TP=2, batch-size-1 measurements show that CPU offload is
+still slower than GPU-only: 27.72 ms versus 14.03 ms TPOT at 64K, and 33.70 ms
+versus 14.28 ms at 128K. Treat these as a temporary engineering baseline, not
+as a general performance claim.
+
+See the [ZoomKV implementation README](docs/features/zoomkv/README.md) for
+architecture, configuration, build, and test details. The
+[Chinese serving and benchmark guide](docs/features/zoomkv/SERVING_AND_BENCHMARK.zh-CN.md)
+contains launch commands, comparison methodology, known limitations, and the
+current benchmark context.
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.

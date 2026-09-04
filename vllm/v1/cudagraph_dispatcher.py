@@ -39,6 +39,22 @@ class CudagraphDispatcher:
             if not self.vllm_config.speculative_config
             else 1 + self.vllm_config.speculative_config.num_speculative_tokens
         )
+        attn_config = getattr(vllm_config, "attention_config", None)
+        backend = getattr(attn_config, "backend", None)
+        self.is_zoomkv = str(backend).upper().endswith("ZOOMKV")
+        self.zoomkv_chunk_buckets: tuple[int, ...] = ()
+        if self.is_zoomkv:
+            model_config = getattr(vllm_config, "model_config", None)
+            max_model_len = int(getattr(model_config, "max_model_len", 131072))
+            max_chunks = max(1, (max_model_len + 15) // 16)
+            max_bucket = max(1024, 1 << (max_chunks - 1).bit_length())
+            self.zoomkv_chunk_buckets = tuple(
+                bucket
+                for bucket in (1024, 2048, 4096, 8192)
+                if bucket <= max_bucket
+            )
+            if max_bucket > 8192:
+                self.zoomkv_chunk_buckets += (max_bucket,)
 
         # Dict to store valid cudagraph dispatching keys.
         self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
@@ -134,6 +150,7 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
+        attention_chunk_bucket: int | None = None,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
@@ -152,7 +169,18 @@ class CudagraphDispatcher:
             uniform=uniform_decode,
             has_lora=has_lora,
             num_active_loras=num_active_loras,
+            attention_chunk_bucket=attention_chunk_bucket,
         )
+
+    def get_zoomkv_chunk_bucket(self, max_seq_len: int) -> int | None:
+        """Return the smallest captured ZoomKV context bucket that fits."""
+        if not self.zoomkv_chunk_buckets:
+            return None
+        required_chunks = max(1, (int(max_seq_len) + 15) // 16)
+        for bucket in self.zoomkv_chunk_buckets:
+            if required_chunks <= bucket:
+                return bucket
+        return None
 
     def add_cudagraph_key(
         self, runtime_mode: CUDAGraphMode, batch_descriptor: BatchDescriptor
@@ -219,13 +247,24 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs, num_active_loras in product(
-                cudagraph_capture_sizes_for_decode, lora_cases
+            chunk_buckets: tuple[int | None, ...] = (
+                self.zoomkv_chunk_buckets
+                if self.zoomkv_chunk_buckets
+                else (None,)
+            )
+            for bs, num_active_loras, chunk_bucket in product(
+                cudagraph_capture_sizes_for_decode,
+                lora_cases,
+                chunk_buckets,
             ):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
                     self._create_padded_batch_descriptor(
-                        bs, True, num_active_loras > 0, num_active_loras
+                        bs,
+                        True,
+                        num_active_loras > 0,
+                        num_active_loras,
+                        chunk_bucket,
                     ),
                 )
 
@@ -237,6 +276,7 @@ class CudagraphDispatcher:
         uniform_decode: bool = False,
         has_lora: bool = False,
         num_active_loras: int = 0,
+        attention_chunk_bucket: int | None = None,
         valid_modes: AbstractSet[CUDAGraphMode] | None = None,
         invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
@@ -300,7 +340,11 @@ class CudagraphDispatcher:
 
         normalized_uniform = uniform_decode and self.cudagraph_mode.separate_routine()
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, normalized_uniform, has_lora, effective_num_active_loras
+            num_tokens,
+            normalized_uniform,
+            has_lora,
+            effective_num_active_loras,
+            attention_chunk_bucket if normalized_uniform else None,
         )
 
         if CUDAGraphMode.FULL in allowed_modes:
@@ -312,7 +356,12 @@ class CudagraphDispatcher:
         if CUDAGraphMode.PIECEWISE in allowed_modes:
             # also check if the relaxed key exists for more "general"
             # piecewise cudagraph
-            batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
+            batch_desc_to_check = replace(
+                batch_desc,
+                num_reqs=None,
+                uniform=False,
+                attention_chunk_bucket=None,
+            )
             if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
                 return CUDAGraphMode.PIECEWISE, batch_desc_to_check
 
@@ -339,9 +388,14 @@ class CudagraphDispatcher:
         for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
             descs = list(self.cudagraph_keys[mode])
             if descs:
-                # Sort by (num_tokens, num_active_loras) descending
+                # Capture larger batch/context shapes first so smaller graphs
+                # can reuse their graph-pool allocations.
                 descs.sort(
-                    key=lambda d: (d.num_tokens, d.num_active_loras),
+                    key=lambda d: (
+                        d.num_tokens,
+                        d.attention_chunk_bucket or 0,
+                        d.num_active_loras,
+                    ),
                     reverse=True,
                 )
                 result.append((mode, descs))

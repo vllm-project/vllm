@@ -57,6 +57,12 @@ class BatchDescriptor:
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
+    attention_chunk_bucket: int | None = None
+    """
+    Optional context-length bucket for attention backends whose full CUDA
+    Graph launch geometry depends on the number of context chunks. ZoomKV
+    uses the number of 16-token child chunks (1024/2048/4096/8192).
+    """
 
 
 def _compute_sp_num_tokens(
