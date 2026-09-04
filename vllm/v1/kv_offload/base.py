@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
 
+from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.kv_offload.config import OffloadingConfig
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -91,10 +92,11 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    kv_hints: KvHintsEnvelope | None = None
     load_tier_filter: TierFilter = TierFilter.ALL
     # Per-request scratch space keyed by value type, so a tier can parse
-    # kv_transfer_params once (in on_new_request) and read the result back
-    # on later calls for the same request.
+    # kv_transfer_params and kv_hints once (in on_new_request) and read the
+    # result back on later calls for the same request.
     _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
 
     def set_state(self, val: Any) -> None:
