@@ -8,7 +8,7 @@ import torch
 from vllm.models.glm5next.nvidia.kda import Glm5NextLinearAttention
 
 
-def test_merged_conv_weight_rebuilds_after_weight_refit():
+def _make_attention():
     attention = object.__new__(Glm5NextLinearAttention)
     weights = [
         torch.nn.Parameter(torch.zeros((2, 1, 3))),
@@ -19,7 +19,20 @@ def test_merged_conv_weight_rebuilds_after_weight_refit():
     object.__setattr__(attention, "k_conv1d", SimpleNamespace(weight=weights[1]))
     object.__setattr__(attention, "v_conv1d", SimpleNamespace(weight=weights[2]))
     object.__setattr__(attention, "_merged_conv_weight", None)
-    object.__setattr__(attention, "_merged_conv_weight_key", None)
+    return attention, weights
+
+
+def test_merged_conv_weight_cached_when_unchanged():
+    attention, _weights = _make_attention()
+
+    merged_first = attention._get_merged_conv_weight()
+    merged_second = attention._get_merged_conv_weight()
+
+    assert merged_first is merged_second
+
+
+def test_merged_conv_weight_rebuilds_after_load_weight_invalidation():
+    attention, weights = _make_attention()
 
     merged_before = attention._get_merged_conv_weight()
 
