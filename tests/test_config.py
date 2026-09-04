@@ -2232,6 +2232,19 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+@pytest.mark.parametrize("num_gpu_blocks_override", [0, -1])
+def test_cache_config_num_gpu_blocks_override_must_be_positive(
+    num_gpu_blocks_override,
+):
+    with pytest.raises(ValidationError):
+        CacheConfig(num_gpu_blocks_override=num_gpu_blocks_override)
+
+
+def test_cache_config_num_gpu_blocks_override_defaults_to_none():
+    assert CacheConfig().num_gpu_blocks_override is None
+    assert CacheConfig(num_gpu_blocks_override=1).num_gpu_blocks_override == 1
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
