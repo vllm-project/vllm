@@ -652,6 +652,17 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        Note:
+            Passing a raw prompt string directly to this method is deprecated.
+            Advanced power-users can manually bypass the raw-prompt fallback
+            path using the Engine's underlying Renderer pipeline:
+
+            >>> from vllm.inputs import parse_model_prompt
+            >>> parsed = parse_model_prompt(self.model_config, "Prompt text")
+            >>> params = self.renderer.default_cmpl_tok_params
+            >>> (engine_input,) = self.renderer.render_cmpl([parsed], params)
+            >>> gen = self.generate(engine_input, sampling_params, request_id)
         """
 
         q: RequestOutputCollector | None = None
