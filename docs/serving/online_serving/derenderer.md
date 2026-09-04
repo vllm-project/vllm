@@ -115,6 +115,15 @@ When a tool or reasoning parser is configured, parser internal state (buffered m
 
 `output_token_ids` and `prompt_token_ids` are both bounded by `max_model_len` but callers streaming long reasoning traces through a parser configured model should expect materially more state transport and CPU cost than the plain detokenization path.
 
+## Streaming state and logprobs
+
+Streaming derender is stateless server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`), `role_sent`, and the parser path's replay fields (see [Streaming cost](#streaming-cost)), the state carries two fields for logprob handling:
+
+- `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
+- `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
+
+When a streamed `GenerateResponseStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice — for chat as `ChatCompletionLogProbs`, for completions converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
+
 ## Example
 
 The example below drives the full `render → generate → derender` round trip for a chat request against a GPU less render server (`/render`, `/derender`) and a token-in / token-out engine (`/inference/v1/generate`).
