@@ -930,13 +930,7 @@ class Scheduler(SchedulerInterface):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if (
-                        self.ec_connector is not None
-                        and request.mm_features
-                        and not self.ec_connector.ensure_cache_available(
-                            request, num_computed_tokens
-                        )
-                    ):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -951,10 +945,17 @@ class Scheduler(SchedulerInterface):
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -2246,6 +2247,16 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
+        """Whether an encoder input this request needs is still in transit."""
+        return (
+            self.ec_connector is not None
+            and bool(request.mm_features)
+            and not self.ec_connector.ensure_cache_available(
+                request, num_computed_tokens
+            )
+        )
 
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
