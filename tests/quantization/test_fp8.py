@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 
 import logging
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import regex as re
@@ -30,6 +31,10 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.linear import (
+    RowParallelLinear,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -560,3 +565,24 @@ def test_kv_cache_dtype_skip_layers(monkeypatch, dist_init, workspace_init):
     for i, layer in enumerate(model.model.decoder.layers):
         expected = "auto" if str(i) in ["0", "2"] else "fp8"
         assert layer.self_attn.attn.kv_cache_dtype == expected
+
+
+def test_resolve_quant_method_honors_ignored_layers_under_model_root_prefix():
+    """The root strip must apply to every backend, not just compressed-tensors.
+
+    FP8 matches `ignored_layers` by exact name, so a drafter loaded under a
+    synthetic root would quantize layers its checkpoint asks to skip.
+    """
+    config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        ignored_layers=["model.layers.0.mlp.down_proj"],
+    )
+    config.model_root_prefix = "draft_model"
+
+    layer = Mock(spec=RowParallelLinear)
+    layer.__class__ = RowParallelLinear
+    method = config.resolve_quant_method(
+        layer, prefix="draft_model.model.layers.0.mlp.down_proj"
+    )
+
+    assert isinstance(method, UnquantizedLinearMethod)

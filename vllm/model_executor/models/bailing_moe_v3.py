@@ -269,7 +269,7 @@ def _is_fp8_module_excluded(
         return False
 
     return is_layer_skipped(
-        prefix=prefix,
+        prefix=quant_config.strip_model_root_prefix(prefix),
         ignored_layers=quant_config.ignored_layers,
         fused_mapping=quant_config.packed_modules_mapping,
         match_mode=quant_config.ignored_layers_match_mode,

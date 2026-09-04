@@ -99,6 +99,12 @@ class QuantizationConfig(ABC):
     not in the model, and should be ignored if unexpected during loading. These are used
     after remapping, so should be in vLLM format (e.g. .q_scale, not .q.scale)."""
 
+    model_root_prefix: str = ""
+    """Prefix the model is loaded under when it is not the top-level model, e.g.
+    `"draft_model"` for a speculative drafter. Runtime layer prefixes include it,
+    but the checkpoint's quantization config does not, so it must be stripped
+    before layer names are matched against targets."""
+
     def __init__(self):
         super().__init__()
         # mapping is updated by models as they initialize
@@ -225,6 +231,44 @@ class QuantizationConfig(ABC):
             re.compile(r"(?<!\.attn)\.([qkv])_zero_point$"): r".attn.\1_zero_point",
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
+
+    def strip_model_root_prefix(self, prefix: str) -> str:
+        """Convert a runtime layer prefix into a checkpoint-relative layer name.
+
+        Args:
+            prefix: the layer's runtime prefix, which is rooted at
+                `model_root_prefix`.
+
+        Returns:
+            The layer name as the checkpoint's quantization config refers to it.
+        """
+        root = self.model_root_prefix
+        if not root:
+            return prefix
+        if prefix == root:
+            return ""
+        if prefix.startswith(f"{root}."):
+            return prefix[len(root) + 1 :]
+        return prefix
+
+    def resolve_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Select the quant method for a layer, by its checkpoint-relative name.
+
+        This is the entry point layers should use. `get_quant_method` matches
+        against a quantization config whose targets name layers relative to the
+        checkpoint, so the runtime `model_root_prefix` is stripped first.
+
+        Args:
+            layer: The layer for the quant method.
+            prefix: The layer's runtime name, rooted at `model_root_prefix`.
+
+        Returns:
+            The quantize method. None if the given layer doesn't support quant
+            method.
+        """
+        return self.get_quant_method(layer, prefix=self.strip_model_root_prefix(prefix))
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
