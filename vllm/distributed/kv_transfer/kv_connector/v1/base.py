@@ -322,6 +322,10 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def prepare_forward(self, **kwargs: Any) -> None:
+        """Prepare connector state consumed by the upcoming model forward."""
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
