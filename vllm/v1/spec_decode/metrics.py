@@ -81,6 +81,11 @@ class SpecDecodingLogging:
 
     def log(self, log_fn=logger.info):
         if not self.num_drafts:
+            # Nothing was observed during this interval, so there is nothing to
+            # log. Restart the interval clock anyway: leaving it at the previous
+            # non-empty interval would charge this idle gap to the throughput of
+            # the next interval that does have traffic.
+            self.last_log_time = time.monotonic()
             return
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
