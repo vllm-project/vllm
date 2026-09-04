@@ -426,14 +426,16 @@ def _select_config(
         BLOCK_N, target_splits, num_warps = (32, 1, 1) if is_prefill else (64, 1, 2)
     elif base_programs <= 24:
         BLOCK_N, target_splits, num_warps = 32, 64, 4
-    elif base_programs <= 64:
+    elif base_programs <= 32:
         BLOCK_N, target_splits, num_warps = 32, 16, 1
+    elif base_programs <= 64:
+        BLOCK_N, target_splits, num_warps = 32, 8, 1
+    elif base_programs <= 128:
+        BLOCK_N, target_splits, num_warps = 32, 4, 1
     elif base_programs <= 256:
         BLOCK_N, target_splits, num_warps = 32, 8, 1
-    elif base_programs <= 640:
+    elif base_programs <= 512:
         BLOCK_N, target_splits, num_warps = 64, 4, 2
-    elif base_programs <= 1024:
-        BLOCK_N, target_splits, num_warps = 32, 4, 1
     else:
         BLOCK_N, target_splits, num_warps = 64, 1, 2
     num_tiles = triton.cdiv(num_columns, BLOCK_N)
