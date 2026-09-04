@@ -74,7 +74,11 @@ from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
@@ -215,7 +219,7 @@ class Fp8Config(QuantizationConfig):
                     Fp8PerTensorOnlineMoEMethod,
                 )
 
-                return Fp8PerTensorOnlineMoEMethod(layer=layer)
+                return Fp8PerTensorOnlineMoEMethod(moe=layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -247,6 +251,8 @@ class Fp8LinearMethod(LinearMethodBase):
     Args:
         quant_config: The quantization config.
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
@@ -366,6 +372,19 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; the only state tensor
+            # export cannot carry is the `input_scale = None` stamp that dynamic
+            # activation quantization relies on, since create_weights never
+            # registered that parameter.
+            if not self.act_q_static and not hasattr(layer, "input_scale"):
+                layer.input_scale = None
+            # Marlin reads marlin_input_dtype in apply_weights; it lives on the
+            # method (not exported with the weights), so restore it here too.
+            if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
+                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+            return
+
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
@@ -471,6 +490,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     Args:
         quant_config: The quantization config.
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
@@ -713,6 +734,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
+        self._init_moe_kernel(layer)
+
+    def _init_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the MoE kernel from the layer's current (converted) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -725,6 +750,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if is_weights_pre_processed():
+            # Weights are already in kernel format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
+
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight

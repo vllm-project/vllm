@@ -284,11 +284,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         query_start_loc: torch.Tensor | None,
         ngram_context: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if prev_block_output is None:
+            assert prev_injection is None
         attn_hc = self.attn_hyper_connection
         if self.ple is not None:
             # PLE adds directly to the multi-stream state, so pending HC state
             # must be materialized before the addition.
-            if prev_block_output is not None and prev_injection is not None:
+            if prev_block_output is not None:
                 hidden_states = attn_hc.combine(
                     hidden_states, prev_block_output, prev_injection
                 )
@@ -304,7 +306,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
             )
 
         # Fuse a pending combine with this HC module's mix when possible.
-        if prev_block_output is not None and prev_injection is not None:
+        if prev_block_output is not None:
             hidden_states, block_input, injection = attn_hc.combine_and_mix(
                 hidden_states, prev_block_output, prev_injection
             )
