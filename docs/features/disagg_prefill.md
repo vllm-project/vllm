@@ -43,6 +43,14 @@ Now supports 9 types of connectors:
 
   For multi-tier offloading (e.g., CPU + filesystem tier) and the full configuration reference, see the [KV Offloading Usage Guide](kv_offloading_usage.md).
 
+- **SimpleCPUOffloadConnector**: lightweight alternative to `OffloadingConnector` that offloads KV blocks to local CPU RAM or a local file on the same machine (no cross-node transfer):
+
+  ```bash
+  --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use": 1000000000, "async_init": true}}'
+  ```
+
+  With `"async_init": true` (CUDA only), the CPU buffer is allocated and pinned in the background instead of blocking startup: the engine serves immediately with GPU-only KV cache and offloading activates once all ranks are ready. Requests admitted before that stay GPU-only for their lifetime; an initialization failure shuts the engine down.
+
 - **FlexKVConnectorV1**: refer to [examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py](../../examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
 
   ```bash
