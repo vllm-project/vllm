@@ -220,12 +220,6 @@ class TestFlexKVConnectorDelegation:
         impl.get_kv_connector_stats.assert_called_once()
         assert result is None
 
-    def test_get_block_ids_with_load_errors(self, connector_and_impl):
-        connector, impl = connector_and_impl
-        impl.get_block_ids_with_load_errors.return_value = {7, 8}
-        result = connector.get_block_ids_with_load_errors()
-        assert result == {7, 8}
-
     def test_wait_for_layer_load(self, connector_and_impl):
         connector, impl = connector_and_impl
         connector.wait_for_layer_load("layer_0")

@@ -254,7 +254,3 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """Get the KV connector stats collected during the last interval."""
         return self._flexkv_connector.get_kv_connector_stats()
-
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """Get the block ids that have failed to load."""
-        return self._flexkv_connector.get_block_ids_with_load_errors()
