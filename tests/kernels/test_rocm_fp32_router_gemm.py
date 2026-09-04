@@ -20,7 +20,10 @@ SHAPES = [
     (6144, 128),
     (6144, 256),
 ]
-MAX_TOKENS = 32
+MAX_TOKENS = 128
+# Every count the kernel sees at decode is covered exactly up to 32; past that
+# the tuned config changes on power-of-two boundaries, so sample those.
+TOKEN_COUNTS = list(range(33)) + [40, 48, 64, 80, 96, 127, 128]
 ATOL = 5e-4
 RTOL = 0.0
 
@@ -47,7 +50,7 @@ def _reference(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
-@pytest.mark.parametrize("num_tokens", range(MAX_TOKENS + 1))
+@pytest.mark.parametrize("num_tokens", TOKEN_COUNTS)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_matches_reference(
     num_tokens: int,
@@ -69,7 +72,7 @@ def test_rocm_fp32_router_gemm_matches_reference(
     torch.testing.assert_close(output, expected, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.parametrize("num_tokens", [1, 4, 16, 24, 32])
+@pytest.mark.parametrize("num_tokens", [1, 4, 16, 24, 32, 64, 128])
 @pytest.mark.parametrize(("hidden_size", "num_experts"), SHAPES)
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_preserves_topk(
@@ -164,7 +167,7 @@ def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
     assert not torch.equal(first_output, second_output)
 
 
-@pytest.mark.parametrize("num_tokens", [4, 32, 33])
+@pytest.mark.parametrize("num_tokens", [4, 32, 33, 128, 129])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_custom_op_dispatch(
@@ -217,7 +220,7 @@ def test_rocm_fp32_router_gemm_dynamic_compile_dispatch() -> None:
         return torch.ops.vllm.fp32_router_gemm_dispatch(x, weight, False)
 
     compiled_dispatch = torch.compile(dispatch, dynamic=True, fullgraph=True)
-    for num_tokens in (4, 16, 33, 5, 32):
+    for num_tokens in (4, 16, 33, 5, 32, 128, 129):
         x = torch.randn(
             num_tokens,
             hidden_size,
