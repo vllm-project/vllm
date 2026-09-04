@@ -23,8 +23,10 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -53,6 +55,66 @@ logger = init_logger(__name__)
 
 
 _SLIDING_ATTENTION = "sliding_attention"
+
+def _dequantize_gptq_proj_weight(
+    linear: nn.Module,
+) -> torch.Tensor:
+    """Rebuild a GPTQ-packed linear's float weight, shape [out, in].
+
+    DFlash's context-KV path (precompute_and_store_context_kv) fuses all
+    layers' K/V projections into a single float GEMM, so it needs actual float
+    weights, but GPTQ/Marlin linears only keep packed tensors. This handles
+    the pre-Marlin (checkpoint) layout, i.e. the parameter state when the
+    model's load_weights runs (before process_weights_after_loading converts
+    them to the Marlin layout):
+      - qweight: [in / 8, out] int32, 8 4-bit codes per word, LSB first,
+        along the input axis (input column i = 8 * w + b holds code b of
+        word w);
+      - scales: [in / group_size, out];
+      - qzeros: [in / group_size, out / 8] int32, 8 4-bit zero points per
+        word, LSB first, along the output axis.
+    Zero points are stored unsigned and the reconstruction is
+    (code - zero) * scale, so symmetric quantizers simply store 8 in every
+    zero-point nibble.
+    """
+    qweight = linear.qweight
+    scales = linear.scales
+    qzeros = linear.qzeros
+    group_size = qweight.shape[0] * 8 // scales.shape[0]
+    num_groups = scales.shape[0]
+    # Unpack the 4-bit codes along the input axis (LSB first).
+    codes = torch.stack(
+        [(qweight >> (4 * b)) & 0xF for b in range(8)], dim=1
+    ).reshape(-1, qweight.shape[1])  # [in, out]
+    # Unpack the 4-bit zero points along the output axis (LSB first).
+    zeros = torch.stack(
+        [(qzeros >> (4 * b)) & 0xF for b in range(8)], dim=-1
+    ).reshape(num_groups, -1)  # [in / group_size, out]
+    group_ids = torch.arange(
+        codes.shape[0], device=qweight.device, dtype=torch.long
+    ) // group_size
+    return ((codes.float() - zeros[group_ids].float())
+            * scales[group_ids].float()).t()
+
+
+def _kv_weight_slice(qkv_proj: nn.Module, q_size: int) -> torch.Tensor:
+    """K/V rows [2 * kv_size, in] of a QKV projection weight.
+
+    Float projections expose .weight directly; GPTQ-quantized ones must be
+    rebuilt from the packed representation first. Other quantized methods are
+    rejected: their parameters do not follow the GPTQ layout this path reads.
+    """
+    if isinstance(qkv_proj.quant_method, AutoGPTQLinearMethod):
+        weight = _dequantize_gptq_proj_weight(qkv_proj)
+    elif isinstance(qkv_proj.quant_method, UnquantizedLinearMethod):
+        weight = qkv_proj.weight
+    else:
+        raise NotImplementedError(
+            "DFlash context-KV precompute needs float K/V weights; quantized "
+            f"drafts using {type(qkv_proj.quant_method).__name__} are not "
+            "supported yet."
+        )
+    return weight[q_size:]
 
 
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
@@ -468,9 +530,15 @@ class DFlashQwen3Model(nn.Module):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+        # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
+        # Quantized drafts have no float .weight; rebuild it from the packed
+        # representation, keeping every buffer in the model's param dtype.
+        kv_weights = [
+            _kv_weight_slice(a.qkv_proj, a.q_size) for a in layers_attn
+        ]
+        self._fused_kv_weight = torch.cat(kv_weights, dim=0).to(
+            dtype=self._hidden_norm_weight.dtype
+        )
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
