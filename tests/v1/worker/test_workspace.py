@@ -82,6 +82,30 @@ def test_workspace_lanes_compose_with_ubatches(monkeypatch) -> None:
     assert len(pointers) == 4
 
 
+def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
+    """Once locked, oversized requests fail loudly instead of reallocating the
+    buffer that captured CUDA graphs point at; unlock restores growth."""
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
+    manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
+
+    (buf,) = manager.get_simultaneous(((256,), torch.uint8))
+    manager.lock()
+    assert manager.is_locked()
+
+    # Requests within the reserved size still reuse the same buffer.
+    (same,) = manager.get_simultaneous(((256,), torch.uint8))
+    (smaller,) = manager.get_simultaneous(((8,), torch.uint8))
+    assert same.data_ptr() == buf.data_ptr()
+    assert smaller.data_ptr() == buf.data_ptr()
+
+    with pytest.raises(AssertionError, match="Workspace is locked"):
+        manager.get_simultaneous(((512,), torch.uint8))
+
+    manager.unlock()
+    (grown,) = manager.get_simultaneous(((512,), torch.uint8))
+    assert grown.numel() == 512
+
+
 def test_workspace_lane_validation(monkeypatch) -> None:
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)
