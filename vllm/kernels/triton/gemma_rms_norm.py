@@ -53,8 +53,17 @@ def _gemma_rms_norm_kernel(
     )
 
 
-def gemma_rms_norm_supported(hidden_size: int) -> bool:
-    return triton.next_power_of_2(hidden_size) <= _MAX_BLOCK_SIZE
+def gemma_rms_norm_supported(
+    x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor | None
+) -> bool:
+    """The kernel derives both the row count and the column count from x,
+    so weight and residual have to match it exactly. Everything else,
+    broadcasting included, belongs on the reference path."""
+    if triton.next_power_of_2(x.shape[-1]) > _MAX_BLOCK_SIZE:
+        return False
+    if weight.shape != x.shape[-1:]:
+        return False
+    return residual is None or (residual.shape == x.shape and residual.stride(-1) == 1)
 
 
 def gemma_rms_norm(
@@ -65,6 +74,7 @@ def gemma_rms_norm(
 ) -> torch.Tensor:
     """Returns the normalized tensor; with ``residual`` given, ``x + residual``
     is also written back into ``residual`` (matching ``fused_add_rms_norm``)."""
+    assert gemma_rms_norm_supported(x, weight, residual)
     hidden_size = x.shape[-1]
     x_2d = x.reshape(-1, hidden_size)
     if x_2d.stride(-1) != 1:
@@ -76,7 +86,6 @@ def gemma_rms_norm(
 
     if residual is not None:
         residual_2d = residual.view(-1, hidden_size)
-        assert residual_2d.stride(-1) == 1
         residual_row_stride = residual_2d.stride(0)
     else:
         residual_2d = out

@@ -172,10 +172,8 @@ class GemmaRMSNorm(CustomOp):
         # The vLLM C kernels need the weight in the activation dtype, and
         # rounding `1 + w` to bf16 changes the result, so use a Triton kernel
         # that keeps the +1 offset and the multiply in fp32 like forward_native.
-        if (
-            not HAS_TRITON
-            or not gemma_rms_norm_supported(x.shape[-1])
-            or (residual is not None and residual.stride(-1) != 1)
+        if not HAS_TRITON or not gemma_rms_norm_supported(
+            x, self.weight.data, residual
         ):
             return self.forward_native(x, residual)
         out = gemma_rms_norm(x, self.weight.data, self.variance_epsilon, residual)
