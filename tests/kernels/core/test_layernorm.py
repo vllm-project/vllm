@@ -232,6 +232,48 @@ def test_fused_rms_norm_quant(
         )
 
 
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
+def test_gemma_rms_norm(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    strided_input: bool,
+) -> None:
+    """The fused CUDA path must match forward_native, which keeps the +1
+    weight offset and the multiply in fp32."""
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    layer = GemmaRMSNorm(hidden_size, eps=1e-6).to(dtype=dtype)
+    layer.weight.data.normal_(mean=0.0, std=0.1)
+    scale = 1 / (2 * hidden_size)
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype)[..., :hidden_size]
+    assert x.is_contiguous() != strided_input
+    x *= scale
+    residual = x.new_empty_strided(x.size(), x.stride()) if add_residual else None
+    if residual is not None:
+        residual.normal_(std=scale)
+        ref_out = layer.forward_native(x, residual.clone())
+        out = layer(x, residual)
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        ref_out = layer.forward_native(x)
+        out = layer(x)
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
 @torch.inference_mode()
 def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
     if not torch.cuda.is_available():
