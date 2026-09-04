@@ -55,7 +55,8 @@ vllm serve <model> \
           "type": "fs",
           "root_dir": "/mnt/kv_cache",
           "n_read_threads": 32,
-          "n_write_threads": 16
+          "n_write_threads": 16,
+          "max_bytes": 107374182400
         }
       ]
     }
@@ -127,10 +128,17 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `max_bytes` | no | unlimited | Maximum bytes of persisted KV block data. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+When `max_bytes` is set, the tier removes least recently used blocks before a
+store would exceed the limit. Blocks in an active load or store are protected.
+If a batch cannot fit safely, its cache write is skipped without failing the
+request. Existing block files are counted once when the tier starts. Omitting
+`max_bytes` preserves the historical unbounded behavior.
 
 #### On-Disk Layout
 
