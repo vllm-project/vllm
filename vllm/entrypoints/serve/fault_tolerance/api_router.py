@@ -63,7 +63,10 @@ async def process_fault_tolerance_instruction(
 
     instruction, params, request_id = _validate_payload(body)
     # One recovery round shares one request_id, which namespaces that round's
-    # coordination keys; empty falls back to the engine's local epoch.
+    # coordination keys. The orchestrator must send the same non-empty
+    # request_id to every engine in a round; empty falls back to the engine's
+    # local epoch, which can diverge across engines after a partially failed
+    # round.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
