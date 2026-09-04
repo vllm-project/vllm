@@ -1082,6 +1082,7 @@ class SpeculativeConfig:
                 ".npz",
                 ".npz.index",
                 ".onnx",
+                ".weights",
             )
         ):
             return False
