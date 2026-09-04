@@ -308,6 +308,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 is_act_and_mul=self.moe.is_act_and_mul,
             )
 
+        is_per_channel = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
             layer=layer,
@@ -317,6 +318,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=is_per_channel,
         )
 
         # Replace parameters with updated versions. Note that this helper
@@ -343,6 +345,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         is_per_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
+        is_per_channel = self.weight_quant.strategy == QuantizationStrategy.CHANNEL
         return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             w1_scale=layer.w13_weight_scale,
@@ -350,7 +353,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             a1_scale=getattr(layer, "w13_input_scale", None),
             a2_scale=getattr(layer, "w2_input_scale", None),
             per_act_token_quant=is_per_token,
-            per_out_ch_quant=is_per_token,
+            per_out_ch_quant=is_per_channel,
             block_shape=self.weight_block_size,
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
