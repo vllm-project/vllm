@@ -74,6 +74,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
@@ -1025,6 +1026,7 @@ class Glm5NextForConditionalGeneration(
                 # and yields NaN image features. Mirrors the MLA/KDA proj
                 # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
