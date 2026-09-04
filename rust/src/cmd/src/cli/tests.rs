@@ -57,13 +57,25 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
-    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
     assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_allow_omitted_max_model_len() {
+    let cli = Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen2.5-0.5B-Instruct"]).unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.max_model_len, None);
 }
 
 #[test]

@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -96,6 +97,18 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     vocab_size: Option<u32>,
+    max_position_embeddings: Option<Value>,
+    n_positions: Option<Value>,
+    max_seq_len: Option<Value>,
+    seq_length: Option<Value>,
+    model_max_length: Option<Value>,
+    max_target_positions: Option<Value>,
+    max_sequence_length: Option<Value>,
+    max_seq_length: Option<Value>,
+    seq_len: Option<Value>,
+    original_max_position_embeddings: Option<Value>,
+    rope_parameters: Option<Value>,
+    rope_scaling: Option<Value>,
     eos_token_id: Option<OneOrManyTokenIds>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
@@ -217,6 +230,84 @@ impl ModelConfig {
         }
     }
 
+    /// Return the effective max model length derived from HF config fields.
+    ///
+    /// HF model families use different names for the same context limit.
+    /// Match Python's key priority: `model_max_length` wins for Command-R/Cohere-style configs;
+    // otherwise use the smallest known key.
+    pub fn max_model_len(&self) -> Option<u32> {
+        let config = self.effective_text_config();
+        let derived = config.derive_base_max_model_len()?;
+        Some(config.apply_rope_scaling_to_max_len(derived))
+    }
+
+    fn derive_base_max_model_len(&self) -> Option<u32> {
+        if let Some(model_max_length) = parse_max_len_value(&self.model_max_length) {
+            return Some(model_max_length);
+        }
+        [
+            parse_max_len_value(&self.max_position_embeddings),
+            parse_max_len_value(&self.n_positions),
+            parse_max_len_value(&self.max_seq_len),
+            parse_max_len_value(&self.seq_length),
+            parse_max_len_value(&self.max_target_positions),
+            parse_max_len_value(&self.max_sequence_length),
+            parse_max_len_value(&self.max_seq_length),
+            parse_max_len_value(&self.seq_len),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Scale `max_model_len` using the RoPE config from `rope_parameters` (modern)
+    /// or `rope_scaling` (legacy). Handles both `rope_type` and legacy `type` keys.
+    fn apply_rope_scaling_to_max_len(&self, max_model_len: u32) -> u32 {
+        let Some(rope_parameters) = self.rope_parameters.as_ref().or(self.rope_scaling.as_ref())
+        else {
+            return max_model_len;
+        };
+        if self.model_type.as_deref().is_some_and(|name| name.contains("gemma3")) {
+            return max_model_len;
+        }
+
+        let mut scaled_max_model_len = max_model_len;
+        let mut scaling_factor = 1.0;
+        let mut has_longrope = false;
+        for rope_config in iter_rope_configs(rope_parameters) {
+            let Some(rope_type) = rope_config
+                .get("rope_type")
+                .or_else(|| rope_config.get("type"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if rope_type == "longrope" {
+                has_longrope = true;
+            }
+            if matches!(rope_type, "su" | "longrope" | "llama3") {
+                continue;
+            }
+            if let Some(factor) = rope_config.get("factor").and_then(Value::as_f64) {
+                scaling_factor = factor;
+            }
+            if rope_type == "yarn"
+                && let Some(original) = parse_max_len_value_from_value(
+                    rope_config.get("original_max_position_embeddings"),
+                )
+            {
+                scaled_max_model_len = original;
+            }
+        }
+
+        if has_longrope {
+            return parse_max_len_value(&self.original_max_position_embeddings)
+                .unwrap_or(scaled_max_model_len);
+        }
+
+        scale_max_len(scaled_max_model_len, scaling_factor)
+    }
+
     /// Return the effective model-side EOS token ids, following the same
     /// simplified text-config selection as `vocab_size`.
     pub(super) fn eos_token_ids(&self) -> &[u32] {
@@ -268,6 +359,46 @@ impl ModelConfig {
 
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
+    }
+}
+
+fn parse_max_len_value(value: &Option<Value>) -> Option<u32> {
+    parse_max_len_value_from_value(value.as_ref())
+}
+
+fn parse_max_len_value_from_value(value: Option<&Value>) -> Option<u32> {
+    match value {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0),
+        Some(Value::String(value)) => value.parse::<u32>().ok().filter(|value| *value > 0),
+        _ => None,
+    }
+}
+
+/// A rope config is either a flat object (has `rope_type` or `type` as legacy key)
+/// or a container of nested per-layer configs.
+fn iter_rope_configs(rope_parameters: &Value) -> Vec<&serde_json::Map<String, Value>> {
+    let Some(object) = rope_parameters.as_object() else {
+        return Vec::new();
+    };
+    if object.contains_key("rope_type") || object.contains_key("type") {
+        vec![object]
+    } else {
+        object.values().filter_map(Value::as_object).collect()
+    }
+}
+
+fn scale_max_len(max_model_len: u32, scaling_factor: f64) -> u32 {
+    if !scaling_factor.is_finite() || scaling_factor <= 0.0 {
+        return max_model_len;
+    }
+    let scaled = (max_model_len as f64) * scaling_factor;
+    if scaled > u32::MAX as f64 {
+        u32::MAX
+    } else {
+        scaled as u32
     }
 }
 
@@ -403,6 +534,120 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.vocab_size().unwrap(), 151936);
+    }
+
+    #[test]
+    fn model_config_uses_minimum_of_known_position_keys() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "max_seq_len": 8192
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(8192));
+    }
+
+    #[test]
+    fn model_config_uses_model_max_length_override() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_seq_len": 8192,
+                "model_max_length": 131072
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(131072));
+    }
+
+    #[test]
+    fn model_config_derives_max_model_len_from_nested_text_config() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "text_config": {
+                    "max_position_embeddings": 4096
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(4096));
+    }
+
+    #[test]
+    fn model_config_scales_max_model_len_with_yarn_factor() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "factor": 4,
+                    "original_max_position_embeddings": 32768
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(131072));
+    }
+
+    #[test]
+    fn model_config_scales_via_legacy_rope_scaling_with_dynamic_factor() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "rope_scaling": {
+                    "rope_type": "dynamic",
+                    "factor": 2
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(65536));
+    }
+
+    #[test]
+    fn model_config_scales_via_legacy_type_key_with_linear_factor() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "rope_scaling": {
+                    "type": "linear",
+                    "factor": 4
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(131072));
+    }
+
+    #[test]
+    fn model_config_uses_longrope_original_max_position_embeddings() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 131072,
+                "original_max_position_embeddings": 32768,
+                "rope_parameters": {
+                    "rope_type": "longrope",
+                    "factor": 4
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.max_model_len(), Some(32768));
+    }
+
+    #[test]
+    fn model_config_returns_none_when_max_model_len_cannot_be_derived() {
+        let config: ModelConfig = serde_json::from_str(r#"{"vocab_size":151936}"#).unwrap();
+
+        assert_eq!(config.max_model_len(), None);
     }
 
     #[test]
