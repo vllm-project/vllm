@@ -655,6 +655,26 @@ def test_sm90_fp8_kv_head_size_support(head_size, expected_supported):
         assert "head_size=512 on SM90" in error
 
 
+@pytest.mark.parametrize("head_size", [256, 512])
+def test_sm90_fp8_kv_mm_prefix_deselects_flash_attn(head_size):
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    with _hopper():
+        error = FlashAttentionBackend.supports_combination(
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8",
+            block_size=64,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=True,
+            device_capability=DeviceCapability(9, 0),
+        )
+
+    assert error == "SM90 FP8 KV with mm_prefix requires Triton"
+
+
 @blackwell_only
 @pytest.mark.parametrize(
     "kwargs,config_kwargs,expected",

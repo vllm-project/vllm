@@ -266,6 +266,13 @@ class FlashAttentionBackend(AttentionBackend):
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
+            use_mm_prefix
+            and kv_cache_dtype is not None
+            and is_quantized_kv_cache(kv_cache_dtype)
+            and device_capability == DeviceCapability(9, 0)
+        ):
+            return "SM90 FP8 KV with mm_prefix requires Triton"
+        if (
             kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
             and not flash_attn_supports_kv_cache_dtype(
