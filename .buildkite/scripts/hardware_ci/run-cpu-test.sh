@@ -67,7 +67,9 @@ BUILD_RETRY_WAITS=(10 20 40)  # seconds to wait before retry 1/2/3
 build_log="$(mktemp)"
 attempt=1
 while true; do
-    if docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test -f docker/Dockerfile.cpu . 2>&1 | tee "$build_log"; then
+    if docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test \
+            --build-arg USE_SCCACHE=1 --build-arg SCCACHE_LOCAL_ONLY=1 \
+            -f docker/Dockerfile.cpu . 2>&1 | tee "$build_log"; then
         break
     fi
     if [ "$attempt" -ge "$BUILD_MAX_ATTEMPTS" ] || ! grep -qE "$BUILD_RETRY_PATTERN" "$build_log"; then
