@@ -85,6 +85,9 @@ NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES = frozenset(
         "DeepSeekV4MTPModel",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
+        "Glm5NextForCausalLM",
+        "Glm5NextForConditionalGeneration",
+        "Glm5NextMTPModel",
         "GlmMoeDsaForCausalLM",
         "HYV4ForCausalLM",
         "HYV4MTPModel",
@@ -784,7 +787,11 @@ class VllmConfig:
             # eagerly. This also handles platforms such as ROCm that deliberately
             # leave breakable graphs disabled by default for performance.
             compilation_config = self.compilation_config
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            cudagraph_mode = compilation_config.cudagraph_mode
+            if compilation_config.mode == CompilationMode.VLLM_COMPILE and (
+                cudagraph_mode is None
+                or cudagraph_mode.requires_piecewise_compilation()
+            ):
                 raise ValueError(
                     f"{self.model_config.architecture} does not expose an active "
                     "torch.compile boundary, so compilation mode VLLM_COMPILE "
@@ -819,11 +826,6 @@ class VllmConfig:
                     compilation_config.cudagraph_mode.name,
                 )
 
-            # None is the unset value, not an explicit compile request. These
-            # wrappers cannot provide piecewise compilation, so resolve it now
-            # and let the compatibility pass below remove impossible modes.
-            if compilation_config.mode is None:
-                compilation_config.mode = CompilationMode.NONE
         return enabled
 
     @property
@@ -1797,9 +1799,7 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_batch_sharded_sampling()
-        self._validate_adaptive_verification(
-            breakable_cudagraph_enabled=breakable_cudagraph_enabled
-        )
+        self._validate_adaptive_verification()
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
@@ -2752,6 +2752,9 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
             unsupported.append("KV sharing fast prefill")
 
+        if self.cache_config.mamba_cache_mode == "all":
+            unsupported.append("mamba cache mode 'all'")
+
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
@@ -2786,9 +2789,7 @@ class VllmConfig:
 
         return unsupported
 
-    def _validate_adaptive_verification(
-        self, *, breakable_cudagraph_enabled: bool
-    ) -> None:
+    def _validate_adaptive_verification(self) -> None:
         spec_config = self.speculative_config
         if not spec_config or not spec_config.enable_adaptive_verification:
             return
@@ -2800,22 +2801,11 @@ class VllmConfig:
                 "Adaptive verification is not currently compatible with LoRA"
             )
 
-        if not VllmConfig._piecewise_cudagraph_provider_available(
-            self,
-            breakable_cudagraph_enabled=breakable_cudagraph_enabled,
-        ):
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise ValueError(
-                "Adaptive verification requires piecewise CUDA graphs, but no "
-                "torch.compile or breakable CUDA graph provider is active. Enable "
-                "breakable CUDA graphs or disable adaptive verification."
-            )
-
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            # The draft budget divides by step costs profiled from captured
-            # cudagraphs; eager execution captures none.
-            raise ValueError(
-                "Adaptive verification is not currently compatible with "
-                "enforce_eager/cudagraph_mode=none"
+                "Adaptive verification requires full CUDA graphs. Use cudagraph "
+                "mode FULL, FULL_DECODE_ONLY, or FULL_AND_PIECEWISE, or disable "
+                "adaptive verification."
             )
 
         if self.parallel_config.pipeline_parallel_size > 1:
@@ -2852,6 +2842,13 @@ class VllmConfig:
             # max_logprobs == -1 allows vocab-size logprob requests, which the
             # fixed-width logprobs gather cannot reasonably size for.
             blockers.append("max_logprobs is -1, allowing vocab-size logprob requests")
+
+        if self.model_config is not None and self.model_config.return_sampling_mask:
+            # gather_sampler_output() drops SamplingMaskTensors: masks come back None.
+            blockers.append(
+                "return_sampling_mask is set and the batch-sharded gather does "
+                "not forward sampling masks"
+            )
 
         if (
             self.speculative_config is not None
