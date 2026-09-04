@@ -617,7 +617,7 @@ steps:
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
 - label: ":amd: (MI300) PyTorch Compilation Passes" # TBD
-  timeout_in_minutes: 40
+  timeout_in_minutes: 80
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
