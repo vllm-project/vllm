@@ -9,7 +9,7 @@ use futures::future::join_all;
 use itertools::Itertools;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use tokio::sync::mpsc;
+use tokio::sync::{OnceCell, mpsc};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
@@ -20,6 +20,7 @@ use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::task::EngineTask;
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
@@ -268,6 +269,7 @@ pub struct EngineCoreClient {
     input_address: String,
     output_address: String,
     engines: Vec<ConnectedEngine>,
+    supported_tasks: OnceCell<Box<[EngineTask]>>,
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
@@ -415,6 +417,7 @@ impl EngineCoreClient {
             input_address: connected.input_address,
             output_address: connected.output_address,
             engines,
+            supported_tasks: OnceCell::new(),
             inner,
             coordinator,
             abort_tx,
@@ -448,6 +451,23 @@ impl EngineCoreClient {
     /// client.
     pub fn data_parallel_size(&self) -> usize {
         self.config.transport_mode.data_parallel_size()
+    }
+
+    /// Return the model tasks reported consistently by all connected engines.
+    ///
+    /// The first call discovers the capabilities through EngineCore's utility
+    /// API. Later calls reuse the cached result.
+    pub async fn get_supported_tasks(&self) -> Result<&[EngineTask]> {
+        Ok(self
+            .supported_tasks
+            .get_or_try_init(|| async {
+                Ok::<_, Error>(
+                    self.call_utility_consensus::<Vec<EngineTask>, _>("get_supported_tasks", ())
+                        .await?
+                        .into_boxed_slice(),
+                )
+            })
+            .await?)
     }
 
     #[cfg(test)]
