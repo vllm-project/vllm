@@ -1547,6 +1547,10 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    is_mamba_group=isinstance(
+                        group_specs[group_index].kv_cache_spec,
+                        MambaSpec,
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2065,6 +2069,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        is_mamba_group: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2075,7 +2080,9 @@ class MooncakeConnectorWorker:
             remote_kv_block_len=remote_kv_block_len,
             producer_cache_replicated=self._producer_cache_is_replicated(),
             total_num_kv_heads=(
-                None if self.use_mla else self.transfer_topo.total_num_kv_heads
+                None
+                if self.use_mla or is_mamba_group
+                else self.transfer_topo.total_num_kv_heads
             ),
         )
 
