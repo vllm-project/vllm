@@ -15,7 +15,7 @@ TEST_COMMAND=$2
 # Disk hygiene knobs. Reclaim space only once the Docker root filesystem crosses
 # DISK_USAGE_THRESHOLD percent, and cap the shared BuildKit cache at
 # BUILDKIT_CACHE_MAX so subsequent builds keep reusing the hottest layers.
-DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-70}
+DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
 BUILDKIT_CACHE_MAX=${BUILDKIT_CACHE_MAX:-200GB}
 
 # Reclaim disk only when the host is under pressure. We trim (not purge) the
