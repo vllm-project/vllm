@@ -547,6 +547,28 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
         connector.connector_worker = None
 
 
+def test_hybrid_gdn_transfer_plan_preserves_legacy_tp_slicing():
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker.shutdown = noop_shutdown
+    worker.tp_rank = 0
+    worker.tp_size = 2
+    worker.use_mla = False
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=2,
+    )
+
+    plan = worker._get_sender_transfer_plan(
+        local_kv_block_len=2000,
+        remote_kv_block_len=1000,
+        remote_tp_rank=1,
+        remote_tp_size=4,
+        is_mamba_group=True,
+    )
+
+    assert plan == (True, 1000, 0, 1000)
+
+
 def test_logical_to_kernel_block_ids_expands_fa_not_gdn():
     worker = object.__new__(MooncakeConnectorWorker)
     worker.shutdown = noop_shutdown
