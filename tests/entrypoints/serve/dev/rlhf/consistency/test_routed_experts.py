@@ -101,10 +101,17 @@ def assert_valid_routed_experts(encoded: str | None, shape: RoutingShape) -> Non
 
 
 @contextmanager
-def _launch(model: str, extra_args: list[str], use_v2: bool):
-    env_vars = {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0"}
+def _launch(
+    model: str,
+    extra_args: list[str],
+    use_v2: bool,
+    env_vars: dict[str, str] | None = None,
+):
+    env = {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0"}
+    if env_vars:
+        env.update(env_vars)
     with (
-        patch.dict(os.environ, env_vars),
+        patch.dict(os.environ, env),
         _server(model, extra_args=extra_args, port=get_open_port()) as url,
     ):
         yield url
@@ -129,7 +136,9 @@ def scale_out_server(use_v2):
         "--data-parallel-size",
         "2",
     ]
-    with _launch(MOE_MODEL, extra_args, use_v2) as url:
+    # The token-in-token-out endpoints are opt-in (PR #54579).
+    env_vars = {"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"}
+    with _launch(MOE_MODEL, extra_args, use_v2, env_vars) as url:
         yield url
 
 
