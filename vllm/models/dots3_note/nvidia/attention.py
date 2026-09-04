@@ -7,6 +7,7 @@ varlen MHA. Decode-only batches use the Triton absorbed-MQA kernel.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -19,7 +20,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.attention.backend import AttentionLayer, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
     FlashAttnMLASparseBackend,
     FlashAttnMLASparseImpl,
@@ -307,6 +312,7 @@ class Dots3NoteFlashAttnPrefillBackend(FlashAttnPrefillBackend):
 class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
     """Keep decode on MQA and route prefill/mixed batches through FA3."""
 
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support = QueryLenSupport.UNIFORM
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
