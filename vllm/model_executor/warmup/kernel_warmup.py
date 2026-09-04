@@ -13,9 +13,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.flashinfer_pcie_ipc_all_reduce import (
-    warmup_flashinfer_pcie_ipc_allreduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
@@ -43,6 +40,9 @@ from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
+)
+from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
+    spec_decode_rejection_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -166,6 +166,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         fa4_cutedsl_warmup(worker)
+        spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
     if current_platform.has_device_capability(90):
@@ -200,7 +201,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
-    warmup_flashinfer_pcie_ipc_allreduce(worker)
+    # Lazy import: flashinfer_pcie_ipc_all_reduce imports flashinfer.comm,
+    # which initializes CUDA at import time and must not run at module scope.
+    if envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC:
+        from vllm.distributed.device_communicators import (
+            flashinfer_pcie_ipc_all_reduce,
+        )
+
+        flashinfer_pcie_ipc_all_reduce.warmup_flashinfer_pcie_ipc_allreduce(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

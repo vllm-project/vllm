@@ -345,28 +345,42 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
-        # The encoder reports each item's cache key and grid here.
+        # The encoder reports each mm_hash's metadata (e.g. the grid) here,
+        # keyed by the same uuid this proxy assigned above.
         try:
             params = (await r.json()).get("ec_transfer_params") or {}
-            reported = params.get("ec_items") or []
         except Exception:
             logger.warning("[%s] Could not read encoder metadata #%d", req_id, idx)
-            reported = []
-        if reported and idx in item_uuids:
-            # One item per encoder request, so the first entry is this item's.
-            # The uuid this proxy assigned is what makes both instances derive
-            # the same cache key, so it stays the item's `uuid`. It is NOT the
-            # key the connectors use: when media_io_kwargs or
-            # mm_processor_kwargs are set, the engine re-hashes the uuid
-            # together with them, so `mm_features[i].identifier` is a derived
-            # value. The encoder already reported that derived value; carry it
-            # through separately instead of overwriting it.
-            item_meta[idx] = {
-                **reported[0],
-                "mm_hash": item_uuids[idx],
-                "ec_mm_hash": reported[0].get("mm_hash"),
-                "transfer_id": item_transfer_ids[idx],
-            }
+            params = {}
+        if idx in item_uuids:
+            # One encoder request carries exactly one item, so there is a
+            # single reported entry. Do not key it by this proxy's uuid: when
+            # media_io_kwargs or mm_processor_kwargs are set the engine
+            # re-hashes the uuid together with them, so the encoder's own
+            # `mm_features[i].identifier` is a derived value this proxy cannot
+            # predict. Fall back to the sole entry, and carry the key the
+            # encoder actually used through as `ec_mm_hash`.
+            ec_mm_hash = item_uuids[idx]
+            reported = params.get(ec_mm_hash)
+            if reported is None and len(params) == 1:
+                ((ec_mm_hash, reported),) = params.items()
+            if reported:
+                metadata = reported.get("metadata") or {}
+                if metadata:
+                    item_meta[idx] = {
+                        **metadata,
+                        "mm_hash": item_uuids[idx],
+                        "ec_mm_hash": ec_mm_hash,
+                    }
+                    if idx in item_transfer_ids:
+                        item_meta[idx]["transfer_id"] = item_transfer_ids[idx]
+                # Whatever the encoder reported alongside `metadata` is the
+                # connector's own handle on the published embedding (for NIXL,
+                # peer_host/peer_port/size_bytes). The decoder's connector
+                # looks it up by mm_hash on the request, so carry it through.
+                orig_request.setdefault("ec_transfer_params", {})[item_uuids[idx]] = (
+                    reported
+                )
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)

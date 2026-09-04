@@ -46,6 +46,10 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     ensure_mooncake_available,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import (
+    PlaceholderMetadataResolver,
+    collect_ec_item_metadata,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ECConnectorOutput
@@ -88,7 +92,7 @@ class ECMooncakeScheduler:
             thread_name_prefix="ec-mooncake-control",
         )
 
-        self._metadata_fields_cache: dict[str, set[str]] = {}
+        self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
         self._unresolved_transfer_ids = 0
         self._drain_pending = True
         self._drained_at = 0.0
@@ -472,27 +476,6 @@ class ECMooncakeScheduler:
     def has_pending_push_work(self) -> bool:
         return self._scheduler_pending_work
 
-    def _placeholder_metadata_fields(self, modality: str) -> set[str]:
-        if modality in self._metadata_fields_cache:
-            return self._metadata_fields_cache[modality]
-
-        fields: set[str] = set()
-        try:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            info = MULTIMODAL_REGISTRY.create_processor(self._model_config).info
-            fields = info.data_parser.placeholder_metadata_fields(modality)
-        except Exception:
-            logger.warning(
-                "Could not determine the placeholder metadata fields for "
-                "modality %s; the consumer will preprocess the media itself.",
-                modality,
-                exc_info=True,
-            )
-
-        self._metadata_fields_cache[modality] = fields
-        return fields
-
     def request_finished(self, request: Any) -> tuple[bool, dict[str, Any] | None]:
         if self._is_consumer:
             for index in range(len(request.mm_features)):
@@ -514,25 +497,15 @@ class ECMooncakeScheduler:
         if not self._is_producer:
             return False, None
 
-        items = []
+        items = collect_ec_item_metadata(request.mm_features, self._metadata_resolver)
         for index, feature in enumerate(request.mm_features):
-            metadata = {}
-            if feature.data is not None:
-                wanted = self._placeholder_metadata_fields(feature.modality)
-                metadata = {
-                    key: value.tolist()
-                    for key, value in feature.data.get_data().items()
-                    if key in wanted and isinstance(value, torch.Tensor)
-                }
             transfer_id = self._request_transfer_id(request, index)
-            item = {"mm_hash": feature.identifier, **metadata}
             if transfer_id is not None:
-                item["transfer_id"] = transfer_id
-            items.append(item)
+                items[feature.identifier]["transfer_id"] = transfer_id
 
         if not items:
             return False, None
-        return False, {"ec_items": items}
+        return False, items
 
     def close(self) -> None:
         self._control_executor.shutdown(wait=True, cancel_futures=True)

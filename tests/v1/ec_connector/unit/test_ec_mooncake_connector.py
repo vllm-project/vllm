@@ -1697,16 +1697,17 @@ class TestECMooncakeSchedulerMetadata:
                 mock_vllm_config_producer, ECConnectorRole.SCHEDULER
             )
             with patch.object(
-                scheduler._scheduler,
-                "_placeholder_metadata_fields",
+                scheduler._scheduler._metadata_resolver,
+                "fields_for",
                 return_value={"image_grid_thw"},
             ):
                 delay_free, params = scheduler.request_finished(request)
 
         assert not delay_free
-        assert params == {
-            "ec_items": [{"mm_hash": "image_uuid", "image_grid_thw": [1, 32, 48]}]
-        }
+        # Upstream shape: keyed by the engine's own identifier, with the
+        # placeholder metadata nested so a connector can report its own
+        # transfer coordinates alongside it.
+        assert params == {"image_uuid": {"metadata": {"image_grid_thw": [1, 32, 48]}}}
 
 
 class TestConsumerReservationManager:
