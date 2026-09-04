@@ -1187,13 +1187,13 @@ def test_fly_does_not_override_target_constraint():
     assert output.sampled_token_ids[0, 0].item() == 9
 
 
-def test_fly_target_only_sampling_uses_native_acceptance(
+def test_fly_target_only_sampling_uses_mapped_target_ids(
     monkeypatch: pytest.MonkeyPatch,
 ):
     _patch_uniform_probs(monkeypatch, [0.5, 0.5, 0.5, 0.5])
-    draft_tokens = [[1, 2, 3, 4]]
-    target_probs = torch.zeros((4, 8), dtype=torch.float32, device=DEVICE_TYPE)
-    target_probs[0, 0], target_probs[0, 1] = 0.6, 0.4
+    draft_tokens = [[7, 2, 3, 4]]
+    target_probs = torch.zeros((4, 10), dtype=torch.float32, device=DEVICE_TYPE)
+    target_probs[0, 9], target_probs[0, 7] = 0.6, 0.4
     for row, token_id in enumerate(draft_tokens[0][1:], start=1):
         target_probs[row, 0] = 0.2
         target_probs[row, token_id] = 0.8
@@ -1203,14 +1203,14 @@ def test_fly_target_only_sampling_uses_native_acceptance(
         temperature=torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE),
     )
     spec_metadata = create_spec_decode_metadata(draft_tokens, logits)
-    bonus = torch.tensor([7], device=logits.device)
+    bonus = torch.tensor([8], device=logits.device)
 
     fly_sampler = _make_fly_sampler(window_size=2)
     mock_sampler_output(fly_sampler, bonus)
     output = fly_sampler(spec_metadata, None, logits, metadata)
     assert torch.equal(
         output.sampled_token_ids,
-        torch.tensor([[1, 2, 3, 4, 7]], dtype=torch.int, device=logits.device),
+        torch.tensor([[7, 2, 3, 4, 8]], dtype=torch.int, device=logits.device),
     )
 
 
