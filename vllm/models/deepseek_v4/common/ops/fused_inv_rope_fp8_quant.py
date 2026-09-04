@@ -38,7 +38,10 @@ class FusedInvRopeFP8QuantKernel(
         use_gdc: bool
 
     @staticmethod
-    @triton.jit(do_not_specialize=["num_tokens"])
+    # scale_stride_k = align(num_tokens, 4) is only 4-aligned, so its Triton int
+    # class varies with batch size; not specialized so one warmup key covers all
+    # (int64-cast, scalar addressing only, so perf-neutral).
+    @triton.jit(do_not_specialize=["num_tokens", "scale_stride_k"])
     def kernel(
         o_ptr,
         positions_ptr,

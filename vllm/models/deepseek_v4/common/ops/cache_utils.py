@@ -22,7 +22,7 @@ import torch
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
@@ -402,7 +402,7 @@ class DequantizeAndGatherKCacheKernel(
                 dict(cache_block_size=tiny_block_size, has_gather_lens=True),
             ),
             max_model_len=max_model_len,
-            use_fnuz=False,
+            use_fnuz=(False, current_platform.is_fp8_fnuz()),
             offset=(1, 2, 16),
         )
 
@@ -791,7 +791,7 @@ def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
 
 
 class CombineTopkSwaIndicesKernel(
-    VllmJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
+    VllmTritonJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
     @dataclass(frozen=True)
     class CompileKey:
@@ -947,32 +947,32 @@ class CombineTopkSwaIndicesKernel(
             image_width=image_widths,
         )
 
-    def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(self.kernel, "warmup", None)
-        assert warmup is not None
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         int32_ptr = TritonWarmupTensor(torch.int32)
-        input_variant = compile_key.input_variant
-        warmup(
-            int32_ptr,
-            1,  # do not specialize combined_indices_stride
-            int32_ptr,
-            input_variant.pointer("topk_indices", torch.int32),
-            1,  # do not specialize topk_indices_stride
-            input_variant.pointer("query_start_loc", torch.int32),
-            input_variant.pointer("seq_lens", torch.int32),
-            input_variant.pointer("gather_lens", torch.int32),
-            int32_ptr,
-            int32_ptr,
-            1,  # do not specialize M
-            1,  # do not specialize N
+        variant = compile_key.input_variant
+        has_image = compile_key.IMAGE_WIDTH > 0
+        return dict(
+            combined_indices=int32_ptr,
+            combined_lens=int32_ptr,
+            topk_indices=variant.pointer(
+                "topk_indices", torch.int32, shape=(1, compile_key.PADDED_TOP_K)
+            ),
+            query_start_loc=variant.pointer("query_start_loc", torch.int32),
+            seq_lens=variant.pointer("seq_lens", torch.int32),
+            gather_lens=variant.pointer("gather_lens", torch.int32),
+            M=1,
+            N=1,
             TOP_K=compile_key.TOP_K,
             COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
             WINDOW_SIZE=compile_key.WINDOW_SIZE,
-            IMAGE_WIDTH=compile_key.IMAGE_WIDTH,
-            PADDED_TOP_K=compile_key.PADDED_TOP_K,
-            grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
+            # Reproduce the runtime substitution: no-image batches launch with
+            # ``topk_indices`` in the visibility pointer slots (see __call__).
+            left_visible=(int32_ptr if has_image else None),
+            right_visible=(int32_ptr if has_image else None),
+            max_image_tokens=compile_key.IMAGE_WIDTH,
         )
 
+    @kernel_launcher
     def __call__(
         self,
         combined_indices: torch.Tensor,
@@ -990,23 +990,15 @@ class CombineTopkSwaIndicesKernel(
         left_visible: torch.Tensor | None = None,
         right_visible: torch.Tensor | None = None,
         max_image_tokens: int = 0,
-    ) -> None:
+    ) -> LaunchSpec:
         num_reqs = seq_lens.shape[0]
         has_image = left_visible is not None
         image_width = max_image_tokens if has_image else 0
-        self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
-            combined_indices,
-            combined_indices.stride(0),
-            combined_lens,
-            topk_indices,
-            topk_indices.stride(0),
-            query_start_loc,
-            seq_lens,
-            gather_lens,
-            left_visible if has_image else topk_indices,
-            right_visible if has_image else topk_indices,
-            M,
-            N,
+        return (num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS), dict(
+            combined_indices_stride=combined_indices.stride(0),
+            topk_indices_stride=topk_indices.stride(0),
+            left_visible_ptr=left_visible if has_image else topk_indices,
+            right_visible_ptr=right_visible if has_image else topk_indices,
             TOP_K=TOP_K,
             COMPRESS_RATIO=COMPRESS_RATIO,
             WINDOW_SIZE=WINDOW_SIZE,
@@ -1408,7 +1400,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
 
         tl.store(sparse_topk_lens_ptr + token_idx, SWA_TOTAL_WIDTH + topk_len)
 
-    def dispatch(
+    def dispatch(  # type: ignore[override]
         self,
         *,
         swa_index_width: int,
@@ -1425,7 +1417,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             image_width=image_width,
             padded_top_k=padded_top_k,
             decode_compressed_topk=decode_compressed_topk,
-            window_block_size=next_power_of_2(max(swa_index_width + image_width, 1)),
+            window_block_size=next_power_of_2(max(swa_index_width, 1)),
             topk_block_size=next_power_of_2(max(padded_top_k, 1)),
         )
 

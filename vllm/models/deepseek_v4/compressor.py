@@ -308,7 +308,7 @@ class DeepseekCompressor(nn.Module):
 
         if vllm_config.kernel_config.enable_jit_warmup:
             _SAVE_PARTIAL_STATES_KERNEL.register_warmup()
-            if not (current_platform.is_cuda() and self.head_dim == 512):
+            if self.head_dim != 512:
                 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
                 )

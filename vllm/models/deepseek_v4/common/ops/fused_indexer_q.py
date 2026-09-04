@@ -238,10 +238,9 @@ class FusedIndexerQRopeQuantTritonKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
         q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
         return dict(
-            positions=int32_ptr,
+            positions=TritonWarmupTensor(torch.int64),
             index_q=TritonWarmupTensor(
                 torch.bfloat16,
                 shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),
@@ -455,12 +454,11 @@ class FusedIndexerQRopeMxFp4TritonKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
         q_stride0 = compile_key.num_heads * compile_key.index_q_head_dim
         packed_head_dim = compile_key.index_q_head_dim // 2
         scale_head_dim = compile_key.index_q_head_dim // compile_key.mxfp4_block
         return dict(
-            positions=int32_ptr,
+            positions=TritonWarmupTensor(torch.int64),
             index_q=TritonWarmupTensor(
                 torch.bfloat16,
                 shape=(1, compile_key.num_heads, compile_key.index_q_head_dim),

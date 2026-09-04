@@ -67,7 +67,7 @@ def test_deepseek_v4_c128a_topk_metadata_warmup_keys() -> None:
                 runtime_scale_dim=8,
                 runtime_kv_block_stride=9216,
             ),
-            (False, 512, 512, 1024, 4, True, 64, 448.0, 64, 576, 8, 64, 16, 9216),
+            (False, 512, 512, 1024, 4, True, 64, 448.0, 64, 576, 8, 4, 16, 9216),
         ),
         (
             dict(
@@ -83,7 +83,7 @@ def test_deepseek_v4_c128a_topk_metadata_warmup_keys() -> None:
                 runtime_scale_dim=16,
                 runtime_kv_block_stride=576,
             ),
-            (True, 512, 512, 512, 128, False, 64, 448.0, 32, 256, 16, 64, 1, 576),
+            (True, 512, 512, 512, 128, False, 64, 448.0, 32, 256, 16, 8, 1, 576),
         ),
     ],
 )
@@ -165,16 +165,19 @@ def test_fused_inv_rope_warmup_uses_runtime_stride_classes(
         )
     )
 
-    stride_names = (
+    # Specialized strides must warm as div-16 to match the runtime compile key.
+    specialized_stride_names = (
         "o_stride_token",
         "o_stride_head",
         "cache_stride_pos",
         "fp8_stride_group",
         "fp8_stride_token",
         "scale_stride_group",
-        "scale_stride_k",
     )
-    assert {warmup_kwargs[name] for name in stride_names} == {16}
+    assert all(warmup_kwargs[name] % 16 == 0 for name in specialized_stride_names)
+
+    # scale_stride_k's int class varies with batch size, so it is not specialized.
+    assert "scale_stride_k" in kernel.kernel.do_not_specialize
 
 
 def test_save_partial_states_dispatch_matches_legacy_meta() -> None:
