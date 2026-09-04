@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
-    activation_to_flashinfer_type,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -93,8 +92,11 @@ class TrtLlmFp8ExpertsBase:
                 (kMxfp8Static, kMxfp8Dynamic),
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             )
-            or activation_to_flashinfer_type(moe_config.activation)
-            != activation_to_flashinfer_type(MoEActivation.SILU)
+            or moe_config.activation
+            not in (
+                MoEActivation.SILU,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            )
         ):
             return False, (
                 "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
