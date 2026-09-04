@@ -89,7 +89,7 @@ class PromptLogprobsWorker:
                 candidate_ids_for_req,
                 dtype=torch.int64,
                 device=hidden_states.device,
-            ).expand(row_end - row_start, -1)
+            )
             part = compute_prompt_token_id_logprobs_with_chunking(
                 ids,
                 hidden_states[row_start:row_end],
@@ -315,36 +315,26 @@ def compute_prompt_token_id_logprobs_with_chunking(
 ) -> TokenIdLogprobsTensors:
     """Gather caller-selected IDs from prompt logits without prompt-logprob semantics.
 
-    ``candidate_token_ids`` has one fixed-width row per scored prompt position.
-    Unlike ``compute_prompt_logprobs_with_chunking``, this function does not add
-    the actual target token or compute its rank.
+    ``candidate_token_ids`` is the request-wise ID list, scored at every row of
+    ``prompt_hidden_states``. Unlike ``compute_prompt_logprobs_with_chunking``,
+    this function does not add the actual target token or compute its rank.
     """
-    assert candidate_token_ids.ndim == 2
-    assert candidate_token_ids.shape[0] == prompt_hidden_states.shape[0]
+    assert candidate_token_ids.ndim == 1
+    num_rows = prompt_hidden_states.shape[0]
+    assert num_rows > 0
     candidate_token_ids = candidate_token_ids.to(torch.int64)
-    ids_chunks: list[torch.Tensor] = []
     score_chunks: list[torch.Tensor] = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
-    for start_idx in range(0, candidate_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
-        logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        ids = candidate_token_ids[start_idx:end_idx]
+    for start_idx in range(0, num_rows, CHUNK_SIZE):
+        logits = logits_fn(prompt_hidden_states[start_idx : start_idx + CHUNK_SIZE])
+        ids = candidate_token_ids.expand(logits.shape[0], -1)
         if logits_mode:
-            scores = logits.gather(-1, ids).to(torch.float32)
+            scores = logits.gather(-1, ids)
         else:
             # Avoid materializing a [tokens, vocab] log-softmax tensor.
             scores = logits.gather(-1, ids) - logits.logsumexp(dim=-1, keepdim=True)
-            scores = scores.to(torch.float32)
-        ids_chunks.append(ids)
-        score_chunks.append(scores)
-    if not ids_chunks:
-        return TokenIdLogprobsTensors(
-            candidate_token_ids,
-            candidate_token_ids.new_empty(
-                candidate_token_ids.shape, dtype=torch.float32
-            ),
-        )
+        score_chunks.append(scores.to(torch.float32))
     return TokenIdLogprobsTensors(
-        torch.cat(ids_chunks) if len(ids_chunks) > 1 else ids_chunks[0],
+        candidate_token_ids,
         torch.cat(score_chunks) if len(score_chunks) > 1 else score_chunks[0],
     )

@@ -11,7 +11,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import PromptLogprobs, SampleLogprobs, TokenIdLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
 
@@ -115,8 +115,9 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
-        prompt_token_id_logprobs: Fixed-token scores indexed by causal source row;
-            row i predicts token i + 1. Only requested rows are returned.
+        prompt_token_id_logprobs: Logprobs of the requested token IDs, indexed
+            by causal source row; row i predicts token i + 1. Only requested
+            rows are returned.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -147,7 +148,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
-        prompt_token_id_logprobs: list[dict[int, float] | None] | None = None,
+        prompt_token_id_logprobs: TokenIdLogprobs | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can

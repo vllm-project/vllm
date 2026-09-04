@@ -204,9 +204,12 @@ class LogprobsTensors(NamedTuple):
 
 
 class TokenIdLogprobsTensors(NamedTuple):
-    """Logprobs for caller-selected token IDs, one fixed-width row per position."""
+    """Logprobs for caller-selected token IDs at selected rows."""
 
+    # [num_token_ids]. Fixed for the whole request, so held once instead of
+    # being repeated for every scored row.
     token_ids: torch.Tensor
+    # [num_rows, num_token_ids]
     logprobs: torch.Tensor
 
     def to_cpu_nonblocking(self) -> "TokenIdLogprobsTensors":
@@ -217,16 +220,10 @@ class TokenIdLogprobsTensors(NamedTuple):
             self.logprobs.to("cpu", non_blocking=True),
         )
 
-    def to_dicts(self) -> list[dict[int, float] | None]:
-        return [
-            {int(token_id): float(score) for token_id, score in zip(ids, scores)}
-            for ids, scores in zip(self.token_ids.tolist(), self.logprobs.tolist())
-        ]
-
     @staticmethod
     def cat(tensors: Sequence["TokenIdLogprobsTensors"]):
         return TokenIdLogprobsTensors(
-            torch.cat([t.token_ids for t in tensors]),
+            tensors[0].token_ids,
             torch.cat([t.logprobs for t in tensors]),
         )
 
