@@ -55,7 +55,6 @@ def _coalesce_runs(
     split. `EmbeddingCache` hands out ascending ids, which is what makes runs
     findable at all.
     """
-
     ids = np.fromiter(block_ids, dtype=np.int64, count=len(block_ids))
     breaks = np.flatnonzero(np.diff(ids) != 1) + 1
     slots = np.concatenate(([0], breaks))
