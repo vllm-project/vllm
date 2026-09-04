@@ -536,15 +536,31 @@ def test_synchronize_input_prep_without_spec_decode_is_unchanged():
     assert log == ["wait:prepare_inputs", "update_states", "record:prepare_inputs"]
 
 
-def test_synchronize_input_prep_is_a_noop_without_overlapped_steps():
+def test_synchronize_input_prep_waits_for_postprocess_without_async_scheduling():
+    """Pipeline parallelism overlaps steps without async scheduling.
+
+    max_concurrent_batches is the PP size even with async scheduling off, so
+    the batch queue runs the next step's _update_states while the previous
+    step's postprocess is still in flight, yet prepare_inputs_event exists only
+    under async scheduling. The accepted-count wait must not depend on it.
+    """
+    log: list[str] = []
     runner = SimpleNamespace(
-        prepare_inputs_event=None, num_accepted_tokens_event=Mock()
+        prepare_inputs_event=None,
+        num_accepted_tokens_event=_RecordingEvent("accepted_counts", log),
     )
 
     with GPUModelRunner.synchronize_input_prep(runner):
-        pass
+        log.append("update_states")
 
-    runner.num_accepted_tokens_event.synchronize.assert_not_called()
+    assert log == ["wait:accepted_counts", "update_states"]
+
+
+def test_synchronize_input_prep_is_a_noop_without_spec_decode_or_overlap():
+    runner = SimpleNamespace(prepare_inputs_event=None, num_accepted_tokens_event=None)
+
+    with GPUModelRunner.synchronize_input_prep(runner):
+        pass
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
