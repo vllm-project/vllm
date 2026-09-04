@@ -781,6 +781,9 @@ class Glm5NextVideoBackend(VideoBackend):
     video_processor="GlmgaVideoProcessor",
 )
 class GLMGAVideoBackend(VideoBackend):
+    _MAX_FRAMES: ClassVar[int] = 640
+    _MAX_FPS: ClassVar[int] = 30
+
     @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
         # Estimate duration from frame count and fps when the container
@@ -806,14 +809,14 @@ class GLMGAVideoBackend(VideoBackend):
         total_frames_num = source.total_frames_num
         duration = source.duration
         original_fps = source.original_fps
-        target_fps = target.fps
+        target_fps = min(target.fps, cls._MAX_FPS)
         max_frame_idx = source.total_frames_num - 1
-        max_frames = kwargs.get("max_frames", 640)
+        max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
         duration = duration or round(max_frame_idx / original_fps) + 1
 
         extract_t = int(duration * target_fps)
-        extract_t = min(extract_t, max_frames)
+        extract_t = min(extract_t, max_frames, total_frames_num)
 
         duration_per_frame = 1 / original_fps
 
