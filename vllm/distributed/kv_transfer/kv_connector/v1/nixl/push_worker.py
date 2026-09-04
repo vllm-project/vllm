@@ -132,6 +132,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
         super().register_kv_caches(kv_caches)
+        if self._mixed_mem_types:
+            raise NotImplementedError(
+                "NixlPushConnector does not support mixed-memory KV caches"
+            )
         if self._push_writer_thread is None:
             self._push_writer_thread = threading.Thread(
                 target=self._push_writer_loop,
@@ -782,7 +786,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
+            done_pushing = self._pop_done_transfers(
+                self._sending_transfers, is_recv=False
+            )
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)

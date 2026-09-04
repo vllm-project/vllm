@@ -47,8 +47,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry to NixlAgentMetadata
+#  12: Add per-region memory types to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 11
+NIXL_CONNECTOR_VERSION: int = 12
 
 
 @dataclass
@@ -65,11 +66,10 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
-    region_strides: list[int] | None = None
     region_num_blocks: list[int] | None = None
     region_group_ids: list[int] | None = None
-    region_block_sizes: list[int] | None = None
     region_names: list[str] | None = None
+    region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
 

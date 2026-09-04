@@ -360,8 +360,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.region_group_ids = [0]
         w.dst_region_num_blocks = {}
         w.dst_region_group_ids = {}
-        w.dst_region_block_sizes = {}
-        w.dst_region_split_ratios = {}
+        w.dst_region_mem_types = {}
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
