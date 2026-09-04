@@ -52,6 +52,14 @@ pub enum Error {
     InvalidRoutedExpertsPromptStart { start: u32, prompt_len: u32 },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
+    #[error(
+        "sampling mask for text request `{request_id}` has {row_count} rows for {token_count} generated tokens"
+    )]
+    SamplingMaskTokenCountMismatch {
+        request_id: String,
+        token_count: usize,
+        row_count: usize,
+    },
     #[error(transparent)]
     Llm(#[from] LlmError),
     #[error(transparent)]

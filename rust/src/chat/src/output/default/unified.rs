@@ -439,6 +439,7 @@ mod tests {
                 kv_transfer_params: None,
                 ec_transfer_params: None,
                 routed_experts: None,
+                sampling_mask: None,
             })),
         }
     }
