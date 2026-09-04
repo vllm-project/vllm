@@ -10,7 +10,10 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors, TokenIdLogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+from vllm.v1.worker.gpu.sample.logprob import (
+    compute_token_logprobs,
+    compute_topk_scores,
+)
 
 CHUNK_SIZE = 1024
 
@@ -325,15 +328,20 @@ def compute_prompt_token_id_logprobs_with_chunking(
     candidate_token_ids = candidate_token_ids.to(torch.int64)
     score_chunks: list[torch.Tensor] = []
     logits_mode = logprobs_mode in ("raw_logits", "processed_logits")
+    # compute_token_logprobs indexes token_ids as contiguous rows, so expand the
+    # request-wise IDs once at chunk width and slice the tail chunk out of it.
+    ids_block = candidate_token_ids.expand(min(num_rows, CHUNK_SIZE), -1).contiguous()
     for start_idx in range(0, num_rows, CHUNK_SIZE):
         logits = logits_fn(prompt_hidden_states[start_idx : start_idx + CHUNK_SIZE])
-        ids = candidate_token_ids.expand(logits.shape[0], -1)
+        ids = ids_block[: logits.shape[0]]
         if logits_mode:
-            scores = logits.gather(-1, ids)
+            scores = logits.gather(-1, ids).to(torch.float32)
         else:
-            # Avoid materializing a [tokens, vocab] log-softmax tensor.
-            scores = logits.gather(-1, ids) - logits.logsumexp(dim=-1, keepdim=True)
-        score_chunks.append(scores.to(torch.float32))
+            # Reuses the sampler's kernel: it accumulates the logsumexp in fp32
+            # and emits only the requested columns, so no [tokens, vocab]
+            # tensor is materialized.
+            scores = compute_token_logprobs(logits, ids)
+        score_chunks.append(scores)
     return TokenIdLogprobsTensors(
         candidate_token_ids,
         torch.cat(score_chunks) if len(score_chunks) > 1 else score_chunks[0],
