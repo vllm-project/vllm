@@ -507,6 +507,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
+        remote_dcp_size: int = 1,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
@@ -1708,8 +1709,9 @@ def test_scheduler_kv_connector_stats_aggregation():
     final_stats = next(
         iter(engine_core_outputs.values())
     ).scheduler_stats.kv_connector_stats
+    # The scheduler stats payload carries serialized per-connector dicts.
     nixl_stats = final_stats["NixlConnector"]
-    assert nixl_stats.num_successful_transfers == 2
+    assert len(nixl_stats["transfer_duration"]) == 2
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])

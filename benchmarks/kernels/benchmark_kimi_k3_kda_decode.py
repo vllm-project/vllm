@@ -81,7 +81,7 @@ def _bench_graph(fn, repeats: int = NUM_KDA_LAYERS) -> float:
 
 
 class Inputs:
-    def __init__(self, num_tokens: int, num_heads: int) -> None:
+    def __init__(self, num_tokens: int, num_heads: int, conv_layout: str) -> None:
         torch.manual_seed(0)
         device = "cuda"
         dim = num_heads * HEAD_DIM
@@ -98,9 +98,15 @@ class Inputs:
                 for i in range(3)
             ]
         )
-        self.conv_state = torch.randn(
-            num_slots, CONV_WIDTH - 1, 3 * dim, device=device, dtype=DTYPE
-        )
+        if conv_layout == "DS":
+            self.conv_state_t = torch.randn(
+                num_slots, 3 * dim, CONV_WIDTH - 1, device=device, dtype=DTYPE
+            )
+        else:
+            conv_state = torch.randn(
+                num_slots, CONV_WIDTH - 1, 3 * dim, device=device, dtype=DTYPE
+            )
+            self.conv_state_t = conv_state.transpose(-1, -2)
         self.recurrent_state = torch.randn(
             num_slots, num_heads, HEAD_DIM, HEAD_DIM, device=device, dtype=torch.float32
         )
@@ -120,7 +126,6 @@ class Inputs:
         self.state_indices = torch.arange(
             1, num_tokens + 1, device=device, dtype=torch.int32
         )
-        self.conv_state_t = self.conv_state.transpose(-1, -2)
         self.out = torch.empty(
             1, num_tokens, num_heads, HEAD_DIM, device=device, dtype=DTYPE
         )
@@ -237,6 +242,12 @@ def main() -> None:
         default=[12],
         help="KDA heads per rank (96 total / TP size)",
     )
+    parser.add_argument(
+        "--layout",
+        choices=("SD", "DS"),
+        default="SD",
+        help="physical conv-state cache layout",
+    )
     args = parser.parse_args()
 
     if not hasattr(torch.ops._C, "fused_kda_decode"):
@@ -245,7 +256,10 @@ def main() -> None:
     props = torch.cuda.get_device_properties(0)
     bench = _bench_graph if args.graph else _bench
     mode = "cuda-graph replay" if args.graph else "eager dispatch"
-    print(f"device: {props.name} ({props.gcnArchName})  timing: {mode}")
+    print(
+        f"device: {props.name} ({props.gcnArchName})  timing: {mode}  "
+        f"layout: {args.layout}"
+    )
     print(
         f"{'heads':>6} {'tokens':>7} {'eager-norm':>11} {'triton-norm':>12} "
         f"{'fused us':>9} {'speedup':>8} {'state TB/s':>11} {'saved ms/step':>14}"
@@ -253,7 +267,10 @@ def main() -> None:
     for num_heads in args.heads:
         for num_tokens in args.tokens:
             if args.graph and args.layers > 1:
-                layers = [Inputs(num_tokens, num_heads) for _ in range(args.layers)]
+                layers = [
+                    Inputs(num_tokens, num_heads, args.layout)
+                    for _ in range(args.layers)
+                ]
                 eager_ms = _bench_graph_layers(
                     [functools.partial(triton_chain, i, False) for i in layers]
                 )
@@ -267,7 +284,7 @@ def main() -> None:
                 del layers
                 torch.accelerator.empty_cache()
             else:
-                inp = Inputs(num_tokens, num_heads)
+                inp = Inputs(num_tokens, num_heads, args.layout)
                 eager_ms = bench(functools.partial(triton_chain, inp, False))
                 triton_ms = bench(functools.partial(triton_chain, inp, True))
                 fused_ms = bench(functools.partial(fused, inp))
