@@ -101,13 +101,9 @@ class SimpleCPUOffloadWorker:
         num_blocks = self.kv_cache_config.num_blocks
         assert self.kv_cache_config.kv_cache_tensors
 
-        # The DMA backend copies whole blocks as base + block_id * stride(0), so
-        # every region is a [num_blocks, block_bytes] view. Which bytes form one
-        # region depends on the layout, so take it from each tensor's placement
-        # metadata instead of reinterpreting the whole allocation with a single
-        # layer's block size. Layers of one allocation can have different page
-        # sizes -- a DSA model's MLA latent and indexer key caches share a cache
-        # group -- so a shared block size does not exist.
+        # The DMA backend copies blocks as base + block_id * stride(0), so every
+        # region is a [num_blocks, block_bytes] view. Block bytes come from each
+        # tensor's placement -- layers in one allocation can differ in page size.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         seen: set[tuple[torch.device, int]] = set()
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
@@ -117,16 +113,13 @@ class SimpleCPUOffloadWorker:
             num_layers = len(kv_cache_tensor.layers)
             block_bytes = kv_cache_tensor.block_stride
             blocks_span = num_blocks * block_bytes
-            if kv_cache_tensor.layer_stride >= blocks_span:
-                # Layer-outermost: each layer owns a contiguous region, or one per
-                # KV head group when the head dim is hoisted out of the block dim
-                # (LHBNC).
+            layer_outermost = kv_cache_tensor.layer_stride >= blocks_span
+            if layer_outermost:
+                # One region per layer, or per KV head group under LHBNC.
                 start = kv_cache_tensor.offset
                 span = num_layers * kv_cache_tensor.layer_stride
                 layer_names = kv_cache_tensor.layers
             else:
-                # Block-outermost: every layer's page sits inside each block, so
-                # one region with a block stride spanning them all covers it.
                 start = 0
                 span = blocks_span
                 layer_names = kv_cache_tensor.layers[:1]
@@ -148,8 +141,6 @@ class SimpleCPUOffloadWorker:
             for idx, region in enumerate(regions):
                 key = (region.device, region.data_ptr())
                 if key in seen:
-                    # Cache groups overlay each other; whichever registered these
-                    # bytes first already covers them.
                     continue
                 seen.add(key)
                 layer_name = layer_names[idx // groups_per_layer]
