@@ -156,8 +156,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
 
     def get_finished_count(self) -> int | None:
-        # Every PCP x TP rank reports (world_size); replicated-KV PCP ranks > 0
-        # report their requests as sent as soon as they are asked to send.
         return None
 
     def get_num_new_matched_tokens(
