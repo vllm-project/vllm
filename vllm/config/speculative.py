@@ -1069,6 +1069,22 @@ class SpeculativeConfig:
             return False
         if "/" in model:
             return False
+        # Weight / config filenames are dotted but are not Python import paths.
+        lower = model.lower()
+        if lower.endswith(
+            (
+                ".pt",
+                ".pth",
+                ".bin",
+                ".safetensors",
+                ".ckpt",
+                ".json",
+                ".npz",
+                ".npz.index",
+                ".onnx",
+            )
+        ):
+            return False
         parts = model.split(".")
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
