@@ -515,9 +515,10 @@ RUN cd /src/projects/rocprofiler-sdk \
     && cmake --install build --prefix /staging --strip
 
 FROM base AS final
+# AITER imports yaml at runtime but omits PyYAML from its wheel metadata.
 RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install --constraint /tmp/rocm-constraints.txt /install/*.whl \
+    pip install --constraint /tmp/rocm-constraints.txt pyyaml /install/*.whl \
     && pip check
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/

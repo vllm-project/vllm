@@ -868,6 +868,7 @@ def test_rocm_native_build_graph_only_serializes_aiter_on_triton() -> None:
 def test_rocm_runtime_dependency_guards_are_enforced() -> None:
     rocm_base = (REPO_ROOT / "docker" / "Dockerfile.rocm_base").read_text()
     rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+    rocm_base_final = rocm_base.split("FROM base AS final", maxsplit=1)[1]
 
     for dockerfile in (rocm_base, rocm_ci):
         assert "ARG USE_SCCACHE\n" in dockerfile.split("FROM ", maxsplit=1)[0]
@@ -879,6 +880,10 @@ def test_rocm_runtime_dependency_guards_are_enforced() -> None:
     assert "PyGObject==" not in rocm_base
     assert "python3 -m pip check" in rocm_base
     assert "&& pip check" in rocm_base
+    assert (
+        "pip install --constraint /tmp/rocm-constraints.txt pyyaml /install/*.whl"
+    ) in rocm_base_final
+    assert "pyyaml" in locked_requirements(ROCM_BUILD_CONSTRAINTS)
 
     assert (
         'test "$(rustc --version | awk \'{print $2}\')" = "${RUST_TOOLCHAIN_VERSION}"'
