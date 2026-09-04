@@ -141,6 +141,7 @@ class Mamba2AttentionMetadataBuilder(
             common_attn_metadata,
             num_accepted_tokens=kwargs.get("num_accepted_tokens"),
             prev_last_scheduled_idx=kwargs.get("prev_last_scheduled_idx"),
+            num_decode_draft_tokens_cpu=kwargs.get("num_decode_draft_tokens_cpu"),
         )
 
         seq_idx_p = None
