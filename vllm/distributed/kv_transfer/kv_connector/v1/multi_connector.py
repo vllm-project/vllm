@@ -426,6 +426,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.on_new_request(request)
 
+    def on_load_failure(self, request_ids: set[str]) -> None:
+        for c in self._connectors:
+            c.on_load_failure(request_ids)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:

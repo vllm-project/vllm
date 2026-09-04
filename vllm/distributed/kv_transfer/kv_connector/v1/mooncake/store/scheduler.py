@@ -99,6 +99,9 @@ class MooncakeStoreScheduler:
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
+        # A failed load can rewind a request to token zero. Bypass lookups
+        # until local allocation succeeds so stale metadata cannot cause a livelock.
+        self._load_failure_bypass_req_ids: set[str] = set()
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
@@ -117,6 +120,14 @@ class MooncakeStoreScheduler:
         Returns ``(None, False)`` when an async lookup is still in flight,
         signaling the scheduler to retry this request on a later step.
         """
+        if request.request_id in self._load_failure_bypass_req_ids:
+            self.load_specs.pop(request.request_id, None)
+            logger.info(
+                "Skipping Mooncake lookup for request %s after KV load failure",
+                request.request_id,
+            )
+            return 0, False
+
         if not self.enable_lookup:
             return 0, False
 
@@ -179,6 +190,7 @@ class MooncakeStoreScheduler:
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
+        self._load_failure_bypass_req_ids.discard(request.request_id)
 
         if request.request_id not in self.load_specs:
             return
@@ -210,6 +222,7 @@ class MooncakeStoreScheduler:
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.client.discard(finished_req_id)
+            self._load_failure_bypass_req_ids.discard(finished_req_id)
             self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
@@ -589,6 +602,10 @@ class MooncakeStoreScheduler:
                     boundary_state_offloads=accepted,
                 )
             )
+
+    def on_load_failure(self, request_ids: set[str]) -> None:
+        """Skip external lookups until requests are allocated for recompute."""
+        self._load_failure_bypass_req_ids.update(request_ids)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Drop the block references of store jobs every rank has finished."""

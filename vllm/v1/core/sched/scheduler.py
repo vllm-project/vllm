@@ -3118,6 +3118,17 @@ class Scheduler(SchedulerInterface):
             total_failed_tokens,
         )
 
+        # Only async requests rewound to zero return to the waiting queue and
+        # run the connector lookup again. Notify the connector so a persistent
+        # external hit cannot make that request repeat the same failed load.
+        async_relookup_req_ids = {
+            req_id
+            for req_id in async_failed_req_ids
+            if self.requests[req_id].num_computed_tokens == 0
+        }
+        if self.connector is not None and async_relookup_req_ids:
+            self.connector.on_load_failure(async_relookup_req_ids)
+
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
