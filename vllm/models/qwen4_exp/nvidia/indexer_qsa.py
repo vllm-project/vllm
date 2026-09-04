@@ -405,6 +405,7 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
+                compressed_metadata.max_seq_len,
             )
         expand_qsa_block_indices(
             block_indices,
