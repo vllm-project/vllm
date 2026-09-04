@@ -1780,7 +1780,7 @@ def _get_hisparse_hma_config(
                 ),
                 block_pool_id=0,
                 enable_prefix_caching=False,
-                enable_kv_transfer=False,
+                enable_kv_transfer=True,
             )
         )
         hot_groups.append(
@@ -1814,7 +1814,7 @@ def _get_hisparse_hma_config(
         list(host_specs),
         source_group_spec,
         block_pool_id=None,
-        enable_kv_transfer=True,
+        enable_kv_transfer=False,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
 

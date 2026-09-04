@@ -25,6 +25,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheGroupSpec,
@@ -1912,6 +1914,61 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
         for block in range(count)
     ]
     assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+
+
+@pytest.mark.cpu_test
+def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
+    """Fallback metadata must route source IDs separately from GPU IDs."""
+    spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
+    scheduler = make_nixl_scheduler(heartbeat=True)
+    scheduler._is_hma_required = False
+    scheduler.kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        num_blocks_by_pool=[32],
+        hisparse_host_num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                spec,
+                block_pool_id=None,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                spec,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=16, page_size=32),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(block_size=16, page_size=32, blocks_per_request=2),
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    request = create_request(do_remote_prefill=True)
+    request.hisparse_host_import = True
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = (
+        [5, 6],
+        [10, 11],
+        [20],
+        [30, 31],
+    )
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+    metadata = scheduler.build_connector_meta(MagicMock())
+    request_metadata = metadata.reqs_to_recv[request.request_id]
+
+    assert request_metadata.hisparse_host_block_ids == [5, 6]
+    assert request_metadata.local_block_ids == ([10, 11], [20])
 
 
 @pytest.mark.cpu_test

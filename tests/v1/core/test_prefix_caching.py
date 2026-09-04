@@ -413,6 +413,7 @@ def allocate_external_prefix(
         num_external_computed_tokens=num_tokens,
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
+        allow_hisparse_host_import=True,
     )
 
 
@@ -797,6 +798,8 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
 
     assert allocated is not None
+    assert request.hisparse_host_import
+    assert request.hisparse_host_import_pending
     source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
@@ -817,11 +820,17 @@ def test_hisparse_external_import_survives_capacity_retry():
     second = make_request("second", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert allocate_external_prefix(manager, first, len(tokens)) is not None
+    assert not first.hisparse_host_import
+    assert not first.hisparse_host_import_pending
 
     assert allocate_external_prefix(manager, second, len(tokens)) is None
+    assert second.hisparse_host_import
+    assert not second.hisparse_host_import_pending
 
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
+    assert second.hisparse_host_import
+    assert second.hisparse_host_import_pending
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
     assert all(block.is_null for block in resident)
     assert len(hot) == 2
