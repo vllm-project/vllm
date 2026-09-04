@@ -1,37 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FLy speculative-token verification policy."""
+"""Entropy-gated deferred verification for FLy speculative decoding.
+
+FLy defers a high-entropy rejection when the next ``W`` draft tokens would be
+accepted natively. Its pre-pass makes the native kernels emit that decision by
+replacing the target argmax for greedy sampling or the uniform sample for
+random sampling.
+"""
 
 import torch
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
-_FLY_ENTROPY_TOP_K = 3
 
+def compute_fly_entropy(target_probs: torch.Tensor) -> torch.Tensor:
+    """Compute FLy's top-k entropy from processed target probabilities."""
 
-@torch.no_grad()
-def compute_fly_entropy(
-    target_logits: torch.Tensor,
-    target_probs: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Compute FLy's fixed top-3 entropy from processed target scores."""
-
-    if target_logits.ndim != 2:
-        raise ValueError("FLy expects 2-D target logits")
-    if target_logits.shape[-1] == 0:
+    if target_probs.ndim != 2:
+        raise ValueError("FLy expects 2-D target probabilities")
+    if target_probs.shape[-1] == 0:
         raise ValueError("FLy requires a non-empty target vocabulary")
-    if target_probs is not None and target_probs.shape != target_logits.shape:
-        raise ValueError("FLy target probabilities must match target logits")
 
-    top_k = min(_FLY_ENTROPY_TOP_K, target_logits.shape[-1])
-    if target_probs is None:
-        logits = target_logits.to(torch.float32)
-        top_logits = torch.topk(logits, k=top_k, dim=-1).values
-        top_log_probs = top_logits - torch.logsumexp(logits, dim=-1, keepdim=True)
-        top_probs = top_log_probs.exp()
-    else:
-        top_probs = torch.topk(target_probs.to(torch.float32), k=top_k, dim=-1).values
-        top_log_probs = top_probs.log()
+    entropy_top_k = envs.VLLM_FLY_ENTROPY_TOP_K
+    if entropy_top_k <= 0:
+        raise ValueError("VLLM_FLY_ENTROPY_TOP_K must be greater than zero")
+    top_k = min(entropy_top_k, target_probs.shape[-1])
+    top_probs = torch.topk(target_probs.to(torch.float32), k=top_k, dim=-1).values
+    top_log_probs = top_probs.log()
 
     entropy_terms = torch.where(
         top_probs > 0,
