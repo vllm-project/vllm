@@ -56,12 +56,9 @@ def _gemma_rms_norm_kernel(
 def gemma_rms_norm_supported(
     x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor | None
 ) -> bool:
-    """The kernel derives both the row count and the column count from x,
-    so weight and residual have to match it exactly. Everything else,
-    broadcasting included, belongs on the reference path."""
     if triton.next_power_of_2(x.shape[-1]) > _MAX_BLOCK_SIZE:
         return False
-    if weight.shape != x.shape[-1:]:
+    if weight.shape != x.shape[-1:] or weight.stride(-1) != 1:
         return False
     return residual is None or (residual.shape == x.shape and residual.stride(-1) == 1)
 
