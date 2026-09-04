@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -215,6 +216,18 @@ class Glm47MoeParser(ParserEngine):
         if not self.thinking_enabled:
             return input_ids
         return super().extract_content_ids(input_ids)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        start_id = self._reasoning_start_token_id
+        end_id = self._reasoning_end_token_id
+        if start_id is None or end_id is None or start_id in token_ids:
+            return super().count_reasoning_tokens(token_ids)
+
+        # GLM may omit the start token, but still emits the end token.
+        for index, token_id in enumerate(token_ids):
+            if token_id == end_id:
+                return index
+        return len(token_ids)
 
     def extract_reasoning(
         self,
