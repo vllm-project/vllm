@@ -512,6 +512,77 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
     assert torch.equal(actual_w2, expected_w2)
 
 
+def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=256,
+        intermediate_size=256,
+    )
+    method = object.__new__(UnquantizedFusedMoEMethod)
+    method.moe = moe_config
+    method.unquantized_backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
+    method.moe_kernel = None
+    monkeypatch.setattr(
+        method,
+        "_init_moe_kernel",
+        lambda _: setattr(method, "moe_kernel", object()),
+    )
+
+    layer = torch.nn.Module()
+    layer.moe_config = moe_config
+    w13_shape = (2, 512, 256)
+    w2_shape = (2, 256, 256)
+    layer.register_parameter(
+        "w13_weight",
+        torch.nn.Parameter(
+            torch.randn(w13_shape, dtype=torch.bfloat16, device="cuda"),
+            requires_grad=False,
+        ),
+    )
+    layer.register_parameter(
+        "w2_weight",
+        torch.nn.Parameter(
+            torch.randn(w2_shape, dtype=torch.bfloat16, device="cuda"),
+            requires_grad=False,
+        ),
+    )
+    w13_ptr = layer.w13_weight.data_ptr()
+    w2_ptr = layer.w2_weight.data_ptr()
+
+    for _ in range(2):
+        reloaded_w13 = torch.randn_like(layer.w13_weight)
+        reloaded_w2 = torch.randn_like(layer.w2_weight)
+        expected_w13, expected_w2 = (
+            convert_moe_weights_to_flashinfer_trtllm_block_layout(
+                {},
+                reloaded_w13.clone(),
+                reloaded_w2.clone(),
+            )
+        )
+
+        layer.w13_weight.copy_(reloaded_w13)
+        layer.w2_weight.copy_(reloaded_w2)
+        method._setup_kernel(layer, layer.w13_weight, layer.w2_weight)
+
+        assert layer.w13_weight.shape == w13_shape
+        assert layer.w2_weight.shape == w2_shape
+        assert layer.w13_weight.data_ptr() == w13_ptr
+        assert layer.w2_weight.data_ptr() == w2_ptr
+        kernel_w13, kernel_w2 = method._kernel_weights(layer)
+        torch.testing.assert_close(kernel_w13, expected_w13)
+        torch.testing.assert_close(kernel_w2, expected_w2)
+
+
 @pytest.mark.parametrize(
     ("weight_key", "activation_key", "activation", "expected"),
     [
