@@ -22,6 +22,7 @@ pub use event::{
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
+use output::apply_output_grammar;
 pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
@@ -60,7 +61,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
-use vllm_text::{Prompt, TextLlm, TextRequest};
+use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
@@ -178,15 +179,8 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let rendered = self.backend.chat_renderer().render(&request)?;
-        let reasoning_parser_kwargs =
-            request
-                .sampling_params
-                .structured_outputs
-                .is_some()
-                .then(|| ReasoningParserKwargs {
-                    chat_template_kwargs: rendered.effective_template_kwargs.clone(),
-                });
+        let mut rendered = self.backend.chat_renderer().render(&request)?;
+        let chat_template_kwargs = std::mem::take(&mut rendered.effective_template_kwargs);
         let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
         Ok(TextRequest {
             request_id: request.request_id,
@@ -201,7 +195,10 @@ impl ChatRequestProcessor {
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
             session_id: request.session_id,
-            reasoning_parser_kwargs,
+            reasoning_parser_kwargs: ReasoningParserKwargs {
+                chat_template_kwargs,
+            },
+            reasoning_ended: None,
             lora_request: request.lora_request,
             arrival_time: Some(arrival_time),
         })
@@ -214,19 +211,36 @@ impl ChatRequestProcessor {
     }
 
     /// Prepare one chat request without submitting it to an engine.
+    ///
+    /// The returned text request is already tokenized: the output processor
+    /// is initialized from the final prompt token IDs and its grammar, if any,
+    /// is applied to the request before it is handed to `text_processor` again
+    /// for lowering.
     pub async fn prepare(
         &self,
         mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
-        let output_processor = self.backend.new_chat_output_processor(
+
+        let mut output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
                 tool_call_parser: &self.tool_call_parser,
                 reasoning_parser: &self.reasoning_parser,
             },
         )?;
-        let text_request = self.prepare_text_request(request).await?;
+        let mut text_request = self.prepare_text_request(request).await?;
+
+        // Initialize the output processor from the final prompt token IDs and apply
+        // the output grammar to the request, if any.
+        let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
+        let grammar = {
+            output_processor.initialize(prompt_token_ids)?;
+            output_processor.build_output_grammar()?
+        };
+        apply_output_grammar(&mut text_request, grammar)?;
+
         Ok((text_request, output_processor))
     }
 }
@@ -348,7 +362,8 @@ impl ChatLlm {
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let (text_request, output_processor) = self.processor.prepare(request).await?;
+        let (text_request, output_processor) =
+            self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 

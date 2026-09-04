@@ -696,13 +696,14 @@ async fn parse_completion(
     };
 
     let mut request = base_request.clone();
-    let processor = backends.chat_backend.new_chat_output_processor(
+    let mut processor = backends.chat_backend.new_chat_output_processor(
         &mut request,
         NewChatOutputProcessorOptions {
             tool_call_parser: &case.tool_call_parser,
             reasoning_parser: &case.reasoning_parser,
         },
     )?;
+    processor.initialize(&prompt_token_ids)?;
 
     let decoded = decoded_completion_stream(
         tokenizer.as_ref(),

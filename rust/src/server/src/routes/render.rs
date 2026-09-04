@@ -123,7 +123,7 @@ async fn render_chat(
     let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
     let (text_request, _) = state
         .chat
-        .prepare(chat_request)
+        .prepare(chat_request, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?;
     Ok(Json(lower_render_request(

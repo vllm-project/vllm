@@ -79,7 +79,8 @@ pub(super) fn prepare_generate_request(
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
-        reasoning_parser_kwargs: None,
+        reasoning_parser_kwargs: Default::default(),
+        reasoning_ended: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
     };

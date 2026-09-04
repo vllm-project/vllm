@@ -48,25 +48,6 @@ impl UnifiedParserState {
         }
     }
 
-    /// Initialize parser state once prompt token IDs are available.
-    fn initialize(&mut self, prompt_token_ids: &[u32]) {
-        if self.parser_failed {
-            return;
-        }
-
-        match self.parser.initialize(prompt_token_ids) {
-            Ok(()) => {}
-            Err(error) => {
-                warn!(
-                    error = %error.as_report(),
-                    "failed to initialize unified parser; falling back to plain text deltas"
-                );
-                self.parser_failed = true;
-                self.open_call_index = None;
-            }
-        }
-    }
-
     /// Convert one decoded text delta into zero or more parsed assistant events.
     fn process_delta(&mut self, delta: DecodedText) -> Result<Vec<AssistantEvent>> {
         if self.parser_failed {
@@ -262,7 +243,6 @@ pub(crate) async fn unified_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
-                state.initialize(&prompt_token_ids);
                 y.yield_ok(AssistantEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
