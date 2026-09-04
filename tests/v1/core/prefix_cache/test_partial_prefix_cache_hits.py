@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
@@ -22,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
@@ -69,6 +71,19 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
     manager.get_computed_blocks.assert_not_called()
 
 
+def drain_boundary_state_offloads(manager):
+    """Drain exact boundary-state block ids offered to a connector."""
+    return manager.take_boundary_state_offloads()
+
+
+def _free_block_ids(manager):
+    """Block ids the pool would hand out to the next allocation."""
+    return {
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    }
+
+
 def make_full_mamba_manager(
     *,
     dcp_world_size: int,
@@ -77,6 +92,7 @@ def make_full_mamba_manager(
     mamba_block_size: int = 4,
     num_blocks: int = 32,
     use_eagle: bool = False,
+    num_prefill_checkpoint_blocks: int = 0,
 ):
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -98,6 +114,7 @@ def make_full_mamba_manager(
                     shapes=(1, 1),
                     dtypes=(torch.float32,),
                     mamba_cache_mode="align",
+                    num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
                 ),
             ),
         ],
@@ -117,6 +134,31 @@ def make_full_mamba_manager(
     )
 
 
+def test_dcp_fine_hit_retention_uses_hash_alignment_without_eagle():
+    """DCP must not discard a reusable Mamba state at hash alignment."""
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=4,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=hash_block_size,
+        num_blocks=64,
+    )
+    manager.coordinator.retention_interval = 0
+
+    token_ids = list(range(7))
+    producer = make_request("producer", token_ids, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(producer)
+    assert num_computed == 0
+    assert manager.allocate_slots(producer, 6, 0, computed_blocks) is not None
+    manager.free(producer)
+    manager.new_step_starts()
+
+    consumer = make_request("consumer", token_ids, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(consumer)
+    assert num_computed == 6
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 4])
 def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
@@ -130,11 +172,12 @@ def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        use_eagle_block_drop=False,
         hash_block_size=hash_block_size,
         dcp_world_size=dcp_world_size,
         scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     split = Scheduler._mamba_block_aligned_split
 
@@ -177,9 +220,10 @@ def test_mamba_align_split_when_block_exceeds_scheduling_budget():
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=token_budget,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
-        use_eagle=False,
+        use_eagle_block_drop=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split
@@ -215,9 +259,10 @@ def test_mamba_align_split_when_block_exceeds_long_prefill_threshold():
         scheduler_config=SimpleNamespace(
             long_prefill_token_threshold=long_prefill_threshold
         ),
-        use_eagle=False,
+        use_eagle_block_drop=False,
         hash_block_size=32,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
     req = make_request("0", [0] * prompt_length, 32, sha256)
     split = Scheduler._mamba_block_aligned_split
@@ -462,6 +507,85 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert moved[0].block_hash_num_tokens == 6
 
 
+def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
+    hash_block_size = 2
+    mamba_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+
+    owner = make_request("owner", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(owner)
+    assert manager.allocate_slots(owner, 6, num_computed, computed_blocks) is not None
+    manager.free(owner)
+    manager.new_step_starts()
+
+    partial_hash = owner.block_hashes[2]
+    partial_block = manager.block_pool.get_cached_block(partial_hash, [1])
+    assert partial_block is not None
+    partial_block_id = partial_block[0].block_id
+
+    replay = make_request(
+        "replay",
+        [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6],
+        hash_block_size,
+        sha256,
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == 6
+
+    realigned_blocks = manager.allocate_slots(replay, 2, num_computed, computed_blocks)
+    assert realigned_blocks is not None
+    mamba_cow_block_id = realigned_blocks.get_block_ids()[1][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_block_id, mamba_cow_block_id) in copies
+    manager.block_pool.free_blocks(retained)
+
+    replay.num_computed_tokens = 8
+    manager.new_step_starts()
+    final_blocks = manager.allocate_slots(replay, 6)
+    assert final_blocks is not None
+
+    checkpoint_block_id, running_block_id = final_blocks.get_block_ids()[1]
+    assert len({mamba_cow_block_id, checkpoint_block_id, running_block_id}) == 3
+    mamba_blocks = manager.get_blocks(replay.request_id).blocks[1]
+    assert mamba_blocks[2].block_id == checkpoint_block_id
+    assert mamba_blocks[3].block_id == running_block_id
+
+
+def test_internal_checkpoint_requires_block_aligned_start():
+    hash_block_size = 2
+    mamba_block_size = 16
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("producer", list(range(50)), hash_block_size, sha256)
+
+    # Compute token 0 first, so the next query starts at token 1, which is not
+    # aligned to the Mamba block size.
+    assert manager.allocate_slots(request, 1) is not None
+    request.num_computed_tokens = 1
+    manager.new_step_starts()
+
+    new_blocks = manager.allocate_slots(request, 49)
+
+    assert new_blocks is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    checkpoint_block_idx = 48 // mamba_block_size - 1
+    assert mamba_blocks[checkpoint_block_idx].is_null
+    assert not mamba_blocks[-1].is_null
+    checkpoint_hash = request.block_hashes[48 // hash_block_size - 1]
+    assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     """An external mid-block hit must become a running request even when its
     first continuation does not need another Mamba block."""
@@ -534,10 +658,95 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     assert moved[0].block_id == cow_copy.dst_block_id
 
 
-def test_take_partial_tail_offloads_returns_cow_target():
-    """The connector offload hand-off exposes the mamba CoW *target* block Y
-    (the durable boundary state), not the overwritten source X, and only at
-    the CoW step."""
+def test_boundary_state_offloads_returns_cow_target():
+    """Boundary hand-offs expose aligned snapshots and the partial-tail CoW
+    target, never the overwritten CoW source."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_prefill_checkpoint_blocks=1,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+
+    # Step A offers the materialized aligned checkpoint immediately.
+    ((group_id, block_id, boundary_tokens),) = drain_boundary_state_offloads(manager)[
+        "0"
+    ]
+    assert group_id == 1
+    assert boundary_tokens == 4
+    aligned_hash = req0.block_hashes[4 // hash_block_size - 1]
+    aligned_block = manager.block_pool.get_cached_block(
+        aligned_hash, kv_cache_group_ids=[1]
+    )
+    assert aligned_block is not None
+    assert block_id == aligned_block[0].block_id
+
+    partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
+    source_block = manager.block_pool.get_cached_block(
+        partial_mamba_hash, kv_cache_group_ids=[1]
+    )
+    assert source_block is not None
+    source_block_id = source_block[0].block_id
+
+    # Step B: the producer continues, triggering the CoW X->Y.
+    req0.num_computed_tokens = 6
+    req0.append_output_token_ids([3])
+    assert manager.allocate_slots(req0, 1) is not None
+
+    offloads = drain_boundary_state_offloads(manager)
+    assert list(offloads.keys()) == ["0"]
+    assert len(offloads["0"]) == 1
+    group_id, block_id, boundary_tokens = offloads["0"][0]
+    assert group_id == 1  # the mamba group
+    assert boundary_tokens == 6
+    copies, retained = manager.take_kv_cache_block_copies()
+    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
+    # The offload points at the durable CoW target Y, not the overwritten X.
+    assert block_id == cow_copy.dst_block_id
+    assert block_id != source_block_id
+    # Draining clears it.
+    assert manager.take_boundary_state_offloads() == {}
+    # CoW consumed the producer marker, so finishing cannot emit the same
+    # boundary a second time.
+    assert manager.finalize_partial_tail_offloads(req0) == []
+
+    manager.block_pool.free_blocks(retained)
+    manager.free(req0)
+
+
+def test_finished_partial_tail_uses_table_source_once():
+    """A finish without another allocation hands off the unchanged table block."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -574,50 +783,78 @@ def test_take_partial_tail_offloads_returns_cow_target():
     req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
 
-    # Step A registered the partial tail but has not CoW'd yet: no offload.
-    assert manager.take_partial_tail_offloads() == {}
-
-    partial_mamba_hash = req0.block_hashes[6 // hash_block_size - 1]
-    source_block = manager.block_pool.get_cached_block(
-        partial_mamba_hash, kv_cache_group_ids=[1]
-    )
-    assert source_block is not None
-    source_block_id = source_block[0].block_id
-
-    # Step B: the producer continues, triggering the CoW X->Y.
     req0.num_computed_tokens = 6
-    req0.append_output_token_ids([3])
-    assert manager.allocate_slots(req0, 1) is not None
+    offloads = manager.finalize_partial_tail_offloads(req0)
 
-    offloads = manager.take_partial_tail_offloads()
-    assert list(offloads.keys()) == ["0"]
-    assert len(offloads["0"]) == 1
-    group_id, block_id, boundary_tokens = offloads["0"][0]
-    assert group_id == 1  # the mamba group
-    assert boundary_tokens == 6
-    copies, _ = manager.take_kv_cache_block_copies()
-    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
-    # The offload points at the durable CoW target Y, not the overwritten X.
-    assert block_id == cow_copy.dst_block_id
-    assert block_id != source_block_id
-    # Draining clears it.
-    assert manager.take_partial_tail_offloads() == {}
+    assert offloads == [(1, source_block_id, 6)]
+    assert manager.finalize_partial_tail_offloads(req0) == []
+    assert manager.take_boundary_state_offloads() == {}
 
-    # The hand-off pinned Y (its CoW retention is released after this step,
-    # and Y is off the request block table); freeing the request unpins it.
-    cow_block = manager.block_pool.blocks[block_id]
-    pinned_ref = cow_block.ref_cnt
-    assert pinned_ref >= 1
-    manager.free(req0)
-    assert cow_block.ref_cnt == pinned_ref - 1
+    # A table state that advanced beyond the boundary is unsafe and is
+    # consumed without producing a handoff.
+    advanced_manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req1 = make_request("1", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = advanced_manager.get_computed_blocks(req1)
+    assert (
+        advanced_manager.allocate_slots(req1, 6, num_computed, computed_blocks)
+        is not None
+    )
+    req1.num_computed_tokens = 7
+    assert advanced_manager.finalize_partial_tail_offloads(req1) == []
+    assert advanced_manager.finalize_partial_tail_offloads(req1) == []
 
 
-def test_partial_tail_pin_survives_released_cow_retention():
-    """If the CoW retention is released before the hand-off is drained
-    (immediate-free mode), the drain must rescue the cow block from the free
-    queue: a raw ref increment would leave a ref>0 block allocatable, and the
-    next allocation would pop it and assert."""
+def test_connector_finish_registers_partial_tail_before_cleanup():
+    class _Connector(SupportsHMA):
+        def register_finished_partial_tail(self, request, block_ids, offloads):
+            self.registered = (request, block_ids, offloads)
+            return True
+
+        def request_finished_all_groups(self, request, block_ids):
+            return False, None
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = _Connector()
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_producer=True)
+    )
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.kv_cache_manager.finalize_partial_tail_offloads.return_value = [
+        (1, 9, 12)
+    ]
+    scheduler.kv_cache_manager.get_block_ids_for_computed_tokens.return_value = (
+        [3],
+        [9],
+    )
+    request = SimpleNamespace(
+        request_id="0",
+        num_computed_tokens=12,
+        num_in_flight_tokens=0,
+        num_prompt_tokens=12,
+    )
+
+    delay_free, kv_xfer_params = scheduler._connector_finished(request)
+
+    assert delay_free is True
+    assert kv_xfer_params is None
+    assert scheduler.connector.registered == (
+        request,
+        ([3], [9]),
+        [(1, 9, 12)],
+    )
+    scheduler.kv_cache_manager.remove_skipped_blocks.assert_called_once()
+
+
+def test_block_pool_touch_pins_released_cow_target():
+    """The connector can rescue an offered CoW target after its step-scoped
+    retention is released by using the bound BlockPool's touch method."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -661,13 +898,18 @@ def test_partial_tail_pin_survives_released_cow_retention():
     _copies, retained = manager.take_kv_cache_block_copies()
     manager.block_pool.free_blocks(retained)
 
-    offloads = manager.take_partial_tail_offloads()
+    offloads = drain_boundary_state_offloads(manager)
     ((_group_id, block_id, boundary_tokens),) = offloads["0"]
     assert boundary_tokens == 6
     cow_block = manager.block_pool.blocks[block_id]
-    assert cow_block.ref_cnt == 1
+    assert cow_block.ref_cnt == 0
+    assert block_id in _free_block_ids(manager)
 
-    # The pinned block is out of the free queue: draining every free block
+    manager.block_pool.touch([cow_block])
+    assert cow_block.ref_cnt == 1
+    assert block_id not in _free_block_ids(manager)
+
+    # The connector-pinned block is out of the free queue: draining every free block
     # neither trips the allocator's ref_cnt assert nor hands it out.
     new_blocks = manager.block_pool.get_new_blocks(
         manager.block_pool.get_num_free_blocks()
@@ -675,7 +917,7 @@ def test_partial_tail_pin_survives_released_cow_retention():
     assert block_id not in {b.block_id for b in new_blocks}
 
 
-def test_partial_tail_offload_dropped_when_request_freed_before_drain():
+def test_boundary_state_offload_dropped_when_request_freed_before_drain():
     """A hand-off recorded in the same scheduling pass as the request's death
     must not be drained: its release hook has already run, so draining would
     leak a pinned block."""
@@ -720,12 +962,12 @@ def test_partial_tail_offload_dropped_when_request_freed_before_drain():
 
     # The request dies (preempt/abort) before the scheduler drains.
     manager.block_pool.free_blocks(manager.pop_blocks_for_free(req0))
-    assert manager.take_partial_tail_offloads() == {}
+    assert manager.take_boundary_state_offloads() == {}
 
 
-def test_take_partial_tail_offloads_empty_without_partial_tail():
-    """A prompt ending on a block boundary registers no partial tail, so there
-    is nothing to offload."""
+def test_boundary_state_offloads_block_aligned_prompt():
+    """A prompt ending on a block boundary registers no CoW partial tail; its
+    boundary state block is handed off as a snapshot instead (once)."""
     hash_block_size = 2
     block_size = 2 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -763,12 +1005,17 @@ def test_take_partial_tail_offloads_empty_without_partial_tail():
     req0 = make_request("0", [0, 0, 1, 1], hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
     assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
-    assert manager.take_partial_tail_offloads() == {}
+    mamba_blocks = manager.coordinator.single_type_managers[1].req_to_blocks["0"]
+    ((group_id, block_id, boundary),) = drain_boundary_state_offloads(manager)["0"]
+    assert group_id == 1
+    assert boundary == block_size
+    assert block_id == mamba_blocks[0].block_id
 
     req0.num_computed_tokens = 4
     req0.append_output_token_ids([2])
     assert manager.allocate_slots(req0, 1) is not None
-    assert manager.take_partial_tail_offloads() == {}
+    # The boundary was already handed off; decoding emits nothing new.
+    assert manager.take_boundary_state_offloads() == {}
 
 
 def test_truncate_computed_blocks_preserves_sparse_prefix_positions():
@@ -1555,6 +1802,127 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
 
 
+def test_opted_out_scratch_group_keeps_partial_hash_hits():
+    hash_block_size = 2
+    mamba_block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["tail"],
+                KpoolTailSpec(
+                    block_size=mamba_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=mamba_block_size,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.enable_partial_hash_hits
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+
+
+def test_kpool_tail_supports_128_token_partial_hash_hits():
+    hash_block_size = 128
+    cache_block_size = 9 * hash_block_size
+    kpool_block_size = 64
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=cache_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=cache_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["tail"],
+                KpoolTailSpec(
+                    block_size=kpool_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=kpool_block_size,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    assert manager.coordinator.scheduler_block_size == cache_block_size
+    assert manager.coordinator.hash_block_size == hash_block_size
+    assert manager.coordinator.enable_partial_hash_hits
+
+    shared_prefix = [10] * (12 * hash_block_size)
+    req0 = make_request("0", shared_prefix, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert (
+        manager.allocate_slots(req0, len(shared_prefix), num_computed, computed_blocks)
+        is not None
+    )
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request("1", shared_prefix + [12] * 64, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == len(shared_prefix)
+
+
 @pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
 def test_hybrid_partial_hash_hit_uses_cow_under_dcp(dcp_world_size: int):
     hash_block_size = 2
@@ -1701,3 +2069,213 @@ def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
     assert num_computed == 4
     assert [len(group) for group in computed_blocks.blocks] == [1, 1]
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
+
+
+def _snapshot_offload_kv_cache_config(
+    hash_block_size: int, block_size: int, num_blocks: int = 24
+):
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
+def test_retention_snapshots_handed_off_with_exact_block_ids():
+    """Under sparse retention, each retained mamba boundary state block is
+    handed to the connector with its exact block id. Connectors must not resolve
+    align-mode state blocks positionally because the block table is not
+    append-only."""
+    hash_block_size = 2
+    block_size = 4
+    manager = make_kv_cache_manager(
+        kv_cache_config=_snapshot_offload_kv_cache_config(hash_block_size, block_size),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    manager.coordinator.retention_interval = 2 * block_size
+
+    req0 = make_request("0", [0] * 16, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+
+    mamba_blocks = manager.coordinator.single_type_managers[1].req_to_blocks["0"]
+    offloads = drain_boundary_state_offloads(manager)
+    ((group_id, block_id, boundary),) = offloads["0"]
+    assert group_id == 1
+    assert boundary == 2 * block_size
+    assert block_id == mamba_blocks[1].block_id
+
+    req0.num_computed_tokens = 8
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 8) is not None
+
+    offloads = drain_boundary_state_offloads(manager)
+    ((group_id, block_id2, boundary2),) = offloads["0"]
+    assert group_id == 1
+    assert boundary2 == 4 * block_size
+    assert block_id2 == mamba_blocks[3].block_id
+    # Interior align-mode positions stay null and are never handed off.
+    assert mamba_blocks[0].is_null and mamba_blocks[2].is_null
+
+    manager.free(req0)
+
+
+def test_snapshot_handoff_dense_default_retention():
+    """With dense (default) retention, every materialized mamba boundary
+    state block is handed off — regular mamba-align + prefix-match-unit
+    deployments get store-able boundary snapshots without setting
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL."""
+    hash_block_size = 2
+    block_size = 4
+    manager = make_kv_cache_manager(
+        kv_cache_config=_snapshot_offload_kv_cache_config(hash_block_size, block_size),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    assert manager.coordinator.retention_interval is None
+
+    req0 = make_request("0", [0] * 16, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+
+    mamba_blocks = manager.coordinator.single_type_managers[1].req_to_blocks["0"]
+    ((group_id, block_id, boundary),) = drain_boundary_state_offloads(manager)["0"]
+    assert group_id == 1
+    assert boundary == 2 * block_size
+    assert block_id == mamba_blocks[1].block_id
+
+    req0.num_computed_tokens = 8
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 8) is not None
+    ((group_id, block_id2, boundary2),) = drain_boundary_state_offloads(manager)["0"]
+    assert group_id == 1
+    assert boundary2 == 4 * block_size
+    assert block_id2 == mamba_blocks[3].block_id
+
+
+def _run_chunked_prefill(manager, req, chunk_size, num_chunks):
+    """Prefill ``req`` one ``chunk_size`` chunk per scheduler step, yielding the
+    boundary-state hand-offs offered (and claimed) at each step."""
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+    for step in range(num_chunks):
+        manager.new_step_starts()
+        req.num_computed_tokens = step * chunk_size
+        if step == 0:
+            allocated = manager.allocate_slots(
+                req, chunk_size, num_computed, computed_blocks
+            )
+        else:
+            allocated = manager.allocate_slots(req, chunk_size)
+        assert allocated is not None
+        yield drain_boundary_state_offloads(manager).get(req.request_id, [])
+
+
+def test_boundary_state_offer_includes_more_mamba_groups_than_two():
+    """One offer batch carries one exact block entry per mamba group."""
+    block_size = 8
+    num_mamba_groups = 3
+    manager = make_kv_cache_manager(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=200,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                *(
+                    KVCacheGroupSpec(
+                        [f"mamba{i}"],
+                        MambaSpec(
+                            block_size=block_size,
+                            shapes=(1, 1),
+                            dtypes=(torch.float32,),
+                            mamba_cache_mode="align",
+                        ),
+                    )
+                    for i in range(num_mamba_groups)
+                ),
+            ],
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req0 = make_request("0", [0] * (2 * block_size), block_size, sha256)
+    entries = next(_run_chunked_prefill(manager, req0, block_size, 1))
+
+    assert [group_id for group_id, _, _ in entries] == [1, 2, 3]
+    assert {boundary for _, _, boundary in entries} == {block_size}
+
+
+def test_boundary_states_offered_past_prompt_for_resumed_prefill():
+    """The core offers every committed boundary, including past
+    ``num_prompt_tokens``. A resumed request re-prefills its generated tokens
+    and every group re-saves them, so filtering on the original prompt length
+    would silently strip the mamba key for boundaries full attention still
+    stores; only the connector knows where its save window ends."""
+    block_size = 8
+    prompt_len = block_size
+    manager = make_kv_cache_manager(
+        kv_cache_config=_snapshot_offload_kv_cache_config(
+            hash_block_size=block_size, block_size=block_size, num_blocks=200
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req0 = make_request("0", [0] * prompt_len, block_size, sha256)
+    assert [
+        boundary
+        for entries in _run_chunked_prefill(manager, req0, block_size, 1)
+        for _, _, boundary in entries
+    ] == [prompt_len]
+
+    # Generate past the next mamba boundary, then replay it as a resumed
+    # prefill: its committed boundary is offered even though it is past the
+    # prompt, matching what full attention saves for the same range.
+    for i in range(block_size):
+        manager.new_step_starts()
+        req0.num_computed_tokens = prompt_len + i
+        req0.append_output_token_ids([1])
+        assert manager.allocate_slots(req0, 1) is not None
+        drain_boundary_state_offloads(manager)
+    assert req0.num_tokens == 2 * block_size
+
+    manager.free(req0)
+    manager.new_step_starts()
+    req0.num_computed_tokens = 0
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, req0.num_tokens - num_computed, num_computed)
+    offered = [b for _, _, b in drain_boundary_state_offloads(manager).get("0", [])]
+    assert 2 * block_size in offered
+    assert req0.num_prompt_tokens < 2 * block_size

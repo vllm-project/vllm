@@ -116,7 +116,7 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
     103: {
         2: 64,  # 64MB
         4: 64,  # 64MB
-        8: 2,  # 2MB
+        8: 4,  # 4MB
         16: 64,  # 64MB (mnnvl multi-node)
     },
     107: {
@@ -989,6 +989,23 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         )
 
 
+def _fused_ar_workspace_hidden_dim(config: VllmConfig) -> int:
+    """Widest hidden size across the target and (optional) draft models.
+
+    The FlashInfer allreduce+RMSNorm workspace is a process-global singleton
+    created eagerly at pass construction and reused by every model. Under
+    speculative decoding the draft shares it, so it must fit the larger of the
+    two hidden sizes; a draft wider than the target otherwise overflows the
+    target-sized buffer (vLLM #52023).
+    """
+    hidden_dim = config.model_config.get_hidden_size()
+    spec = config.speculative_config
+    draft_model_config = getattr(spec, "draft_model_config", None) if spec else None
+    if draft_model_config is not None:
+        hidden_dim = max(hidden_dim, draft_model_config.get_hidden_size())
+    return hidden_dim
+
+
 class AllReduceFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
@@ -1005,7 +1022,9 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                 "AllReduce fusion pass is disabled for missing model_config."
             )
             return
-        self.hidden_dim = config.model_config.get_hidden_size()
+        # Size the shared workspace for the widest model that reuses it (the
+        # draft under speculative decoding may be wider than the target).
+        self.workspace_hidden_dim = _fused_ar_workspace_hidden_dim(config)
         self.group = get_tp_group().cpu_group
         rank = get_tensor_model_parallel_rank()
         if flashinfer_comm is None:
@@ -1026,7 +1045,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = max_size // (self.hidden_dim * element_size)
+        self.max_token_num = max_size // (self.workspace_hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
         self.max_token_num = min(
@@ -1043,7 +1062,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             world_size=self.tp_size,
             rank=rank,
             max_token_num=self.max_token_num,
-            hidden_dim=self.hidden_dim,
+            hidden_dim=self.workspace_hidden_dim,
             dtype=self.model_dtype,
             group=self.group,
         )

@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, get_args
 
 import msgspec
 import zmq
@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -281,6 +282,17 @@ class EngineCore:
                 )
                 vllm_config.cache_config.enable_prefix_caching = False
 
+        # Resolve the KV cache layout before memory profiling: workers that
+        # capture full cudagraphs initialize a minimal KV cache during it.
+        # Attention-free models resolve the default so layout reads never precede
+        # resolution.
+        layout = resolve_kv_cache_layout(
+            vllm_config,
+            self.model_executor.get_supported_kv_cache_layouts(),
+            [s for specs in kv_cache_specs for s in specs.values()],
+        )
+        self.model_executor.set_kv_cache_layout(layout.name)
+
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
@@ -307,6 +319,8 @@ class EngineCore:
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
+        for kv_cache_config in kv_cache_configs:
+            kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling
@@ -319,8 +333,19 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # Exclude groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail, a 1-block/req scratch buffer with block_size=kpool):
+            # their small block_size would otherwise drag the global block_size
+            # below the real allocator block size and desync it from mamba.
+            participating = [
+                g.kv_cache_spec.block_size
+                for g in kv_cache_groups
+                if g.kv_cache_spec.prefix_cacheable
+            ]
             vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+                participating
+                if participating
+                else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -825,6 +850,13 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
+    def _finish_pause(self, clear_cache: bool) -> None:
+        # A completed pause promises an idle device: nothing else waits on
+        # the last dummy batch an idle DP rank launches.
+        self.model_executor.collective_rpc("synchronize_device")
+        if clear_cache:
+            self._reset_caches()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -841,7 +873,7 @@ class EngineCore:
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
@@ -851,8 +883,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if clear_cache:
-            self._reset_caches()
+        self._finish_pause(clear_cache)
 
         return None
 
@@ -1919,12 +1950,11 @@ class EngineCoreProc(EngineCore):
         - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            if clear_cache:
-                engine._reset_caches()
+            engine._finish_pause(clear_cache)
             future.set_result(None)
 
         if mode == "abort":
@@ -1937,8 +1967,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            if clear_cache:
-                self._reset_caches()
+            self._finish_pause(clear_cache)
             return None
 
         future = Future[Any]()
