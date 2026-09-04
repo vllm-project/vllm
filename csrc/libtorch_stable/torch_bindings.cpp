@@ -955,14 +955,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
 
-  // Grouped concat_and_cache_mla across all layers (bf16 only). Each
-  // layer's cache base pointer is read from kv_cache_ptrs.
+  // Grouped concat_and_cache_mla across all layers. Each layer's cache base
+  // pointer and optional plain-FP8 scale are read from device tensors.
   ops.def(
       "concat_and_cache_mla_grouped(Tensor kv_c, Tensor k_pe,"
       "                             Tensor kv_cache_ptrs,"
       "                             Tensor slot_mapping,"
       "                             int block_size, int block_stride,"
-      "                             int entry_stride) -> ()");
+      "                             int entry_stride,"
+      "                             Tensor? kv_scales=None,"
+      "                             str kv_cache_dtype='auto') -> ()");
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(

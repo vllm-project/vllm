@@ -2890,6 +2890,8 @@ def concat_and_cache_mla_grouped(
     block_size: int,
     block_stride: int,
     entry_stride: int,
+    kv_scales: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla_grouped(
         kv_c,
@@ -2899,6 +2901,8 @@ def concat_and_cache_mla_grouped(
         block_size,
         block_stride,
         entry_stride,
+        kv_scales,
+        kv_cache_dtype,
     )
 
 
