@@ -45,8 +45,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
+#  10: Add dense virtual transfer pages for compressed MLA caches
 #
-NIXL_CONNECTOR_VERSION: int = 9
+NIXL_CONNECTOR_VERSION: int = 10
 
 
 @dataclass
