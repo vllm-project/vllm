@@ -389,5 +389,58 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
     assert loaded_model.model.embed_tokens is target_embedding
 
 
+def test_interleaved_deepstack_split_keeps_embedding_modality():
+    """Regression for #53700: the deepstack torch.split must carry the
+    embedding's modality over to the main-scale split, otherwise the
+    interleaved audio-in-video merge cannot group embeddings by modality.
+    """
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+    from vllm.multimodal.utils import set_mm_embedding_modality
+
+    text_hidden = 8
+    multiscale_len = 2
+    thinker = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    thinker.config = SimpleNamespace(
+        video_token_id=1003,
+        audio_token_id=1001,
+        image_token_id=1002,
+        text_config=SimpleNamespace(hidden_size=text_hidden),
+    )
+    embed_tokens = nn.Embedding(2000, text_hidden)
+    nn.init.zeros_(embed_tokens.weight)
+    thinker.language_model = SimpleNamespace(embed_input_ids=embed_tokens)
+    thinker.visual = SimpleNamespace(deepstack_visual_indexes=[0, 1])
+    thinker._set_deepstack_input_embeds = Mock()
+
+    # [text text][V V V V][A A A][V V][A A][text]
+    input_ids = torch.tensor(
+        [0, 0, 1003, 1003, 1003, 1003, 1001, 1001, 1001, 1003, 1003, 1001, 1001, 0]
+    )
+    is_multimodal = (input_ids == 1001) | (input_ids == 1003)
+
+    video_embed = set_mm_embedding_modality(
+        torch.full((6, text_hidden * (multiscale_len + 1)), 1.0), "video"
+    )
+    audio_embed = set_mm_embedding_modality(torch.full((5, text_hidden), 2.0), "audio")
+
+    out = thinker.embed_input_ids(
+        input_ids,
+        [video_embed, audio_embed],
+        is_multimodal=is_multimodal,
+    )
+
+    is_video = input_ids == 1003
+    is_audio = input_ids == 1001
+    assert out.shape == (len(input_ids), text_hidden)
+    assert torch.all(out[is_video] == 1.0)
+    assert torch.all(out[is_audio] == 2.0)
+    assert torch.all(out[~(is_video | is_audio)] == 0.0)
+    thinker._set_deepstack_input_embeds.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
