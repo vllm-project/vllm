@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -687,17 +687,13 @@ def prepare_inputs_to_capture(
         slot_mappings, kv_cache_config
     )
 
-    # HACK(woosuk): Special handling for DCP.
-    if block_tables.cp_size > 1:
-        prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-        )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+    maybe_prepare_dcp_local_seq_lens(
+        input_batch,
+        input_buffers,
+        block_tables.cp_size,
+        block_tables.cp_rank,
+        block_tables.cp_interleave,
+    )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention
     # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
