@@ -196,6 +196,82 @@ class TestBuildSrcSplitHandles:
 class TestMambaPlanSplitHandles:
     """Verify split handles for Mamba with FA/SSM distinction."""
 
+    @pytest.mark.parametrize("mode", ["pull", "push"])
+    @pytest.mark.parametrize("local_tp,remote_tp", [(1, 2), (2, 1), (2, 4), (4, 2)])
+    def test_replicated_conv_has_one_writer(self, mode, local_tp, remote_tp):
+        """Both READ and WRITE transfers select one B/C source per consumer."""
+        writes = [0] * (local_tp if mode == "pull" else remote_tp)
+        for rank in range(local_tp):
+            worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
+            worker._has_mamba = True
+            worker._TRANSFER_MODE = mode
+            worker.tp_rank = rank
+            ratio = (
+                local_tp // remote_tp
+                if local_tp >= remote_tp
+                else -(remote_tp // local_tp)
+            )
+            worker.transfer_topo = SimpleNamespace(
+                get_engine_info=lambda _: SimpleNamespace(remote_tp_size=remote_tp),
+                tp_ratio=lambda _, ratio=ratio: ratio,
+            )
+            plan = _compute_mapping(
+                tp_rank=rank,
+                tp_size=local_tp,
+                remote_tp_size=remote_tp,
+                group_spec_types=(FullAttentionSpec, MambaSpec),
+            )
+            worker.tp_mappings = {"peer": plan}
+            worker._mamba_conv_replicated = {"peer": True}
+            for remote_rank in plan.all_source_ranks:
+                if not worker._skip_replicated_mamba_conv("peer", remote_rank):
+                    writes[rank if mode == "pull" else remote_rank] += 1
+        assert writes == [1] * len(writes)
+
+    def test_replicated_conv_splits_only_x_and_temporal_state(self):
+        """Gather head shards while keeping each B/C destination whole."""
+        plan = _compute_mapping(
+            tp_size=1,
+            remote_tp_size=2,
+            group_spec_types=(FullAttentionSpec, MambaSpec),
+        )
+        worker = _make_mock_worker_for_splits((FullAttentionSpec, MambaSpec))
+        worker._logical_num_blocks = 1
+        # One FA descriptor followed by x, B, C and temporal state.
+        src_blocks_data = np.array(
+            [
+                (1000, 200, 0),
+                (2000, 400, 0),
+                (3000, 100, 0),
+                (4000, 100, 0),
+                (5000, 800, 0),
+            ],
+            dtype=np.uint64,
+        )
+
+        splits = list(
+            worker._build_local_splits_from_plan(
+                plan, src_blocks_data, 1, replicated_conv=True
+            )
+        )
+
+        assert splits == [
+            [
+                (1000, 100, 0),
+                (2000, 200, 0),
+                (3000, 100, 0),
+                (4000, 100, 0),
+                (5000, 400, 0),
+            ],
+            [
+                (1100, 100, 0),
+                (2200, 200, 0),
+                (3000, 100, 0),
+                (4000, 100, 0),
+                (5400, 400, 0),
+            ],
+        ]
+
     def test_fa_and_ssm_different_split_factors(self):
         """Section 0 split by num_attn_reads, section 1 by abs_tp."""
         fa_readers = (0,)
