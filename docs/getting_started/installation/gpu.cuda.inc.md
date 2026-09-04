@@ -531,7 +531,52 @@ Use `pytorch/manylinux2_28-builder:cuda13.4` for `BUILD_BASE_IMAGE` on
 `ARCH=amd64`. `requirements/rubin-prerelease.txt` in this repo already
 carries a public pin set (public PyTorch nightly, `nvidia-cutlass-dsl[cu13]`,
 `flashinfer-python`) for this path, so no internal prerelease requirements
-file is needed.
+For `FINAL_BASE_IMAGE`, use the public, multi-arch
+`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+For `BUILD_BASE_IMAGE`, use:
+- `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
+- `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
+
+??? console "ARM64/AArch64 build command"
+
+    ```bash
+    docker buildx build --progress=plain --load \
+      --file docker/Dockerfile \
+      --target vllm-openai \
+      --platform "linux/arm64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-arm64" \
+      --build-arg max_jobs="$(nproc)" \
+      --build-arg nvcc_threads=2 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      --build-arg INSTALL_RUBIN_PRERELEASE=true \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+      --build-arg CUDA_VERSION=13.4 \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinuxaarch64-builder:cuda13.4" \
+      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      .
+    ```
+
+??? console "x86_64 build command"
+
+    ```bash
+    docker buildx build --progress=plain --load \
+      --file docker/Dockerfile \
+      --target vllm-openai \
+      --platform "linux/amd64" \
+      --tag "vllm/vllm-rubin-openai:prerelease-cu134-public-amd64" \
+      --build-arg max_jobs="$(nproc)" \
+      --build-arg nvcc_threads=2 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      --build-arg INSTALL_RUBIN_PRERELEASE=true \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
+      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
+      --build-arg CUDA_VERSION=13.4 \
+      --build-arg BUILD_BASE_IMAGE="pytorch/manylinux2_28-builder:cuda13.4" \
+      --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
+      .
+    ```
+
 
 !!! note
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
