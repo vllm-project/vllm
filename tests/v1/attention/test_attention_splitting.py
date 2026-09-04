@@ -131,6 +131,21 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
+def test_make_metadata_with_slice_preserves_dbo_metadata(mixed_small_metadata):
+    mixed_small_metadata.positions = torch.arange(
+        mixed_small_metadata.num_actual_tokens
+    )
+    mixed_small_metadata.is_prefilling = torch.tensor(
+        [False, True, True], dtype=torch.bool
+    )
+    ubatch_slice = UBatchSlice(slice(1, 3), slice(1, 7))
+
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
+
+    assert torch.equal(result.positions, torch.arange(1, 7))
+    assert torch.equal(result.is_prefilling, torch.tensor([True, True]))
+
+
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
     """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
