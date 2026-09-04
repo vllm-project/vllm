@@ -97,7 +97,7 @@ def _qsa_mqa_paged_uniform_kernel(
             scores,
             (BLOCK_N, DECODE_QUERY_LEN_PADDED, NUM_HEADS_PADDED),
         )
-        score = tl.sum(scores, axis=2) / HEAD_DIM**0.5
+        score = tl.sum(scores, axis=2)
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
             score,
@@ -123,8 +123,8 @@ def _qsa_mqa_paged_prefill_kernel(
     stride_logits_row,
     num_rows,
     query_offset,
+    page_table_width,
     PAGE_SIZE: tl.constexpr,
-    PAGE_TABLE_WIDTH: tl.constexpr,
     NUM_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     TILE_R: tl.constexpr,
@@ -132,7 +132,7 @@ def _qsa_mqa_paged_prefill_kernel(
     K_TILES: tl.constexpr,
     STAGES: tl.constexpr,
 ) -> None:
-    NUM_COLUMNS: tl.constexpr = PAGE_TABLE_WIDTH * PAGE_SIZE
+    num_columns = page_table_width * PAGE_SIZE
     NUM_HEADS_PADDED: tl.constexpr = triton.next_power_of_2(NUM_HEADS)
     # tl.dot requires a reduction dimension of at least 16.
     BLOCK_D: tl.constexpr = max(16, triton.next_power_of_2(HEAD_DIM))
@@ -163,7 +163,7 @@ def _qsa_mqa_paged_prefill_kernel(
     if k_tile_start * BLOCK_N >= max_visible:
         return
     k_tile_end = tl.minimum(k_tile_start + K_TILES, tl.cdiv(max_visible, BLOCK_N))
-    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(NUM_COLUMNS, BLOCK_N))
+    k_tile_end = tl.minimum(k_tile_end, tl.cdiv(num_columns, BLOCK_N))
 
     dims = tl.arange(0, BLOCK_D)
     m = tl.arange(0, TILE_R * NUM_HEADS_PADDED)
@@ -184,7 +184,7 @@ def _qsa_mqa_paged_prefill_kernel(
     for tile in tl.range(k_tile_start, k_tile_end, num_stages=STAGES):
         columns = tile * BLOCK_N + column_offsets
         live = columns < max_visible
-        logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
+        logical_page = tl.minimum(columns // PAGE_SIZE, page_table_width - 1)
         page_offset = columns % PAGE_SIZE
         physical_page = tl.load(
             page_table_ptr + request * stride_table_req + logical_page,
@@ -202,11 +202,11 @@ def _qsa_mqa_paged_prefill_kernel(
         )
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.reshape(scores, (BLOCK_N, TILE_R, NUM_HEADS_PADDED))
-        score = tl.sum(tl.maximum(scores, 0.0), axis=2) / HEAD_DIM**0.5
+        score = tl.sum(tl.maximum(scores, 0.0), axis=2)
         store_mask = (
             valid_rows[None, :]
             & (columns[:, None] < visible[None, :])
-            & (columns[:, None] < NUM_COLUMNS)
+            & (columns[:, None] < num_columns)
         )
         tl.store(
             logits_ptr + rows[None, :] * stride_logits_row + columns[:, None],
@@ -262,6 +262,15 @@ def _expand_qsa_indices_kernel(
         tl.where(valid, token, -1),
         mask=columns < OUTPUT_WIDTH,
     )
+    # TRAILING COUNT COLUMN: the packed buffer is OUTPUT_WIDTH+1 wide; the
+    # last column holds this row's valid-entry count (expanded blocks plus
+    # causal tail). It is NOT a token index — the sparse attention kernel
+    # reads it as the row's tile-loop bound.
+    if tl.program_id(1) == 0:
+        tl.store(
+            output_ptr + row * stride_output_row + OUTPUT_WIDTH * stride_output_column,
+            expanded_count + tail_count,
+        )
 
 
 def _decode_tiles_per_program(num_requests: int, columns: int) -> int:
@@ -372,22 +381,25 @@ def _prefill_logits(
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
     max_query_len: int,
+    logits_width: int,
     query_offset: int,
     num_queries: int,
 ) -> torch.Tensor:
     assert query_start_loc.shape == (page_table.shape[0] + 1,)
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
+    assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
 
-    columns = page_table.shape[1] * k_cache.shape[1]
-    logits = torch.empty((num_queries, columns), dtype=torch.float32, device=q.device)
+    logits = torch.empty(
+        (num_queries, logits_width), dtype=torch.float32, device=q.device
+    )
     TILE_R = 64
     BLOCK_N = 64
     K_TILES = 16
     grid = (
         page_table.shape[0],
         triton.cdiv(min(num_queries, max_query_len), TILE_R),
-        triton.cdiv(columns, BLOCK_N * K_TILES),
+        triton.cdiv(logits_width, BLOCK_N * K_TILES),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -402,8 +414,8 @@ def _prefill_logits(
         *logits.stride()[:-1],
         num_queries,
         query_offset,
+        page_table.shape[1],
         PAGE_SIZE=k_cache.shape[1],
-        PAGE_TABLE_WIDTH=page_table.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
         TILE_R=TILE_R,
@@ -430,7 +442,10 @@ def expand_qsa_block_indices(
     output_width = token_topk + compress_ratio - 1
     assert block_indices.shape == (query_positions.numel(), block_topk)
     assert visible_blocks.shape == query_positions.shape
-    assert out.shape == (block_indices.shape[0], output_width)
+    # +1: the packed buffer's trailing column holds each row's valid-entry
+    # count (never a token index); the index region below only writes
+    # columns [0, output_width).
+    assert out.shape == (block_indices.shape[0], output_width + 1)
     column_block = 256
     grid = (block_indices.shape[0], triton.cdiv(output_width, column_block))
     _expand_qsa_indices_kernel[grid](
@@ -557,6 +572,7 @@ def qsa_select_paged_prefill(
     compress_ratio: int,
     max_query_len: int,
     block_indices: torch.Tensor,
+    max_seq_len: int,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -572,16 +588,21 @@ def qsa_select_paged_prefill(
         compress_ratio: Number of logical tokens represented by a cache row.
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
+        max_seq_len: Longest context length in the batch this step.
     """
 
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     rows = q.shape[0]
-    columns = page_table.shape[1] * k_cache.shape[1]
+    # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
+    # columns. Round up to 64 to keep the logits row stride
+    # cooperative_topk-compatible.
+    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+    logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    rows_per_chunk = max(1, max_logits_bytes // (columns * 4))
+    rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
@@ -596,6 +617,7 @@ def qsa_select_paged_prefill(
             query_start_loc,
             visible_blocks,
             max_query_len,
+            logits_width,
             query_offset=query_start,
             num_queries=query_end - query_start,
         )

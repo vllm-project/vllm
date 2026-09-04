@@ -70,7 +70,7 @@ steps:
       - tests/lora
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # expandable_segments breaks custom all-reduce IPC on ROCm.
       - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
       - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py
       - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
