@@ -138,7 +138,7 @@ def _sample_local_expert_ids(
     global_num_experts: int,
     expert_map: torch.Tensor | None,
     device: torch.device,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     """Sample routed expert ids that this rank actually owns.
 
     ``topk_ids`` carries global ids. Under expert parallelism ``expert_map``
@@ -146,6 +146,9 @@ def _sample_local_expert_ids(
     another rank, and ``moe_align_block_size`` drops the invalid ones before the
     GEMMs. Sampling the local id range would therefore warm nothing on every
     rank whose slice does not start at 0, so draw from the owned global ids.
+
+    Returns ``None`` when the rank owns no expert, since then there is no expert
+    GEMM to warm.
     """
     if expert_map is None:
         return torch.randint(
@@ -153,7 +156,7 @@ def _sample_local_expert_ids(
         )
     owned = torch.nonzero(expert_map >= 0, as_tuple=True)[0]
     if owned.numel() == 0:
-        return torch.empty(shape, device=device, dtype=torch.int32)
+        return None
     picks = torch.randint(0, owned.numel(), shape, device=device)
     return owned[picks].to(torch.int32)
 
@@ -182,14 +185,20 @@ def _warmup_expert_gemms(
     )
     max_m = m_values[-1]
 
-    # Allocate for the largest M once and slice; `apply` resizes the
-    # workspaces it is given, so an oversized buffer is fine.
-    hidden_states = torch.zeros((max_m, hidden_size), device=device, dtype=act_dtype)
     # Spread tokens over the experts this rank owns so every expert block is
     # exercised and the token-to-block assignment matches a realistic batch.
+    # Sampled before any buffer is allocated so a rank that owns no expert
+    # returns without reserving memory.
     topk_ids = _sample_local_expert_ids(
         (max_m, top_k), layer.global_num_experts, layer.expert_map, device
     )
+    if topk_ids is None:
+        # No expert lives on this rank, so there is no expert GEMM to warm.
+        return
+
+    # Allocate for the largest M once and slice; `apply` resizes the
+    # workspaces it is given, so an oversized buffer is fine.
+    hidden_states = torch.zeros((max_m, hidden_size), device=device, dtype=act_dtype)
     topk_weights = torch.ones((max_m, top_k), device=device, dtype=torch.float32)
     workspace13_shape, workspace2_shape, output_shape = experts.workspace_shapes(
         max_m,

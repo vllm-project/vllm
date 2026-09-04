@@ -125,10 +125,12 @@ def test_sampled_expert_ids_stay_on_this_rank_under_expert_parallelism() -> None
     assert int(ids.max()) < start + local_num_experts
 
 
-def test_sampled_expert_ids_tolerate_a_rank_owning_nothing() -> None:
+def test_no_sampled_ids_when_the_rank_owns_no_expert() -> None:
+    # Returning a tensor here would hand uninitialised ids to `apply` as global
+    # expert ids, which can index expert_map out of bounds; the caller has to
+    # skip the warmup instead.
     expert_map = torch.full((16,), -1, dtype=torch.int32)
-    ids = _sample_local_expert_ids((4, 2), 16, expert_map, torch.device("cpu"))
-    assert ids.shape == (4, 2)
+    assert _sample_local_expert_ids((4, 2), 16, expert_map, torch.device("cpu")) is None
 
 
 def test_naive_block_assignment_cutoff_matches_the_kernel_condition() -> None:
