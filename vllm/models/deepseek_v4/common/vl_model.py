@@ -68,8 +68,8 @@ def _make_deepseek_v4_vl_weights_mapper(
         },
         orig_to_new_substr={
             **text_mapper.orig_to_new_substr,
-            # The MTP/DSpark draft heads are not supported for the vision
-            # variant; drop their weights.
+            # Draft models load the checkpoint's MTP weights separately from
+            # the target model.
             "mtp.": None,
         },
     )

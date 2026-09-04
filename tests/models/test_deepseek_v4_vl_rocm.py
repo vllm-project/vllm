@@ -8,8 +8,42 @@ import torch
 from torch import nn
 
 from vllm.model_executor.models.utils import WeightsMapper
+from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
+
+
+def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:
+    from vllm.config import CacheConfig
+    from vllm.models.deepseek_v4.attention import _resolve_dsv4_kv_cache_dtype
+
+    cache_config = CacheConfig()
+
+    resolved_dtype, torch_dtype = _resolve_dsv4_kv_cache_dtype(
+        use_fp8_ds_mla_layout=True,
+        kv_cache_dtype=cache_config.cache_dtype,
+        cache_config=cache_config,
+    )
+
+    assert resolved_dtype == "fp8_ds_mla"
+    assert torch_dtype is torch.uint8
+    assert cache_config.cache_dtype == "fp8_ds_mla"
+
+
+def test_rocm_packed_kv_cache_rejects_unquantized_dtype() -> None:
+    from vllm.config import CacheConfig
+    from vllm.models.deepseek_v4.attention import _resolve_dsv4_kv_cache_dtype
+
+    cache_config = CacheConfig(cache_dtype="bfloat16")
+
+    with pytest.raises(ValueError, match="only supports fp8 kv-cache"):
+        _resolve_dsv4_kv_cache_dtype(
+            use_fp8_ds_mla_layout=True,
+            kv_cache_dtype=cache_config.cache_dtype,
+            cache_config=cache_config,
+        )
 
 
 def test_vl_mapper_preserves_rocm_weight_mapping() -> None:
@@ -79,6 +113,75 @@ def test_rocm_moe_wires_vision_routing_on_hash_and_regular_layers(
         assert moe.gate.bias_vl is not None
         assert factory_kwargs["bias_vl"] is moe.gate.bias_vl
         assert factory_kwargs["image_sentinel_lo"] == IMAGE_SENTINEL_BASE_ID
+
+
+def test_rocm_mtp_forwards_input_ids_for_vision_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.deepseek_v4.amd import mtp as rocm_mtp
+
+    hidden_size = 4
+    hc_mult = 2
+
+    class FakeNorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+            self.variance_epsilon = 1e-6
+
+    class FakeMTPBlock(nn.Module):
+        use_fused_mhc = False
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_input_ids: torch.Tensor | None = None
+
+        def forward(
+            self,
+            *,
+            positions: torch.Tensor,
+            x: torch.Tensor,
+            input_ids: torch.Tensor | None,
+        ):
+            self.seen_input_ids = input_ids
+            return x, None, None, None
+
+    def passthrough_mtp_input(
+        inputs_embeds: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        *args,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return inputs_embeds, previous_hidden_states
+
+    monkeypatch.setattr(rocm_mtp, "fused_mtp_input_rmsnorm", passthrough_mtp_input)
+
+    layer = object.__new__(rocm_mtp.DeepSeekV4MultiTokenPredictorLayer)
+    nn.Module.__init__(layer)
+    layer.config = SimpleNamespace(hidden_size=hidden_size)
+    layer.hc_mult = hc_mult
+    layer.enorm = FakeNorm()
+    layer.hnorm = FakeNorm()
+    layer.e_proj = nn.Identity()
+    layer.h_proj = nn.Identity()
+    layer.mtp_block = FakeMTPBlock()
+
+    input_ids = torch.tensor([11, 12])
+    positions = torch.tensor([3, 4])
+    inputs_embeds = torch.arange(8, dtype=torch.float32).view(2, hidden_size)
+    previous_hidden_states = torch.arange(16, dtype=torch.float32).view(2, -1)
+
+    output = layer(
+        input_ids,
+        positions,
+        previous_hidden_states,
+        inputs_embeds,
+    )
+
+    assert layer.mtp_block.seen_input_ids is input_ids
+    expected = previous_hidden_states.view(2, hc_mult, hidden_size)
+    expected = expected + inputs_embeds.unsqueeze(-2)
+    torch.testing.assert_close(output, expected.flatten(1))
 
 
 def test_rocm_compute_logits_local_skips_gather() -> None:

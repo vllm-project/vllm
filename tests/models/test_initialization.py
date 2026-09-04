@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -161,12 +160,7 @@ def can_initialize(
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-        kwargs: dict[str, Any] = {}
-        if (
-            model_arch == "DeepseekV4ForConditionalGeneration"
-            and current_platform.is_rocm()
-        ):
-            kwargs["kv_cache_dtype"] = "fp8"
+        kwargs = {}
         if not model_info.enable_prefix_caching:
             kwargs["enable_prefix_caching"] = False
 

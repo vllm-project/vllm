@@ -446,6 +446,32 @@ def test_combine_topk_swa_indices_adds_image_visibility() -> None:
 
 
 @torch.inference_mode()
+def test_combine_topk_swa_indices_apc_hit_inside_image() -> None:
+    from vllm.models.deepseek_v4.amd.rocm import combine_topk_swa_indices
+
+    device = torch.device("cuda")
+    indices, lens = combine_topk_swa_indices(
+        torch.full((2, 1), -1, dtype=torch.int32, device=device),
+        torch.tensor([0, 2], dtype=torch.int32, device=device),
+        torch.tensor([10], dtype=torch.int32, device=device),
+        # Only positions [5, 10) exist in the gathered SWA workspace.
+        torch.tensor([5], dtype=torch.int32, device=device),
+        window_size=4,
+        compress_ratio=1,
+        topk=0,
+        M=10,
+        N=0,
+        max_image_tokens=10,
+        left_visible=torch.tensor([8, 9], dtype=torch.int32, device=device),
+        # Deliberately extends beyond seq_len to exercise the upper clamp too.
+        right_visible=torch.tensor([5, 5], dtype=torch.int32, device=device),
+    )
+
+    assert lens.cpu().tolist() == [5, 5]
+    assert indices[:, :5].cpu().tolist() == [list(range(5)), list(range(5))]
+
+
+@torch.inference_mode()
 def test_combine_topk_swa_indices_keeps_vision_row_width_without_images() -> None:
     from vllm.models.deepseek_v4.amd.rocm import combine_topk_swa_indices
 

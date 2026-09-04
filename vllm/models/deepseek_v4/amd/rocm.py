@@ -143,9 +143,13 @@ def _combine_topk_swa_indices_kernel(
             left = 0
             right = 0
         left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
-        swa_start = tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0)
-        swa_end = pos + right + 1
-        swa_len = swa_end - swa_start
+        # Prefix caching can resume inside an image span. Do not generate
+        # indices outside the SWA rows present in the gathered workspace.
+        swa_start = tl.maximum(
+            tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0), gather_start
+        )
+        swa_end = tl.minimum(pos + right + 1, seq_len)
+        swa_len = tl.maximum(swa_end - swa_start, 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -197,8 +201,7 @@ def combine_topk_swa_indices(
     num_reqs = seq_lens.shape[0]
     has_image = left_visible is not None
     # Keep the row shape fixed for a vision model even when a particular batch
-    # has no image. The gathered KV workspace needs no matching expansion: its
-    # query portion already contains each atomically-prefilled image span.
+    # has no image.
     swa_width = window_size + max_image_tokens
     combined_topk = (
         (topk + swa_width + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
