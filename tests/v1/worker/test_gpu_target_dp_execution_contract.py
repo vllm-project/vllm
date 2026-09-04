@@ -405,6 +405,7 @@ def test_worker_marks_execution_contract_dummy_as_idle(enabled):
     expected_kwargs: dict[str, object] = {"uniform_decode": True}
     if enabled:
         expected_kwargs.update(
+            valid_dummy_state_slots=True,
             dp_idle=True,
             dp_execution_contract_refresh=False,
             dp_execution_contract_epoch=None,
@@ -428,6 +429,7 @@ def test_worker_forwards_cached_contract_epoch_to_idle_dummy():
     worker.model_runner._dummy_run.assert_called_once_with(
         4,
         uniform_decode=True,
+        valid_dummy_state_slots=True,
         dp_idle=True,
         dp_execution_contract_refresh=True,
         dp_execution_contract_epoch=17,

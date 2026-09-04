@@ -1275,6 +1275,7 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(
                 num_tokens,
                 uniform_decode=True,
+                valid_dummy_state_slots=True,
                 dp_idle=True,
                 dp_execution_contract_refresh=dp_execution_contract_refresh,
                 dp_execution_contract_epoch=dp_execution_contract_epoch,

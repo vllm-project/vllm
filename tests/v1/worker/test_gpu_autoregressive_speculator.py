@@ -619,6 +619,50 @@ def test_cached_target_contract_keeps_dummy_rank_logically_idle(monkeypatch):
     assert signature.live_num_reqs == 0
     assert signature.execution_num_reqs == 4
 
+    prestart = speculator.maybe_start_decode_dp_sync(
+        input_batch,
+        target_sync,
+        dummy_run=True,
+        is_profile=False,
+    )
+    assert prestart is not None
+    assert speculator._decode_dp_sync.start.call_args.args[1:3] == (4, 4)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_dummy_propose_uses_target_execution_capacity(monkeypatch):
+    speculator, input_batch, _, _ = _make_async_sync_propose_speculator(monkeypatch)
+    target_sync = DPSyncState(
+        torch.tensor([4, 4]),
+        1,
+        False,
+        generation=7,
+        execution_num_reqs=4,
+        live_facts_exact=False,
+        contract_epoch=10,
+    )
+    prefill_desc, _ = spec_module.dispatch_cg_and_sync_dp.return_value
+    spec_module.dispatch_cg_and_sync_dp.return_value = (prefill_desc, target_sync)
+
+    speculator.propose(
+        input_batch=input_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.zeros(2, 3),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(1, dtype=torch.int32),
+        num_rejected=torch.zeros(1, dtype=torch.int32),
+        last_sampled=torch.zeros(1, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(1, dtype=torch.int64),
+        temperature=torch.ones(1),
+        seeds=torch.zeros(1, dtype=torch.int64),
+        dp_sync=target_sync,
+        dummy_run=True,
+    )
+
+    assert speculator._decode_dp_sync.start.call_args.args[1:3] == (4, 4)
+
 
 @pytest.mark.cpu_test
 @pytest.mark.skip_global_cleanup

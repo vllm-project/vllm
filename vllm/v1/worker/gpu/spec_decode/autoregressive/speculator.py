@@ -276,10 +276,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dummy_run=dummy_run,
             is_profile=is_profile,
         )
+        agreement_num_reqs = (
+            signature.execution_num_reqs
+            if signature.dummy_run
+            else signature.live_num_reqs
+        )
         future = self._decode_dp_sync.start(
             self.decode_cudagraph_manager,
-            signature.live_num_reqs,
-            signature.live_num_reqs,
+            agreement_num_reqs,
+            agreement_num_reqs,
             uniform_token_count=1,
             need_eager=is_profile,
             parent_generation=signature.parent_generation,
@@ -458,10 +463,15 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     )
                 decode_dp_future = dp_sync_prestart.future
             else:
+                agreement_num_reqs = (
+                    signature.execution_num_reqs
+                    if signature.dummy_run
+                    else signature.live_num_reqs
+                )
                 decode_dp_future = self._decode_dp_sync.start(
                     self.decode_cudagraph_manager,
-                    signature.live_num_reqs,
-                    signature.live_num_reqs,
+                    agreement_num_reqs,
+                    agreement_num_reqs,
                     uniform_token_count=1,
                     need_eager=is_profile,
                     parent_generation=signature.parent_generation,
