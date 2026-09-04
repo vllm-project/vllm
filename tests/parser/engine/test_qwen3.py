@@ -104,6 +104,55 @@ class TestUnclosedParameterFlush:
         assert args.startswith('{"path": "README.md"'), args[:60]
         json.loads(args)
 
+    @pytest.fixture
+    def tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "count": {"type": "integer"},
+                        },
+                    },
+                },
+            }
+        ]
+
+    @pytest.fixture
+    def parser_with_tools(self, mock_tokenizer, tools):
+        return ParserEngine(
+            mock_tokenizer,
+            tools=tools,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+
+    def test_truncated_typed_parameter_still_streams_valid_json(
+        self, parser_with_tools, mock_request
+    ):
+        """Truncation inside a schema-typed (non-string) parameter.
+
+        The number cannot stream, so before the fix the prefix ended on the
+        separator, ``{"path": "README.md", "count": ``, and the flush had no
+        completion for it.
+        """
+        raw = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=path>\nREADME.md\n</parameter>\n"
+            "<parameter=count>\n12"
+        )
+        results = simulate_tool_streaming(parser_with_tools, mock_request, list(raw))
+        finish = parser_with_tools.finish_streaming()
+        if finish is not None:
+            results.append((finish, ""))
+
+        args = collect_tool_arguments(results)
+        assert args, "no arguments were streamed"
+        assert json.loads(args)["path"] == "README.md"
+
 
 class TestNonStreaming:
     def test_no_tool_calls(self, parser, mock_request):
