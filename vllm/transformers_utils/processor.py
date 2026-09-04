@@ -166,9 +166,11 @@ def get_processor_cls_name_from_config(
 
 def get_video_processor_cls_name_from_config(
     processor_name: str,
-    revision: str | None = "main",
+    revision: str | None = None,
 ) -> str | None:
     processor_name = convert_model_repo_to_path(processor_name, revision=revision)
+    if revision is None:
+        revision = "main"
     config_file = [
         "video_preprocessor_config.json",
         "preprocessor_config.json",
@@ -211,13 +213,10 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
-    modelscope_revision = revision
-    if revision is None:
-        revision = "main"
     try:
-        processor_name = convert_model_repo_to_path(
-            processor_name, revision=modelscope_revision
-        )
+        processor_name = convert_model_repo_to_path(processor_name, revision=revision)
+        if revision is None:
+            revision = "main"
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )

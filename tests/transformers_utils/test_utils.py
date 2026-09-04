@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from types import ModuleType
-from unittest.mock import Mock
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -13,6 +12,57 @@ from vllm.transformers_utils.utils import (
     is_gcs,
     is_s3,
 )
+
+
+@pytest.fixture
+def modelscope_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "1")
+    legacy_root = tmp_path / "hub" / "models"
+    file_utils = ModuleType("modelscope.utils.file_utils")
+    monkeypatch.setattr(
+        file_utils, "get_model_cache_root", lambda: str(legacy_root), raising=False
+    )
+    hub = ModuleType("modelscope_hub")
+    monkeypatch.setattr(
+        hub,
+        "get_default_config",
+        lambda: SimpleNamespace(cache_dir=tmp_path),
+        raising=False,
+    )
+    monkeypatch.setitem(sys.modules, "modelscope", ModuleType("modelscope"))
+    monkeypatch.setitem(sys.modules, "modelscope.utils", ModuleType("modelscope.utils"))
+    monkeypatch.setitem(sys.modules, "modelscope.utils.file_utils", file_utils)
+    monkeypatch.setitem(sys.modules, "modelscope_hub", hub)
+    return tmp_path
+
+
+@pytest.mark.parametrize("revision", [None, "release/v1"])
+def test_modelscope_resolves_requested_snapshot(modelscope_cache, revision):
+    """Resolve the requested revision even when another snapshot is cached."""
+    snapshots = modelscope_cache / "models" / "org--model" / "snapshots"
+    (snapshots / "unrelated").mkdir(parents=True)
+    expected = snapshots / (revision or "master")
+    expected.mkdir(parents=True)
+    assert convert_model_repo_to_path("org/model", revision) == str(expected)
+
+
+def test_modelscope_prefers_existing_legacy_cache(modelscope_cache):
+    legacy = modelscope_cache / "hub" / "models" / "org" / "model"
+    legacy.mkdir(parents=True)
+    (modelscope_cache / "models" / "org--model" / "snapshots" / "master").mkdir(
+        parents=True
+    )
+    assert convert_model_repo_to_path("org/model") == str(legacy)
+
+
+def test_modelscope_missing_cache_preserves_legacy_path(modelscope_cache):
+    """Missing snapshots must not trigger downloads or select another revision."""
+    (modelscope_cache / "models" / "org--model" / "snapshots" / "other").mkdir(
+        parents=True
+    )
+    expected = modelscope_cache / "hub" / "models" / "org" / "model"
+    assert convert_model_repo_to_path("org/model", "missing") == str(expected)
+    assert not expected.exists()
 
 
 def test_is_gcs():
@@ -42,46 +92,3 @@ def test_is_cloud_storage():
     assert is_cloud_storage("az://model-container/path")
     assert not is_cloud_storage("/unix/local/path")
     assert not is_cloud_storage("nfs://nfs-fqdn.local")
-
-
-def test_convert_model_repo_to_path_without_modelscope(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
-
-    assert convert_model_repo_to_path("org/model") == "org/model"
-
-
-def test_convert_model_repo_to_path_preserves_local_path(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-):
-    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "true")
-
-    assert convert_model_repo_to_path(str(tmp_path)) == str(tmp_path)
-
-
-def test_convert_model_repo_to_path_uses_modelscope_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "true")
-    snapshot_path = "/cache/modelscope/models/org--model/snapshots/master"
-    snapshot_download = Mock(return_value=snapshot_path)
-    modelscope = ModuleType("modelscope")
-    modelscope.__path__ = []
-    modelscope_hub = ModuleType("modelscope.hub")
-    modelscope_hub.__path__ = []
-    snapshot_download_module = ModuleType("modelscope.hub.snapshot_download")
-    snapshot_download_module.__dict__["snapshot_download"] = snapshot_download
-    monkeypatch.setitem(sys.modules, "modelscope", modelscope)
-    monkeypatch.setitem(sys.modules, "modelscope.hub", modelscope_hub)
-    monkeypatch.setitem(
-        sys.modules, "modelscope.hub.snapshot_download", snapshot_download_module
-    )
-
-    assert convert_model_repo_to_path("org/model", revision="v1") == snapshot_path
-    snapshot_download.assert_called_once_with(
-        model_id="org/model",
-        revision="v1",
-        local_files_only=True,
-    )

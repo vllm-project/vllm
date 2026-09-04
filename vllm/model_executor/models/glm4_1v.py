@@ -977,8 +977,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def _get_processor_class_name(self) -> str | None:
         return get_processor_cls_name_from_config(
             convert_model_repo_to_path(
-                self.ctx.model_config.model,
-                revision=self.ctx.model_config.revision,
+                self.ctx.model_config.model, revision=self.ctx.model_config.revision
             ),
             revision=self.ctx.model_config.revision,
         )
