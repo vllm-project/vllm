@@ -889,7 +889,13 @@ class SpeculativeConfig:
             # same `mtp_num_hidden_layers` field as the multimodal ones.
             is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
+            try:
+                text_config = get_hf_text_config(hf_config)
+            except Exception:
+                text_config = getattr(hf_config, "text_config", None)
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            if n_predict is None and text_config is not None:
+                n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
             hf_config.update(
                 {
                     "n_predict": n_predict,
