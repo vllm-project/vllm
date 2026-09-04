@@ -536,8 +536,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferB12xNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
-        # Weight-only kernels go last: on a W4A4-capable checkpoint they are a
-        # fallback, not a preference.
+        # Weight-only: a fallback on a W4A4-capable checkpoint, not a preference.
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         FlashInferTrtllmNvFp4LinearKernel,
