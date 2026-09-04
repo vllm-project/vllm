@@ -200,7 +200,10 @@ class FindSelection:
         if not _path_is_within(root, test_file):
             return False
 
-        depth_below_root = 0 if root in ("", ".") else test_file[len(root) :].count("/")
+        # `find <root>` puts a direct child at depth 1, whether <root> is a real
+        # subdir ("compile") or the tests/ root itself ("" / ".").
+        below = test_file if root in ("", ".") else test_file[len(root) :]
+        depth_below_root = below.lstrip("/").count("/") + 1
         if self.max_depth is not None and depth_below_root > self.max_depth:
             return False
 
@@ -407,9 +410,17 @@ def _parse_command(command: str, visited: set[str] | None = None) -> list[Select
     e.g., a ``find`` and a ``pytest`` on the same line are both handled.
     """
     visited = visited if visited is not None else set()
+    subcommands = _split_subcommands(command)
+    # A `find ... -name` selection only counts if the same line feeds its output
+    # to a test runner (`| xargs pytest`, `-exec pytest \;`). A bare find, or one
+    # piped to a non-pytest consumer, would invent coverage that isn't there.
+    line_runs_pytest = any(t in PYTEST_COMMANDS for sub in subcommands for t in sub)
     selections: list[Selection] = []
-    for sub in _split_subcommands(command):
-        selections.extend(_classify_subcommand(sub, visited))
+    for sub in subcommands:
+        for selection in _classify_subcommand(sub, visited):
+            if isinstance(selection, FindSelection) and not line_runs_pytest:
+                continue
+            selections.append(selection)
     return selections
 
 
@@ -453,6 +464,12 @@ def load_selections() -> list[Selection]:
         except yaml.YAMLError as e:
             rel = yaml_path.relative_to(REPO_ROOT)
             raise SystemExit(f"error: {rel} is not valid YAML: {e}") from None
+        if not isinstance(yaml_doc, dict):
+            rel = yaml_path.relative_to(REPO_ROOT)
+            raise SystemExit(
+                f"error: {rel} is not a Buildkite pipeline "
+                f"(top-level {type(yaml_doc).__name__}, expected a mapping)"
+            )
         for step in _iter_job_steps(yaml_doc):
             commands = list(step.get("commands") or [])
             if step.get("command"):  # some steps use the singular form
