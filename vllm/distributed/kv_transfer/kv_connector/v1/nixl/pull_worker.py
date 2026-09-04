@@ -254,6 +254,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
+                awaiting_kvs=meta.awaiting_kvs,
             )
 
         if self.use_mla and tp_ratio < 0 and len(read_specs) == 1:
@@ -276,6 +277,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
         expected_consumers: int,
+        awaiting_kvs: bool,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -335,7 +337,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # in finished_recving, and the scheduler has no other way to
             # release it: it stays in skipped_waiting holding the blocks it
             # was allocated, for the life of the process.
-            self._recving_transfers.setdefault(request_id, [])
+            #
+            # Only for a recv the scheduler parked on. The same empty-blocks
+            # path also serves notify-only recvs -- an abort seeding an empty
+            # recv to free P's blocks, or a readback on a request that stays
+            # RUNNING -- and reporting those trips the scheduler's asserts in
+            # _update_from_kv_xfer_finished.
+            if awaiting_kvs:
+                self._recving_transfers.setdefault(request_id, [])
             return
 
         assert (

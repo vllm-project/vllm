@@ -2534,6 +2534,7 @@ def test_full_prefix_cache_hit_is_reported_finished(
             "remote_port": 1234,
             "remote_tp_size": 1,
         },
+        awaiting_kvs=True,
     )
     connector.bind_connector_metadata(metadata)
     dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
@@ -2544,6 +2545,60 @@ def test_full_prefix_cache_hit_is_reported_finished(
 
     _, done_recving = connector.get_finished(finished_req_ids=set())
     assert request_id in done_recving
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_notify_only_recv_is_not_reported_finished(default_vllm_config, dist_init):
+    """An empty recv the scheduler is not parked on must stay unreported.
+
+    The empty-blocks path in _read_blocks also serves callers the scheduler is
+    not waiting on: request_finished seeding an empty recv to free P's blocks
+    for a request aborted before it was scheduled, and a readback on a request
+    that stays RUNNING. Reporting either crashes the engine core --
+    _update_from_kv_xfer_finished asserts the id is still in self.requests and
+    that the request is WAITING_FOR_REMOTE_KVS or finished.
+
+    awaiting_kvs, set by the scheduler only when it parks the request, is what
+    separates those from the full-hit case above.
+    """
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0.0,
+        kv_cache_config=connector._kv_cache_config,
+    )
+
+    request_id = "test_notify_only_recv"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=(),  # empty: nothing to pull, notify the producer only
+        kv_transfer_params={
+            "remote_block_ids": [[20, 21, 22]],
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+        awaiting_kvs=False,
+    )
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    connector.start_load_kv(dummy_ctx)
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert request_id not in done_recving
 
 
 @patch(

@@ -240,6 +240,12 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    # True only when the scheduler moved the request to WAITING_FOR_REMOTE_KVS
+    # and is therefore waiting to see it in finished_recving. Notify-only recvs
+    # (an abort seeding an empty recv to free P's blocks, or a readback on a
+    # request that stays RUNNING) must not be reported: the scheduler asserts on
+    # a finished recv for a request it is not holding.
+    awaiting_kvs: bool = False
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -269,6 +275,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        awaiting_kvs: bool = False,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -279,6 +286,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
+            awaiting_kvs=awaiting_kvs,
         )
 
     def add_new_req_to_save(
@@ -297,9 +305,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        awaiting_kvs: bool = False,
     ):
         req = self._add_new_req(
-            local_block_ids, kv_transfer_params, local_num_computed_blocks
+            local_block_ids, kv_transfer_params, local_num_computed_blocks, awaiting_kvs
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],
