@@ -1593,29 +1593,88 @@ class TestArgDeltaWithConverter:
 
 
 class TestSafeArgPrefix:
-    """Unit tests for ParserEngine._safe_arg_prefix."""
+    """Unit tests for ParserEngine._safe_arg_prefix.
+
+    A trailing value that cannot stream (non-string, or a string for a key the
+    schema may coerce) is withheld together with its ``"key": `` separator:
+    the flush can drop an unfinished parameter, and a prefix ending on the
+    separator then has no valid completion.
+    """
 
     @pytest.mark.parametrize(
         "json_str, expected",
         [
-            ('{"a": 1}', '{"a": '),
-            ('{"a": 1, "b": 2}', '{"a": 1, "b": '),
+            ('{"a": 1}', ""),
+            ('{"a": 1, "b": 2}', '{"a": 1'),
             ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": "world'),
-            ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}, "b": '),
-            ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80", "b": '),
-            ('{"a": 1', '{"a": '),
+            ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}'),
+            ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80"'),
+            ('{"a": 1', ""),
             ("{}", ""),
             ("{", ""),
             ("", ""),
-            ('{"k":1}', '{"k":'),
-            ('{"k": 1, "v":2}', '{"k": 1, "v":'),
+            ('{"k":1}', ""),
+            ('{"k": 1, "v":2}', '{"k": 1'),
             ('{"k":"value"}', '{"k":"value'),
             ('{"k":"unterminated', '{"k":"unterminated'),
             (r'{"k":"escaped \" quote"}', r'{"k":"escaped \" quote'),
+            # A complete trailing value followed by a separator is kept whole.
+            ('{"a": "x", "b": 2, ', '{"a": "x", "b": 2'),
+            # Unfinished containers are withheld with their key.
+            ('{"a": "x", "obj": {"b": ', '{"a": "x"'),
+            ('{"a": "x", "items": [1, ', '{"a": "x"'),
+            # A streamed string never ends inside an escape sequence.
+            ('{"t": "ab\\', '{"t": "ab'),
+            ('{"t": "ab\\u12', '{"t": "ab'),
+            ('{"t": "ab\\u12ab', '{"t": "ab\\u12ab'),
+            ('{"t": "ab\\n', '{"t": "ab\\n'),
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
         assert ParserEngine._safe_arg_prefix(json_str) == expected
+
+    def test_schema_typed_trailing_string_is_withheld_with_its_key(self):
+        # ``count`` may be coerced to a number, so its value cannot stream and
+        # the separator must not be left dangling either.
+        json_str = '{"path": "README.md", "count": "1'
+        assert (
+            ParserEngine._safe_arg_prefix(json_str, {"path"}) == '{"path": "README.md"'
+        )
+
+
+class TestJsonPrefixTerminator:
+    """Unit tests for ParserEngine._json_prefix_terminator.
+
+    Every non-empty suffix must make the prefix parse; a prefix with no valid
+    completion yields "" so the caller can decline to close it.
+    """
+
+    @pytest.mark.parametrize(
+        "prefix, expected",
+        [
+            ('{"a": "x', '"}'),
+            ('{"a": "x\\', '\\"}'),
+            ('{"a": [', "]}"),
+            ('{"a": {"b": "x', '"}}'),
+            # A dangling separator is completed with null, the one value every
+            # schema type accepts.
+            ('{"count": ', "null}"),
+            ('{"a": "x", "b": ', "null}"),
+            ('{"a": {"b": ', "null}}"),
+            ('{"a": "x", "items": [1, ', "null]}"),
+            # An object after a comma cannot be completed without inventing a key.
+            ('{"a": 1, ', ""),
+            # A partial escape cannot be completed without inventing characters.
+            ('{"t": "ab\\u12', ""),
+            ('{"flag": tr', ""),
+            ("", ""),
+        ],
+    )
+    def test_json_prefix_terminator(self, prefix, expected):
+        suffix = ParserEngine._json_prefix_terminator(prefix)
+        assert suffix == expected
+        if suffix:
+            json.loads(prefix + suffix)
 
 
 # ── Coercion instability regression tests ────────────────────────

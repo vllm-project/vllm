@@ -292,6 +292,7 @@ class ParserEngine(Parser):
         the closing tag arrives.
         """
         last_colon = -1
+        last_comma = -1
         last_key: str | None = None
         pending_key: str | None = None
         in_string = False
@@ -321,27 +322,50 @@ class ParserEngine(Parser):
                 last_colon = i
                 last_key = pending_key
                 pending_key = None
+            elif c == "," and depth == 1:
+                last_comma = i
         if last_colon < 0:
             return ""
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
-        if end >= len(json_str) or json_str[end] != '"':
-            return json_str[:end]
-        if string_keys is not None and last_key not in string_keys:
-            return json_str[:end]
+        if (
+            end >= len(json_str)
+            or json_str[end] != '"'
+            or (string_keys is not None and last_key not in string_keys)
+        ):
+            # The trailing value cannot stream. Stop after the last complete
+            # top-level value rather than after ``"key": ``: the flush can
+            # drop an unfinished parameter, and a prefix that ends on the
+            # separator then has no valid completion.
+            return json_str[:last_comma] if last_comma >= 0 else ""
 
         escape = False
+        escape_start = -1
+        hex_left = 0
         for i in range(end + 1, len(json_str)):
             c = json_str[i]
+            if hex_left:
+                hex_left -= 1
+                if hex_left == 0:
+                    escape_start = -1
+                continue
             if escape:
                 escape = False
+                if c == "u":
+                    hex_left = 4
+                else:
+                    escape_start = -1
                 continue
             if c == "\\":
                 escape = True
+                escape_start = i
                 continue
             if c == '"':
                 return json_str[:i]
+        if escape_start >= 0:
+            # Never end on a partial escape: ``\u12`` has no valid completion.
+            return json_str[:escape_start]
         return json_str
 
     @staticmethod
@@ -1034,6 +1058,16 @@ class ParserEngine(Parser):
             suffix += "\\"
         if in_string:
             suffix += '"'
+        else:
+            # A dangling separator has no value to close; ``null`` is the one
+            # placeholder every schema type accepts. An object cannot be
+            # completed after a comma without inventing a key, so that case
+            # falls through to the parse check below and yields no suffix.
+            tail = prefix.rstrip()
+            if tail.endswith(":") or (
+                tail.endswith(",") and stack and stack[-1] == "]"
+            ):
+                suffix += "null"
         suffix += "".join(reversed(stack))
         if not suffix:
             return ""
