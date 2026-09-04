@@ -88,24 +88,74 @@ def _naive_block_assignment_max_m(
     return global_num_experts // (top_k * 4)
 
 
-def _warmup_m_values(max_tokens: int, naive_max_m: int) -> list[int]:
+def _divisibility_companion(m: int, top_k: int, max_tokens: int) -> int | None:
+    """An M near ``m`` whose ``num_valid_tokens`` flips 16-divisibility.
+
+    ``num_valid_tokens`` is ``M * top_k``, and Triton keys its 16-divisibility
+    separately, so a tile config needs both a divisible and a non-divisible
+    representative. ``m + 1`` does not guarantee that: with ``top_k=1`` neither
+    24 nor 25 is divisible. Scan the 16 neighbours that span every residue,
+    preferring larger M but falling back to smaller ones at the token budget.
+
+    Returns ``None`` when no neighbour flips the predicate, which happens when
+    ``top_k`` is a multiple of 16 -- then ``M * top_k`` is always divisible and
+    the non-divisible variant does not exist.
+    """
+    want_divisible = (m * top_k) % 16 != 0
+    candidates = list(range(m + 1, m + 16 + 1)) + list(range(m - 1, m - 16 - 1, -1))
+    for candidate in candidates:
+        if not 0 < candidate <= max_tokens:
+            continue
+        if (((candidate * top_k) % 16) == 0) == want_divisible:
+            return candidate
+    return None
+
+
+def _warmup_m_values(max_tokens: int, naive_max_m: int, top_k: int) -> list[int]:
     values: set[int] = set()
+
+    def add_with_companion(m: int) -> None:
+        if not 0 < m <= max_tokens:
+            return
+        values.add(m)
+        companion = _divisibility_companion(m, top_k, max_tokens)
+        if companion is not None:
+            values.add(companion)
+
     for m in _WARMUP_M_GRID:
         if m > max_tokens:
             break
-        values.add(m)
-        # A neighbour of opposite parity keeps the same tile config but flips
-        # the 16-divisibility of EM and num_valid_tokens, which is a separate
-        # Triton compile key. Config-file keys are almost all even, so without
-        # this the non-divisible variant never gets compiled.
-        values.add(min(m + 1, max_tokens))
+        add_with_companion(m)
     # The tile config just above the naive cutoff is shared by too few grid
-    # entries to be guaranteed both parities, so pin them explicitly.
-    values.update(m for m in (naive_max_m + 1, naive_max_m + 2) if 0 < m <= max_tokens)
-    values.add(max_tokens)
-    if max_tokens > 1:
-        values.add(max_tokens - 1)
+    # entries to be guaranteed both divisibility classes, so pin it explicitly.
+    add_with_companion(naive_max_m + 1)
+    add_with_companion(max_tokens)
     return sorted(values)
+
+
+def _sample_local_expert_ids(
+    shape: tuple[int, int],
+    global_num_experts: int,
+    expert_map: torch.Tensor | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Sample routed expert ids that this rank actually owns.
+
+    ``topk_ids`` carries global ids. Under expert parallelism ``expert_map``
+    maps a global id to a local one, or to ``-1`` when the expert lives on
+    another rank, and ``moe_align_block_size`` drops the invalid ones before the
+    GEMMs. Sampling the local id range would therefore warm nothing on every
+    rank whose slice does not start at 0, so draw from the owned global ids.
+    """
+    if expert_map is None:
+        return torch.randint(
+            0, global_num_experts, shape, device=device, dtype=torch.int32
+        )
+    owned = torch.nonzero(expert_map >= 0, as_tuple=True)[0]
+    if owned.numel() == 0:
+        return torch.empty(shape, device=device, dtype=torch.int32)
+    picks = torch.randint(0, owned.numel(), shape, device=device)
+    return owned[picks].to(torch.int32)
 
 
 def _warmup_expert_gemms(
@@ -118,7 +168,6 @@ def _warmup_expert_gemms(
     w13 = layer.w13_weight
     w2 = layer.w2_weight
     top_k = layer.top_k
-    num_experts = w13.size(0)
     hidden_size = w2.size(1)
     device = w13.device
     act_dtype = layer.params_dtype
@@ -129,16 +178,17 @@ def _warmup_expert_gemms(
         _naive_block_assignment_max_m(
             layer.global_num_experts, top_k, layer.expert_map
         ),
+        top_k,
     )
     max_m = m_values[-1]
 
     # Allocate for the largest M once and slice; `apply` resizes the
     # workspaces it is given, so an oversized buffer is fine.
     hidden_states = torch.zeros((max_m, hidden_size), device=device, dtype=act_dtype)
-    # Spread tokens over all experts so every expert block is exercised and
-    # the token-to-block assignment matches a realistic batch.
-    topk_ids = torch.randint(
-        0, num_experts, (max_m, top_k), device=device, dtype=torch.int32
+    # Spread tokens over the experts this rank owns so every expert block is
+    # exercised and the token-to-block assignment matches a realistic batch.
+    topk_ids = _sample_local_expert_ids(
+        (max_m, top_k), layer.global_num_experts, layer.expert_map, device
     )
     topk_weights = torch.ones((max_m, top_k), device=device, dtype=torch.float32)
     workspace13_shape, workspace2_shape, output_shape = experts.workspace_shapes(
