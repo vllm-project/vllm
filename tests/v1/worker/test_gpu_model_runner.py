@@ -563,7 +563,10 @@ def test_synchronize_input_prep_is_a_noop_without_spec_decode_or_overlap():
         pass
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not hasattr(torch.cuda, "_sleep"),
+    reason="needs a CUDA device and torch.cuda._sleep",
+)
 def test_synchronize_input_prep_lands_prior_d2h_before_batch_mutation():
     """Same contract on real events: the postprocess D2H must have landed.
 
