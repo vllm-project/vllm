@@ -232,11 +232,12 @@ class CountExpertNumTokensKernel(
         num_local_experts: int,
         expert_map: torch.Tensor | None,
     ) -> LaunchSpec:
-        block_size = min(topk_ids.numel(), 1024)
+        topk_numel = prod(topk_ids.shape)
+        block_size = min(topk_numel, 1024)
         block_size = triton.next_power_of_2(block_size)
         return (num_local_experts,), dict(
             num_experts=num_local_experts,
-            topk_numel=topk_ids.numel(),
+            topk_numel=topk_numel,
             HAS_EXPERT_MAP=expert_map is not None,
             BLOCK_SIZE=block_size,
         )

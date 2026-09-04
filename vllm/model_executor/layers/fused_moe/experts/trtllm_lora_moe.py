@@ -270,7 +270,7 @@ class TrtLlmLoraFinalizeKernel(
         top_k: int,
         scale: float,
     ) -> LaunchSpec:
-        hidden_size = gemm2_permuted.size(1)
+        hidden_size = gemm2_permuted.shape[1]
         compile_key = self.dispatch(
             dtype=gemm2_permuted.dtype,
             hidden_size=hidden_size,
@@ -282,7 +282,7 @@ class TrtLlmLoraFinalizeKernel(
         )
         return grid, dict(
             gemm2_ptr=gemm2_permuted,
-            weight_ptr=expert_weights.reshape(-1),
+            weight_ptr=expert_weights,
             idx_ptr=idx_map,
             delta_ptr=w2_delta,
             out_ptr=output,
