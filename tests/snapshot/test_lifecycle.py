@@ -62,12 +62,25 @@ def test_resume_reconnects_transport_before_worker_restore():
     with (
         patch("vllm.v1.engine.core.get_ip", return_value="10.0.0.2"),
         patch(
-            "vllm.v1.engine.core.refresh_scheduler_after_snapshot_restore"
-        ) as refresh,
+            "vllm.v1.engine.core."
+            "refresh_scheduler_kv_transfer_identity_after_snapshot_restore"
+        ) as refresh_identity,
+        patch(
+            "vllm.v1.engine.core."
+            "rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore"
+        ) as rebuild_endpoint,
         patch(
             "vllm.v1.engine.core.refresh_scheduler_handshake_metadata_after_snapshot_restore"
         ) as refresh_metadata,
     ):
+        calls = []
+        refresh_identity.side_effect = lambda *_: calls.append("refresh_identity")
+        engine.model_executor.resume.side_effect = lambda *_: calls.append(
+            "worker_resume"
+        )
+        rebuild_endpoint.side_effect = lambda *_: calls.append("rebuild_endpoint")
+        refresh_metadata.side_effect = lambda *_: calls.append("refresh_metadata")
+
         EngineCoreProc.resume(engine, "10.0.0.3", "/snapshot/model")
 
         assert engine.vllm_config.parallel_config.data_parallel_master_ip == "10.0.0.3"
@@ -79,8 +92,15 @@ def test_resume_reconnects_transport_before_worker_restore():
         )
     engine._reconnect_transport.assert_called_once_with("10.0.0.3")
     assert engine._transport_reconnected
-    refresh.assert_called_once_with(engine, "10.0.0.2")
+    refresh_identity.assert_called_once_with(engine, "10.0.0.2")
+    rebuild_endpoint.assert_called_once_with(engine, "10.0.0.2")
     refresh_metadata.assert_called_once_with(engine)
+    assert calls == [
+        "refresh_identity",
+        "worker_resume",
+        "rebuild_endpoint",
+        "refresh_metadata",
+    ]
 
 
 def test_resume_rebuilds_engine_core_dp_group():
@@ -91,7 +111,14 @@ def test_resume_rebuilds_engine_core_dp_group():
             "vllm.v1.engine.core.stateless_destroy_torch_distributed_process_group"
         ) as destroy_dp_group,
         patch("vllm.v1.engine.core.get_ip", return_value="10.0.0.2"),
-        patch("vllm.v1.engine.core.refresh_scheduler_after_snapshot_restore"),
+        patch(
+            "vllm.v1.engine.core."
+            "refresh_scheduler_kv_transfer_identity_after_snapshot_restore"
+        ),
+        patch(
+            "vllm.v1.engine.core."
+            "rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore"
+        ),
         patch(
             "vllm.v1.engine.core.refresh_scheduler_handshake_metadata_after_snapshot_restore"
         ),

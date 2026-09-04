@@ -33,9 +33,10 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalCacheMissError
-from vllm.snapshot.kv_transfer import (
-    refresh_scheduler_after_snapshot_restore,
+from vllm.snapshot.kv_connector_lifecycle import (
+    rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore,
     refresh_scheduler_handshake_metadata_after_snapshot_restore,
+    refresh_scheduler_kv_transfer_identity_after_snapshot_restore,
 )
 from vllm.snapshot.utils import is_restore
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -2171,7 +2172,7 @@ class EngineCoreProc(EngineCore):
 
         local_ip = get_ip(force=True)
 
-        refresh_scheduler_after_snapshot_restore(self, local_ip)
+        refresh_scheduler_kv_transfer_identity_after_snapshot_restore(self, local_ip)
 
         parallel_config = self.vllm_config.parallel_config
         parallel_config.data_parallel_master_ip = data_parallel_master_ip
@@ -2183,6 +2184,7 @@ class EngineCoreProc(EngineCore):
             model_path,
             new_engine_id,
         )
+        rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore(self, local_ip)
 
         if self.dp_group is not None:
             stateless_destroy_torch_distributed_process_group(self.dp_group)
