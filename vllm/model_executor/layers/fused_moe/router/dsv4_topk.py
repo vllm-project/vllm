@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import zip_inputs
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-
-_TOPK = 6
+from vllm.utils.math_utils import next_power_of_2
 
 # Adapted from:
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/moe_fused_gate.py
@@ -29,16 +38,28 @@ def can_use_dsv4_topk(
         and correction_bias.dtype == torch.float32
         and correction_bias.shape == (gating_output.shape[1],)
         and correction_bias.is_contiguous()
-        and topk == _TOPK
+        and topk == DSV4TopKKernel.top_k
         and renormalize
         and indices_dtype in (torch.int32, torch.uint32, torch.int64)
     )
 
 
-if current_platform.is_cuda():
+class DSV4TopKKernel(VllmTritonJitKernel["DSV4TopKKernel.CompileKey"]):
+    top_k = 6
 
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_experts: int
+        block_n: int
+        indices_dtype: torch.dtype
+        routed_scaling_factor: float
+        has_vl: bool
+        image_sentinel_lo: int
+        launch_pdl: bool
+
+    @staticmethod
     @triton.jit
-    def _dsv4_topk_kernel(
+    def kernel(
         gating_output_ptr,
         correction_bias_ptr,
         topk_weights_ptr,
@@ -112,6 +133,107 @@ if current_platform.is_cuda():
         tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
         tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
+    def dispatch(
+        self,
+        *,
+        num_experts: int,
+        indices_dtype: torch.dtype,
+        routed_scaling_factor: float,
+        has_vl: bool,
+        image_sentinel_lo: int,
+        launch_pdl: bool,
+    ) -> CompileKey:
+        return self.CompileKey(
+            num_experts=num_experts,
+            block_n=next_power_of_2(num_experts),
+            indices_dtype=indices_dtype,
+            routed_scaling_factor=routed_scaling_factor,
+            has_vl=has_vl,
+            image_sentinel_lo=image_sentinel_lo,
+            launch_pdl=launch_pdl,
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        hf_config = vllm_config.model_config.hf_config
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return []
+
+        num_experts = hf_config.n_routed_experts
+        topk = hf_config.num_experts_per_tok
+        if (
+            num_experts not in (256, 384)
+            or topk != self.top_k
+            or not bool(getattr(hf_config, "norm_topk_prob", False))
+            or getattr(hf_config, "scoring_func", None) != "sqrtsoftplus"
+        ):
+            return []
+
+        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        from vllm.models.deepseek_v4.common.mm_preprocess import (
+            IMAGE_SENTINEL_BASE_ID,
+        )
+
+        has_vl = getattr(hf_config, "vision_n_layers", 0) > 0
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(
+                dict(has_vl=False, image_sentinel_lo=0),
+                dict(
+                    has_vl=has_vl,
+                    image_sentinel_lo=IMAGE_SENTINEL_BASE_ID if has_vl else 0,
+                ),
+            ),
+            num_experts=num_experts,
+            indices_dtype=torch.int64 if use_mega_moe else torch.int32,
+            routed_scaling_factor=float(
+                getattr(hf_config, "routed_scaling_factor", 1.0)
+            ),
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
+        return dict(
+            gating_output=TritonWarmupTensor(
+                torch.float32, shape=(1, compile_key.num_experts)
+            ),
+            correction_bias=TritonWarmupTensor(
+                torch.float32, shape=(compile_key.num_experts,)
+            ),
+            topk_weights=TritonWarmupTensor(torch.float32, shape=(1, self.top_k)),
+            topk_ids=TritonWarmupTensor(
+                compile_key.indices_dtype, shape=(1, self.top_k)
+            ),
+            routed_scaling_factor=compile_key.routed_scaling_factor,
+            input_ids=(TritonWarmupTensor(torch.int64) if compile_key.has_vl else None),
+            bias_vl=(
+                TritonWarmupTensor(torch.float32, shape=(compile_key.num_experts,))
+                if compile_key.has_vl
+                else None
+            ),
+            image_sentinel_lo=compile_key.image_sentinel_lo,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        routed_scaling_factor: float,
+        input_ids: torch.Tensor | None = None,
+        bias_vl: torch.Tensor | None = None,
+        image_sentinel_lo: int = 0,
+    ) -> LaunchSpec:
+        num_tokens, num_experts = gating_output.shape
+        has_vl = bias_vl is not None and image_sentinel_lo > 0
+        return (num_tokens,), dict(
+            NUM_EXPERTS=num_experts,
+            BLOCK_N=next_power_of_2(num_experts),
+            HAS_VL=has_vl,
+            num_warps=1,
+            launch_pdl=current_platform.is_arch_support_pdl(),
+        )
+
 
 def dsv4_topk(
     gating_output: torch.Tensor,
@@ -123,17 +245,16 @@ def dsv4_topk(
     image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
-    has_vl = bias_vl is not None and image_sentinel_lo > 0
     if bias_vl is not None:
         assert input_ids is not None, "bias_vl routing requires input_ids"
         assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
         assert bias_vl.shape == (num_experts,)
         assert input_ids.is_contiguous()
-    shape = (num_tokens, _TOPK)
+    shape = (num_tokens, _DSV4_TOPK_KERNEL.top_k)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
     if num_tokens > 0:
-        _dsv4_topk_kernel[(num_tokens,)](
+        _DSV4_TOPK_KERNEL(
             gating_output,
             correction_bias,
             topk_weights,
@@ -142,10 +263,8 @@ def dsv4_topk(
             input_ids,
             bias_vl,
             image_sentinel_lo,
-            NUM_EXPERTS=num_experts,
-            BLOCK_N=triton.next_power_of_2(num_experts),
-            HAS_VL=has_vl,
-            num_warps=1,
-            launch_pdl=current_platform.is_arch_support_pdl(),
         )
     return topk_weights, topk_ids
+
+
+_DSV4_TOPK_KERNEL = DSV4TopKKernel()
