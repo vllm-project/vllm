@@ -196,9 +196,16 @@ class OfflineInferenceMixin:
             ),
             mm_processor_kwargs=mm_processor_kwargs,
         )
-        tok_params = renderer.default_chat_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
+        # The chat template is responsible for emitting BOS/EOS, so do not let
+        # the tokenizer add them again unless the caller asks for it. This
+        # matches the online chat API (`ChatCompletionRequest.add_special_tokens`
+        # defaults to `False`) and avoids a double BOS for multimodal models,
+        # whose processor default is `add_special_tokens=True` (#55197).
+        tokenization_kwargs = {
+            "add_special_tokens": False,
+            **(tokenization_kwargs or {}),
+        }
+        tok_params = renderer.default_chat_tok_params.with_kwargs(**tokenization_kwargs)
         prompt_extras = (
             None
             if mm_processor_kwargs is None
