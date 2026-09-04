@@ -196,14 +196,14 @@ def make_mock_model(hidden: int = 8):
         return ids.float().unsqueeze(-1).expand(-1, hidden).clone()
 
     lang_model = Mock()
-    lang_model.embed_input_ids = fake_lm_embed
+    lang_model.embed_input_ids = Mock(side_effect=fake_lm_embed)
     model.get_language_model = Mock(return_value=lang_model)
 
     # _embed_text_input_ids: delegate to SupportsMultiModal's implementation
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
-    model._embed_text_input_ids = (
-        lambda *a, **kw: SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
+    model._embed_text_input_ids = lambda *a, **kw: (
+        SupportsMultiModal._embed_text_input_ids(model, *a, **kw)
     )
 
     # super().embed_input_ids → use SupportsMultiModal.embed_input_ids
@@ -221,10 +221,8 @@ def make_mock_model(hidden: int = 8):
         )
 
     # Bind embed_input_ids as the real method
-    model.embed_input_ids = (
-        lambda *a, **kw: Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(
-            model, *a, **kw
-        )
+    model.embed_input_ids = lambda *a, **kw: (
+        Qwen2_5OmniThinkerForConditionalGeneration.embed_input_ids(model, *a, **kw)
     )
 
     # Store super-embed for use inside the method
@@ -251,6 +249,16 @@ def build_mm_embeds(
 
 
 class TestEmbedInputIds:
+    def test_non_interleaved_text_embedding_called_once(self):
+        """The standard merge path should embed text only once."""
+        input_ids, is_multimodal = make_token_seq(5, 4, 6)
+        mm_embeds = build_mm_embeds(5, 4, 6, hidden=8)
+
+        model, _ = make_mock_model(hidden=8)
+        model.embed_input_ids(input_ids, mm_embeds, is_multimodal=is_multimodal)
+
+        assert model.get_language_model.return_value.embed_input_ids.call_count == 1
+
     def _run(self, audio_n, image_n, video_n, hidden=8):
         """
         Run embed_input_ids for a non-interleaved mixed-modality sequence.
@@ -357,6 +365,8 @@ class TestEmbedInputIds:
             mm_embeds,
             is_multimodal=is_multimodal,
         )
+
+        assert model.get_language_model.return_value.embed_input_ids.call_count == 1
 
         video_pos = (input_ids == VIDEO_TOKEN_ID).nonzero(as_tuple=True)[0]
         audio_pos = (input_ids == AUDIO_TOKEN_ID).nonzero(as_tuple=True)[0]
