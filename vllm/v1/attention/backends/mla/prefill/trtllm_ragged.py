@@ -91,6 +91,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
+        assert prefill_metadata.query_lens_cpu is not None
+        self._query_seq_lens_cpu = prefill_metadata.query_lens_cpu
 
     def supports_out(self) -> bool:
         # Output head dim is v.shape[-1] == v_head_dim, so `out` is unpadded.
@@ -135,6 +137,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             is_causal=True,
             return_lse=return_softmax_lse,
             out=out,
+            q_seq_lens_cpu=self._query_seq_lens_cpu,
+            kv_seq_lens_cpu=self._query_seq_lens_cpu,
         )
 
         if isinstance(ret, tuple):
@@ -180,6 +184,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             is_causal=False,
             return_lse=True,
             out=out,
+            q_seq_lens_cpu=self._query_seq_lens_cpu[chunk.request_slice],
+            kv_seq_lens_cpu=chunk.seq_lens,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
