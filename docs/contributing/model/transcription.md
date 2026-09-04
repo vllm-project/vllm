@@ -203,7 +203,7 @@ Relevant server logic:
 ??? code "_preprocess_speech_to_text()"
 
     ```python
-    # vllm/entrypoints/openai/speech_to_text.py
+    # vllm/entrypoints/speech_to_text/base/serving.py
     async def _preprocess_speech_to_text(...):
         language = self.model_cls.validate_language(request.language)
         ...
