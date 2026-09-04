@@ -294,6 +294,19 @@ def _is_deep_gemm_mega_moe_requested(vllm_config: VllmConfig | None) -> bool:
     )
 
 
+def _use_sequence_parallel_moe(
+    parallel_config: ParallelConfig, vllm_config: VllmConfig | None
+) -> bool:
+    return parallel_config.pipeline_parallel_size == 1 and (
+        parallel_config.use_sequence_parallel_moe
+        or (
+            _is_deep_gemm_mega_moe_requested(vllm_config)
+            and parallel_config.enable_expert_parallel
+            and parallel_config.tensor_parallel_size > 1
+        )
+    )
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -317,8 +330,10 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.use_mega_moe = _is_deep_gemm_mega_moe_requested(vllm_config)
+        self.is_sequence_parallel = _use_sequence_parallel_moe(
+            parallel_config, vllm_config
+        )
         if self.use_mega_moe and not current_platform.is_cuda():
             raise NotImplementedError("DeepGEMM MegaMoE requires CUDA.")
         if self.use_mega_moe and not parallel_config.enable_expert_parallel:

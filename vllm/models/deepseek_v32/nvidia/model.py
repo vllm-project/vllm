@@ -28,6 +28,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MLP,
     DeepseekV2MoE,
     _try_load_fp8_indexer_wk,
+    _use_sequence_parallel_moe,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
@@ -73,9 +74,8 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
+        self.use_sequence_parallel = _use_sequence_parallel_moe(
+            parallel_config, vllm_config
         )
 
         self.self_attn = DeepseekV32Attention(
@@ -179,9 +179,8 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
-        self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
+        self.use_sequence_parallel = _use_sequence_parallel_moe(
+            parallel_config, vllm_config
         )
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.

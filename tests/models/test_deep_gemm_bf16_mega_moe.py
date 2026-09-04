@@ -7,6 +7,7 @@ import torch
 
 from vllm.model_executor.models.deepseek_v2 import (
     _is_deep_gemm_mega_moe_requested,
+    _use_sequence_parallel_moe,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepGemmMegaMoEExperts,
@@ -44,6 +45,34 @@ def test_mega_moe_request_applies_to_mtp_model_config():
     )
 
     assert _is_deep_gemm_mega_moe_requested(vllm_config)
+
+
+def test_mega_moe_forces_sequence_parallel_for_tp_ep():
+    parallel_config = SimpleNamespace(
+        pipeline_parallel_size=1,
+        use_sequence_parallel_moe=False,
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+    )
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe")
+    )
+
+    assert _use_sequence_parallel_moe(parallel_config, vllm_config)
+
+
+def test_mega_moe_does_not_force_sequence_parallel_with_pipeline_parallelism():
+    parallel_config = SimpleNamespace(
+        pipeline_parallel_size=2,
+        use_sequence_parallel_moe=False,
+        enable_expert_parallel=True,
+        tensor_parallel_size=8,
+    )
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe")
+    )
+
+    assert not _use_sequence_parallel_moe(parallel_config, vllm_config)
 
 
 def test_megamoe_mapping_uses_direct_expert_parameter_prefix():

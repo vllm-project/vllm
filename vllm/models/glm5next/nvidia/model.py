@@ -57,7 +57,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
+from vllm.model_executor.models.deepseek_v2 import (
+    _get_moe_router_dtype,
+    _use_sequence_parallel_moe,
+)
 from vllm.model_executor.models.glm4_1v import (
     Glm4vDummyInputsBuilder,
     Glm4vForConditionalGeneration,
@@ -177,10 +180,12 @@ class Glm5NextMoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.use_mega_moe = bool(
             vllm_config is not None
             and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        )
+        self.is_sequence_parallel = _use_sequence_parallel_moe(
+            parallel_config, vllm_config
         )
         if self.use_mega_moe and not parallel_config.enable_expert_parallel:
             raise NotImplementedError(
@@ -266,7 +271,7 @@ class Glm5NextMoE(nn.Module):
                 num_local_experts=self.n_local_physical_experts,
                 experts_start_idx=self.physical_expert_start,
                 num_logical_experts=self.n_logical_experts,
-                top_k=config.num_experts_per_tok,
+                top_k=config.num_experts_per_token,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
                 mma_type="fp8xfp4" if source_nvfp4 else "bf16xbf16",
@@ -317,7 +322,7 @@ class Glm5NextMoE(nn.Module):
             topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=self.config.num_experts_per_tok,
+                topk=self.config.num_experts_per_token,
                 renormalize=self.config.moe_renormalize,
                 num_expert_group=self.config.n_group,
                 topk_group=self.config.topk_group,
@@ -382,7 +387,9 @@ class Glm5NextDecoderLayer(nn.Module):
         self.mhc = config.mhc
         is_kda_layer = not is_mtp_layer and config.is_kda_layer(layer_idx)
         self.layer_kind = "kda" if is_kda_layer else "mla"
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = _use_sequence_parallel_moe(
+            parallel_config, vllm_config
+        )
 
         if is_kda_layer:
             self.self_attn = Glm5NextLinearAttention(
@@ -722,8 +729,8 @@ class Glm5NextModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.is_sequence_parallel = (
-            vllm_config.parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = _use_sequence_parallel_moe(
+            vllm_config.parallel_config, vllm_config
         )
 
         world_size = get_tensor_model_parallel_world_size()
