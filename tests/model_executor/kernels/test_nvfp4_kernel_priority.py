@@ -8,6 +8,7 @@ from vllm.model_executor.kernels.linear import (
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
+    MarlinNvFp4LinearKernel,
 )
 from vllm.platforms import PlatformEnum
 
@@ -31,3 +32,17 @@ def test_w4a16_cutedsl_ranks_below_native_w4a4_kernels():
             f"{w4a4_kernel.__name__} does the W4A4 GEMM natively and must be "
             "tried before the dequantizing W4A16 kernel"
         )
+
+
+def test_w4a16_cutedsl_stays_in_the_a16_tier():
+    """The A16 kernels form a tier: Marlin has always outranked Trtllm, cuDNN
+    and Fbgemm, so "every W4A4 kernel first" has never been the invariant here.
+    Keeping the CuTe-DSL W4A16 kernel immediately above Marlin reproduces the
+    pre-regression selection on sm_12x exactly -- that corner previously landed
+    on Marlin, also an A16 kernel. Demoting it below Trtllm/cuDNN/Fbgemm would
+    promote those above the A16 tier for the first time on any release.
+    """
+    assert (
+        _CUDA_KERNELS.index(FlashInferCuteDslNvFp4W4A16LinearKernel)
+        == _CUDA_KERNELS.index(MarlinNvFp4LinearKernel) - 1
+    ), "the two A16 kernels must stay adjacent, CuTe-DSL W4A16 preferred"
