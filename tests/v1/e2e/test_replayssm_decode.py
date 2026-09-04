@@ -30,6 +30,16 @@ except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
 
+@pytest.fixture(autouse=True)
+def _use_v1_model_runner_by_default(monkeypatch):
+    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        envs.disable_envs_cache()
+        yield
+    envs.disable_envs_cache()
+
+
 def _check_replayssm_parity(
     vllm_runner,
     model_name,
