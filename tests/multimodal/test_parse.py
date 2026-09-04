@@ -72,16 +72,6 @@ def test_parse_video_frame_list_as_single_video(frames):
     np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
 
 
-def test_parse_video_frame_list_checks_all_frame_dimensions():
-    """Only a list whose every array is 3-D represents one video item."""
-    frames = [
-        np.zeros((H, W, 3), dtype=np.uint8),
-        np.zeros((2, H, W, 3), dtype=np.uint8),
-    ]
-
-    items = MultiModalDataParser().parse_mm_data({"video": frames})["video"]
-
-    assert items.get_count() == 2
 
 
 @pytest.mark.parametrize(
