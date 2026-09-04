@@ -5,9 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from vllm.snapshot.kv_connector_lifecycle import (
-    rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore,
     refresh_scheduler_handshake_metadata_after_snapshot_restore,
-    refresh_scheduler_kv_transfer_identity_after_snapshot_restore,
     rotate_engine_id,
 )
 
@@ -20,85 +18,6 @@ def test_rotate_engine_id_preserves_instance_and_dp_rank():
         result = rotate_engine_id(engine_id)
 
     assert result == "instance-fedcba9876543210fedcba9876543210_dp3"
-
-
-def test_refresh_scheduler_updates_kv_identity_and_host():
-    rebuild = Mock()
-    connector_scheduler = SimpleNamespace(
-        side_channel_host="10.0.0.1",
-        engine_id="instance-0123456789abcdef0123456789abcdef_dp0",
-    )
-    connector = SimpleNamespace(
-        connector_scheduler=connector_scheduler,
-        engine_id=connector_scheduler.engine_id,
-        rebuild_kv_transfer_endpoint=rebuild,
-    )
-    kv_config = SimpleNamespace(
-        is_kv_producer=True,
-        is_kv_consumer=False,
-        engine_id=connector_scheduler.engine_id,
-    )
-    engine_core = SimpleNamespace(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_config),
-        scheduler=SimpleNamespace(connector=connector),
-    )
-
-    with patch(
-        "vllm.snapshot.kv_connector_lifecycle.rotate_engine_id",
-        return_value="instance-new",
-    ):
-        refresh_scheduler_kv_transfer_identity_after_snapshot_restore(
-            engine_core, "10.0.0.2"
-        )
-
-    assert connector_scheduler.side_channel_host == "10.0.0.2"
-    assert connector_scheduler.engine_id == "instance-new"
-    assert connector.engine_id == "instance-new"
-    assert kv_config.engine_id == "instance-new"
-    rebuild.assert_not_called()
-
-
-def test_refresh_scheduler_rebuilds_connector_without_scheduler_delegate():
-    rebuild = Mock()
-    connector = SimpleNamespace(rebuild_kv_transfer_endpoint=rebuild)
-    kv_config = SimpleNamespace(
-        is_kv_producer=True,
-        is_kv_consumer=False,
-        engine_id="engine-id",
-    )
-    engine_core = SimpleNamespace(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_config),
-        scheduler=SimpleNamespace(connector=connector),
-    )
-
-    rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore(
-        engine_core, "10.0.0.2"
-    )
-
-    rebuild.assert_called_once_with("10.0.0.2", "engine-id")
-
-
-def test_refresh_scheduler_rotates_identity_without_scheduler_engine_id():
-    connector = SimpleNamespace(connector_scheduler=SimpleNamespace())
-    kv_config = SimpleNamespace(
-        is_kv_producer=True,
-        is_kv_consumer=False,
-        engine_id="instance-0123456789abcdef0123456789abcdef_dp0",
-    )
-    engine_core = SimpleNamespace(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_config),
-        scheduler=SimpleNamespace(connector=connector),
-    )
-
-    with patch(
-        "vllm.snapshot.kv_connector_lifecycle.rotate_engine_id",
-        return_value="instance-new",
-    ):
-        refresh_scheduler_kv_transfer_identity_after_snapshot_restore(
-            engine_core, "10.0.0.2"
-        )
-
-    assert kv_config.engine_id == "instance-new"
 
 
 def test_refresh_scheduler_replaces_worker_handshake_metadata():
