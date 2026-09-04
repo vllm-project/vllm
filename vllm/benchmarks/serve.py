@@ -1593,10 +1593,10 @@ def compute_result_filename(
     return file_name
 
 
-def _parse_positive_int(value: str) -> int:
+def _parse_non_negative_int(value: str) -> int:
     parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than 0")
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 0")
     return parsed
 
 
@@ -1642,7 +1642,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
     )
     parser.add_argument(
         "--max-concurrency",
-        type=_parse_positive_int,
+        type=_parse_non_negative_int,
         default=None,
         help="Maximum number of concurrent requests. This can be used "
         "to help simulate an environment where a higher level component "
