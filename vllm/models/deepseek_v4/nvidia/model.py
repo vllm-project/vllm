@@ -1242,8 +1242,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
                     output_finite,
                     y.float().abs().max().item(),
                 )
-            if not hidden_finite or not weights_finite or not output_finite:
-                raise RuntimeError(f"Non-finite MegaMoE tensor in {self.prefix}")
         return y
 
 

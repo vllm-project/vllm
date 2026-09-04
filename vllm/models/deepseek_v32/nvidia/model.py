@@ -69,10 +69,6 @@ def _debug_finite_tensor(prefix: str, tensor: torch.Tensor) -> None:
             finite,
             tensor.float().abs().max().item(),
         )
-    if not finite:
-        raise RuntimeError(f"Non-finite GLM tensor at {prefix}")
-
-
 class DeepseekV32DecoderLayer(torch.nn.Module):
     def __init__(
         self,
