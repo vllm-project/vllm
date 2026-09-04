@@ -17,7 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -68,6 +68,17 @@ class BatchExecutionDescriptor:
     # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
+
+
+def make_cudagraph_stats(
+    batch_desc: BatchExecutionDescriptor, num_tokens: int
+) -> CUDAGraphStat:
+    return CUDAGraphStat(
+        num_unpadded_tokens=num_tokens,
+        num_padded_tokens=batch_desc.num_tokens,
+        num_paddings=batch_desc.num_tokens - num_tokens,
+        runtime_mode=str(batch_desc.cg_mode),
+    )
 
 
 class CreateForwardFn(Protocol):
