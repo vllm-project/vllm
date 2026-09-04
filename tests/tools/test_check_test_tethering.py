@@ -24,6 +24,7 @@ from tools.pre_commit.check_test_tethering import (
     _parse_command,
     _to_repo_relative,
     all_test_modules,
+    allowlist_entries_missing_reason,
     is_test_module,
     is_tethered,
     load_allowlist,
@@ -508,6 +509,21 @@ def test_allowlist_entries_are_well_formed():
     assert allowlist, "allowlist should not be empty while gaps remain"
     assert all(is_test_module(path) for path in allowlist)
     assert all(not path.startswith("/") for path in allowlist)
+
+
+def test_real_allowlist_entries_all_have_a_reason():
+    assert allowlist_entries_missing_reason() == []
+
+
+def test_bare_allowlist_entry_is_flagged(tmp_path, monkeypatch):
+    allowlist = tmp_path / "allowlist.txt"
+    allowlist.write_text(
+        "tests/a/test_ok.py  # torchrun multi-GPU, no job\n"
+        "tests/b/test_bare.py\n"
+        "  # a standalone comment line is fine\n"
+    )
+    monkeypatch.setattr(checker, "ALLOWLIST_PATH", allowlist)
+    assert allowlist_entries_missing_reason() == ["tests/b/test_bare.py"]
 
 
 def test_real_tree_has_no_unallowlisted_gaps():
