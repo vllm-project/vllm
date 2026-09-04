@@ -432,6 +432,12 @@ def _make_model_inputs(num_tokens: int, device: torch.device) -> dict[str, Any]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _no_comm_sm_reservation(monkeypatch):
+    """CI runs on MIG slices with fewer SMs than the default comm reservation."""
+    monkeypatch.setenv("VLLM_DBO_COMM_SMS", "0")
+
+
 def _make_execution_runner(vllm_config: VllmConfig) -> UBatchRunner:
     """A runner for the execution tests below, which never call `prepare()`.
 
