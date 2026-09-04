@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -133,6 +134,7 @@ class TrtLlmNvFp4ExpertsBase:
             beta,
             clamp,
         )
+        self._chunk_size = self._get_chunk_size()
 
     def _compute_g1_scale_c(self) -> torch.Tensor:
         assert self.quant_config.g1_alphas is not None
@@ -274,9 +276,25 @@ class TrtLlmNvFp4ExpertsBase:
             ) // top_k
 
         # Using 305k or more causes IMA error in the kernel, so limit to 300k.
-        return min(
+        safe_chunk_size = min(
             300000, _calc_max_supported_tokens(self.topk, self.moe_config.num_experts)
         )
+        configured_max = envs.VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE
+        if configured_max is None:
+            return safe_chunk_size
+        if configured_max <= 0:
+            raise ValueError(
+                "VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE must be a positive "
+                f"integer, got {configured_max}"
+            )
+
+        chunk_size = min(safe_chunk_size, configured_max)
+        logger.info_once(
+            "Capping TRTLLM NVFP4 MoE kernel invocations at %d input tokens "
+            "via VLLM_TRTLLM_NVFP4_MOE_MAX_CHUNK_SIZE.",
+            chunk_size,
+        )
+        return chunk_size
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
@@ -290,7 +308,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ):
         super().__init__(moe_config, quant_config, per_token_activation)
         # Each launch permutes into its own buffer, so a chunked call finalizes.
-        moe_config.limit_deferred_moe_finalize(self._get_chunk_size())
+        moe_config.limit_deferred_moe_finalize(self._chunk_size)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -383,7 +401,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             per_token_scale=per_token_scale,
             output=output,
             tune_max_num_tokens=min(
-                fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
+                fi_moe_largest_bucket(self.moe_config), self._chunk_size
             ),
         )
         if output is not None:
@@ -423,7 +441,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         topk_ids = topk_ids.to(dtype=torch.int32)
 
         M = hidden_states.shape[0]
-        chunk_size = self._get_chunk_size()
+        chunk_size = self._chunk_size
 
         if chunk_size >= M:
             # Each launch permutes into its own buffer, so only a run that fits
