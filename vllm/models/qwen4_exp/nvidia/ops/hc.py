@@ -289,20 +289,16 @@ def _hc_combine_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
     launch_pdl: tl.constexpr,
 ) -> None:
+    HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
+    NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
+    NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
+
     row = tl.program_id(0)
     stream = tl.program_id(1)
-    if inj_ptr is not None:
-        HC_PAD: tl.constexpr = triton.next_power_of_2(HC)
-        NUM_TILES: tl.constexpr = triton.cdiv(HC_DIM, BLOCK_SIZE)
-        NUM_TILES_PAD: tl.constexpr = triton.next_power_of_2(NUM_TILES)
-        offs_hc = tl.arange(0, HC_PAD)
-        mask_hc = offs_hc < HC
-        tile_ids = tl.arange(0, NUM_TILES_PAD)
-        offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
-    else:
-        # Unit injection needs no HC-axis broadcast; keep its norm tile flat.
-        UNIT_BLOCK_SIZE: tl.constexpr = triton.next_power_of_2(HC_DIM)
-        offs_inner = tl.arange(0, UNIT_BLOCK_SIZE)
+    offs_hc = tl.arange(0, HC_PAD)
+    mask_hc = offs_hc < HC
+    tile_ids = tl.arange(0, NUM_TILES_PAD)
+    offs_inner = tile_ids[:, None] * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[None, :]
     mask_inner = offs_inner < HC_DIM
     offs = stream * HC_DIM + offs_inner
     # Shared norm weights repeat across streams; per-branch weights use the
@@ -333,10 +329,7 @@ def _hc_combine_norm_kernel(
     tl.store(out_ptr + row * stride_out + offs, out, mask=mask_inner)
 
     out = out.to(tl.float32)
-    if inj_ptr is not None:
-        sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
-    else:
-        sum_sq = tl.sum(out * out)
+    sum_sq = tl.sum(tl.sum(out * out, axis=1), axis=0)
     rrms = tl.rsqrt(sum_sq / HC_DIM + EPS)
 
     if launch_pdl:
