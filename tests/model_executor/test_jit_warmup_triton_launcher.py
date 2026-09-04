@@ -69,6 +69,28 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
     assert runtime_calls == [(owner.kernel, (2,), ("runtime", 2), {"CONST": 7})]
 
 
+def test_triton_launcher_supports_cpu_function_wrappers() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def kernel(first: str, second: int, CONST: int) -> None:
+        calls.append((first, second, CONST))
+
+    class FuncWrapper:
+        def __init__(self) -> None:
+            self.func = kernel
+
+        def __getitem__(self, _grid: Any) -> Any:
+            return self.func
+
+    class TestCpuKernel(_TestTritonKernel):
+        kernel = FuncWrapper()
+
+    owner = TestCpuKernel()
+
+    owner("runtime", 2, None)
+    assert calls == [("runtime", 2, 7)]
+
+
 def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     from vllm.v1.attention.backends.utils import PAD_SLOT_ID
     from vllm.v1.worker.block_table import ComputeSlotMappingKernel
