@@ -530,9 +530,6 @@ class NixlBaseConnectorWorker:
         # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
         # replicated or fully sharded. A DCP rank is always derivable this way.
         self.dcp_rank = self.tp_rank % self.dcp_size
-        if self._has_mamba and self.dcp_size > 1:
-            # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
-            raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -2174,6 +2171,11 @@ class NixlBaseConnectorWorker:
             f"DCP sizes must divide one another: local={self.dcp_size}, "
             f"remote={remote_dcp_size} (engine {remote_engine_id})."
         )
+        if self._has_mamba and self.dcp_size != remote_dcp_size:
+            raise RuntimeError(
+                "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
+                f"got local={self.dcp_size}, remote={remote_dcp_size}."
+            )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
