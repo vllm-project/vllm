@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
@@ -11,6 +13,9 @@ from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_SCORE_DOC,
     compute_maxsim_score_batched,
 )
+from vllm.v1.pool.metadata import PoolingCursor
+
+logger = init_logger(__name__)
 
 
 class LateInteractionRunner:
@@ -23,6 +28,64 @@ class LateInteractionRunner:
         self._query_uses: dict[str, int] = {}
         # doc request id -> query key.
         self._doc_query_keys: dict[str, str] = {}
+        # Check if flash_maxsim_rerank_direct is available
+        try:
+            from vllm.v1.pool.flash_maxsim import (  # noqa: F401
+                flash_maxsim_rerank_direct,
+            )
+
+            self._has_flash_maxsim_rerank = True
+        except ImportError:
+            self._has_flash_maxsim_rerank = False
+
+    def warmup_kernels(self) -> None:
+        """Pre-compile flash_maxsim_rerank_direct for realistic autotune
+        buckets so the first request never triggers Triton autotune.
+
+        Caller is responsible for invoking this only when the loaded model
+        has a late-interaction pooler (see gpu_model_runner.load_model)."""
+        if not self._has_flash_maxsim_rerank or not torch.cuda.is_available():
+            return
+        if os.environ.get("VLLM_DISABLE_ZEROCOPY"):
+            # User opted out of the zero-copy path entirely — don't pay
+            # the autotune cost at model load either.
+            return
+        try:
+            from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
+
+            device = torch.accelerator.current_device_index()
+            # d=128 covers ColBERT and ColPali. Override via env var
+            # for other embedding dims.
+            d = int(os.environ.get("VLLM_FLASH_MAXSIM_WARMUP_D", "128"))
+            lq_buckets = [32, 64, 128, 256, 512, 1024]
+            ld_buckets = [32, 64, 128, 256, 512, 1024]
+
+            for Lq in lq_buckets:
+                Q = torch.randn(Lq, d, device=device, dtype=torch.float16)
+                for Ld in ld_buckets:
+                    batch = torch.randn(64 * Ld, d, device=device, dtype=torch.float16)
+                    offs = torch.arange(
+                        0, 64 * Ld, Ld, device=device, dtype=torch.int32
+                    )
+                    lens = torch.full((64,), Ld, device=device, dtype=torch.int32)
+                    flash_maxsim_rerank_direct(Q, batch, offs, lens, Ld)
+                    del batch, offs, lens
+                del Q
+        except Exception as e:
+            # Warmup is a pure latency optimization (pre-compiling Triton
+            # kernels). A failure here — transient CUDA error, OOM on the
+            # dummy allocations, or a Triton autotune edge case — must not
+            # take down the server: the kernels JIT on the first real
+            # request instead, only that request pays the autotune cost.
+            logger.warning("flash-maxsim kernel warmup failed: %s", e)
+        finally:
+            if torch.cuda.is_available():
+                torch.accelerator.empty_cache()
+
+    @property
+    def has_pending_docs(self) -> bool:
+        """True when there are doc-scoring requests in flight."""
+        return bool(self._doc_query_keys)
 
     def clear(self) -> None:
         self._query_cache.clear()
@@ -50,6 +113,8 @@ class LateInteractionRunner:
         pooling_params: list[PoolingParams],
         req_ids: list[str],
         finished_mask: list[bool],
+        projected_batch: torch.Tensor | None = None,
+        pooling_cursor: PoolingCursor | None = None,
     ) -> PoolerOutput:
         if not isinstance(raw_pooler_output, list):
             return raw_pooler_output
@@ -71,12 +136,38 @@ class LateInteractionRunner:
         if not any(p.late_interaction_params is not None for p in pooling_params):
             return raw_pooler_output
 
+        use_zerocopy = (
+            projected_batch is not None
+            and pooling_cursor is not None
+            and self._has_flash_maxsim_rerank
+        )
+
+        # Offsets/lengths from the CPU-side scheduled-token metadata —
+        # no GPU->CPU synchronization on the hot path.
+        firsts_cpu: list[int] = []
+        lasts_cpu: list[int] = []
+        if use_zerocopy:
+            assert pooling_cursor is not None  # narrowed by use_zerocopy
+            fcpu = pooling_cursor.first_token_indices_cpu
+            lcpu = pooling_cursor.last_token_indices_cpu
+            if fcpu is not None and lcpu is not None:
+                firsts_cpu = fcpu.tolist()
+                lasts_cpu = lcpu.tolist()
+            else:  # fallback: single sync (older cursor producers)
+                firsts_cpu = pooling_cursor.first_token_indices_gpu.tolist()
+                lasts_cpu = pooling_cursor.last_token_indices_gpu.tolist()
+
         outputs: list[torch.Tensor | None] = list(raw_pooler_output)
         score_indices: list[int] = []
         score_req_ids: list[str] = []
         score_query_keys: list[str] = []
         score_queries: list[torch.Tensor] = []
+        # For zero-copy: collect (offset, length) instead of tensor copies
+        score_doc_offsets: list[int] = []
+        score_doc_lengths: list[int] = []
+        # Fallback: collect tensor copies
         score_docs: list[torch.Tensor] = []
+
         for i, (req_id, output, params, finished) in enumerate(
             zip(req_ids, outputs, pooling_params, finished_mask)
         ):
@@ -110,13 +201,55 @@ class LateInteractionRunner:
                 score_req_ids.append(req_id)
                 score_query_keys.append(query_key)
                 score_queries.append(query_output)
-                score_docs.append(output)
+
+                if use_zerocopy:
+                    # Collect offset/length into projected batch — no copy
+                    first = firsts_cpu[i]
+                    last = lasts_cpu[i]
+                    score_doc_offsets.append(first)
+                    score_doc_lengths.append(last - first + 1)
+                else:
+                    score_docs.append(output)
                 continue
 
             raise ValueError(f"Unsupported late-interaction mode: {mode!r}")
 
         if score_indices:
-            score_values = compute_maxsim_score_batched(score_queries, score_docs)
+            if use_zerocopy:
+                assert projected_batch is not None  # narrowed by use_zerocopy
+                try:
+                    score_values = self._score_zerocopy(
+                        score_queries,
+                        projected_batch,
+                        score_doc_offsets,
+                        score_doc_lengths,
+                    )
+                except Exception as exc:
+                    # A persistent Triton compile/launch failure must not
+                    # take down requests: disable the kernel path for the
+                    # rest of the process and serve this batch through the
+                    # vanilla scorer using views into the projected batch.
+                    self._has_flash_maxsim_rerank = False
+                    logger.warning(
+                        "flash-maxsim zero-copy scoring failed (%s); "
+                        "falling back to the vanilla MaxSim path and "
+                        "disabling the kernel for this process.",
+                        exc,
+                    )
+                    score_docs = [
+                        projected_batch[o : o + n]
+                        for o, n in zip(score_doc_offsets, score_doc_lengths)
+                    ]
+                    score_values = compute_maxsim_score_batched(
+                        score_queries,
+                        score_docs,
+                    )
+            else:
+                score_values = compute_maxsim_score_batched(
+                    score_queries,
+                    score_docs,
+                )
+
             for i, req_id, query_key, score in zip(
                 score_indices, score_req_ids, score_query_keys, score_values
             ):
@@ -125,6 +258,77 @@ class LateInteractionRunner:
                 self._release_query_use(query_key)
 
         return outputs
+
+    @staticmethod
+    def _score_zerocopy(
+        queries: list[torch.Tensor],
+        projected_batch: torch.Tensor,
+        doc_offsets: list[int],
+        doc_lengths: list[int],
+    ) -> list[torch.Tensor]:
+        """Score queries against docs with a single kernel launch.
+
+        Reads doc embeddings directly from projected_batch — zero copy.
+        One distinct query (the common rerank pattern): shared-query kernel,
+        exactly as before. Multiple distinct queries (N:N scoring): the
+        pairwise kernel scores every (query_i, doc_i) pair in one launch —
+        previously this looped one launch per unique query, which is where
+        the N:N regression vs the vanilla scorer came from.
+        """
+        from vllm.v1.pool.flash_maxsim import (
+            flash_maxsim_rerank_direct,
+            flash_maxsim_rerank_pairs,
+        )
+
+        device = projected_batch.device
+
+        # fp16 models: the kernel reads projected_batch in place — true
+        # zero-copy. Other dtypes (e.g. BF16 heads): cast ONCE here for the
+        # whole step.
+        if projected_batch.dtype != torch.float16:
+            projected_batch = projected_batch.half()
+        if not projected_batch.is_contiguous():
+            projected_batch = projected_batch.contiguous()
+
+        # Identify unique queries (same cached tensor = same data_ptr).
+        unique: dict[int, tuple[torch.Tensor, int]] = {}
+        for q in queries:
+            key = q.data_ptr()
+            if key not in unique:
+                unique[key] = (q, len(unique))
+
+        if len(unique) == 1:
+            off_t = torch.tensor(doc_offsets, device=device, dtype=torch.int32)
+            len_t = torch.tensor(doc_lengths, device=device, dtype=torch.int32)
+            scores = flash_maxsim_rerank_direct(
+                queries[0], projected_batch, off_t, len_t, max(doc_lengths)
+            )
+            return list(scores)
+
+        # Pack the unique queries once (small copy: queries are short-lived
+        # cache entries); docs stay zero-copy in projected_batch.
+        uniq_tensors = [t for t, _ in unique.values()]
+        q_starts: list[int] = []
+        start = 0
+        for t in uniq_tensors:
+            q_starts.append(start)
+            start += t.shape[0]
+        q_packed = torch.cat(uniq_tensors, dim=0)
+
+        pair_q_offsets = [q_starts[unique[q.data_ptr()][1]] for q in queries]
+        pair_q_lengths = [q.shape[0] for q in queries]
+
+        scores = flash_maxsim_rerank_pairs(
+            q_packed,
+            torch.tensor(pair_q_offsets, device=device, dtype=torch.int32),
+            torch.tensor(pair_q_lengths, device=device, dtype=torch.int32),
+            projected_batch,
+            torch.tensor(doc_offsets, device=device, dtype=torch.int32),
+            torch.tensor(doc_lengths, device=device, dtype=torch.int32),
+            max(pair_q_lengths),
+            max(doc_lengths),
+        )
+        return list(scores)
 
     def _release_query_use(self, query_key: str) -> None:
         remaining = self._query_uses.get(query_key, 1) - 1
