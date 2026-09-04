@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from collections import deque
 from concurrent.futures import Future
 from unittest.mock import Mock
 
@@ -30,7 +31,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler import Scheduler, _take_routed_experts_block_ids
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -53,6 +54,23 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_take_routed_experts_block_ids_drains_discarded_output_snapshot():
+    snapshots = {"discarded": deque([[4, 5]])}
+
+    assert _take_routed_experts_block_ids(True, snapshots, "discarded") == [4, 5]
+    assert snapshots == {}
+    assert _take_routed_experts_block_ids(True, snapshots, "missing") == []
+
+
+def test_take_routed_experts_block_ids_preserves_in_flight_fifo():
+    snapshots = {"request": deque([[1, 2], [3, 4]])}
+
+    assert _take_routed_experts_block_ids(True, snapshots, "request") == [1, 2]
+    assert snapshots == {"request": deque([[3, 4]])}
+    assert _take_routed_experts_block_ids(True, snapshots, "request") == [3, 4]
+    assert snapshots == {}
 
 
 def test_make_scheduled_encoder_input_stats_output_embeddings():
@@ -3588,8 +3606,11 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
-    scheduler.vllm_config.model_config.enable_return_routed_experts = False
-    scheduler.enable_return_routed_experts = False
+    scheduler.vllm_config.model_config.enable_return_routed_experts = True
+    scheduler.enable_return_routed_experts = True
+    scheduler._re_block_ids = {request.request_id: deque([[4]])}
+    scheduler.routed_experts_mgr = Mock()
+    scheduler.routed_experts_mgr.serialize_terminal.return_value = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
@@ -3638,6 +3659,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert engine_core_output.request_id == request.request_id
     assert engine_core_output.new_token_ids == [123]
     assert engine_core_output.finish_reason == FinishReason.ERROR
+    assert engine_core_output.routed_experts_payload is None
+    assert scheduler._re_block_ids == {}
+    scheduler.routed_experts_mgr.serialize_terminal.assert_called_once_with(
+        [4],
+        request.num_tokens - 1,
+        0,
+        current_step_captured=False,
+    )
 
 
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])

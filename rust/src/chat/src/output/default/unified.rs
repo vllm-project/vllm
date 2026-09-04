@@ -438,6 +438,7 @@ mod tests {
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
             })),
         }
     }
