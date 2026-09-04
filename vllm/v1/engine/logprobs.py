@@ -83,6 +83,15 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
+        # Seed context window once, then build incrementally
+        # to avoid repeated _get_sampled_context_ids calls
+        # (matters for spec decoding where the loop runs multiple times).
+        context_window: list[int] | None = (
+            None
+            if self.tokenizer is None
+            else self._get_sampled_context_ids(self.logprobs)
+        )
+
         for rank_np, logprobs_np, token_ids_np in zip(
             ranks_lst, logprobs_lst, token_ids_lst
         ):
@@ -94,15 +103,18 @@ class LogprobsProcessor:
             if self.tokenizer is None:
                 decoded_tokens = NONES
             else:
+                assert context_window is not None
                 decoded_tokens_list = convert_ids_list_to_tokens(
                     self.tokenizer, token_ids
                 )
-                context_token_ids = self._get_sampled_context_ids(self.logprobs)
                 decoded_tokens = self._verify_tokens(
                     decoded_tokens_list=decoded_tokens_list,
                     tokens=token_ids,
-                    context_token_ids=context_token_ids,
+                    context_token_ids=context_window[-4:]
+                    if context_window
+                    else [],
                 )
+                context_window.append(token_ids[0])
 
             # Sampler puts the sampled logprob in first.
             sampled_token_logprob = logprobs[0]
@@ -154,6 +166,15 @@ class LogprobsProcessor:
         prompt_logprobs = logprobs.tolist()
         token_ids_list = token_ids.tolist()
 
+        # Seed context window from any pre-existing prompt logprobs
+        # (e.g. from prior prefill chunks), then build incrementally
+        # to avoid calling _get_sampled_context_ids per position.
+        context_window: list[int] | None = (
+            None
+            if all_decoded_tokens is None
+            else self._get_sampled_context_ids(self.prompt_logprobs)
+        )
+
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
             # Handle flattening and UTF-8 correction per position
@@ -164,17 +185,20 @@ class LogprobsProcessor:
             if all_decoded_tokens is None:
                 decoded_tokens_for_pos = NONES
             else:
+                assert context_window is not None
                 # Extract decoded tokens for this position
                 decoded_tokens_slice = all_decoded_tokens[offset:offset_end]
-                # Context: preceding prompt tokens accumulated in
-                # self.prompt_logprobs from previous loop iterations.
-                context_token_ids = self._get_sampled_context_ids(self.prompt_logprobs)
                 # Apply UTF-8 correction within this position's token boundaries
                 decoded_tokens_for_pos = self._verify_tokens(
                     decoded_tokens_list=decoded_tokens_slice,
                     tokens=token_ids_list[pos],
-                    context_token_ids=context_token_ids,
+                    context_token_ids=context_window[-4:]
+                    if context_window
+                    else [],
                 )
+                # Track the sampled token (first in position) for
+                # the next iteration's context.
+                context_window.append(token_ids_list[pos][0])
 
             # Update with the Logprob container for this pos.
             append_logprobs_for_next_position(
