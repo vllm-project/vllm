@@ -27,6 +27,8 @@ class PendingRecv:
 
     sampled_tokens: torch.Tensor  # [num_reqs, max_sample_len]
     combined: torch.Tensor  # [2, num_reqs]: num_sampled, num_rejected
+    num_sampled: torch.Tensor  # [num_reqs]
+    num_rejected: torch.Tensor  # [num_reqs]
     idx_mapping: torch.Tensor  # [num_reqs]
     idx_mapping_np: np.ndarray  # [num_reqs]
     # Records which rows need a deferred postprocess (bool).
@@ -65,7 +67,6 @@ class PPHandler:
         max_num_reqs: int,
         num_speculative_steps: int,
         device: torch.device,
-        use_async_scheduling: bool,
     ):
         pp_group = get_pp_group()
         self.is_last_rank = pp_group.is_last_rank
@@ -79,24 +80,35 @@ class PPHandler:
         self.requested_recv_launch_delay = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV
         if not 0 <= self.requested_recv_launch_delay < pp_group.world_size:
             raise ValueError(
-                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must be in "
-                f"[0, {pp_group.world_size - 1}] for PP size "
-                f"{pp_group.world_size}; got {self.requested_recv_launch_delay}"
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must satisfy "
+                "0 <= delay < pp_size; got "
+                f"delay={self.requested_recv_launch_delay}, "
+                f"pp_size={pp_group.world_size}"
             )
         if self.requested_recv_launch_delay and not current_platform.is_cuda():
             raise ValueError(
                 "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV is currently supported only on CUDA"
             )
-        if self.requested_recv_launch_delay and not use_async_scheduling:
-            raise ValueError(
-                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV requires async scheduling"
-            )
-
         # Warmup must retain upstream collective timing. The worker enables
         # the requested delay only after all compilation and warmup completes.
         # The last PP rank always broadcasts immediately.
         self.recv_launch_delay = 0
         self.deferred_collectives_active = False
+
+        # Diagnostics are collected only when deferral is active. They make
+        # idle-boundary flushes and late receives visible in benchmark logs.
+        self.num_deferred_recv_launches = 0
+        self.num_idle_boundaries = 0
+        self.num_idle_flushes = 0
+        self.num_idle_flushed_receives = 0
+        self.num_consume_fallbacks = 0
+        self.num_unready_at_consume = 0
+        self.num_measured_consume_waits = 0
+        self.total_consume_wait_ms = 0.0
+        self.max_consume_wait_ms = 0.0
+        self.pending_wait_events: deque[tuple[torch.cuda.Event, torch.cuda.Event]] = (
+            deque()
+        )
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
@@ -191,6 +203,8 @@ class PPHandler:
             slot.combined.record_stream(self.main_stream)
             if slot.draft_tokens is not None:
                 slot.draft_tokens.record_stream(self.main_stream)
+        if self.recv_launch_delay:
+            self.num_deferred_recv_launches += 1
 
     def _advance_receive_queue(self) -> PendingRecv | None:
         """Launch the configured slot and return the slot due this step."""
@@ -204,17 +218,88 @@ class PPHandler:
         self.queue.append(None)
         return due_slot
 
-    def flush_pending_collectives(self) -> int:
+    def _queue_receive(self, slot: PendingRecv) -> None:
+        """Associate a receive with the current step and launch if immediate."""
+        self.queue[-1] = slot
+        if self.recv_launch_delay == 0:
+            self._launch_receive(slot)
+
+    def _ensure_receive_launched(self, slot: PendingRecv) -> None:
+        if slot.event is not None:
+            return
+        # Defensive fallback for a changed cadence or an early finite drain:
+        # never consume a slot without posting its collective.
+        logger.warning_once(
+            "Deferred PP sampled-token receive reached consumption before "
+            "its configured launch step; posting it now"
+        )
+        self.num_consume_fallbacks += 1
+        self._launch_receive(slot)
+
+    def flush_pending_collectives(self, reason: str = "explicit") -> int:
         """Post all deferred receives before an idle boundary or shutdown."""
         if self.is_last_rank:
             return 0
+
+        if reason == "idle" and self.recv_launch_delay:
+            self.num_idle_boundaries += 1
 
         launched = 0
         for slot in self.queue:
             if slot is not None and slot.event is None:
                 self._launch_receive(slot)
                 launched += 1
+        if reason == "idle" and launched:
+            self.num_idle_flushes += 1
+            self.num_idle_flushed_receives += launched
         return launched
+
+    def _collect_completed_wait_timings(self, force: bool = False) -> None:
+        while self.pending_wait_events:
+            start_event, end_event = self.pending_wait_events[0]
+            if not force and not end_event.query():
+                break
+            self.pending_wait_events.popleft()
+            elapsed_ms = start_event.elapsed_time(end_event)
+            self.num_measured_consume_waits += 1
+            self.total_consume_wait_ms += elapsed_ms
+            self.max_consume_wait_ms = max(self.max_consume_wait_ms, elapsed_ms)
+
+    def _wait_for_receive(self, event: torch.cuda.Event) -> None:
+        """Wait on the main stream and measure a genuinely unready receive."""
+        self._collect_completed_wait_timings()
+        if self.recv_launch_delay and not event.query():
+            self.num_unready_at_consume += 1
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record(self.main_stream)
+            self.main_stream.wait_event(event)
+            end_event.record(self.main_stream)
+            self.pending_wait_events.append((start_event, end_event))
+            return
+        self.main_stream.wait_event(event)
+
+    def log_deferred_receive_stats(self) -> None:
+        """Log end-of-run diagnostics after the device has synchronized."""
+        if self.is_last_rank or not self.deferred_collectives_active:
+            return
+        self._collect_completed_wait_timings(force=True)
+        logger.info(
+            "Deferred PP sampled-token receive stats: launches=%d, "
+            "idle_boundaries=%d, idle_flushes=%d, idle_flushed_receives=%d, "
+            "consume_fallbacks=%d, unready_at_consume=%d, "
+            "measured_consume_waits=%d, total_consume_wait_ms=%.3f, "
+            "max_consume_wait_ms=%.3f",
+            self.num_deferred_recv_launches,
+            self.num_idle_boundaries,
+            self.num_idle_flushes,
+            self.num_idle_flushed_receives,
+            self.num_consume_fallbacks,
+            self.num_unready_at_consume,
+            self.num_measured_consume_waits,
+            self.total_consume_wait_ms,
+            self.max_consume_wait_ms,
+        )
 
     def get_prev_sampled_outputs(
         self, draft_tokens_to_update: torch.Tensor | None = None
@@ -228,14 +313,7 @@ class PPHandler:
         if slot is None:
             return None
 
-        if slot.event is None:
-            # Defensive fallback for a changed cadence or an early finite
-            # drain: never consume a slot without posting its collective.
-            logger.warning_once(
-                "Deferred PP sampled-token receive reached consumption before "
-                "its configured launch step; posting it now"
-            )
-            self._launch_receive(slot)
+        self._ensure_receive_launched(slot)
         assert slot.event is not None
 
         # Skip requests which did not need sampled output and/or those already
@@ -251,8 +329,7 @@ class PPHandler:
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
-        self.main_stream.wait_event(slot.event)
-        num_sampled, num_rejected = slot.combined.unbind(dim=0)
+        self._wait_for_receive(slot.event)
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
@@ -266,8 +343,8 @@ class PPHandler:
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
         return dict(
             sampled_tokens=slot.sampled_tokens,
-            num_sampled=num_sampled,
-            num_rejected=num_rejected,
+            num_sampled=slot.num_sampled,
+            num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
         )
 
@@ -290,6 +367,8 @@ class PPHandler:
         """Returns True iff sampled tokens need to be gathered from *all*
         requests in the batch."""
         assert not self.is_last_rank
+        # The source uses the same predicate in `broadcast`, which preserves
+        # collective skip/order symmetry across PP ranks.
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
@@ -301,10 +380,15 @@ class PPHandler:
 
         num_reqs = input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
+            # Preserve upstream stream/allocation ordering even when launch is
+            # deferred. The launch path waits again at T+delay so the receive
+            # cannot race newer main-stream work.
+            self.broadcast_stream.wait_stream(self.main_stream)
             sampled_tokens = torch.empty(
                 num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
             )
             combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
+            num_sampled, num_rejected = combined.unbind(dim=0)
             draft_tokens = None
             if self.num_speculative_steps > 0:
                 draft_tokens = torch.empty(
@@ -313,19 +397,41 @@ class PPHandler:
                     dtype=torch.int64,
                     device=self.device,
                 )
+            event = None
+            if self.recv_launch_delay == 0:
+                # Keep the default path's ordering identical to upstream.
+                torch.distributed.broadcast(
+                    sampled_tokens, src=self.last_rank, group=self.broadcast_group
+                )
+                torch.distributed.broadcast(
+                    combined, src=self.last_rank, group=self.broadcast_group
+                )
+                if draft_tokens is not None:
+                    torch.distributed.broadcast(
+                        draft_tokens,
+                        src=self.last_rank,
+                        group=self.broadcast_group,
+                    )
+                event = self.broadcast_stream.record_event()
+            # These tensors remain live in the queue until the main stream
+            # consumes them, including across a deferred launch.
+            sampled_tokens.record_stream(self.main_stream)
+            combined.record_stream(self.main_stream)
+            if draft_tokens is not None:
+                draft_tokens.record_stream(self.main_stream)
         slot = PendingRecv(
-            None,
+            event,
             sampled_tokens,
             combined,
+            num_sampled,
+            num_rejected,
             input_batch.idx_mapping,
             input_batch.idx_mapping_np,
             need_sampled_mask,
             gen_at_receive_np,
             draft_tokens,
         )
-        self.queue[-1] = slot
-        if self.recv_launch_delay == 0:
-            self._launch_receive(slot)
+        self._queue_receive(slot)
         return bool(need_sampled_mask.all())
 
     def broadcast(
@@ -336,6 +442,7 @@ class PPHandler:
         input_batch: InputBatch,
     ) -> None:
         assert self.is_last_rank
+        # Keep this predicate identical to the receiver-side check above.
         if compute_need_sampled_mask(input_batch) is None:
             # No request needs sampled outputs for a subsequent decode step.
             return

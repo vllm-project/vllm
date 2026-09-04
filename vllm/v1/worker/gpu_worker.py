@@ -931,7 +931,7 @@ class Worker(WorkerBase):
         set_torch_threads_for_runtime()
 
         if self.use_v2_model_runner:
-            pp_handler = getattr(self.model_runner, "pp_handler", None)
+            pp_handler = self.model_runner.pp_handler  # type: ignore[attr-defined]
             if pp_handler is not None:
                 pp_handler.enable_deferred_collectives()
 
@@ -1132,9 +1132,9 @@ class Worker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if not forward_pass and self.use_v2_model_runner:
-            pp_handler = getattr(self.model_runner, "pp_handler", None)
+            pp_handler = self.model_runner.pp_handler  # type: ignore[attr-defined]
             if pp_handler is not None:
-                pp_handler.flush_pending_collectives()
+                pp_handler.flush_pending_collectives(reason="idle")
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config

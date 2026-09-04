@@ -546,6 +546,17 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+def get_pp_defer_sampled_token_recv() -> int:
+    """Parse the experimental PP sampled-token receive delay."""
+    value = os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
+    try:
+        return int(value)
+    except ValueError as err:
+        raise ValueError(
+            f"VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must be an integer; got {value!r}"
+        ) from err
+
+
 def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
@@ -876,9 +887,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Experimental Model Runner V2 pipeline-parallel optimization. Delay
     # non-last-rank sampled-token receives by this many scheduler steps.
     # The default of 0 preserves immediate receive posting.
-    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV": lambda: int(
-        os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
-    ),
+    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV": get_pp_defer_sampled_token_recv,
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (
