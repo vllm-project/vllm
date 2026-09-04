@@ -32,6 +32,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
+    BlockPriority,
     KVCacheBlock,
     get_block_hash,
     get_group_id,
@@ -3137,9 +3138,10 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
     """Within each lcm-aligned segment, SWA's ``find_longest_cache_hit`` only
     returns the trailing ``ceil((sliding_window - 1) / block_size)`` blocks
     (its right-to-left scan stops once a contiguous match is found). Blocks
-    earlier in the segment can never serve a hit, so
-    ``HybridKVCacheCoordinator.cache_blocks`` should skip them rather than
-    polluting the prefix-cache hash map."""
+    earlier in the segment cannot serve a hit, so
+    ``HybridKVCacheCoordinator.cache_blocks`` marks them as ``LOW`` priority:
+    they remain in the prefix-cache hash map for opportunistic reuse but
+    drain first under eviction."""
     block_size = 8
     # Full attn block_size=32, SWA block_size=8, sw=8 -> lcm=32.
     # tail = ceil(7/8) = 1; per_segment = 32/8 = 4.
@@ -3191,18 +3193,17 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
     assert len(req.block_hashes) == 8
 
     pool = manager.block_pool
-    # SWA group_id=1: only hash 3 and hash 7 (the last block of each
-    # 32-token segment) should be cached. Hashes 0,1,2,4,5,6 cannot serve
-    # a hit at any lcm-aligned length, so they must NOT be cached.
-    expected_cached = {3, 7}
+    # SWA group_id=1: every block is cached; only hashes 3 and 7 (the last
+    # block of each 32-token segment) carry NORMAL priority, the earlier
+    # blocks in each segment are cached at LOW priority.
+    normal_expected = {3, 7}
     for i in range(8):
         cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
-        if i in expected_cached:
-            assert cached is not None, f"SWA hash {i} should be cached"
-        else:
-            assert cached is None, (
-                f"SWA hash {i} cannot serve any lcm-aligned hit; should not be cached"
-            )
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
 
 def test_hybrid_cache_blocks_clamped_to_lcm():
@@ -3324,13 +3325,16 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {7, 11, 15}
+    # Every SWA block is cached under the new sparse-retention scheme; only the
+    # boundary tails carry NORMAL priority — everything else is LOW.
+    normal_expected = {7, 11, 15}
     for i in range(16):
         cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
-        if i in expected_swa_cached:
-            assert cached is not None, f"SWA hash {i} should be cached"
-        else:
-            assert cached is None, f"SWA hash {i} should not be cached"
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
 
 @pytest.mark.parametrize(
@@ -3537,13 +3541,16 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11}
+    # All SWA blocks are cached; only the latest replay boundary is NORMAL,
+    # the rest are LOW-priority opportunistic entries.
+    normal_expected = {11}
     for i in range(16):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
-        if i in expected_swa_cached:
-            assert cached is not None, f"SWA hash {i} should be cached"
-        else:
-            assert cached is None, f"SWA hash {i} should not be cached"
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
     manager.free(req0)
     retained_swa_block = pool.get_cached_block(req0.block_hashes[11], [1])
@@ -3559,8 +3566,12 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
 
     shorter_req = make_request("2", token_ids[: 12 * block_size], block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(shorter_req)
-    assert num_computed_tokens == 0
-    assert len(computed_blocks.blocks[1]) == 0
+    # Under the LOW-priority scheme every SWA block is cached (LOW for
+    # intermediates, NORMAL only for the replay boundary), so the shorter
+    # request's own replay boundary (previous LCM boundary = 64 tokens) is
+    # reachable via the LOW-priority tail block. The hit lands at 64 tokens.
+    assert num_computed_tokens == 8 * block_size
+    assert len(computed_blocks.blocks[1]) == 8
 
 
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
@@ -3622,13 +3633,21 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11, 12}
+    # Blocks past the coordinator's LCM+EAGLE clamp (104 tokens -> 13 blocks)
+    # are not cached at all. Within the clamp, blocks 11 and 12 carry NORMAL
+    # priority (the EAGLE/MTP replay tail); everything else is cached at LOW.
+    normal_expected = {11, 12}
+    uncached_expected = {13, 14}
     for i in range(15):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
-        if i in expected_swa_cached:
-            assert cached is not None, f"SWA hash {i} should be cached"
-        else:
+        if i in uncached_expected:
             assert cached is None, f"SWA hash {i} should not be cached"
+            continue
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
     manager.free(req0)
 
@@ -4000,9 +4019,9 @@ def test_cache_hit_local_and_external_two_groups_preempt_and_reallocate():
 
 
 def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
-    """Dense retention: freeing an SWA request must place its
-    uncached scratch blocks at the front of the free queue (recycled first)
-    and keep its cached checkpoint blocks at the back (retained for prefix
+    """Dense retention: freeing an SWA request must place its ``LOW``-priority
+    scratch blocks at the front of the free queue (recycled first) and keep
+    its ``NORMAL``-priority checkpoint blocks at the back (retained for prefix
     hits). This split is always-on, independent of the retention interval."""
     block_size = 8
     kv_cache_config = KVCacheConfig(
@@ -4050,21 +4069,24 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
 
     swa_manager = manager.coordinator.single_type_managers[1]
     null_block = manager.block_pool.null_block
-    cached_ids: set[int] = set()
-    uncached_ids: set[int] = set()
-    cached_hash_indices: list[int] = []
+    normal_ids: set[int] = set()
+    low_ids: set[int] = set()
+    normal_hash_indices: list[int] = []
     for i, block in enumerate(swa_manager.req_to_blocks[req.request_id]):
         if block is null_block:
             continue
-        if block.block_hash is None:
-            uncached_ids.add(block.block_id)
+        assert block.block_hash is not None, (
+            "under the LOW-priority scheme every non-null SWA block is cached"
+        )
+        if block.priority == BlockPriority.NORMAL:
+            normal_ids.add(block.block_id)
+            normal_hash_indices.append(i)
         else:
-            cached_ids.add(block.block_id)
-            cached_hash_indices.append(i)
-    # The dense default mask caches only the per-segment tails, so a 16-block
-    # SWA prompt must produce a mix of retained and scratch blocks.
-    assert cached_ids, "expected some retained (cached) SWA tail blocks"
-    assert uncached_ids, "expected some scratch (uncached) SWA blocks"
+            low_ids.add(block.block_id)
+    # The dense default mask marks only the per-segment tails as NORMAL, so a
+    # 16-block SWA prompt must produce a mix of NORMAL and LOW retention.
+    assert normal_ids, "expected some NORMAL-priority SWA tail blocks"
+    assert low_ids, "expected some LOW-priority SWA scratch blocks"
 
     manager.free(req)
 
@@ -4072,10 +4094,10 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch():
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ]
     pos = {bid: i for i, bid in enumerate(order)}
-    # Every scratch block is recycled before every retained block.
-    assert max(pos[bid] for bid in uncached_ids) < min(pos[bid] for bid in cached_ids)
-    # The retained tails survive the free and still serve a prefix-cache hit.
-    for i in cached_hash_indices:
+    # Every LOW-priority block is recycled before every NORMAL-priority block.
+    assert max(pos[bid] for bid in low_ids) < min(pos[bid] for bid in normal_ids)
+    # The NORMAL-priority tails survive the free and still serve a hit.
+    for i in normal_hash_indices:
         assert (
             manager.block_pool.get_cached_block(
                 req.block_hashes[i], kv_cache_group_ids=[1]
@@ -4113,8 +4135,10 @@ def _make_pure_swa_manager(block_size, sliding_window, num_blocks=100, **kwargs)
 
 def test_pure_swa_retention_interval_caches_sparse_tails():
     """Sparse retention must work for a pure-SWA single-group model, not just
-    hybrid models: only the per-interval tails plus the latest replay tail are
-    cached, and a replay still hits the latest replayable boundary."""
+    hybrid models: all blocks are cached, but only the per-interval tails plus
+    the latest replay tail carry ``NORMAL`` priority; every other block is
+    kept at ``LOW`` priority so it drains first under memory pressure. A replay
+    still hits the latest replayable boundary."""
     block_size = 16
     manager = _make_pure_swa_manager(
         block_size, sliding_window=block_size, retention_interval=64
@@ -4133,17 +4157,18 @@ def test_pure_swa_retention_interval_caches_sparse_tails():
     assert blocks is not None
 
     pool = manager.block_pool
-    cached = {
-        i
-        for i in range(16)
-        if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[0])
-        is not None
-    }
     # per_segment = 64 / 16 = 4, need = cdiv(16-1, 16) = 1 -> segment tails at
     # i%4==3 -> {3,7,11,15}; latest replay boundary (255//16*16 = 240) -> tail
-    # block 14. Crucially this is a strict subset of all 16 blocks: retention
-    # is actually sparse for pure SWA (not silently dense).
-    assert cached == {3, 7, 11, 14, 15}
+    # block 14. These are the boundary states kept at NORMAL priority; every
+    # other block is cached at LOW priority (opportunistic retention).
+    normal_expected = {3, 7, 11, 14, 15}
+    for i in range(16):
+        cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[0])
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
     # A replay of the same prompt hits the latest replayable boundary (240).
     replay = make_request("1", token_ids, block_size, sha256)
@@ -4152,7 +4177,8 @@ def test_pure_swa_retention_interval_caches_sparse_tails():
 
 
 def test_pure_swa_retention_latest_only():
-    """`=0` on a pure-SWA model keeps only the latest replay tail."""
+    """``=0`` on a pure-SWA model marks only the latest replay tail as
+    ``NORMAL`` priority; every other block is cached at ``LOW`` priority."""
     block_size = 16
     manager = _make_pure_swa_manager(
         block_size, sliding_window=block_size, retention_interval=0
@@ -4170,14 +4196,16 @@ def test_pure_swa_retention_latest_only():
     assert blocks is not None
 
     pool = manager.block_pool
-    cached = {
-        i
-        for i in range(16)
-        if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[0])
-        is not None
-    }
-    # No segment tails (interval 0); only the latest replay tail (block 14).
-    assert cached == {14}
+    # No segment tails (interval 0); only the latest replay tail (block 14) is
+    # NORMAL priority. Everything else is cached at LOW priority.
+    normal_expected = {14}
+    for i in range(16):
+        cached = pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[0])
+        assert cached is not None, f"SWA hash {i} should be cached"
+        expected = BlockPriority.NORMAL if i in normal_expected else BlockPriority.LOW
+        assert cached[0].priority == expected, (
+            f"SWA hash {i} should have priority {expected.name}"
+        )
 
     replay = make_request("1", token_ids, block_size, sha256)
     _, num_computed, _ = manager.get_computed_blocks(replay)
@@ -4298,16 +4326,17 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
 def test_mamba_shared_prefix_survives_zero_retention():
     """Manager-level check of the full wiring: a pinned shared-prefix boundary
     (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
-    detection) keeps its Mamba state block cached under
-    ``prefix_cache_retention_interval=0``, which otherwise retains only the
-    end-of-prompt replay boundary. Without this, a shared prefix (junction
-    before ``num_prompt``) would be recomputed by every sharing request."""
+    detection) keeps its Mamba state block at ``NORMAL`` priority under
+    ``prefix_cache_retention_interval=0``, which otherwise only marks the
+    end-of-prompt replay boundary as ``NORMAL``. Without this, a shared prefix
+    (junction before ``num_prompt``) would drop out of the NORMAL retention set
+    and get evicted first under memory pressure."""
     block_size = 16
 
     # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
     token_ids = [i for i in range(16) for _ in range(block_size)]
 
-    def cached_mamba_blocks(shared_prefix_boundary):
+    def normal_priority_mamba_blocks(shared_prefix_boundary):
         # Fresh manager per scenario so cached blocks don't leak between runs.
         manager = make_kv_cache_manager(
             _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
@@ -4324,26 +4353,38 @@ def test_mamba_shared_prefix_survives_zero_retention():
         )
         assert blocks is not None
         pool = manager.block_pool
+        # Every non-null block is cached (LOW or NORMAL); return the subset
+        # that carries NORMAL priority (i.e. the durable retention set).
         return {
             i
             for i in range(16)
-            if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+            if (
+                cached := pool.get_cached_block(
+                    req.block_hashes[i], kv_cache_group_ids=[1]
+                )
+            )
             is not None
+            and cached[0].priority == BlockPriority.NORMAL
         }
 
-    # Without a pinned boundary, retention=0 keeps only the replay boundary (14).
-    assert cached_mamba_blocks(0) == {14}
-    # Pinning the shared prefix at token 96 (state block 5) retains it too, so a
-    # later request sharing that prefix can hit the Mamba state.
-    assert cached_mamba_blocks(96) == {5, 14}
+    # Without a pinned boundary, retention=0 keeps only the replay boundary (14)
+    # at NORMAL priority; every other Mamba state falls into LOW retention.
+    assert normal_priority_mamba_blocks(0) == {14}
+    # Pinning the shared prefix at token 96 (state block 5) promotes it to
+    # NORMAL as well, so a later request sharing that prefix will not lose it
+    # to early eviction.
+    assert normal_priority_mamba_blocks(96) == {5, 14}
 
 
 def test_mamba_shared_prefix_reuse_under_zero_retention():
     """Full cross-request Marconi flow: a partial shared prefix cached by the
     detecting request must stay reusable by a later request under
-    ``prefix_cache_retention_interval=0``. Without the pin the junction is
-    masked out and the later request misses; with it (and under dense) the reuse
-    is preserved."""
+    ``prefix_cache_retention_interval=0``. Under the LOW-priority retention
+    scheme every masked block is still cached (just at LOW priority), so
+    without memory pressure the junction stays reachable in all three
+    configurations. The pin still matters under pressure — it promotes the
+    junction to NORMAL priority so eviction does not target it first — but
+    this test only verifies the reuse wiring, not the eviction policy."""
     block_size = 16
 
     def last_req_hit(retention, pin):
@@ -4360,7 +4401,8 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
             return [v for _ in range(2 * block_size)]
 
         # req0 primes the shared prefix's (dense) attention cache; align-mode
-        # Mamba keeps only its own tail, not the shared-prefix junction.
+        # Mamba keeps only its own tail at NORMAL retention, but the junction
+        # is still cached at LOW priority.
         req0 = make_request("0", shared + distinct(50), block_size, sha256)
         cb, nc, _ = manager.get_computed_blocks(req0)
         manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
@@ -4380,11 +4422,13 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
         _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
-    # Dense retains the junction -> reuse works (baseline ceiling).
+    # Dense retains the junction at NORMAL -> reuse works.
     assert last_req_hit(retention=None, pin=False) == 2 * block_size
-    # retention=0 without the pin masks the junction out -> reuse lost (the bug).
-    assert last_req_hit(retention=0, pin=False) == 0
-    # retention=0 with the pin keeps the junction -> reuse restored.
+    # retention=0 without the pin keeps the junction at LOW priority; without
+    # memory pressure it is still cached and reachable, so reuse works.
+    assert last_req_hit(retention=0, pin=False) == 2 * block_size
+    # retention=0 with the pin promotes the junction back to NORMAL -> reuse
+    # is preserved even under eviction pressure.
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
 
 
@@ -4590,9 +4634,11 @@ def test_mamba_reachable_block_mask_large_dcp_stays_sparse():
 
 def test_swa_shared_prefix_reuse_under_zero_retention():
     """SWA cross-request analog: a partial shared prefix's sliding-window tail
-    must stay reusable under ``prefix_cache_retention_interval=0``. Without
-    the pin the junction window is masked out and a later request misses; with
-    it (and under dense) reuse is preserved."""
+    must stay reusable under ``prefix_cache_retention_interval=0``. Under the
+    LOW-priority retention scheme every masked SWA block is still cached (at
+    LOW priority), so without memory pressure the junction stays reachable in
+    every configuration. The pin promotes the junction back to NORMAL for
+    eviction-resistance but does not affect reachability in this test."""
     block_size = 16
 
     def last_req_hit(retention, pin):
@@ -4608,18 +4654,19 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         def distinct(v):
             return [v for _ in range(2 * block_size)]
 
-        # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
-        # only its own replay window, not the shared-prefix boundary.
+        # req0 primes the (dense) full-attention cache; SWA under RET=0 marks
+        # only its own replay window at NORMAL priority, but every other tail
+        # is still cached at LOW priority.
         req0 = make_request("0", shared + distinct(50), block_size, sha256)
         cb, nc, _ = manager.get_computed_blocks(req0)
         manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
 
-        # req1 detects the shared prefix (full-attn hit, SWA lag). No chunk for
-        # SWA -- the pin fires during normal prefill.
+        # req1 previously detected a shared-prefix junction when SWA "lagged"
+        # behind full-attention (SWA had gaps under retention=0 masking). Under
+        # the LOW-priority scheme SWA no longer lags — every block is cached —
+        # so no junction is reported and the pin path is a no-op in this test.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
         cb, nc, boundary = manager.get_computed_blocks(req1)
-        if retention == 0:
-            assert boundary == 4 * block_size  # junction detected when SWA lags
         if pin and boundary:
             req1.shared_prefix_boundary = boundary
         manager.allocate_slots(req1, len(req1.all_token_ids), nc, cb)
@@ -4629,9 +4676,11 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
         _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
-    # Dense keeps every SWA tail -> reuse works (ceiling).
+    # Dense keeps every SWA tail at NORMAL -> reuse works.
     assert last_req_hit(retention=None, pin=False) == 4 * block_size
-    # retention=0 without the pin drops the junction window -> reuse lost (bug).
-    assert last_req_hit(retention=0, pin=False) == 0
-    # retention=0 with the pin keeps the junction window -> reuse restored.
+    # retention=0 without the pin: junction tail is cached at LOW priority
+    # -> still reachable without eviction pressure, so reuse works.
+    assert last_req_hit(retention=0, pin=False) == 4 * block_size
+    # retention=0 with the pin promotes the junction window to NORMAL ->
+    # reuse survives even under eviction pressure.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size

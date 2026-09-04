@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
+    BlockPriority,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
@@ -250,11 +251,13 @@ class BlockPool:
             kv_cache_group_id: The id of the KV cache group.
             block_mask: Optional mask aligned with
                 ``blocks[num_cached_blocks:num_full_blocks]``. When provided,
-                blocks where the mask is False are skipped (treated like null
-                blocks). Used by groups whose ``find_longest_cache_hit`` only
-                consults a subset of blocks (e.g. SWA tail-window), so blocks
-                that can never serve a hit stay out of the prefix-cache hash
-                map.
+                blocks where the mask is False are still cached but tagged
+                with ``BlockPriority.LOW`` so eviction drains them before
+                ``NORMAL`` cached blocks. Used by groups whose
+                ``find_longest_cache_hit`` only consults a subset of blocks
+                (e.g. SWA tail-window / Mamba boundary states): non-tail
+                blocks stay reachable in the prefix cache but yield first
+                when the pool comes under pressure.
         """
         if num_cached_blocks >= num_full_blocks:
             return
@@ -269,10 +272,8 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
-            # Some blocks may be null or masked out when enabling sparse attention
-            # like sliding window attention, or Mamba models with prefix-caching
-            # in align mode. We skip null blocks here.
-            if blk.is_null or (block_mask is not None and not block_mask[i]):
+            # Skip null blocks
+            if blk.is_null:
                 continue
             block_hash = new_block_hashes[i]
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
@@ -295,6 +296,8 @@ class BlockPool:
                 blk,
                 num_tokens=num_hash_tokens,
             )
+            if block_mask is not None and not block_mask[i]:
+                blk.priority = BlockPriority.LOW
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
@@ -313,13 +316,11 @@ class BlockPool:
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
             # features, or cache_salt only for the first block).
-            # Skip null/masked-out blocks to match the length of new_hashes.
+            # Skip null blocks to match the length of new_hashes.
             extra_keys_list: list[tuple[Any, ...] | None] = []
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
                 if blocks[i].is_null:
-                    continue
-                if block_mask is not None and not block_mask[i - num_cached_blocks]:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
@@ -642,9 +643,13 @@ class BlockPool:
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
         num_tokens = src_block.block_hash_num_tokens
+        # ``_remove_cached_block_hashes`` resets ``src_block``'s priority;
+        # snapshot it so the durable copy inherits the same eviction class.
+        src_priority = src_block.priority
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
+        dst_block.priority = src_priority
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -715,6 +720,10 @@ class BlockPool:
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            # A prefix-cache hit proves the block was worth retaining, so
+            # promote LOW-priority (sparse-retention) blocks back to NORMAL
+            if block.priority != BlockPriority.NORMAL:
+                block.priority = BlockPriority.NORMAL
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
@@ -732,6 +741,7 @@ class BlockPool:
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
+        blocks_low_priority = []
         blocks_to_evict_first = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
@@ -739,10 +749,14 @@ class BlockPool:
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
+                elif block.priority == BlockPriority.LOW:
+                    blocks_low_priority.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
 
+        # Desired ordering: [to_evict_first | low_priority | ... | to_evict_last]
+        self.free_block_queue.prepend_n(blocks_low_priority)
         # Blocks to reuse first are prepended to the front of the free queue.
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
