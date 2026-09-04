@@ -54,7 +54,7 @@ __global__ void __launch_bounds__(512, 1)
 
 template <typename T>
 DINLINE void multimem_load_reduce_16(uint32_t (&result)[4], const T* address) {
-#if !defined(USE_ROCM) && CUDA_VERSION >= 12010 && defined(__CUDA_ARCH__) && \
+#if !defined(USE_ROCM) && CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ >= 900)
   if constexpr (std::is_same<T, nv_bfloat16>::value) {
     asm volatile(

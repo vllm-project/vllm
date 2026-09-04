@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Benchmark production TP8 reduce-scatter backends on one SM100/SM103 node.
+"""Benchmark production MNNVL reduce-scatter backends on SM100/SM103.
 
 The multimem candidate includes the device-to-device copy into its persistent
 symmetric input buffer. Timings use pointer-distinct CUDA graphs and report the
@@ -184,34 +184,56 @@ def build_candidates(
 
 def check_correctness(
     candidates: list[Candidate],
-    input_tensor: torch.Tensor,
+    inputs: list[torch.Tensor],
     rank: int,
     world_size: int,
     cpu_group: dist.ProcessGroup,
     device_group: dist.ProcessGroup,
+    graphs: dict[str, list[torch.cuda.CUDAGraph]] | None = None,
 ) -> None:
-    expected = input_tensor.float().clone()
-    dist.all_reduce(expected, group=device_group)
-    expected = expected.to(input_tensor.dtype).chunk(world_size)[rank]
+    expected_outputs = []
+    for input_tensor in inputs:
+        expected = input_tensor.float().clone()
+        dist.all_reduce(expected, group=device_group)
+        expected_outputs.append(expected.to(input_tensor.dtype).chunk(world_size)[rank])
 
-    if input_tensor.dtype == torch.float32:
+    if inputs[0].dtype == torch.float32:
         rtol, atol = 1e-5, 1e-5
-    elif input_tensor.dtype == torch.float16:
+    elif inputs[0].dtype == torch.float16:
         rtol, atol = 1e-2, 1e-2
     else:
         rtol, atol = 5e-2, 1.25e-1
 
     for candidate in candidates:
-        dist.barrier(group=cpu_group)
-        candidate.runs[0]()
-        torch.accelerator.synchronize()
-        torch.testing.assert_close(
-            candidate.outputs[0],
-            expected,
-            rtol=rtol,
-            atol=atol,
-            msg=f"{candidate.name} produced an incorrect shard",
-        )
+        for workspace_index, expected in enumerate(expected_outputs):
+            dist.barrier(group=cpu_group)
+            if graphs is None:
+                candidate.runs[workspace_index]()
+            else:
+                graphs[candidate.name][workspace_index].replay()
+            torch.accelerator.synchronize()
+            error = None
+            try:
+                torch.testing.assert_close(
+                    candidate.outputs[workspace_index],
+                    expected,
+                    rtol=rtol,
+                    atol=atol,
+                )
+            except AssertionError as assertion_error:
+                error = assertion_error
+            correct = torch.tensor(
+                error is None,
+                dtype=torch.int32,
+                device=candidate.outputs[workspace_index].device,
+            )
+            dist.all_reduce(correct, op=dist.ReduceOp.MIN, group=device_group)
+            if not correct.item():
+                location = f"{candidate.name} workspace {workspace_index}"
+                detail = str(error) if error is not None else "failed on another rank"
+                raise AssertionError(
+                    f"{location} produced an incorrect shard: {detail}"
+                )
     dist.barrier(group=cpu_group)
 
 
@@ -329,13 +351,22 @@ def benchmark_size(
     dist.barrier(group=cpu_group)
     check_correctness(
         candidates,
-        inputs[0],
+        inputs,
         rank,
         world_size,
         cpu_group,
         device_group,
     )
     graphs, graph_keepalive = capture_candidates(candidates, cpu_group)
+    check_correctness(
+        candidates,
+        inputs,
+        rank,
+        world_size,
+        cpu_group,
+        device_group,
+        graphs,
+    )
 
     flush = None
     if args.cold_l2:
@@ -382,9 +413,10 @@ def main() -> None:
     world_size = dist.get_world_size(device_group)
     device = torch.device("cuda", local_rank)
     capability = torch.cuda.get_device_capability(device)
-    if world_size != 8 or capability not in ((10, 0), (10, 3)):
+    if world_size not in (2, 4, 8) or capability not in ((10, 0), (10, 3)):
         raise RuntimeError(
-            f"This benchmark targets TP8 SM100/SM103, got TP{world_size} SM{capability}"
+            "This benchmark targets TP2/TP4/TP8 SM100/SM103, "
+            f"got TP{world_size} SM{capability}"
         )
 
     max_message_bytes = max(args.message_bytes)
@@ -398,7 +430,7 @@ def main() -> None:
         raise RuntimeError("The production custom all-reduce backend is unavailable")
     comm._init_mnnvl_multimem_reduce_scatter_buffer()
     if not comm.mnnvl_multimem_rs_multicast_ptr:
-        raise RuntimeError("The production TP8 multimem backend is unavailable")
+        raise RuntimeError("The production MNNVL multimem backend is unavailable")
 
     dtype = _DTYPES[args.dtype]
     warmup = torch.zeros(1, dtype=torch.float32, device=device)

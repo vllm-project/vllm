@@ -379,14 +379,16 @@ def _run_multimem_reduce_scatter_test(
                     if backend == "mnnvl_multimem":
                         assert fa.mnnvl_multimem_rs_initialized
                         assert fa.mnnvl_multimem_rs_multicast_ptr
-                torch.testing.assert_close(out, torch.full_like(out, 36))
+                expected = tp_size * (tp_size + 1) // 2
+                torch.testing.assert_close(out, torch.full_like(out, expected))
 
 
 @pytest.mark.skipif(
     not _supports_sm100_or_sm103(),
     reason="The low-SM MNNVL reduce-scatter path requires SM100 or SM103.",
 )
-def test_mnnvl_multimem_reduce_scatter(monkeypatch: pytest.MonkeyPatch):
-    if torch.accelerator.device_count() < 8:
-        pytest.skip("Need at least eight GPUs to run the test.")
-    multi_process_parallel(monkeypatch, 8, 1, _run_multimem_reduce_scatter_test)
+@pytest.mark.parametrize("tp_size", [2, 4, 8])
+def test_mnnvl_multimem_reduce_scatter(monkeypatch: pytest.MonkeyPatch, tp_size: int):
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Need at least {tp_size} GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, _run_multimem_reduce_scatter_test)

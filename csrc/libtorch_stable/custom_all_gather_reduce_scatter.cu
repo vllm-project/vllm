@@ -200,9 +200,6 @@ void CustomAllreduce::mnnvl_multimem_reduce_scatter(cudaStream_t stream,
     throw std::runtime_error(
         "MNNVL multimem reduce-scatter requires a non-empty input");
   int size_bytes = size * sizeof(T);
-  if (world_size_ != 8)
-    throw std::runtime_error(
-        "MNNVL multimem reduce-scatter currently supports TP8 only");
   if (size_bytes % (kMnnvlMultimemRsVectorBytes * world_size_) != 0)
     throw std::runtime_error(
         "MNNVL multimem reduce-scatter requires each output shard byte size "
@@ -216,9 +213,22 @@ void CustomAllreduce::mnnvl_multimem_reduce_scatter(cudaStream_t stream,
   int blocks = std::min(
       block_limit, (packs_per_rank + packs_per_block - 1) / packs_per_block);
 
-  mnnvl_multimem_reduce_scatter_kernel<T, 8>
-      <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(
-          multicast_input, output, sg_, self_sg_, rank_, packs_per_rank);
+#define MNNVL_MULTIMEM_RS_CASE(ngpus)                                       \
+  case ngpus:                                                               \
+    mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                          \
+        <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(                   \
+            multicast_input, output, sg_, self_sg_, rank_, packs_per_rank); \
+    break;
+
+  switch (world_size_) {
+    MNNVL_MULTIMEM_RS_CASE(2)
+    MNNVL_MULTIMEM_RS_CASE(4)
+    MNNVL_MULTIMEM_RS_CASE(8)
+    default:
+      throw std::runtime_error(
+          "MNNVL multimem reduce-scatter only supports num gpus in (2,4,8)");
+  }
+#undef MNNVL_MULTIMEM_RS_CASE
 }
 
 }  // namespace vllm

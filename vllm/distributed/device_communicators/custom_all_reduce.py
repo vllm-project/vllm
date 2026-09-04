@@ -33,6 +33,7 @@ except ImportError:
 logger = init_logger(__name__)
 
 _ReduceScatterBackend = Literal["legacy", "mnnvl_lamport", "mnnvl_multimem"]
+_MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES = (2, 4, 8)
 
 
 def _has_local_multicast_support(device: torch.device) -> bool:
@@ -103,7 +104,7 @@ def _supports_mnnvl_multimem_reduce_scatter(
     device: torch.device, world_size: int
 ) -> bool:
     return (
-        world_size == 8
+        world_size in _MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES
         and device.index is not None
         and (
             current_platform.is_device_capability((10, 0), device.index)
@@ -337,7 +338,7 @@ class CustomAllreduce:
                 max_mnnvl_reduce_scatter_size,
             )
         )
-        if world_size == 8:
+        if world_size in _MNNVL_MULTIMEM_REDUCE_SCATTER_WORLD_SIZES:
             self.mnnvl_multimem_rs_supported = _all_ranks_true(
                 self.group,
                 mnnvl_multimem_rs_supported and bool(self.mnnvl_multicast_ptr),
@@ -421,6 +422,11 @@ class CustomAllreduce:
         except RuntimeError as error:
             logger.debug("MNNVL multimem RS allocation failed: %s", error)
         if not _all_ranks_true(self.group, buffer is not None):
+            logger.warning_once(
+                "MNNVL multimem reduce-scatter symmetric-memory allocation "
+                "failed on at least one rank; falling back to NCCL.",
+                scope="global",
+            )
             return
         assert buffer is not None
 
@@ -433,6 +439,11 @@ class CustomAllreduce:
             self.group,
             handle is not None and bool(handle.multicast_ptr),
         ):
+            logger.warning_once(
+                "MNNVL multimem reduce-scatter symmetric-memory rendezvous "
+                "failed on at least one rank; falling back to NCCL.",
+                scope="global",
+            )
             return
         assert handle is not None
 
