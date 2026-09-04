@@ -35,8 +35,6 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._xpu_ops import xpu_ops
 
 logger = init_logger(__name__)
 
@@ -337,28 +335,16 @@ def sparse_attn_indexer_kpool(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
-                )
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
-                )
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_dst,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                select_k,
+            )
 
             if index_kpool > 1:
                 pool_ids = pool_topk.to(torch.int64)
@@ -596,28 +582,16 @@ def sparse_attn_indexer_kpool(
                 attn_metadata_narrowed.max_seq_len,
             )
         else:
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
-                )
-            else:
-                torch.ops._C.top_k_per_row_decode(
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
-                )
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                seq_lens,
+                topk_dst,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                select_k,
+            )
 
         # Resolve to token-level indices in the output buffer.
         if index_kpool > 1:
@@ -709,20 +683,15 @@ class SparseAttnIndexerKpool(CustomOp):
         index_kpool: int = 1,
         positions: torch.Tensor | None = None,
     ):
-        if current_platform.is_cuda() or current_platform.is_xpu():
-            return self.forward_cuda(
-                hidden_states,
-                q_quant,
-                k,
-                weights,
-                gate_score=gate_score,
-                compress_ape=compress_ape,
-                index_kpool=index_kpool,
-                positions=positions,
-            )
-        raise NotImplementedError(
-            "SparseAttnIndexer native forward is only implemented for "
-            "CUDA and XPU platforms."
+        return self.forward_cuda(
+            hidden_states,
+            q_quant,
+            k,
+            weights,
+            gate_score=gate_score,
+            compress_ape=compress_ape,
+            index_kpool=index_kpool,
+            positions=positions,
         )
 
     def forward_cuda(
