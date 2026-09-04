@@ -57,7 +57,7 @@ prune_if_disk_pressure
 # omits `--pull` so it already prefers a cached image over the network. A
 # single attempt only -- the retry loop below covers a miss here too.
 echo "--- :docker: Pre-fetching base image"
-docker pull ubuntu:22.04 || true
+docker pull ubuntu:25.04 || true
 
 # building the docker image
 echo "--- :docker: Building Docker image"
