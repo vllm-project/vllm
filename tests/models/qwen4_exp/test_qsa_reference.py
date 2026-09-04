@@ -770,14 +770,14 @@ def test_qsa_block_expansion_correctness() -> None:
         "num_query_heads",
         "num_kv_heads",
         "page_size",
-        "is_prefill",
+        "use_prefill_config",
         "num_requests",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
-        # is_prefill variants.
+        # use_prefill_config variants.
         pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
         pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
         pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
@@ -795,7 +795,7 @@ def test_qsa_sparse_paged_attention_correctness(
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
-    is_prefill: bool,
+    use_prefill_config: bool,
     num_requests: int,
 ) -> None:
     torch.manual_seed(2)
@@ -888,7 +888,7 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_indices,
         block_table,
         token_to_req,
-        is_prefill=is_prefill,
+        use_prefill_config=use_prefill_config,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,

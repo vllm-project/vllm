@@ -123,7 +123,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
-        is_prefill: bool,
+        use_prefill_config: bool,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -158,7 +158,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             logical_indices,
             attn_metadata.block_table,
             token_to_req,
-            is_prefill,
+            use_prefill_config,
             output[:num_tokens],
         )
         return output
@@ -208,6 +208,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         if self.total_num_heads % tp_size:
             raise ValueError("QSA attention heads must be divisible by TP size")
         self.num_heads = self.total_num_heads // tp_size
+        # Decode/verify batches have at most 1 + num_spec query tokens per
+        # request; use_prefill_config (max_query_len > this) steers the
+        # config table. Shorter batches take the decode profile — harmless,
+        # the difference is tile-shape tuning, not correctness.
         self._max_decode_query_len = 1 + vllm_config.num_speculative_tokens
         self.total_num_kv_heads = int(config.num_key_value_heads)
         if self.total_num_kv_heads >= tp_size:
@@ -393,7 +397,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             main_metadata,
             output,
             token_to_req=side_metadata.token_to_req,
-            is_prefill=main_metadata.max_query_len > self._max_decode_query_len,
+            use_prefill_config=main_metadata.max_query_len > self._max_decode_query_len,
         )
 
     def forward(
