@@ -222,7 +222,14 @@ class QSAIndexer(nn.Module):
         positions: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Return fixed-width request-relative token indices padded with ``-1``."""
+        """Select each query row's token indices.
+
+        Returns the packed buffer of shape [num_tokens, output_width + 1]:
+        the leading ``output_width`` columns are ``-1``-padded
+        request-relative token indices, and the trailing column is the row's
+        valid-entry count (the attention kernel's loop bound, never a token
+        index).
+        """
 
         metadata = self._metadata()
         if metadata is None:
