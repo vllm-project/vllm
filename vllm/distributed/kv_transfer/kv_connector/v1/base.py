@@ -671,6 +671,16 @@ class KVConnectorBase_V1(ABC):
         params = request.kv_transfer_params
         return bool(params and params.get("do_remote_prefill"))
 
+    def on_load_failure(self, request_ids: set[str]) -> None:
+        """Notify the connector before failed external KV loads are looked up again.
+
+        Connectors may use this callback to make a failed external cache hit a
+        request-local miss on the next scheduling attempt. The default is a
+        no-op because not every connector needs special handling before the
+        affected tokens are recomputed.
+        """
+        return
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
