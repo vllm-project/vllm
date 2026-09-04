@@ -280,8 +280,9 @@ def is_in_target_modules(
 ) -> bool:
     """Check if a module passes the deployment-time target_modules filter.
 
-    When target_modules is None (no restriction), all modules pass.
-    Otherwise, the module's suffix must be in the target_modules list.
+    When target_modules is None (no restriction), all modules pass. Otherwise,
+    matching supports exact paths, leaf names, packed module relationships, and
+    an optional runtime-only module name prefix.
 
     Args:
         module_name: Full dot-separated module name.
