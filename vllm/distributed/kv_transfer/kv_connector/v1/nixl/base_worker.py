@@ -163,7 +163,6 @@ class NixlBaseConnectorWorker:
         dst_num_blocks: int,
         block_size_ratio: float | None,
         physical_blocks_per_logical: int,
-        region_group_ids: tuple[int, ...] | None = None,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
@@ -183,13 +182,14 @@ class NixlBaseConnectorWorker:
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
 
-        if region_group_ids is not None:
+        if self._member_group_ids:
             # Member-major descriptors, using each member's KV-cache group.
-            out = [
-                np.asarray(block_ids[g], dtype=np.int32) + k * num_blocks
-                for k, g in enumerate(region_group_ids)
-            ]
-            return np.concatenate(out) if out else np.empty(0, dtype=np.int32)
+            return np.concatenate(
+                [
+                    np.asarray(block_ids[g], dtype=np.int32) + k * num_blocks
+                    for k, g in enumerate(self._member_group_ids)
+                ]
+            )
 
         num_fa_descs = self.num_regions * num_blocks
 
@@ -365,7 +365,8 @@ class NixlBaseConnectorWorker:
         self.region_members: list[list[str]] = region_members
         if not self._requires_member_identity():
             return
-        ungrouped = [m for m in members if m not in self._layer_name_to_kv_group_index]
+        group_by_member = self.kv_cache_config.transfer_group_index_by_layer
+        ungrouped = [m for m in members if m not in group_by_member]
         assert not ungrouped, f"KV cache layers outside any local group: {ungrouped}"
         self._member_names = tuple(members)
         self._member_local_regions = tuple(
@@ -373,18 +374,10 @@ class NixlBaseConnectorWorker:
             for region_idx, region in enumerate(region_members)
             for _ in region
         )
-        self._member_group_ids = tuple(
-            self._layer_name_to_kv_group_index[member] for member in members
-        )
+        self._member_group_ids = tuple(group_by_member[member] for member in members)
 
     def _requires_member_identity(self) -> bool:
-        """Whether this worker's local layout must be routed by layer name.
-
-        True for a PP-sharded push producer whose local KV layout is hybrid
-        (HMA): region indices are not a stable identity across the P/D layer
-        split, so transfers must be keyed by member name. Independent of the
-        remote peer.
-        """
+        """Whether PP push must match HMA layers by name, not region index."""
         return (
             self._supports_member_identity
             and self.pp_size > 1
@@ -792,9 +785,6 @@ class NixlBaseConnectorWorker:
 
         # Member metadata is populated for HMA layouts.
         self.region_members = []
-        self._layer_name_to_kv_group_index = (
-            self.kv_cache_config.transfer_group_index_by_layer
-        )
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
 
@@ -1769,15 +1759,10 @@ class NixlBaseConnectorWorker:
         num_blocks = self.num_blocks * block_size_ratio
         device_id = self.device_id
         block_arange = np.arange(num_blocks, dtype=np.uint64)
-        if self._member_local_regions:
-            region_iter = [
-                (region, base_addresses[region])
-                for region in self._member_local_regions
-            ]
-        else:
-            region_iter = list(enumerate(base_addresses))
+        region_indices = self._member_local_regions or range(len(base_addresses))
         parts: list[np.ndarray] = []
-        for i, base_addr in region_iter:
+        for i in region_indices:
+            base_addr = base_addresses[i]
             block_len = self.block_len_per_layer[i] // block_size_ratio
             block_stride = self.block_stride_per_layer[i] // block_size_ratio
             addrs = base_addr + block_arange * block_stride
@@ -1933,27 +1918,25 @@ class NixlBaseConnectorWorker:
             )
             return self._remote_agents[engine_id][(0, remote_tp_rank)]
 
-        member_order = bool(self._member_local_regions)
-        if member_order:
+        # Number of physical regions registered locally (one per layer/tensor).
+        num_local_regions = len(self.block_len_per_layer)
+        if self._member_local_regions:
             self._align_remote_regions_by_member(nixl_agent_meta)
-        else:
-            # Number of physical regions registered locally (one per layer/tensor).
-            num_local_regions = len(self.block_len_per_layer)
-            if (
-                self.pp_size > 1
-                and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
-            ):
-                # This worker holds a PP layer-slice; the PP=1 remote registered
-                # the full model. Slice its regions to our layer window so the
-                # logic below sees congruent local/remote lists.
-                start = self._remote_region_offset
-                end = start + num_local_regions
-                assert len(nixl_agent_meta.kv_caches_base_addr) >= end
-                nixl_agent_meta.kv_caches_base_addr = (
-                    nixl_agent_meta.kv_caches_base_addr[start:end]
-                )
-                nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
-                nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
+        elif (
+            self.pp_size > 1
+            and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
+        ):
+            # This worker holds a PP layer-slice; the PP=1 remote registered
+            # the full model. Slice its regions to our layer window so the
+            # logic below sees congruent local/remote lists.
+            start = self._remote_region_offset
+            end = start + num_local_regions
+            assert len(nixl_agent_meta.kv_caches_base_addr) >= end
+            nixl_agent_meta.kv_caches_base_addr = nixl_agent_meta.kv_caches_base_addr[
+                start:end
+            ]
+            nixl_agent_meta.block_lens = nixl_agent_meta.block_lens[start:end]
+            nixl_agent_meta.block_strides = nixl_agent_meta.block_strides[start:end]
 
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
@@ -1989,8 +1972,6 @@ class NixlBaseConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
-
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
 
@@ -2001,6 +1982,7 @@ class NixlBaseConnectorWorker:
         self._validate_remote_agent_handshake(
             nixl_agent_meta, remote_tp_size, remote_dcp_size
         )
+        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -2221,6 +2203,9 @@ class NixlBaseConnectorWorker:
         # the per-rank KV head ratio rather than the raw tp_ratio, because GQA
         # replication caps per-rank heads at 1 when tp > total_kv_heads
         # (issue #45330). Mamba uses the ssm_sizes counterpart, so skip here.
+        local_regions = self._member_local_regions or range(
+            len(self.block_len_per_layer)
+        )
         if self._has_mamba and self.use_mla:
             # Hybrid MLA+SSM (e.g. KimiLinear's KDA+MLA): regions are
             # kernel-granularity views of the mamba-unified page. The MLA
@@ -2237,14 +2222,7 @@ class NixlBaseConnectorWorker:
                 f"remote={nixl_agent_meta.block_lens}."
             )
         elif not self._has_mamba:
-            if member_order:
-                local_lens = [
-                    self.block_len_per_layer[region]
-                    for region in self._member_local_regions
-                ]
-            else:
-                local_lens = self.block_len_per_layer
-            assert len(local_lens) == len(nixl_agent_meta.block_lens), (
+            assert len(local_regions) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers/members must match between prefill and decode"
             )
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
@@ -2253,8 +2231,8 @@ class NixlBaseConnectorWorker:
             total_kv_heads = self.transfer_topo.total_num_kv_heads
             local_heads = self.transfer_topo.local_physical_heads
             remote_heads = max(1, total_kv_heads // remote_tp_size)
-            for i, local_len in enumerate(local_lens):
-                region_idx = self._member_local_regions[i] if member_order else i
+            for i, region_idx in enumerate(local_regions):
+                local_len = self.block_len_per_layer[region_idx]
                 replicated = model_replicated or self._is_region_replicated(region_idx)
                 remote_len = nixl_agent_meta.block_lens[i]
                 if replicated:
@@ -2286,12 +2264,7 @@ class NixlBaseConnectorWorker:
 
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
-        expected_regions = (
-            len(self._member_local_regions)
-            if member_order
-            else len(self.block_len_per_layer)
-        )
-        assert len(nixl_agent_meta.kv_caches_base_addr) == expected_regions
+        assert len(nixl_agent_meta.kv_caches_base_addr) == len(local_regions)
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """copy recved kv from host buffer to device."""

@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -43,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
@@ -1378,7 +1380,7 @@ def _agent_metadata(
         num_blocks=2,
         block_lens=block_lens,
         block_strides=list(block_lens if block_strides is None else block_strides),
-        kv_cache_layout="HND",
+        kv_cache_layout="LBHNC",
         block_size=16,
         ssm_sizes=(0, 0),
         attn_backend_name="FLASH_ATTN",
@@ -1399,22 +1401,19 @@ def _member_worker(
     worker.block_size = 16
     worker._has_mamba = False
     worker._is_hma_required = is_hma
-    worker._layer_name_to_kv_group_index = group_by_member
+    worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=group_by_member)
     worker.transfer_topo = MagicMock()
     worker._set_region_members(region_members)
     return worker
 
 
 def test_member_group_ids_route_descriptor_blocks():
-    worker = _StubWriterWorker.fresh()
-    worker._has_mamba = False
-    worker.num_regions = 3
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
     desc_ids = worker._compute_desc_ids(
         block_ids=[[1, 2], [5]],
         dst_num_blocks=10,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
-        region_group_ids=(0, 1, 0),
     )
     assert desc_ids.tolist() == [1, 2, 15, 21, 22]
 
@@ -1484,7 +1483,7 @@ def test_member_alignment_filters_and_reorders_a_pp_stage():
     assert metadata.block_strides == [131072, 65536]
 
 
-def test_member_alignment_handles_asymmetric_pp_split():
+def test_member_descriptors_pair_layers_across_asymmetric_pp_split():
     """A PP split can leave each stage a different mix of attention types.
 
     Stage 1 owns L3 (full) pooled with L4 (sliding) in region 0, and L5 (full)
@@ -1492,20 +1491,47 @@ def test_member_alignment_handles_asymmetric_pp_split():
     differently, so region indices cannot be paired positionally.
     """
     worker = _member_worker([["L3", "L4"], ["L5"]], {"L3": 0, "L4": 1, "L5": 0})
-    assert worker._member_names == ("L3", "L4", "L5")
-    assert worker._member_local_regions == (0, 0, 1)
-    assert worker._member_group_ids == (0, 1, 0)
+    worker.block_len_per_layer = [128, 128]
+    worker.block_stride_per_layer = [256, 512]
+    worker._region_is_mla = [False, False]
+    worker.num_blocks = 4
+    worker.device_id = 0
 
     consumer = _agent_metadata(
         [["L0", "L1"], ["L3", "L2"], ["L5", "L4"]],
         [0xA000, 0xB000, 0xC000],
         [128, 128, 128],
+        [256, 512, 1024],
     )
+    consumer.num_blocks = 4
     worker._align_remote_regions_by_member(consumer)
 
     # L3 -> remote region 1, L4 -> 2, L5 -> 2. Pairing by index would have sent
     # L5 to region 1 and L4 to region 2's sibling.
     assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
+
+    plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
+    local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    local_ids = worker._compute_desc_ids([[1, 2], [3]], 4, None, 1)
+    remote_ids = worker._compute_desc_ids([[0, 1], [2]], 4, None, 1)
+
+    # Each pair addresses the same layer's blocks despite different pooling
+    # and strides. L3 and L5 use group 0; L4 uses group 1.
+    assert local_descs[local_ids].tolist() == [
+        [0x1100, 128, 0],
+        [0x1200, 128, 0],
+        [0x1300, 128, 0],
+        [0x2200, 128, 0],
+        [0x2400, 128, 0],
+    ]
+    assert remote_descs[remote_ids].tolist() == [
+        [0xB000, 128, 7],
+        [0xB200, 128, 7],
+        [0xC800, 128, 7],
+        [0xC000, 128, 7],
+        [0xC400, 128, 7],
+    ]
 
 
 def test_member_alignment_is_canonical_across_remote_orderings():
@@ -1575,31 +1601,38 @@ def test_set_region_members_rejects_layer_outside_any_kv_group():
 
 
 @pytest.mark.parametrize(
-    ("local_block_size", "remote_block_size"),
-    [(32, 16), (16, 32)],
+    ("local_block_size", "remote_block_size", "remote_tp_size", "error"),
+    [
+        (32, 16, 1, "identical P/D block sizes"),
+        (16, 32, 1, "identical P/D block sizes"),
+        (16, 16, 2, "decode TP greater"),
+    ],
 )
-def test_attention_member_routing_rejects_heterogeneous_block_sizes(
-    local_block_size: int, remote_block_size: int
+def test_member_handshake_rejects_unsupported_geometry(
+    local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
 ):
+    """Reject unsupported peers before ratio math or descriptor construction."""
     metadata = _agent_metadata([["a"]], [0xA000], [128])
     metadata.block_size = remote_block_size
     worker = _member_worker([["a"]], {"a": 0})
     worker.block_size = local_block_size
-    remote_info = worker.transfer_topo.get_engine_info.return_value
-    remote_info.remote_tp_size = 1
-    remote_info.remote_dcp_size = 1
-
-    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
-        worker._validate_remote_agent_handshake(metadata, 1)
-
-
-def test_attention_member_routing_rejects_decode_tp_fanout():
-    metadata = _agent_metadata([["a"]], [0xA000], [128])
-    worker = _member_worker([["a"]], {"a": 0})
+    worker.block_len_per_layer = [128]
     worker.use_mla = False
-    worker.transfer_topo.get_engine_info.return_value.remote_tp_size = 2
-    worker.transfer_topo.get_engine_info.return_value.remote_dcp_size = 1
-    worker.transfer_topo.tp_ratio.return_value = -2
+    worker.nixl_wrapper = MagicMock()
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker.dst_num_blocks = {}
+    worker.tp_mappings = {}
+    worker.transfer_topo = TransferTopology(
+        tp_rank=0,
+        tp_size=1,
+        block_size=local_block_size,
+        engine_id=worker.engine_id,
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=8,
+        attn_backends=[],
+    )
 
-    with pytest.raises(NotImplementedError, match="decode TP greater"):
-        worker._validate_remote_agent_handshake(metadata, 2)
+    with pytest.raises(NotImplementedError, match=error):
+        worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
+    worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()

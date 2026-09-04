@@ -120,6 +120,7 @@ Current push PP + HMA limitations:
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
 - HMA requires the same block size on P and D.
+- Attention-HMA member routing requires decode TP to be no greater than prefill TP.
 
 ### Quantized KV cache
 
