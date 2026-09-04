@@ -1083,6 +1083,23 @@ def test_chat_completion_request_rejects_prompt_logprobs_zero_with_stream():
         )
 
 
+def test_chat_completion_request_accepts_prompt_logprobs_zero_with_raw_false_stream():
+    """A raw, not-yet-coerced `stream="false"` must not be treated as truthy.
+
+    The cross-field check runs as an "after" validator against the typed,
+    coerced `self.stream` (a real bool), not the raw request dict, so a
+    string "false" that pydantic coerces to False must not wrongly reject a
+    valid `prompt_logprobs=0` request."""
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        prompt_logprobs=0,
+        stream="false",
+    )
+    assert request.stream is False
+    assert request.prompt_logprobs == 0
+
+
 def test_chat_completion_request_accepts_model_specific_reasoning_effort():
     request = ChatCompletionRequest(
         model="test-model",

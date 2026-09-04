@@ -119,12 +119,14 @@ pub(super) fn prepare_chat_request(
     let requested_logprobs = request.logprobs;
     let is_named_tool_choice = matches!(&request.tool_choice, Some(ToolChoice::Function { .. }));
 
-    // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
-    // behavior.
+    // Auto-enable prompt logprobs for non-streaming echo, but only when the
+    // caller actually requested output logprobs -- matching Python vLLM's
+    // behavior of inheriting `top_logprobs` for echo only when `logprobs` was
+    // explicitly requested, rather than unconditionally on every echo request.
     let top_logprobs = request.top_logprobs.unwrap_or(0);
     let prompt_logprobs = request
         .prompt_logprobs
-        .or((request.echo && !request.stream).then_some(top_logprobs));
+        .or((request.echo && !request.stream && request.logprobs).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
 
     let structured_outputs = convert_from_response_format(
@@ -1390,6 +1392,53 @@ mod tests {
         .expect("request is valid");
 
         assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
+        assert!(!prepared.options.include_prompt_logprobs);
+    }
+
+    #[test]
+    fn prepare_chat_request_enables_prompt_logprobs_for_non_streaming_echo_with_logprobs() {
+        let request = ChatCompletionRequest {
+            stream: false,
+            logprobs: true,
+            top_logprobs: Some(3),
+            echo: true,
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.sampling_params.prompt_logprobs,
+            Some(3)
+        );
+        assert!(prepared.options.include_prompt_logprobs);
+    }
+
+    #[test]
+    fn prepare_chat_request_does_not_enable_prompt_logprobs_for_echo_without_logprobs() {
+        // Echo alone must not implicitly turn on prompt logprobs -- only when
+        // the caller actually asked for output logprobs, matching Python
+        // vLLM's chat protocol behavior.
+        let request = ChatCompletionRequest {
+            stream: false,
+            logprobs: false,
+            echo: true,
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
         assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
         assert!(!prepared.options.include_prompt_logprobs);
     }
