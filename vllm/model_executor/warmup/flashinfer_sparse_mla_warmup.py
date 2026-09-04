@@ -106,9 +106,12 @@ def _run_flashinfer_sparse_mla_decode_autotune(
 ) -> bool:
     """Autotune FlashInfer's SM120 sparse-MLA decode path.
 
-    The mixed-batch run at ``num_tokens`` triggers the constants/crossover
-    calibrations; the per-bucket uniform-decode runs at ``refine_tokens``
-    (CUDA-graph capture sizes <= 64) then refine the cpb pick per shape."""
+    Every rank enters the tuning context: the calibrations and refinements
+    measure the local device and persist under its own device key, so a rank
+    that skips tuning keeps the heuristic picks. The mixed-batch run at
+    ``num_tokens`` triggers the constants/crossover calibrations; the
+    per-bucket uniform-decode runs at ``refine_tokens`` (CUDA-graph capture
+    sizes <= 64) then refine the cpb pick per shape."""
     runner = worker.model_runner
     log_label = _flashinfer_sparse_mla_decode_label(runner, allowed_backends)
     if log_label is None:
@@ -119,7 +122,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         return False
 
     try:
-        from flashinfer.autotuner import AutoTuner
+        from flashinfer.autotuner import AutoTuner, set_autotune_process_group
     except ImportError:
         logger.warning(
             "Skipping FlashInfer SM120 sparse MLA decode autotune because "
@@ -158,24 +161,15 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 uniform_decode=True,
             )
 
-    with torch.inference_mode():
-        warmup_executed = True
-        if is_leader:
-            with flashinfer_autotune(True, cache=str(cache_path)):
-                if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
-                    v2_runner = cast("V2GPUModelRunner", runner)
-                    warmup_executed = run_mixed_prefill_decode_warmup(
-                        v2_runner,
-                        worker.execute_model,
-                        worker.sample_tokens,
-                        num_tokens,
-                        req_id_prefix="_sparse_mla_v2_warmup",
-                    )
-                else:
-                    runner._dummy_run(**dummy_run_kwargs)
-                if warmup_executed:
-                    _refine_bucket_runs()
-        else:
+    # The process group keeps any tunable op hit during these runs consistent
+    # across ranks, same as the general FlashInfer autotune pass.
+    set_autotune_process_group(world.cpu_group if world.world_size > 1 else None)
+    try:
+        with (
+            torch.inference_mode(),
+            flashinfer_autotune(True, cache=str(cache_path)),
+        ):
+            warmup_executed = True
             if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
                 v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
@@ -189,6 +183,8 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 runner._dummy_run(**dummy_run_kwargs)
             if warmup_executed:
                 _refine_bucket_runs()
+    finally:
+        set_autotune_process_group(None)
 
     if not warmup_executed:
         return False
