@@ -425,12 +425,7 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 #### [Preview] Building vLLM's Docker Image from Source for NVIDIA Rubin GPU Architecture
 
-Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path. NVIDIA
-engineers and partners with access to NVIDIA's internal prerequisites can use
-a `requirements/rubin-prerelease.txt` file containing pointers to NVIDIA's
-internal prerelease packages, plus NVIDIA-internal CUDA 13.4 or CUDA 13.5
-development images for `BUILD_BASE_IMAGE` and `FINAL_BASE_IMAGE`. See "Public
-alternative" below for a build path requiring no NVIDIA-internal access.
+Set `INSTALL_RUBIN_PRERELEASE=true` to enable the Rubin build path.
 
 Triton must currently be installed from source for Rubin compatibility.
 Specify its repository with `TRITON_INSTALL_FROM_SOURCE_REPO`; an empty
@@ -444,66 +439,9 @@ BuildKit does not automatically invalidate cached layers when a mutable Git
 ref changes. Use `--no-cache-filter extensions-build` to refresh an empty,
 branch, or tag revision.
 
-Use `ARCH=arm64` on VR200 or `ARCH=amd64` on R100:
-
-??? console "CUDA 13.4 command"
-
-    ```bash
-    ARCH=arm64
-    docker buildx build --progress=plain --load \
-      --file docker/Dockerfile \
-      --target vllm-openai \
-      --platform "linux/${ARCH}" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu134-${ARCH}" \
-      --build-arg max_jobs="$(nproc)" \
-      --build-arg nvcc_threads=2 \
-      --build-arg RUN_WHEEL_CHECK=false \
-      --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.4.1 \
-      --build-arg BUILD_BASE_IMAGE="<cuda-13.4-manylinux-devel-image-${ARCH}>" \
-      --build-arg FINAL_BASE_IMAGE="<cuda-13.4-ubuntu24.04-devel-image-${ARCH}>" \
-      .
-    ```
-
-??? console "CUDA 13.5 command"
-
-    ```bash
-    ARCH=arm64
-    docker buildx build --progress=plain --load \
-      --file docker/Dockerfile \
-      --target vllm-openai \
-      --platform "linux/${ARCH}" \
-      --tag "vllm/vllm-rubin-openai:prerelease-cu135-${ARCH}" \
-      --build-arg max_jobs="$(nproc)" \
-      --build-arg nvcc_threads=2 \
-      --build-arg RUN_WHEEL_CHECK=false \
-      --build-arg INSTALL_RUBIN_PRERELEASE=true \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
-      --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
-      --build-arg CUDA_VERSION=13.5.0 \
-      --build-arg BUILD_BASE_IMAGE="<cuda-13.5-manylinux-devel-image-${ARCH}>" \
-      --build-arg FINAL_BASE_IMAGE="<cuda-13.5-ubuntu24.04-devel-image-${ARCH}>" \
-      .
-    ```
-
-CUDA 13.5 compiled-mode qualification passed with NVIDIA driver versions
-615.62.03 and 620.05. Driver 610.47.04 failed the tested compiled CUDA 13.5
-kernel. Validate the exact driver version on the target system.
-
-##### Public alternative (no NVIDIA-internal access required)
-
 For `FINAL_BASE_IMAGE`, use the public, multi-arch
-`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image - it
-already bundles nvcc/nvrtc-dev, `PATH`/`CUDA_HOME`, NCCL 2.30.7, and GDRCopy
-2.5.1. Confirmed via `apt-cache policy`/a dry-run install against this exact
-image tag that every CUDA dev-tools package the Dockerfile installs
-(`cuda-nvcc-13-4`, `cuda-nvrtc-dev-13-4`, `cuda-cudart-13-4`,
-`cuda-cuobjdump-13-4`, `libcurand-dev-13-4`, `libcublas-dev-13-4`, etc.) is
-already installed via `dpkg`, satisfied from `/var/lib/dpkg/status` with no
-NVIDIA apt source registered at all - so no NVIDIA preview apt repo is
-needed against this image. For `BUILD_BASE_IMAGE`, use:
+`nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04` image.
+For `BUILD_BASE_IMAGE`, use:
 - `pytorch/manylinux2_28-builder:cuda13.4` for x86_64 CPUs.
 - `pytorch/manylinuxaarch64-builder:cuda13.4` for ARM64/AArch64 CPUs.
 
@@ -546,10 +484,6 @@ needed against this image. For `BUILD_BASE_IMAGE`, use:
       --build-arg FINAL_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base:26.08-cuda13.4-devel-ubuntu24.04" \
       .
     ```
-
-`requirements/rubin-prerelease.txt` in this repo already carries a public pin
-set (public PyTorch nightly, `nvidia-cutlass-dsl[cu13]`, `flashinfer-python`)
-for this path, so no internal prerelease requirements file is needed.
 
 !!! note
     Keep the default explicit `torch_cuda_arch_list`. GPU-less BuildKit builds
