@@ -260,9 +260,11 @@ class ProducerSession:
         # Key: "{consumer_session_id}:{mm_hash}" — matches the NIXL notif_msg exactly,
         # so completion notification lookup is a direct dict pop with no parsing.
         self._active_xfers: dict[str, ProducerXfer] = {}
-        # mm_hash values whose read finished or whose grant lapsed, for the
-        # scheduler to release the pin it took when announcing them.
-        self._served: set[str] = set()
+        # One entry per grant whose read finished or whose lease lapsed, for
+        # the scheduler to release the matching pin it took when announcing.
+        # A list, not a set: two consumers reading the same encoding hold two
+        # pins, and collapsing their events would release only one.
+        self._served: list[str] = []
 
         self._req_decoder = msgspec.msgpack.Decoder(XferReq)
         self._req_encoder = msgspec.msgpack.Encoder()
@@ -368,16 +370,16 @@ class ProducerSession:
                 xfer = self._active_xfers.pop(key, None)
                 if xfer is not None:
                     self._cache.unpin(xfer.mm_hash)
-                    self._served.add(xfer.mm_hash)
+                    self._served.append(xfer.mm_hash)
                     logger.debug(
                         "EC producer: NIXL READ completed mm_hash=%s key=%s",
                         xfer.mm_hash,
                         key,
                     )
 
-    def take_served(self) -> set[str]:
-        """Return and clear the encodings whose read finished or lapsed."""
-        served, self._served = self._served, set()
+    def take_served(self) -> list[str]:
+        """Return and clear one entry per grant that finished or lapsed."""
+        served, self._served = self._served, []
         return served
 
     def _sweep_timeouts(self) -> None:
@@ -391,7 +393,7 @@ class ProducerSession:
                     key,
                 )
                 self._cache.unpin(xfer.mm_hash)
-                self._served.add(xfer.mm_hash)
+                self._served.append(xfer.mm_hash)
                 del self._active_xfers[key]
 
 

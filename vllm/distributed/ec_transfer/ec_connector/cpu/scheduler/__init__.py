@@ -7,6 +7,7 @@ Owns the mmap region and the embedding cache, and handles the producer
 for the ECCPUConnector.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -37,6 +38,22 @@ logger = init_logger(__name__)
 # How long a transient condition (a settling DMA, a full pool) may hold a
 # request back before it is failed rather than deferred indefinitely.
 _ADMIT_DEFER_TIMEOUT_S = 60.0
+
+
+@dataclass
+class _AnnounceHold:
+    """Pins kept for consumers that were told where to read an encoding.
+
+    One per announcement, not one per encoding: two requests routed to two
+    consumers each need the entry to survive until their own read lands.
+    """
+
+    deadline: float
+    # Pins taken on a ready entry.
+    holds: int = 0
+    # Announcements made before the save landed. A not-ready entry cannot be
+    # evicted, so these take their pins at mark_ready.
+    pending: int = 0
 
 
 class ECCPUScheduler:
@@ -95,10 +112,12 @@ class ECCPUScheduler:
         self._in_flight: set[str] = set()
         self._tombstones: set[str] = set()
         self._step_completed: set[str] = set()
-        # mm_hash -> when a transient condition first held a request back, so
-        # one that never clears fails the request instead of deferring it
-        # forever. Cleared as soon as the encoding lands.
-        self._deferred_since: dict[str, float] = {}
+        # (request_id, mm_hash) -> when a transient condition first held this
+        # request back, so one that never clears fails the request instead of
+        # deferring it forever. Per request: a shared mm_hash must not make a
+        # newly arrived request inherit an older one's clock. Cleared as soon
+        # as the encoding lands.
+        self._deferred_since: dict[tuple[str, str], float] = {}
         # Requests needing a remote encoding that will not arrive. Drained by
         # get_unrecoverable_requests(); the scheduler aborts them.
         self._unrecoverable: set[str] = set()
@@ -106,12 +125,7 @@ class ECCPUScheduler:
         # later step, by which time the orchestrator has rewritten the media
         # off the request. These hold the encoding across that window: FIFO
         # eviction inside it leaves the consumer nothing to fall back on.
-        # mm_hash -> lease deadline of a pin already taken.
-        self._announce_pins: dict[str, float] = {}
-        # mm_hash -> lease deadline, for entries announced before their save
-        # landed. A not-ready entry is already non-evictable, so the pin is
-        # taken when the worker reports the save.
-        self._announce_pending: dict[str, float] = {}
+        self._announce: dict[str, _AnnounceHold] = {}
         self._announce_lease_s: float = 0.0
         self._peer_host: str | None = None
         self._peer_port: int | None = None
@@ -262,9 +276,11 @@ class ECCPUScheduler:
             announced = params.get(mm_hash)
             # Without a producer address there is nothing to fetch: the request
             # carries what the model needs and the encoder runs locally.
+            # `ec_transfer_params` reaches us from the request, so its shape is
+            # checked rather than assumed.
             remote: dict[str, Any] | None = (
                 announced
-                if announced is not None and "peer_host" in announced
+                if isinstance(announced, dict) and "peer_host" in announced
                 else None
             )
 
@@ -272,7 +288,7 @@ class ECCPUScheduler:
             if entry is not None and entry.ready:
                 # Local hit: upstream's update_state_after_alloc pins and
                 # loads it through the same path as a natively cached entry.
-                self._deferred_since.pop(mm_hash, None)
+                self._deferred_since.pop((request.request_id, mm_hash), None)
                 continue
             if mm_hash in self._in_flight or mm_hash in self._step_completed:
                 pending = True
@@ -299,7 +315,11 @@ class ECCPUScheduler:
                 continue
 
             expected = pos.length * self._hidden_dim * self._element_size
-            size = int(remote.get("size_bytes", -1))
+            try:
+                size = int(remote["size_bytes"])
+            except (KeyError, TypeError, ValueError):
+                self._fail(request, mm_hash, "the announced size was unusable")
+                return False
             if size != expected:
                 logger.warning(
                     "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
@@ -325,7 +345,7 @@ class ECCPUScheduler:
                 pending = True
                 continue
             self._in_flight.add(mm_hash)
-            self._deferred_since.pop(mm_hash, None)
+            self._deferred_since.pop((request.request_id, mm_hash), None)
             pending = True
         return not pending
 
@@ -335,7 +355,7 @@ class ECCPUScheduler:
         Returns False once the condition has outlived its budget, having
         marked the request unschedulable.
         """
-        since = self._deferred_since.setdefault(mm_hash, now)
+        since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
         waited = now - since
         if waited <= _ADMIT_DEFER_TIMEOUT_S:
             return True
@@ -343,7 +363,7 @@ class ECCPUScheduler:
         return False
 
     def _fail(self, request: "Request", mm_hash: str, why: str) -> None:
-        self._deferred_since.pop(mm_hash, None)
+        self._deferred_since.pop((request.request_id, mm_hash), None)
         self._unrecoverable.add(request.request_id)
         logger.error(
             "EC consumer: request %s needs remote encoding mm_hash=%s but %s. "
@@ -414,45 +434,49 @@ class ECCPUScheduler:
         return True
 
     def _hold_announced(self, mm_hash: str, entry: Any) -> None:
-        """Hold an announced encoding until its consumer has read it."""
+        """Hold an announced encoding until its consumer has read it.
+
+        One hold per announcement: the same encoding announced to two
+        consumers must survive until both reads land, so re-announcing takes
+        a second pin rather than only extending the window.
+        """
         import time
 
-        deadline = time.monotonic() + self._announce_lease_s
-        if mm_hash in self._announce_pins:
-            # Announced again by a later request: extend the hold rather than
-            # taking a second pin, so one release is enough.
-            self._announce_pins[mm_hash] = deadline
-            return
-        if mm_hash in self._announce_pending:
-            self._announce_pending[mm_hash] = deadline
-            return
-        if not entry.ready:
-            self._announce_pending[mm_hash] = deadline
-            return
-        self._cache.pin(mm_hash)
-        self._announce_pins[mm_hash] = deadline
+        hold = self._announce.get(mm_hash)
+        if hold is None:
+            hold = self._announce[mm_hash] = _AnnounceHold(0.0)
+        hold.deadline = time.monotonic() + self._announce_lease_s
+        if entry.ready:
+            self._cache.pin(mm_hash)
+            hold.holds += 1
+        else:
+            hold.pending += 1
 
     def _release_announce_pins(self) -> None:
-        """Release holds whose read has landed, and sweep lapsed leases."""
+        """Release one hold per landed read, and sweep lapsed leases."""
         import time
 
         assert self._producer_session is not None
         for mm_hash in self._producer_session.take_served():
-            if self._announce_pins.pop(mm_hash, None) is not None:
+            hold = self._announce.get(mm_hash)
+            if hold is None:
+                # Already swept by a lapsed lease; nothing left to release.
+                continue
+            if hold.holds:
+                hold.holds -= 1
                 self._unpin_announced(mm_hash)
-            else:
-                self._announce_pending.pop(mm_hash, None)
+            elif hold.pending:
+                hold.pending -= 1
+            if not hold.holds and not hold.pending:
+                del self._announce[mm_hash]
         now = time.monotonic()
-        for mm_hash, deadline in list(self._announce_pins.items()):
-            if now > deadline:
-                del self._announce_pins[mm_hash]
+        for mm_hash, hold in list(self._announce.items()):
+            if now <= hold.deadline:
+                continue
+            for _ in range(hold.holds):
                 self._unpin_announced(mm_hash)
-                logger.debug(
-                    "EC producer: hold on mm_hash=%s lapsed; releasing", mm_hash
-                )
-        for mm_hash, deadline in list(self._announce_pending.items()):
-            if now > deadline:
-                del self._announce_pending[mm_hash]
+            del self._announce[mm_hash]
+            logger.debug("EC producer: hold on mm_hash=%s lapsed; releasing", mm_hash)
 
     def _unpin_announced(self, mm_hash: str) -> None:
         # A pinned entry cannot be evicted or discarded, so it is normally
@@ -473,6 +497,18 @@ class ECCPUScheduler:
             self._on_peer_down(addr)
         for session in self._sessions.values():
             self._process_session_results(session)
+        self._sweep_deferrals(now)
+
+    def _sweep_deferrals(self, now: float) -> None:
+        """Drop deferral clocks left behind by requests that went away.
+
+        A request still being scheduled is failed, and its clock removed, as
+        soon as it passes the budget; anything older belongs to a request the
+        scheduler has since dropped.
+        """
+        for key, since in list(self._deferred_since.items()):
+            if now - since > 2 * _ADMIT_DEFER_TIMEOUT_S:
+                del self._deferred_since[key]
 
     def _process_session_results(self, session: Any) -> None:
         r = session.take_results()
@@ -588,12 +624,14 @@ class ECCPUScheduler:
                 )
             elif not entry.ready:
                 self._cache.mark_ready(mm_hash)
-                # It has just become evictable, so an announcement made while
-                # the save was in flight takes its pin now.
-                deadline = self._announce_pending.pop(mm_hash, None)
-                if deadline is not None:
-                    self._cache.pin(mm_hash)
-                    self._announce_pins[mm_hash] = deadline
+                # It has just become evictable, so announcements made while
+                # the save was in flight take their pins now.
+                hold = self._announce.get(mm_hash)
+                if hold is not None and hold.pending:
+                    for _ in range(hold.pending):
+                        self._cache.pin(mm_hash)
+                    hold.holds += hold.pending
+                    hold.pending = 0
                 logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
         for transfer_id in meta.completed_loads:
             pending = self._load_acks.get(transfer_id)

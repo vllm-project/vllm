@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 import uuid
+
+import pytest
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
@@ -238,6 +241,67 @@ def test_size_mismatch_fails_the_request(monkeypatch):
     assert "h1" not in s._in_flight
     assert s._cache.get("h1") is None
     assert s.get_unrecoverable_requests() == {"r1"}
+    s.shutdown()
+
+
+@pytest.mark.parametrize(
+    "announced",
+    [
+        {"peer_host": "h", "peer_port": 1, "size_bytes": None},
+        {"peer_host": "h", "peer_port": 1, "size_bytes": "big"},
+        {"peer_host": "h", "peer_port": 1},
+        123,
+    ],
+    ids=["null-size", "text-size", "no-size", "not-a-mapping"],
+)
+def test_unusable_announcement_fails_the_request(monkeypatch, announced):
+    """`ec_transfer_params` arrives on the request, so it may be anything.
+
+    Raising here would propagate out of Scheduler.schedule() and take the
+    engine down, which is the failure this whole path exists to prevent.
+    """
+    s = _consumer_sched(monkeypatch)
+    req = _Request([_Feature("h1", 1)], params={"h1": announced})
+    admitted = s.ensure_cache_available(req, 0)
+    if announced == 123:
+        # Not a mapping at all: indistinguishable from "never remote", so the
+        # encoder runs locally rather than the request failing.
+        assert admitted is True
+        assert s.get_unrecoverable_requests() == set()
+    else:
+        assert admitted is False
+        assert s.get_unrecoverable_requests() == {"r1"}
+    assert "h1" not in s._in_flight
+    s.shutdown()
+
+
+def test_deferral_budget_is_per_request(monkeypatch):
+    """A request must not inherit an earlier one's clock for a shared item.
+
+    Two requests needing the same encoding hit the same transient condition;
+    the newcomer gets its own budget, so the one that has actually waited too
+    long is the one that fails.
+    """
+    s = _consumer_sched(monkeypatch)
+    # A not-ready orphan entry defers every request that needs it.
+    assert s._cache.alloc("h1", 1) is not None
+    params = _params("h1", 1)
+    old = _Request([_Feature("h1", 1)], params=params, req_id="old")
+    new = _Request([_Feature("h1", 1)], params=params, req_id="new")
+
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    assert s.ensure_cache_available(old, 0) is False
+    now[0] += sched_mod._ADMIT_DEFER_TIMEOUT_S - 1
+    assert s.ensure_cache_available(new, 0) is False
+    assert s.get_unrecoverable_requests() == set()
+
+    now[0] += 2
+    # `old` is now past its budget; `new` is not.
+    assert s.ensure_cache_available(new, 0) is False
+    assert s.get_unrecoverable_requests() == set()
+    assert s.ensure_cache_available(old, 0) is False
+    assert s.get_unrecoverable_requests() == {"old"}
     s.shutdown()
 
 

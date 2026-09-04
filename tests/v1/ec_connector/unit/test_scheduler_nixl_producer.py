@@ -120,13 +120,13 @@ class _FakeProducerSession:
     """Stands in for ProducerSession so build_connector_meta can run."""
 
     def __init__(self):
-        self.served = set()
+        self.served: list[str] = []
 
     def poll_step(self):
         pass
 
     def take_served(self):
-        served, self.served = self.served, set()
+        served, self.served = self.served, []
         return served
 
 
@@ -169,7 +169,7 @@ def test_hold_is_released_once_the_read_lands(monkeypatch):
     _announce(s, "h1")
     assert not entry.evictable
 
-    s._producer_session.served.add("h1")
+    s._producer_session.served.append("h1")
     s.build_connector_meta(scheduler_output=None)
     assert entry.evictable
     s.shutdown()
@@ -206,7 +206,7 @@ def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
     entry = s._cache.alloc("h1", 2)
     assert entry is not None and not entry.ready
     _announce(s, "h1")
-    assert "h1" in s._announce_pending
+    assert s._announce["h1"].pending == 1
 
     s.update_connector_output(
         ECConnectorOutput(
@@ -215,19 +215,28 @@ def test_hold_is_taken_when_a_late_save_lands(monkeypatch):
     )
     assert entry.ready
     assert not entry.evictable
-    assert "h1" not in s._announce_pending
+    assert not s._announce["h1"].pending
     s.shutdown()
 
 
-def test_reannouncing_extends_the_hold_without_a_second_pin(monkeypatch):
-    """One release must be enough however many requests announced it."""
+def test_each_announcement_keeps_its_own_hold(monkeypatch):
+    """Two consumers told to read the same encoding each need it to survive.
+
+    Releasing on the first read would let the entry be evicted while the
+    second consumer, whose media has already been rewritten to a remote
+    reference, has not started its read.
+    """
     s = _announcing_sched(monkeypatch)
     entry = s._cache.alloc("h1", 2)
     s._cache.mark_ready("h1")
     _announce(s, "h1")
     _announce(s, "h1")
 
-    s._producer_session.served.add("h1")
+    s._producer_session.served.append("h1")
+    s.build_connector_meta(scheduler_output=None)
+    assert not entry.evictable
+
+    s._producer_session.served.append("h1")
     s.build_connector_meta(scheduler_output=None)
     assert entry.evictable
     s.shutdown()
