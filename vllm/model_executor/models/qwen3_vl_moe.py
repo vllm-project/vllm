@@ -251,9 +251,9 @@ class Qwen3VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         self.use_deepstack = hasattr(
             config.vision_config, "deepstack_visual_indexes"

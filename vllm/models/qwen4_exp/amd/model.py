@@ -883,7 +883,6 @@ class Qwen4ExpForConditionalGeneration(
             self.video_pruning_rate = 0.0
             self._tokenizer = None
             self.visual = StageMissingLayer("vision_tower")
-            self.input_norm = FusedInputNorm.identity()
             self._tower_model_names = []
         else:
             self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
@@ -895,9 +894,9 @@ class Qwen4ExpForConditionalGeneration(
                     config.vision_config,
                     norm_eps=config.text_config.rms_norm_eps,
                     quant_config=quant_config,
+                    input_norm=FusedInputNorm.from_model_config(self.model_config),
                     prefix=maybe_prefix(prefix, "visual"),
                 )
-                self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         self.use_deepstack = (
             not self.language_model_only
