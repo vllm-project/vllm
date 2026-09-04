@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -48,6 +49,7 @@ def sync_cudagraph_and_dp_padding(
     dp_rank: int,
     max_query_len: int | None = None,
     num_active_loras: int = 0,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """
     Coordinates the batch descriptor and DP padding across all ranks.
@@ -56,13 +58,20 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(
+        6 if profiler_sync is not None else 5, dp_size, dtype=torch.int32, device="cpu"
+    )
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = num_reqs
+    if profiler_sync is not None:
+        tensor[5][dp_rank] = int(profiler_sync._pending)
     dist.all_reduce(tensor, group=group)
+
+    if profiler_sync is not None:
+        profiler_sync.observe(bool(tensor[5].any().item()))
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
@@ -152,6 +161,7 @@ def dispatch_cg_and_sync_dp(
     need_eager: bool = False,
     num_active_loras: int = 0,
     dp_sync: DPSyncState | None = None,
+    profiler_sync: DPProfilerSync | None = None,
 ) -> tuple[BatchExecutionDescriptor, DPSyncState | None]:
     """Pick a cudagraph descriptor for this batch, agreeing it across DP ranks.
 
@@ -239,4 +249,5 @@ def dispatch_cg_and_sync_dp(
         dp_rank,
         max_query_len=max_query_len,
         num_active_loras=num_active_loras,
+        profiler_sync=profiler_sync,
     )
