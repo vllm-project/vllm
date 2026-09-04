@@ -210,6 +210,23 @@ def test_option_and_token_handling(command, test_file, expected):
         ),
         # The root confines the sweep.
         ("find kernels -name 'test_*.py' | xargs pytest", "lora/test_a.py", False),
+        # -maxdepth is honored even when the find root is the tests/ root itself
+        # ("." or "tests/"), not just a subdir.
+        (
+            "find . -maxdepth 1 -name 'test_*.py' | xargs pytest",
+            "test_regression.py",
+            True,
+        ),
+        (
+            "find . -maxdepth 1 -name 'test_*.py' | xargs pytest",
+            "v1/test_scheduler.py",
+            False,
+        ),
+        (
+            "find tests/ -maxdepth 1 -name 'test_*.py' | xargs pytest",
+            "v1/test_scheduler.py",
+            False,
+        ),
     ],
 )
 def test_find_pipelines(command, test_file, expected):
@@ -276,6 +293,10 @@ def test_direct_runners(command, test_file, expected):
         "bash tests/does_not_exist.sh",
         "echo 'pytest kernels/test_a.py'",
         'pytest -v -s "unbalanced',
+        # A `find` whose output never reaches pytest is not a test selection.
+        "find kernels -name 'test_*.py'",
+        "find kernels -name 'test_*.py' | wc -l",
+        "find kernels -name 'test_*.py' -delete",
     ],
 )
 def test_non_test_commands_contribute_nothing(command):
@@ -405,6 +426,13 @@ def test_unparsable_yaml_is_fatal(tmp_path, monkeypatch):
     untethered files, so it must fail loudly instead."""
     with pytest.raises(SystemExit):
         _write_area(tmp_path, monkeypatch, "steps: [oops\n")
+
+
+def test_non_mapping_yaml_is_fatal(tmp_path, monkeypatch):
+    """A yaml that parses but isn't a pipeline mapping (a bare list or scalar)
+    must raise the actionable error, not crash on ``.get``."""
+    with pytest.raises(SystemExit):
+        _write_area(tmp_path, monkeypatch, "- just\n- a\n- list\n")
 
 
 # --------------------------------------------------------------------------- #
