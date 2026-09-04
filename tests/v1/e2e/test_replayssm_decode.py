@@ -156,7 +156,8 @@ def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_na
     reason="flashinfer.mamba.checkpointing_ssu not available",
 )
 @large_gpu_mark(min_gb=40)
-def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_replayssm_flashinfer_mtp(vllm_runner, monkeypatch, use_v2_model_runner):
     common = dict(
         max_model_len=1024,
         trust_remote_code=True,
@@ -169,7 +170,7 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
     )
     try:
         with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
             envs.disable_envs_cache()
             with vllm_runner(
                 MAMBA2_MTP_MODEL,
@@ -177,7 +178,10 @@ def test_replayssm_flashinfer_mtp_v2(vllm_runner, monkeypatch):
                 replayssm_buffer_len=16,
                 **common,
             ) as llm:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                assert (
+                    llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                    is use_v2_model_runner
+                )
                 outputs = llm.generate_greedy(PROMPTS, max_tokens=32)
                 draft_count = sum(
                     metric.value
