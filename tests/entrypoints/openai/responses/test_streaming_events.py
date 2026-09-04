@@ -48,6 +48,28 @@ class TestSplitDelta:
         assert len(result) == 1
         assert result[0] is delta
 
+    def test_tool_call_tail_emitted_before_content(self) -> None:
+        """Verify that an in-flight tool call argument tail (name is None)
+        is emitted before following reasoning and content."""
+        tc_tail = _make_tool_call(0, arguments='{"city":"NYC"}')
+        delta = DeltaMessage(reasoning="think", content="answer", tool_calls=[tc_tail])
+        result = split_delta(delta)
+        assert len(result) == 3
+        assert result[0].tool_calls == [tc_tail]
+        assert result[1].reasoning == "think"
+        assert result[2].content == "answer"
+
+    def test_new_tool_call_emitted_after_content(self) -> None:
+        """Verify that a newly starting tool call (name is present)
+        is emitted after preceding reasoning and content."""
+        tc_new = _make_tool_call(0, name="get_weather", arguments='{"city":"NYC"}')
+        delta = DeltaMessage(reasoning="think", content="answer", tool_calls=[tc_new])
+        result = split_delta(delta)
+        assert len(result) == 3
+        assert result[0].reasoning == "think"
+        assert result[1].content == "answer"
+        assert result[2].tool_calls == [tc_new]
+
 
 def _run_through_processor(
     processor: SimpleStreamingEventProcessor,
@@ -124,3 +146,47 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+    def test_speculative_boundary_crossing_tool_call_tail_and_content(
+        self,
+    ) -> None:
+        """Regression test for #55284: verify that multi-token/speculative
+        decoding steps spanning a tool call finish and subsequent content
+        do not trigger a nameless tool call open or crash with a Pydantic
+        ValidationError."""
+        processor = SimpleStreamingEventProcessor()
+
+        # Step 1: Tool call opens
+        step1 = DeltaMessage(
+            tool_calls=[_make_tool_call(0, name="get_weather", arguments="")]
+        )
+        events1 = _run_through_processor(processor, step1)
+        assert any(e.type == "response.output_item.added" for e in events1)
+        assert processor.state.current_state == _StateType.TOOL_CALL
+
+        # Step 2: Boundary crossing step (closing arguments + post-tool content)
+        step2 = DeltaMessage(
+            content="Here is the weather result.",
+            tool_calls=[_make_tool_call(0, arguments='{"city":"NYC"}')],
+        )
+        events2 = _run_through_processor(processor, step2)
+
+        types = [e.type for e in events2]
+        assert "response.function_call_arguments.delta" in types
+        assert "response.function_call_arguments.done" in types
+        assert "response.output_text.delta" in types
+
+        # Completed tool item must retain the original tool call name
+        done_items = [e.item for e in events2 if e.type == "response.output_item.done"]
+        assert done_items[0].name == "get_weather"
+        assert done_items[0].arguments == '{"city":"NYC"}'
+
+    def test_nameless_tool_call_open_fallback(self) -> None:
+        """Verify that an unexpected nameless tool call open does not crash
+        with a Pydantic ValidationError and uses a safe fallback."""
+        processor = SimpleStreamingEventProcessor()
+        tc = _make_tool_call(0, arguments='{"a":1}')
+        # Force open without preceding state
+        events = processor.open(_StateType.TOOL_CALL, tc)
+        assert len(events) == 1
+        assert events[0].item.name == "unknown"

@@ -1117,7 +1117,15 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
     The Responses API emits typed SSE events (one type per event), so a
     compound DeltaMessage must be split before entering the state machine.
-    Order: reasoning -> content -> tool_calls (grouped by index).
+
+    Ordering:
+    - If tool_calls contains an in-flight argument continuation (the first
+      DeltaToolCall carries function.name as None), it belongs to an ongoing
+      tool call that preceded any following content or reasoning in the same
+      step. Emitting tool_calls first allows the open tool call to consume its
+      remaining arguments before transitioning and closing the item.
+    - Otherwise (e.g. a newly starting tool call with a function name),
+      reasoning and content precede tool_calls as usual.
     """
     has_reasoning = delta.reasoning is not None
     has_content = delta.content is not None
@@ -1130,17 +1138,32 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
     ):
         return [delta]
 
-    deltas: list[DeltaMessage] = []
-    if has_reasoning:
-        deltas.append(DeltaMessage(reasoning=delta.reasoning))
-    if has_content:
-        deltas.append(DeltaMessage(content=delta.content))
+    tool_deltas: list[DeltaMessage] = []
     if has_tools:
         groups: dict[int | None, list[DeltaToolCall]] = {}
         for tc in delta.tool_calls:
             groups.setdefault(tc.index, []).append(tc)
         for tcs in groups.values():
-            deltas.append(DeltaMessage(tool_calls=tcs))
+            tool_deltas.append(DeltaMessage(tool_calls=tcs))
+
+    is_tool_tail = (
+        has_tools
+        and delta.tool_calls[0].function is not None
+        and delta.tool_calls[0].function.name is None
+    )
+
+    deltas: list[DeltaMessage] = []
+    if is_tool_tail:
+        deltas.extend(tool_deltas)
+
+    if has_reasoning:
+        deltas.append(DeltaMessage(reasoning=delta.reasoning))
+    if has_content:
+        deltas.append(DeltaMessage(content=delta.content))
+
+    if not is_tool_tail:
+        deltas.extend(tool_deltas)
+
     return deltas or [delta]
 
 
@@ -1244,9 +1267,10 @@ class SimpleStreamingEventProcessor:
                 tool_call.function.name,
                 tool_call_name_map=self.tool_call_name_map,
             )
+            tool_name = call_name.name or self.state.tool_call_name or "unknown"
             return handlers.open_fn(
                 self.state,
-                call_name.name,
+                tool_name,
                 tool_call.index,
                 call_name.namespace,
             )
