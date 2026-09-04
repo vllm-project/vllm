@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import field
+from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, ClassVar, Literal
 
@@ -73,6 +73,13 @@ PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
+@dataclass
+class ResolvedKVCacheLayout:
+    """Shared state for the resolved physical KV cache layout."""
+
+    value: str | None = None
+
+
 @config
 class CacheConfig:
     """Configuration for the KV cache."""
@@ -86,10 +93,13 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    kv_cache_layout: str | None = field(default=None, init=False)
-    """Resolved physical KV cache layout name (a ``KVCacheLayout`` member).
+    _resolved_kv_cache_layout: ResolvedKVCacheLayout = field(
+        default_factory=ResolvedKVCacheLayout,
+        repr=False,
+    )
+    """Shared state for the resolved physical KV cache layout name.
 
-    ``None`` means the layout has not been resolved yet. The engine core
+    A ``None`` value means the layout has not been resolved yet. The engine core
     resolves it once (``resolve_kv_cache_layout``) before memory profiling, and
     every worker process adopts the resolved name — via the
     ``set_kv_cache_layout`` RPC, or ``KVCacheConfig.kv_cache_layout`` for
@@ -97,6 +107,15 @@ class CacheConfig:
     set the value is final and read with ``get_resolved_kv_cache_layout``,
     which raises on ``None``. Tests and standalone tools may pre-set a value,
     which resolution then honors as-is."""
+
+    @property
+    def kv_cache_layout(self) -> str | None:
+        return self._resolved_kv_cache_layout.value
+
+    @kv_cache_layout.setter
+    def kv_cache_layout(self, value: str | None) -> None:
+        self._resolved_kv_cache_layout.value = value
+
     prefix_match_unit: int | None = Field(default=None, gt=0)
     """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
@@ -296,7 +315,10 @@ class CacheConfig:
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
-        return {key: str(value) for key, value in self.__dict__.items()}
+        info = {key: str(value) for key, value in self.__dict__.items()}
+        info.pop("_resolved_kv_cache_layout")
+        info["kv_cache_layout"] = str(self.kv_cache_layout)
+        return info
 
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
