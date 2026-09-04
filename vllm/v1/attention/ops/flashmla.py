@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
 
+import functools
+
 import torch
 
 import vllm.envs as envs
@@ -61,13 +63,22 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
     return True, None
 
 
+@functools.lru_cache(maxsize=1)
 def _use_triton_sparse_mla() -> bool:
     """Whether to bind the portable Triton sparse-MLA kernels instead of the
     native FlashMLA ops. The native sparse kernels (vllm._flashmla_C) only
     build for sm90/sm100; on consumer Blackwell (SM12x: RTX 5090 / GB10) the
     Triton implementations in sm12x_sparse_mla_attn.py are the only working
     sparse-MLA path. Unset VLLM_TRITON_MLA_SPARSE = auto (SM12x only);
-    "1"/"0" force it on/off for A/B testing."""
+    "1"/"0" force it on/off for A/B testing.
+
+    The result is cached (maxsize=1) so the import-time symbol binding below and
+    every runtime consumer agree on a single decision. Without caching, a probe
+    that raised at import time (binding ``_raise_flashmla_unavailable``) could
+    later return True at runtime, enabling the SM12x path against a module that
+    still holds the raising stubs -> ``RuntimeError: FlashMLA is not available``
+    on the first FP8 decode. Env/capability are fixed for a process lifetime, so
+    a stable cached decision is correct."""
     try:
         if not current_platform.is_cuda():
             return False
@@ -76,6 +87,13 @@ def _use_triton_sparse_mla() -> bool:
             return configured
         return current_platform.is_device_capability_family(120)
     except Exception:  # pragma: no cover - platform probing must never break import
+        # Log rather than silently swallow: a probe failure here freezes the
+        # cached decision to False, so it must be visible if it ever happens.
+        logger.warning(
+            "Triton sparse-MLA capability probe failed; assuming disabled. "
+            "Set VLLM_TRITON_MLA_SPARSE=1 to force it on.",
+            exc_info=True,
+        )
         return False
 
 

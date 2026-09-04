@@ -901,6 +901,7 @@ def _fused_gather_dequant_attend_splitk(
     acc,
     num_splits: int,
     *,
+    head_block: int | None = None,
     block_n: int = _FUSED_BLOCK_N,
     num_warps: int = _FUSED_NUM_WARPS,
     num_stages: int = _FUSED_NUM_STAGES,
@@ -910,7 +911,11 @@ def _fused_gather_dequant_attend_splitk(
     T, H, D = q.shape
     K = indices.shape[1]
     total_slots = cache_flat.shape[0]
-    head_block = _FUSED_HEAD_BLOCK if H >= 16 else max(next_power_of_2(max(H, 1)), 16)
+    # Use the caller's resolved head block; fall back to the same rule as the
+    # plain path so a standalone call stays correct (tl.dot needs M >= 16).
+    if head_block is None:
+        head_block = _FUSED_HEAD_BLOCK if H >= 16 else next_power_of_2(max(H, 1))
+    head_block = max(head_block, 16)
     hb_cnt = triton.cdiv(H, head_block)
     tiles = triton.cdiv(K, block_n)
     num_splits = max(1, min(num_splits, tiles))
@@ -918,7 +923,13 @@ def _fused_gather_dequant_attend_splitk(
     # partials sized on the PADDED head grid (hb_cnt*head_block) so out-of-range
     # heads have a slot to (mask-)address; combine masks them out identically.
     Hp = hb_cnt * head_block
-    key = (T, Hp, num_splits, q.device.index)
+    # Include the CUDA stream in the key: the split kernel writes these partials
+    # and the combine kernel reads them back, ordered only WITHIN a stream. Two
+    # same-shape calls issued on different streams (e.g. concurrent CUDA graphs)
+    # must not share buffers, or one can overwrite partials before the other's
+    # combine consumes them. cuda_stream is a stable, hashable pointer.
+    stream = torch.cuda.current_stream(q.device).cuda_stream
+    key = (T, Hp, num_splits, q.device.index, stream)
     bufs = _SPLITK_BUF_CACHE.get(key)
     if bufs is None:
         bufs = (
@@ -1029,8 +1040,15 @@ def _fused_gather_dequant_attend(
     assert max_score.shape == (T, H) and denom.shape == (T, H)
     assert acc.shape[:2] == (T, H)
     assert acc.shape[2] >= _DV
+    # Resolve the head block ONCE (tl.dot needs the M dim >= 16; pad small head
+    # counts up to 16) so the split-K gate, the plain grid, and the split-K
+    # launch all agree on the same head grid regardless of the caller's value.
+    if head_block is None:
+        head_block = _FUSED_HEAD_BLOCK if H >= 16 else next_power_of_2(max(H, 1))
+    head_block = max(head_block, 16)
+
     _sk = _splitk_splits()
-    if _sk > 1 and T * triton.cdiv(H, _FUSED_HEAD_BLOCK) < 8:
+    if _sk > 1 and T * triton.cdiv(H, head_block) < 8:
         # decode-ish shapes only: the plain grid already fills the GPU at
         # prefill (T large), where split-K would just add combine overhead.
         return _fused_gather_dequant_attend_splitk(
@@ -1043,15 +1061,12 @@ def _fused_gather_dequant_attend(
             denom,
             acc,
             _sk,
+            head_block=head_block,
             block_n=block_n,
             num_warps=num_warps,
             num_stages=num_stages,
         )
 
-    if head_block is None:
-        # tl.dot needs the M dim >= 16; pad small head counts up to 16.
-        head_block = _FUSED_HEAD_BLOCK if H >= 16 else next_power_of_2(max(H, 1))
-        head_block = max(head_block, 16)
     grid = (T, triton.cdiv(H, head_block))
     _fused_gather_dequant_attn_kernel[grid](
         q,

@@ -97,6 +97,8 @@ if TYPE_CHECKING:
     VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
     VLLM_TRITON_MLA_SPARSE_HEAD_BLOCK_SIZE: int | None = None
     VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE: bool | None = None
+    VLLM_SPARSE_MLA_SPLITK: int = 0
+    VLLM_SPARSE_MLA_FUSED: bool = True
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -357,6 +359,16 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
+
+
+def _env_int_or_zero(name: str) -> int:
+    """Parse an int env var, treating unset or non-numeric values as 0. Mirrors
+    the uncached reader in sm12x_sparse_mla_attn.py; registered here only so
+    environment validation accepts the switch."""
+    try:
+        return int(os.getenv(name, "0"))
+    except ValueError:
+        return 0
 
 
 def maybe_convert_scale_out_endpoints(value: str | None) -> bool | None:
@@ -667,6 +679,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_MLA_SPARSE_MATMUL_DECODE", "").strip()
     ),
+    # Split-K decode path for the Triton sparse-MLA kernel: number of
+    # candidate-tile splits (0/1 = disabled). Read uncached in
+    # sm12x_sparse_mla_attn.py so a micro-benchmark harness can toggle it per
+    # call; registered here only so environment validation accepts it.
+    "VLLM_SPARSE_MLA_SPLITK": lambda: _env_int_or_zero("VLLM_SPARSE_MLA_SPLITK"),
+    # Fused gather+dequant+attend path (default on); "0" selects the legacy
+    # materialized path for A/B/debug. Also read uncached in the kernel file.
+    "VLLM_SPARSE_MLA_FUSED": lambda: os.getenv("VLLM_SPARSE_MLA_FUSED", "1") != "0",
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
     # are "warn" (print a warning on each sync) or "error" (raise on sync).
