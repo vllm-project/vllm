@@ -608,6 +608,21 @@ def varlen_with_paged_kv(
             slot_mapping=slot_mapping,
             isa=isa,
         )
+        ref_metadata = cpu_attn_get_scheduler_metadata(
+            num_reqs=num_seqs,
+            num_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            seq_lens=kv_lens_tensor,
+            dtype=dtype,
+            query_start_loc=cu_query_lens,
+            causal=dynamic_causal is None,
+            sliding_window_size=(sliding_window if sliding_window is not None else -1),
+            isa=isa,
+            enable_kv_split=True,
+            dynamic_causal=dynamic_causal_tensor,
+            kv_cache_dtype="auto",
+        )
         ref_output = torch.empty_like(query)
         cpu_attention_with_kv_cache(
             query=query,
@@ -622,7 +637,7 @@ def varlen_with_paged_kv(
             sliding_window=sliding_window if sliding_window is not None else -1,
             block_table=block_tables,
             softcap=soft_cap if soft_cap is not None else 0,
-            scheduler_metadata=metadata,
+            scheduler_metadata=ref_metadata,
             s_aux=s_aux,
             dynamic_causal=dynamic_causal_tensor,
         )

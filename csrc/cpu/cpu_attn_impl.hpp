@@ -1097,11 +1097,6 @@ class AttentionMainLoop {
 
       // process logits
       {
-        // if (debug_info){
-        //     print_logits("raw logits", logits_buffer, q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num);
-        // }
-
         if (softcap_scale != 0.0f) {
           apply_softcap(logits_buffer, kv_tile_token_num, q_head_num,
                         kv_tile_token_num, softcap_scale);
@@ -1390,7 +1385,12 @@ class AttentionMainLoop {
         sum_buffer[i] = new_sum_val;
 
         curr_logits_buffer += logits_buffer_stride;
-        curr_prob_buffer += kv_tile_token_num;
+        if constexpr (prequantize_probabilities) {
+          curr_prob_buffer += kv_tile_token_num;
+        } else {
+          curr_prob_buffer =
+              reinterpret_cast<softmax_prob_buffer_t*>(curr_logits_buffer);
+        }
         curr_partial_q_buffer += head_dim;
       }
     }
@@ -1865,13 +1865,6 @@ class AttentionMainLoop {
                   float* curr_sum_buffer = sum_buffer + q_tile_head_offset;
 
                   bool debug_info = false;
-                  //   bool debug_info = (
-                  //     q_head_start_idx == 4 &&
-                  //     (q_token_start_idx + q_head_tile_token_offset) <=
-                  //     4
-                  //     && (q_token_start_idx + q_head_tile_token_offset +
-                  //     q_tile_token_num) > 4
-                  //   );
                   // if (debug_info) {
                   //   std::printf("\tq_iter_idx: %d, q_token_start: %d,"
                   //   "q_token_end: %d, q_token_num: %d, q_head_num: %d,"
