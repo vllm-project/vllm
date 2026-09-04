@@ -26,6 +26,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -544,13 +545,25 @@ class LlamaForCausalLM(
         return loader.load_weights(weights)
 
 
-class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+if TYPE_CHECKING:
+    _LlamaBidirectionalForSequenceClassificationBase = LlamaForCausalLM
+    _LlamaBidirectionalModelBase = LlamaForCausalLM
+else:
+    _LlamaBidirectionalForSequenceClassificationBase = as_seq_cls_model(
+        LlamaForCausalLM
+    )
+    _LlamaBidirectionalModelBase = as_embedding_model(LlamaForCausalLM)
+
+
+class LlamaBidirectionalForSequenceClassification(
+    _LlamaBidirectionalForSequenceClassificationBase
+):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
 
 
-class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+class LlamaBidirectionalModel(_LlamaBidirectionalModelBase):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass

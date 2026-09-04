@@ -178,6 +178,7 @@ class FlashNgramModel(FlashModel):
         if num_layers is not None and hf.num_hidden_layers != num_layers:
             hf.num_hidden_layers = num_layers
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.ngram_embeddings: NgramEmbedding | None
         if get_pp_group().is_first_rank and uses_ngram_embedding(self.config):
             self.ngram_embeddings = NgramEmbedding(self.config, self.embed_tokens)
         else:
