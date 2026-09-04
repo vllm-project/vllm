@@ -203,7 +203,6 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.kernel_block_size = 2
-    worker.pages_per_host_block = 1
     source = torch.empty((3, 2, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
@@ -214,9 +213,7 @@ def test_hisparse_pre_forward_transfer_builds_page_descriptors():
     worker._dma_free_descriptors = []
     worker._submit_dma_descriptors = MagicMock()
 
-    worker._enqueue_transfers(
-        [SparseKVPageTransfer(7, 2, 0, (1,), after_forward=False)]
-    )
+    worker._enqueue_transfers([SparseKVPageTransfer(7, 2, (1,), after_forward=False)])
 
     descriptors, count = worker._submit_dma_descriptors.call_args.args
     assert count == 1
@@ -235,7 +232,7 @@ def test_hisparse_eager_mirror_records_transfer_without_page_copy():
     ]
     worker._record_transfer_completion = MagicMock()
     worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, 0, (1,), after_forward=False)]
+    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
 
     worker._submit_transfers(transfers)
 
@@ -250,7 +247,7 @@ def test_hisparse_lazy_mirror_copies_transfer_pages():
     ]
     worker._record_transfer_completion = MagicMock()
     worker._enqueue_transfers = MagicMock()
-    transfers = [SparseKVPageTransfer(7, 2, 0, (1,), after_forward=False)]
+    transfers = [SparseKVPageTransfer(7, 2, (1,), after_forward=False)]
 
     worker._submit_transfers(transfers)
 
@@ -262,7 +259,6 @@ def test_hisparse_dma_row_mirror_builds_descriptors(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.kernel_block_size = 2
-    worker.pages_per_host_block = 1
     source = torch.empty((3, 2, 4), dtype=torch.uint8)
     destination = torch.empty((6, 4), dtype=torch.uint8)
     worker.resident_caches = (source,)
@@ -468,7 +464,7 @@ def test_hisparse_finish_step_submits_lazy_post_forward_transfer(monkeypatch):
     worker = _make_hisparse_worker()
     worker.is_host_writer = True
     worker.cache_handles = [SimpleNamespace(runtime=runtime, num_actual_tokens=0)]
-    transfer = SparseKVPageTransfer(7, 2, 0, (1,), after_forward=True)
+    transfer = SparseKVPageTransfer(7, 2, (1,), after_forward=True)
     worker._post_forward_transfers = [transfer]
     worker._forward_ready_event = MagicMock()
     worker._enqueue_host_mirror = MagicMock()
@@ -695,7 +691,7 @@ def test_hisparse_shared_host_reader_skips_transfer_completion():
     worker._enqueued_transfer_ids = []
     worker._pending_transfer_events = []
 
-    worker._record_transfer_completion([SparseKVPageTransfer(1, 2, 0, (3,), True)])
+    worker._record_transfer_completion([SparseKVPageTransfer(1, 2, (3,), True)])
 
     assert worker._enqueued_transfer_ids == []
     assert worker._pending_transfer_events == []
@@ -712,8 +708,8 @@ def test_hisparse_writer_records_transfer_completion_after_dma(monkeypatch):
 
     worker._record_transfer_completion(
         [
-            SparseKVPageTransfer(3, 2, 0, (1,), False),
-            SparseKVPageTransfer(7, 4, 0, (5,), True),
+            SparseKVPageTransfer(3, 2, (1,), False),
+            SparseKVPageTransfer(7, 4, (5,), True),
         ]
     )
 
@@ -882,7 +878,6 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
-        host_pool_gib=1.0,
     )
     monkeypatch.setattr(hisparse_runtime_module, "_has_hisparse_ops", lambda: True)
     monkeypatch.setattr(
@@ -970,7 +965,6 @@ def test_hisparse_cache_eagerly_mirrors_host_rows(monkeypatch, kv_transfer_confi
     resolved = hisparse_runtime_module.ResolvedHiSparseConfig(
         top_k=4,
         device_buffer_size=8,
-        host_pool_gib=1.0,
     )
     monkeypatch.setattr(
         hisparse_runtime_module.ResolvedHiSparseConfig,
@@ -1004,7 +998,6 @@ def test_hisparse_runtime_takes_eager_host_mirror_from_config(
         config=hisparse_runtime_module.ResolvedHiSparseConfig(
             top_k=4,
             device_buffer_size=8,
-            host_pool_gib=1.0,
             eager_host_mirror=eager_host_mirror,
         ),
         max_num_reqs=2,

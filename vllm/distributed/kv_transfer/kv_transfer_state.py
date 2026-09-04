@@ -93,18 +93,6 @@ def ensure_kv_transfer_initialized(
             kv_cache_config=kv_cache_config,
         )
 
-    if kv_cache_config.hisparse_host_num_blocks is not None:
-        from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
-            attach_hisparse_connector,
-        )
-
-        _KV_CONNECTOR_AGENT = attach_hisparse_connector(
-            _KV_CONNECTOR_AGENT,
-            vllm_config,
-            KVConnectorRole.WORKER,
-            kv_cache_config,
-        )
-
 
 def ensure_kv_transfer_shutdown() -> None:
     global _KV_CONNECTOR_AGENT

@@ -91,7 +91,6 @@ class PagedCacheView:
 class ResolvedHiSparseConfig:
     top_k: int
     device_buffer_size: int
-    host_pool_gib: float
     eager_host_mirror: bool = True
 
     @classmethod
@@ -147,7 +146,6 @@ class ResolvedHiSparseConfig:
         return cls(
             top_k=model_top_k,
             device_buffer_size=device_buffer_size,
-            host_pool_gib=config.host_pool_gib,
             eager_host_mirror=config.eager_host_mirror,
         )
 
@@ -159,7 +157,8 @@ def check_hisparse_host_memory(pool_bytes: int) -> None:
         raise ValueError(
             f"HiSparse pinned host pool needs ~{pool_bytes / 2**30:.0f} GiB "
             f"but only {mem.available / 2**30:.0f} GiB of RAM is available. "
-            "Lower hisparse_config.host_pool_gib or leave headroom for co-tenants."
+            "Lower the HiSparseConnector host_pool_gib or leave headroom "
+            "for co-tenants."
         )
 
 
@@ -1042,12 +1041,10 @@ def create_hisparse_cache_handle(
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d (%d LRU rows), host_pool_gib=%s, "
-        "max_num_seqs=%d.",
+        "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
         config.top_k,
         config.device_buffer_size,
         config.device_buffer_size,
-        config.host_pool_gib,
         max_num_reqs,
     )
     handle = HiSparseCacheHandle(runtime)

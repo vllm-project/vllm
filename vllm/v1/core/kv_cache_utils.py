@@ -14,6 +14,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
@@ -1651,10 +1652,14 @@ def validate_kv_cache_layout(
 
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
     """Return per-replica HiSparse host-cache capacity in bytes."""
-    config = vllm_config.attention_config.hisparse_config
-    if config is None:
-        return None
-    return int(config.host_pool_gib * 2**30)
+    host_pool_gib = hisparse_host_pool_gib(vllm_config.kv_transfer_config)
+    hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
+    if hisparse_enabled != (host_pool_gib is not None):
+        raise ValueError(
+            "HiSparse requires both attention_config.hisparse_config and "
+            "HiSparseConnector with host_pool_gib"
+        )
+    return int(host_pool_gib * 2**30) if host_pool_gib is not None else None
 
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
@@ -1719,8 +1724,10 @@ def _get_hisparse_hma_config(
     )
     assert config is not None
 
-    # Host pages retain the scheduler block size. The packed GPU slab uses
-    # native kernel pages so indexer and hot-cache block IDs share one layout.
+    host_specs = {
+        name: spec.copy_with_new_block_size(gpu_block_size)
+        for name, spec in host_specs.items()
+    }
     gpu_indexer_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
@@ -1746,12 +1753,7 @@ def _get_hisparse_hma_config(
             and layer_spec.is_index_group_leader
         ) or not hot_units:
             hot_units.append([])
-        hot_units[-1].append(
-            (
-                f"{layer_name}{HISPARSE_HOT_SUFFIX}",
-                layer_spec.copy_with_new_block_size(gpu_block_size),
-            )
-        )
+        hot_units[-1].append((f"{layer_name}{HISPARSE_HOT_SUFFIX}", layer_spec))
 
     resident_groups: list[KVCacheGroupSpec] = []
     hot_groups: list[KVCacheGroupSpec] = []
@@ -1778,7 +1780,7 @@ def _get_hisparse_hma_config(
                 ),
                 block_pool_id=0,
                 enable_prefix_caching=False,
-                enable_kv_transfer=True,
+                enable_kv_transfer=False,
             )
         )
         hot_groups.append(
@@ -1812,7 +1814,7 @@ def _get_hisparse_hma_config(
         list(host_specs),
         source_group_spec,
         block_pool_id=None,
-        enable_kv_transfer=False,
+        enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
     )
 

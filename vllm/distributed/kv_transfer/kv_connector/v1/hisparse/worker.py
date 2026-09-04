@@ -24,14 +24,12 @@ from vllm.v1.core.kv_cache_utils import (
     HISPARSE_HOT_SUFFIX,
     HISPARSE_RESIDENT_SUFFIX,
     KVCacheBlockCopy,
-    get_unique_kv_cache_group_id,
 )
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
 )
 from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
@@ -217,15 +215,8 @@ class HiSparseConnectorWorker:
         hot_backing = next(iter(hot_backings.values()))
         pinned_host_pools = list(registered_host_pools.values())
 
-        source_group_id = get_unique_kv_cache_group_id(
-            self.kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
-        )
-        source_block_size = self.kv_cache_config.kv_cache_groups[
-            source_group_id
-        ].kv_cache_spec.block_size
         resident = cache_handles[0].view
         assert resident is not None
-        assert source_block_size % resident.block_size == 0
         host_num_blocks = self.kv_cache_config.hisparse_host_num_blocks
         assert host_num_blocks is not None
         try:
@@ -234,7 +225,6 @@ class HiSparseConnectorWorker:
                 cache_layer_names,
                 hot_backing,
                 self.vllm_config.scheduler_config.max_num_seqs,
-                source_block_size // resident.block_size,
                 host_num_blocks,
                 hot_backing.device,
                 pinned_host_pools,
@@ -252,7 +242,6 @@ class HiSparseConnectorWorker:
         cache_layer_names: list[str],
         hot_backing: torch.Tensor,
         max_num_reqs: int,
-        pages_per_host_block: int,
         host_num_blocks: int,
         device: torch.device,
         pinned_host_pools: list[torch.Tensor],
@@ -265,7 +254,6 @@ class HiSparseConnectorWorker:
         resident = cache_handles[0].view
         assert resident is not None
         self.kernel_block_size = resident.block_size
-        self.pages_per_host_block = pages_per_host_block
         self.host_num_blocks = host_num_blocks
         self.pinned_host_pools = pinned_host_pools
         self.shared_host_region = shared_host_region
@@ -708,11 +696,7 @@ class HiSparseConnectorWorker:
         descriptors = self._acquire_dma_descriptors(descriptor_count)
         destination_rows = np.fromiter(
             (
-                (
-                    transfer.destination_block_id * self.pages_per_host_block
-                    + transfer.destination_page_offset
-                )
-                * self.kernel_block_size
+                transfer.destination_block_id * self.kernel_block_size
                 for transfer in transfers
             ),
             dtype=np.int64,

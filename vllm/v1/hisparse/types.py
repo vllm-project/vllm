@@ -10,7 +10,6 @@ class SparseKVPageTransfer:
 
     transfer_id: int
     destination_block_id: int
-    destination_page_offset: int
     source_block_ids: tuple[int, ...]
     after_forward: bool
 

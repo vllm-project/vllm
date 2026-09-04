@@ -28,9 +28,10 @@ request ────► HiSparseCoordinator ── source blocks + residency pol
 This is a local KV connector. When P/D or another offload connector is also
 configured, `MultiConnector` composes it with `HiSparseConnector`.
 
-`host_pool_gib` is the usable host-cache capacity per data-parallel replica,
-not a node-wide memory budget. Tensor-parallel ranks hold replicated views of
-that logical cache. Those views may use private per-rank backing or one shared
+`host_pool_gib` is configured on `HiSparseConnector` and is the usable
+host-cache capacity per data-parallel replica, not a node-wide memory budget.
+Tensor-parallel ranks hold replicated views of that logical cache. Those views
+may use private per-rank backing or one shared
 physical allocation without changing the configured capacity. Physical host
 memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
