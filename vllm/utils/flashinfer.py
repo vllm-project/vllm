@@ -200,6 +200,10 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
 flashinfer_prepare_bf16_fp4_weights = _lazy_import_wrapper(
     "flashinfer.gemm", "prepare_bf16_fp4_weights"
 )
+flashinfer_gemma_rmsnorm = _lazy_import_wrapper("flashinfer.norm", "gemma_rmsnorm")
+flashinfer_gemma_fused_add_rmsnorm = _lazy_import_wrapper(
+    "flashinfer.norm", "gemma_fused_add_rmsnorm"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
