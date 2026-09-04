@@ -83,7 +83,7 @@ def test_triton_launcher_supports_cpu_function_wrappers() -> None:
             return self.func
 
     class TestCpuKernel(_TestTritonKernel):
-        kernel = FuncWrapper()
+        kernel: Any = FuncWrapper()
 
     owner = TestCpuKernel()
 
