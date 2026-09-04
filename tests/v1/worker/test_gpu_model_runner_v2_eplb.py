@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
@@ -84,6 +85,7 @@ def _make_runner(**overrides: Any) -> Any:
         post_forward=lambda *_, **__: None,
     )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.pooling_runner = None
     runner.execute_model_state = None
     for key, value in overrides.items():
