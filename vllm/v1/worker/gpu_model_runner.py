@@ -1165,6 +1165,7 @@ class GPUModelRunner(
             kernel_block_sizes=self._kernel_block_sizes,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -2434,6 +2435,16 @@ class GPUModelRunner(
             _bidi_sw = getattr(hf_text_config, "sliding_window", None)
             _clamps_in_kernel = getattr(
                 self.model, "mm_prefix_clamp_sliding_window", False
+            ) or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False)
+            # Some models (DeepSeek-V4 vision) define the bidirectional span
+            # over the whole sentinel block ([IMAGE_START, IMAGE_END]) rather
+            # than the embed tokens, and prepend a position-dependent
+            # alignment pad before the first sentinel. For those, derive the
+            # span from the full placeholder range and strip the pad.
+            # TODO(Isotr0py): Refactor mm_prefix_lm implementation
+            # for better readability and maintainability.
+            _span_pad_modulus = getattr(
+                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -2442,7 +2453,18 @@ class GPUModelRunner(
                     if mm_feature.modality == "audio":
                         continue
                     pos_info = mm_feature.mm_position
-                    img_doc_range = pos_info.extract_embeds_range()
+                    if _span_pad_modulus:
+                        pad = (
+                            _span_pad_modulus - 1 - pos_info.offset % _span_pad_modulus
+                        )
+                        img_doc_range = [
+                            (
+                                pos_info.offset + pad,
+                                pos_info.offset + pos_info.length - 1,
+                            )
+                        ]
+                    else:
+                        img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
                         if (
                             not _clamps_in_kernel
