@@ -13,6 +13,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Executor, Future
 from typing import Any
 
 import torch
@@ -124,21 +125,30 @@ def make_cancel_request(
 
 
 class EventInbox:
-    """Receive Consumer readiness events without blocking the Scheduler."""
+    """Receive Consumer readiness events without blocking the Scheduler.
 
-    def __init__(self, client: ControlClient) -> None:
+    Subscribing needs one blocking control request per shard, so it runs on
+    `executor` when one is given: an unreachable Consumer must cost the
+    Scheduler nothing, not one control timeout per drain.
+    """
+
+    def __init__(self, client: ControlClient, executor: Executor | None = None) -> None:
         self._client = client
+        self._executor = executor
+        self._discovery: Future[list[str] | None] | None = None
         self._context: zmq.Context | None = None
         self._socket: zmq.Socket | None = None
         self._closed = False
         self.shard_count = 1
 
-    def _connect(self, base_addr: str) -> None:
-        if self._socket is not None:
-            return
+    def _endpoints(self, base_addr: str) -> list[str] | None:
+        """Ask every shard where it publishes readiness events.
+
+        Blocking: called on `self._executor` unless there is none.
+        """
         shards = self._client.discover_shards(base_addr)
         if shards is None:
-            return
+            return None
         endpoints = []
         for addr in shards:
             try:
@@ -151,14 +161,44 @@ class EventInbox:
                     "consumer shard %s; retrying the complete topology later.",
                     addr,
                 )
-                return
+                return None
+        return endpoints
+
+    def _connect(self, base_addr: str) -> None:
+        if self._socket is not None or self._closed:
+            return
+        if self._executor is None:
+            self._install(self._endpoints(base_addr))
+            return
+        if self._discovery is None:
+            self._discovery = self._executor.submit(self._endpoints, base_addr)
+            return
+        if not self._discovery.done():
+            return
+        discovery, self._discovery = self._discovery, None
+        try:
+            self._install(discovery.result())
+        except Exception:
+            logger.warning(
+                "EC Mooncake event-channel discovery for %s failed; retrying.",
+                base_addr,
+                exc_info=True,
+            )
+
+    def _install(self, endpoints: list[str] | None) -> None:
+        """Adopt a discovered topology.
+
+        Runs on the caller's thread so the socket is only ever touched there.
+        """
+        if not endpoints or self._closed:
+            return
         context = zmq.Context()
         socket = context.socket(zmq.PULL)
         for endpoint in endpoints:
             socket.connect(endpoint)
         self._context = context
         self._socket = socket
-        self.shard_count = len(shards)
+        self.shard_count = len(endpoints)
 
     def drain(self, base_addr: str) -> list[dict[str, Any]]:
         self._connect(base_addr)
@@ -170,11 +210,20 @@ class EventInbox:
                 events.append(self._socket.recv_json(flags=zmq.DONTWAIT))
             except zmq.Again:
                 return events
+            except Exception:
+                # The event channel is a plain PULL socket: an undecodable
+                # frame must cost one frame, not the engine.
+                logger.warning(
+                    "Discarding an undecodable EC Mooncake event.", exc_info=True
+                )
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        if self._discovery is not None:
+            self._discovery.cancel()
+            self._discovery = None
         if self._socket is not None:
             self._socket.close(linger=0)
         if self._context is not None:

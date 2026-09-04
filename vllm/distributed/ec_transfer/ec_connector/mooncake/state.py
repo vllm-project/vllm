@@ -12,6 +12,9 @@ from enum import Enum, auto
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeLoadSpec,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class SchedulerTransferState(Enum):
@@ -129,7 +132,13 @@ class SchedulerTransferTable:
         request_id: str,
         mm_hash: str,
         deadline: float,
-    ) -> SchedulerTransfer:
+    ) -> SchedulerTransfer | None:
+        """Track a request waiting for a push.
+
+        Returns None when `transfer_id` already names a different encoding.
+        The id comes from the request, so a collision has to fail that one
+        request; re-issuing it re-runs the encode under a fresh id.
+        """
         record = self._records.get(transfer_id)
         if record is None:
             record = SchedulerTransfer(
@@ -141,8 +150,10 @@ class SchedulerTransferTable:
                 deadline=deadline,
             )
             self._insert(record)
+        elif not self._identity_matches(record, mm_hash):
+            self._refuse_colliding_id(record, mm_hash, request_id)
+            return None
         else:
-            self._check_identity(record, mm_hash)
             if not record.request_id:
                 record.request_id = request_id
             if record.state in _TERMINAL_STATES and request_id:
@@ -164,8 +175,9 @@ class SchedulerTransferTable:
                 deadline=None,
             )
             self._insert(record)
-        else:
-            self._check_identity(record, spec.mm_hash)
+        elif not self._identity_matches(record, spec.mm_hash):
+            self._refuse_colliding_id(record, spec.mm_hash, record.request_id)
+            return record, False
         if record.state is not SchedulerTransferState.WAITING_EVENT:
             return record, False
         record.spec = spec
@@ -183,6 +195,7 @@ class SchedulerTransferTable:
         mm_hash: str,
         transfer_id: str | None = None,
         request_id: str = "",
+        deadline: float | None = None,
     ) -> SchedulerTransfer | None:
         record = self._records.get(transfer_id) if transfer_id else None
         if record is not None and (
@@ -202,7 +215,9 @@ class SchedulerTransferTable:
             return None
         if not record.request_id:
             record.request_id = request_id
-        record.deadline = None
+        # A dispatched load that never reports back would otherwise hold this
+        # hash in LOADING for good, deferring every later request for it.
+        record.deadline = deadline
         self._transition(record, SchedulerTransferState.LOADING)
         self._loads_to_dispatch[record.transfer_id] = None
         return record
@@ -307,6 +322,15 @@ class SchedulerTransferTable:
                     now=now,
                 )
                 expired.append(record)
+            elif record.state is SchedulerTransferState.LOADING:
+                self._transition(
+                    record,
+                    SchedulerTransferState.UNAVAILABLE,
+                    now=now,
+                )
+                if record.request_id:
+                    self._notify_unavailable(record, record.request_id)
+                expired.append(record)
             elif record.state in _TERMINAL_STATES:
                 self._remove(record.transfer_id)
         terminal_ids = [
@@ -337,12 +361,27 @@ class SchedulerTransferTable:
             )
 
     @staticmethod
-    def _check_identity(record: SchedulerTransfer, mm_hash: str) -> None:
-        if record.mm_hash and record.mm_hash != mm_hash:
-            raise ValueError(
-                f"Transfer {record.transfer_id!r} changed mm_hash from "
-                f"{record.mm_hash!r} to {mm_hash!r}"
-            )
+    def _identity_matches(record: SchedulerTransfer, mm_hash: str) -> bool:
+        return not record.mm_hash or record.mm_hash == mm_hash
+
+    def _refuse_colliding_id(
+        self, record: SchedulerTransfer, mm_hash: str, request_id: str
+    ) -> None:
+        """Report a transfer id that already names another encoding.
+
+        Transfer ids arrive on the request, so a collision is reachable from
+        outside and must not reach the engine as an exception.
+        """
+        logger.warning(
+            "EC Mooncake transfer_id=%s already names mm_hash=%s; refusing "
+            "mm_hash=%s for request %s",
+            record.transfer_id,
+            record.mm_hash[:16],
+            mm_hash[:16],
+            request_id or "<unknown>",
+        )
+        if request_id:
+            self._unavailable_requests.add(request_id)
 
     def _transition(
         self,

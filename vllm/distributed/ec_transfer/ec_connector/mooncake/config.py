@@ -54,12 +54,16 @@ class MooncakeECConfig:
 
     ``control_port`` is the first TP-shard port after the DP offset;
     ``control_addr`` targets that shard, which advertises the full topology.
+    ``control_host`` is the address this instance both advertises and binds,
+    so reaching a Consumer means being routed to it rather than finding it on
+    every interface.
     """
 
     is_producer: bool
     is_consumer: bool
     protocol: str
     buffer_device: str
+    control_host: str
     control_port: int
     control_addr: str
     control_timeout_ms: int
@@ -102,6 +106,7 @@ class MooncakeECConfig:
             is_consumer=ec_config.is_ec_consumer,
             protocol=str(get("mooncake_protocol", "rdma")),
             buffer_device=str(ec_config.ec_buffer_device or "cuda").lower(),
+            control_host=str(ec_config.ec_ip),
             control_port=control_port,
             control_addr=make_zmq_path("tcp", ec_config.ec_ip, control_port),
             control_timeout_ms=max(

@@ -228,7 +228,7 @@ async def fanout_encoder_primer(
     e_urls: list[str],
     req_id: str,
     consumer_zmq: str | None = None,
-) -> dict[int, dict]:
+) -> tuple[dict[int, dict], dict[str, dict]]:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
@@ -238,13 +238,17 @@ async def fanout_encoder_primer(
     `ec_transfer_params`: its EC cache key and the grid its processor produced.
     The proxy still supplies the uuid so both sides key the cache the same way;
     the grid can only come from the encoder, which is the side that computed it.
+
+    Also returns the connector handles to put on the decode body, as a fresh
+    mapping. `orig_request` is left untouched so a retry re-encodes from the
+    original request instead of carrying the previous attempt's handles.
     """
     logger.info("[%s] Processing multimodal items...", req_id)
 
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
-        return {}  # nothing to do
+        return {}, {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
@@ -252,6 +256,7 @@ async def fanout_encoder_primer(
     item_uuids: dict[int, str] = {}
     item_transfer_ids: dict[int, str] = {}
     item_meta: dict[int, dict] = {}
+    ec_params: dict[str, dict] = {}
 
     # Round-robin over encode servers to distribute load a bit. The cursor
     # persists across requests so fan-out doesn't restart at e_urls[0] every
@@ -378,14 +383,12 @@ async def fanout_encoder_primer(
                 # connector's own handle on the published embedding (for NIXL,
                 # peer_host/peer_port/size_bytes). The decoder's connector
                 # looks it up by mm_hash on the request, so carry it through.
-                orig_request.setdefault("ec_transfer_params", {})[item_uuids[idx]] = (
-                    reported
-                )
+                ec_params[item_uuids[idx]] = reported
 
     logger.info(
         "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
     )
-    return item_meta
+    return item_meta, ec_params
 
 
 async def maybe_prefill(
@@ -522,7 +525,17 @@ async def log_requests(request: Request, call_next):
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
     timeout = aiohttp.ClientTimeout(total=100_000)
-    connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    # vLLM closes an idle keep-alive connection after
+    # VLLM_HTTP_TIMEOUT_KEEP_ALIVE seconds (5 by default), while aiohttp keeps
+    # pooling it for 15. Reusing one it has already closed fails the request
+    # with ServerDisconnectedError, and the server logs nothing at all: it
+    # closed the socket before the request arrived. Retire ours first.
+    server_keep_alive = float(os.getenv("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5"))
+    connector = aiohttp.TCPConnector(
+        limit=0,
+        force_close=False,
+        keepalive_timeout=max(1.0, server_keep_alive - 1.0),
+    )
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:
         # only setup if prefill instance(s) exist
@@ -559,9 +572,18 @@ async def prepare_for_decode(
     rather than from a body whose images are already metadata references.
     """
     _t0 = time.perf_counter()
-    item_meta = await fanout_encoder_primer(req_data, e_urls, req_id, consumer_zmq)
+    item_meta, ec_params = await fanout_encoder_primer(
+        req_data, e_urls, req_id, consumer_zmq
+    )
     _t1 = time.perf_counter()
     prepared = req_data if NO_REWRITE else rewrite_for_decode(req_data, item_meta)
+    if ec_params:
+        # A fresh body every time: `rewrite_for_decode` hands back `req_data`
+        # itself when it rewrote nothing, and this attempt's handles must not
+        # outlive it into a retry.
+        handles = dict(prepared.get("ec_transfer_params") or {})
+        handles.update(ec_params)
+        prepared = {**prepared, "ec_transfer_params": handles}
     _t2 = time.perf_counter()
     prepared = await maybe_prefill(prepared, p_url, req_id)
     return prepared, _t1 - _t0, _t2 - _t1

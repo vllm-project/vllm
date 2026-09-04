@@ -90,6 +90,7 @@ class ECMooncakeWorker:
         self.is_producer = config.is_producer
         self.is_consumer = config.is_consumer
         self._buffer_device = config.buffer_device
+        self._control_host = config.control_host
         self._control_port = config.control_port
         self._transfer = MooncakeTransfer(get_ip(), config.protocol)
         self._consumer_memory = ConsumerMemoryPool(
@@ -163,7 +164,10 @@ class ECMooncakeWorker:
             )
         base_port = self._control_port
         self._control_server = ConsumerControlServer(
-            "0.0.0.0",
+            # The reservation channel hands out registered-memory addresses
+            # and takes cancellations, so it listens where the Consumer
+            # advertises itself (`ec_ip`), not on every interface.
+            self._control_host,
             base_port + self._tp_rank,
             self._reserve_push_destination,
             self._push_status,

@@ -85,11 +85,11 @@ class ECMooncakeScheduler:
         )
         self._model_config = vllm_config.model_config
         self._control_client = ControlClient(config.control_timeout_ms)
-        self._event_inbox = EventInbox(self._control_client)
         self._control_executor = ThreadPoolExecutor(
             max_workers=_CONTROL_WORKERS,
             thread_name_prefix="ec-mooncake-control",
         )
+        self._event_inbox = EventInbox(self._control_client, self._control_executor)
 
         self._metadata_resolver = PlaceholderMetadataResolver(vllm_config.model_config)
         self._unresolved_transfer_ids = 0
@@ -147,14 +147,17 @@ class ECMooncakeScheduler:
         mm_hash: str,
         transfer_id: str,
         request_id: str,
+        now: float,
     ) -> None:
-        now = time.monotonic()
         record = self._transfers.wait_for_event(
             transfer_id,
             request_id,
             mm_hash,
             now + self._push_wait_timeout,
         )
+        if record is None:
+            # The id names another encoding; the request is already failed.
+            return
         if record.state is not SchedulerTransferState.WAITING_EVENT:
             return
         assert record.deadline is not None
@@ -264,19 +267,30 @@ class ECMooncakeScheduler:
         self._expire_transfers()
         events = self._event_inbox.drain(self._control_addr)
         for data in events:
-            if data.get("ready"):
-                transfer_id = str(data["transfer_id"])
-                record = self._transfers.get(transfer_id)
-                if record is not None and record.state in {
-                    SchedulerTransferState.CANCELLED,
-                    SchedulerTransferState.UNAVAILABLE,
-                    SchedulerTransferState.EXPIRED,
-                    SchedulerTransferState.FAILED,
-                }:
-                    continue
-                if not self._note_shard_ready(data):
-                    continue
-                self._store_pushed_spec(data)
+            if not data.get("ready"):
+                continue
+            try:
+                self._accept_ready_event(data)
+            except (KeyError, TypeError, ValueError):
+                # Readiness events cross a plain PULL socket, so a malformed
+                # one costs that event and not the engine.
+                logger.warning(
+                    "Discarding a malformed EC readiness event.", exc_info=True
+                )
+
+    def _accept_ready_event(self, data: dict[str, Any]) -> None:
+        transfer_id = str(data["transfer_id"])
+        record = self._transfers.get(transfer_id)
+        if record is not None and record.state in {
+            SchedulerTransferState.CANCELLED,
+            SchedulerTransferState.UNAVAILABLE,
+            SchedulerTransferState.EXPIRED,
+            SchedulerTransferState.FAILED,
+        }:
+            return
+        if not self._note_shard_ready(data):
+            return
+        self._store_pushed_spec(data)
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
@@ -355,6 +369,9 @@ class ECMooncakeScheduler:
             return True
 
         self._drain_push_notifications()
+        # One timestamp for the whole decision, so the deadlines it hands out
+        # cannot disagree between features.
+        now = time.monotonic()
         all_ready = True
         for index, feature in enumerate(request.mm_features):
             if (
@@ -366,7 +383,7 @@ class ECMooncakeScheduler:
             transfer_id = self._request_transfer_id(request, index)
             if transfer_id is not None:
                 self._transfers.touch_available(
-                    transfer_id, time.monotonic() + _RESERVATION_TTL_SECONDS
+                    transfer_id, now + _RESERVATION_TTL_SECONDS
                 )
             if mm_hash in self._local_cache:
                 continue
@@ -379,13 +396,14 @@ class ECMooncakeScheduler:
                 mm_hash,
                 transfer_id,
                 request.request_id,
+                now + self._push_wait_timeout,
             )
             if record is not None:
                 self._scheduler_pending_work = True
                 all_ready = False
             else:
                 waiting_id = transfer_id or f"{request.request_id}:{index}"
-                self._note_awaiting_push(mm_hash, waiting_id, request.request_id)
+                self._note_awaiting_push(mm_hash, waiting_id, request.request_id, now)
                 all_ready = False
         return all_ready
 

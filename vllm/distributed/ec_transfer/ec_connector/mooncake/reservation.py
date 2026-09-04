@@ -22,6 +22,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     MemoryAllocation,
     ResidentLease,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class ConsumerReservationState(Enum):
@@ -103,6 +106,9 @@ class ConsumerReservationManager:
     ) -> None:
         self._memory = memory
         self._lease_ttl = lease_ttl
+        # A writer that has not reported for a full extra lease is gone; no
+        # RDMA write outlives that, so reclaiming its destination is safe.
+        self._writer_grace = lease_ttl
         self._tombstone_limit = tombstone_limit
         self._records: dict[str, ConsumerReservation] = {}
         self._active_ids: dict[str, None] = {}
@@ -237,7 +243,7 @@ class ConsumerReservationManager:
                 if record.state is ConsumerReservationState.READY:
                     self._terminate(record, ConsumerReservationState.CANCELLED)
                 elif record.state is ConsumerReservationState.WRITING:
-                    self._transition(record, ConsumerReservationState.CANCEL_PENDING)
+                    self._defer(record, ConsumerReservationState.CANCEL_PENDING)
             self._condition.notify_all()
 
     def wait_for_writers(self, timeout: float) -> bool:
@@ -297,7 +303,7 @@ class ConsumerReservationManager:
             if record.state in _DEFERRED_STATES and not abandon:
                 return True
             if record.state is ConsumerReservationState.WRITING and not abandon:
-                self._transition(record, ConsumerReservationState.CANCEL_PENDING)
+                self._defer(record, ConsumerReservationState.CANCEL_PENDING)
                 return True
             if record.state not in _ACTIVE_STATES:
                 return False
@@ -346,9 +352,40 @@ class ConsumerReservationManager:
                 self._terminate(record, ConsumerReservationState.EXPIRED)
                 expired += 1
             elif record.state is ConsumerReservationState.WRITING:
-                self._transition(record, ConsumerReservationState.EXPIRE_PENDING)
+                self._defer(record, ConsumerReservationState.EXPIRE_PENDING)
+            elif record.state in _DEFERRED_STATES:
+                # The writer that this release deferred to never reported
+                # back: it crashed, or its host is gone. Waiting forever
+                # pins the destination for the life of the process, so take
+                # the buffer back once no in-flight write could still land.
+                logger.warning(
+                    "Reclaiming EC destination for transfer_id=%s after %.0fs "
+                    "in %s: its writer never reported back",
+                    record.transfer_id,
+                    self._writer_grace,
+                    record.state.name,
+                )
+                self._terminate(
+                    record,
+                    ConsumerReservationState.CANCELLED
+                    if record.state is ConsumerReservationState.CANCEL_PENDING
+                    else ConsumerReservationState.EXPIRED,
+                )
+                expired += 1
         self._reap_tombstones(now)
         return expired
+
+    def _defer(
+        self, record: ConsumerReservation, state: ConsumerReservationState
+    ) -> None:
+        """Hand a release to the remote writer, but not indefinitely.
+
+        Mooncake may still be writing into the destination, so the release
+        waits for the writer to report. `_expire_locked` reclaims the buffer
+        once the grace has passed without a report.
+        """
+        self._transition(record, state)
+        record.expires_at = time.monotonic() + self._writer_grace
 
     def _terminate(
         self, record: ConsumerReservation, state: ConsumerReservationState

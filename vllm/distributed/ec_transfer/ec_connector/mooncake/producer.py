@@ -22,6 +22,26 @@ import torch
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakePushSpec,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+def _same_destination(
+    existing: ECMooncakePushSpec, incoming: ECMooncakePushSpec
+) -> bool:
+    """Whether two specs describe one push, ignoring which request asked.
+
+    The same encoding requested twice shares a transfer id legitimately; only
+    a different payload or destination is a collision.
+    """
+    return (
+        existing.mm_hash == incoming.mm_hash
+        and existing.nbytes == incoming.nbytes
+        and existing.shape == incoming.shape
+        and existing.dtype == incoming.dtype
+        and existing.consumer_zmq == incoming.consumer_zmq
+    )
 
 
 class ProducerPushState(Enum):
@@ -107,9 +127,19 @@ class ProducerPushManager:
         with self._lock:
             existing = self._records.get(spec.transfer_id)
             if existing is not None:
-                if existing.spec != spec:
-                    raise ValueError(
-                        f"Producer transfer {spec.transfer_id!r} changed identity"
+                if not _same_destination(existing.spec, spec):
+                    # Transfer ids come in on the request, so two requests can
+                    # name one id. Keep the push already in flight and drop
+                    # the newcomer: the consumer times its own wait out and
+                    # fails that request, which an engine-level raise would
+                    # not.
+                    logger.warning(
+                        "EC Mooncake producer transfer_id=%s already pushes "
+                        "mm_hash=%s to %s; dropping mm_hash=%s",
+                        spec.transfer_id,
+                        existing.spec.mm_hash[:16],
+                        existing.spec.consumer_zmq,
+                        spec.mm_hash[:16],
                     )
                 return existing, False
             record = ProducerPushRecord(

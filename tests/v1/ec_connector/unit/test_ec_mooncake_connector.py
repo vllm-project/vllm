@@ -19,7 +19,7 @@ import weakref
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
 from typing import Any
@@ -175,6 +175,22 @@ def _wait_for_worker_io(
             return meta
         time.sleep(0.01)
     raise TimeoutError("EC Mooncake worker I/O did not finish")
+
+
+def _drain_until_subscribed(scheduler: Any, timeout: float = 5.0) -> None:
+    """Drain until the event-channel discovery lands.
+
+    Subscribing runs on the control executor so an unreachable consumer costs
+    the Scheduler nothing, which means the first drain only starts it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        scheduler._drain_pending = True
+        scheduler._drain_push_notifications()
+        if scheduler._event_inbox._socket is not None:
+            return
+        time.sleep(0.005)
+    raise TimeoutError("EC Mooncake event channel was never subscribed")
 
 
 def _bind_extra_config(config: VllmConfig) -> None:
@@ -474,6 +490,89 @@ class TestECMooncakeControlPlane:
         finally:
             raw.close(linger=0)
             context.term()
+            client.close()
+            server.close()
+
+    def test_a_dead_writer_gives_its_destination_back(self):
+        """Reserve, then vanish: the receive pool has to recover on its own.
+
+        Driven over the wire the way a Producer and the Scheduler drive it --
+        `reserve`, then the Scheduler's own cancel, which does not abandon the
+        writer. That cancel used to leave the destination pinned with no path
+        back, so a Producer crash permanently cost the Consumer a buffer.
+        """
+        engine = MagicMock(spec=MooncakeTransfer)
+        engine.register_memory.return_value = 0
+        engine.unregister_memory.return_value = True
+        pool = ConsumerMemoryPool(768, engine)
+        pool.prepare(torch.device("cpu"))
+        manager = ConsumerReservationManager(pool, 300.0, 16)
+
+        def reserve(request: dict[str, Any]) -> dict[str, Any]:
+            """The Worker's own handler, minus the dtype plumbing."""
+            manager.expire()
+            reservation, _ = manager.reserve(
+                str(request["transfer_id"]),
+                str(request["mm_hash"]),
+                int(request["nbytes"]),
+                tuple(int(value) for value in request["shape"]),
+                str(request["dtype"]),
+                torch.float32,
+            )
+            if reservation is None:
+                raise RuntimeError("EC consumer buffer pool is full")
+            return {"ready": reservation.state is ConsumerReservationState.READY}
+
+        port = _find_free_port()
+        server = ConsumerControlServer(
+            "127.0.0.1",
+            port,
+            reserve=reserve,
+            status=manager.status,
+            complete=manager.complete,
+            cancel=manager.cancel,
+            reap=manager.expire,
+            peer_ports=[port],
+        )
+        server.start()
+        addr = f"tcp://127.0.0.1:{port}"
+        client = ControlClient(2000)
+
+        def request_destination(transfer_id: str) -> None:
+            client.request(
+                addr,
+                {
+                    "op": "reserve",
+                    "transfer_id": transfer_id,
+                    "mm_hash": f"hash-{transfer_id}",
+                    "nbytes": 64,
+                    "shape": [16],
+                    "dtype": "float32",
+                },
+            )
+
+        try:
+            abandoned = 0
+            for index in range(64):
+                try:
+                    request_destination(f"t{index}")
+                except RuntimeError as error:
+                    assert "pool is full" in str(error)
+                    break
+                # The writer dies here, so no completion ever arrives; the
+                # Scheduler times the transfer out and cancels it.
+                assert client.request(
+                    addr, control.make_cancel_request(f"t{index}")
+                ) == {"cancelled": True}
+                abandoned += 1
+            assert abandoned, "the pool should accept a writer before filling up"
+
+            # No in-flight write can still land, so the buffers come back and
+            # an unrelated request gets a destination again.
+            for record in manager._records.values():
+                record.expires_at = 0
+            request_destination("after-the-grace")
+        finally:
             client.close()
             server.close()
 
@@ -1126,8 +1225,13 @@ class TestSchedulerTransferTable:
         assert (
             table.first_for_hash("hash", (SchedulerTransferState.AVAILABLE,)) is second
         )
-        with pytest.raises(ValueError):
-            table.observe_ready(self.pushed_spec("first", "other-hash"), 10)
+        # A colliding transfer id is refused rather than raised: transfer ids
+        # arrive on the request, so the engine must not fail on one.
+        collided, accepted = table.observe_ready(
+            self.pushed_spec("first", "other-hash"), 10
+        )
+        assert collided is first and not accepted
+        assert first.mm_hash == "hash"
 
     def test_unavailable_notification_is_drained_once_and_rejects_late_ready(self):
         table = SchedulerTransferTable(resident_capacity=64, tombstone_ttl=30)
@@ -1186,9 +1290,118 @@ class TestSchedulerTransferTable:
         assert table.drain_orphaned() == ["first"]
         assert table.drain_orphaned() == []
 
+    def test_a_load_that_never_reports_back_fails_its_request(self):
+        """A dispatched load needs a deadline of its own.
+
+        LOADING used to carry none, so a lost Worker report left the hash
+        loading for good and deferred every later request for it, silently
+        and without even a retriable failure.
+        """
+        table = SchedulerTransferTable(resident_capacity=64, tombstone_ttl=30)
+        record, _ = table.observe_ready(self.pushed_spec("transfer"), 10)
+
+        assert table.begin_load("hash", "transfer", "request", 20) is record
+        assert table.take_loads_to_dispatch() == [record]
+
+        assert table.expire(15, 16) == []
+        assert table.expire(21, 16) == [record]
+        assert record.state is SchedulerTransferState.UNAVAILABLE
+        assert table.take_unavailable_requests() == {"request"}
+
+    def test_a_colliding_transfer_id_fails_only_the_request_that_named_it(self):
+        """Transfer ids arrive on the request, so a collision is reachable.
+
+        Raising took the engine down with it; the transfer already under that
+        id has to survive and only the newcomer may fail.
+        """
+        table = SchedulerTransferTable(resident_capacity=64, tombstone_ttl=30)
+        first = table.wait_for_event("shared", "req-a", "hash", 1)
+
+        assert first is not None
+        assert table.wait_for_event("shared", "req-b", "other-hash", 1) is None
+        assert table.take_unavailable_requests() == {"req-b"}
+        assert first.mm_hash == "hash"
+        assert first.request_id == "req-a"
+
 
 class TestECMooncakeSchedulerMetadata:
     """Validate Scheduler decisions and per-step Worker metadata."""
+
+    def test_an_unreachable_consumer_does_not_block_the_scheduler(
+        self, mock_vllm_config_consumer
+    ):
+        """Subscribing must never cost the Scheduler a control timeout.
+
+        `has_cache_item` runs inside `schedule()`, and discovery is one
+        blocking request per shard. Doing it inline froze every request in the
+        engine for `control_timeout_s` on each drain while a shard was
+        unreachable, and `discover_shards` caches only successes, so the cost
+        repeated for as long as the shard stayed down.
+        """
+        timeout_s = 0.4
+        mock_vllm_config_consumer.ec_transfer_config.ec_connector_extra_config = {
+            "mooncake_protocol": "tcp",
+            "control_timeout_s": timeout_s,
+        }
+        mock_vllm_config_consumer.ec_transfer_config.ec_port = _find_free_port()
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                elapsed = []
+                for _ in range(3):
+                    started = time.monotonic()
+                    assert scheduler.has_cache_item("hash") is False
+                    elapsed.append(time.monotonic() - started)
+            finally:
+                scheduler.shutdown()
+
+        assert max(elapsed) < timeout_s, elapsed
+
+    def test_a_duplicate_transfer_id_fails_the_request_not_the_engine(
+        self, mock_vllm_config_consumer, mock_request_with_3_mm
+    ):
+        """`ec_transfer_params` is a request field, so ids can collide.
+
+        `ensure_cache_available` runs inside `schedule()`: raising there took
+        EngineCore down on input any client could send.
+        """
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                first = mock_request_with_3_mm
+                first.mm_features = first.mm_features[:1]
+                first.request_id = "req-a"
+                first.ec_transfer_params = {
+                    "ec_items": [
+                        {
+                            "mm_hash": first.mm_features[0].identifier,
+                            "transfer_id": "shared",
+                        }
+                    ]
+                }
+                second = copy.copy(first)
+                second.request_id = "req-b"
+                second.mm_features = [
+                    replace(first.mm_features[0], identifier="another_hash")
+                ]
+                second.ec_transfer_params = {
+                    "ec_items": [{"mm_hash": "another_hash", "transfer_id": "shared"}]
+                }
+
+                with patch.object(scheduler._scheduler, "_drain_push_notifications"):
+                    assert not scheduler.ensure_cache_available(first, 0)
+                    assert not scheduler.ensure_cache_available(second, 0)
+
+                assert scheduler.take_unavailable_requests() == {"req-b"}
+                record = scheduler._scheduler._transfers.get("shared")
+                assert record is not None
+                assert record.request_id == "req-a"
+            finally:
+                scheduler.shutdown()
 
     def test_cancel_confirms_topology_and_retries_only_failed_shards(self):
         scheduler = object.__new__(ECMooncakeScheduler)
@@ -1430,7 +1643,7 @@ class TestECMooncakeSchedulerMetadata:
                     "request",
                     side_effect=fake_send,
                 ) as send_control:
-                    scheduler._scheduler._drain_push_notifications()
+                    _drain_until_subscribed(scheduler._scheduler)
 
                 subscribed = [
                     call.args[0]
@@ -1858,6 +2071,45 @@ class TestConsumerReservationManager:
         assert list(manager._tombstones) == ["c", "a", "d"]
         assert set(manager._records) == {"c", "a", "d"}
 
+    @pytest.mark.parametrize(
+        "deferred,terminal",
+        [
+            (
+                ConsumerReservationState.CANCEL_PENDING,
+                ConsumerReservationState.CANCELLED,
+            ),
+            (
+                ConsumerReservationState.EXPIRE_PENDING,
+                ConsumerReservationState.EXPIRED,
+            ),
+        ],
+    )
+    def test_a_deferred_release_is_reclaimed_when_no_writer_reports(
+        self, deferred, terminal
+    ):
+        """A writer that never reports must not pin its destination for good.
+
+        Cancellation and expiry defer to the remote writer, so a Producer that
+        died between reserve and complete used to hold the buffer for the life
+        of the process and every later reserve saw a full pool.
+        """
+        manager, pool, allocation = self.manager()
+        record, _ = self.reserve(manager)
+
+        if deferred is ConsumerReservationState.CANCEL_PENDING:
+            assert manager.cancel("transfer", "")
+        else:
+            record.expires_at = 0
+            manager.expire()
+        assert record.state is deferred
+        # Mooncake may still be writing, so the release waits first.
+        pool.free.assert_not_called()
+
+        record.expires_at = 0
+        assert manager.expire() == 1
+        assert record.state is terminal
+        pool.free.assert_called_once_with(allocation)
+
 
 class TestECMooncakeWorkerTransfer:
     """Validate end-to-end Worker reservation, push, load, and cleanup flows."""
@@ -1943,10 +2195,17 @@ class TestECMooncakeWorkerTransfer:
         assert created
         assert duplicate is record
         assert not duplicate_created
+        # Another request may legitimately name the same encoding.
+        reasked = copy.copy(spec)
+        reasked.request_id = "another-request"
+        assert manager.reserve(reasked, lambda: Future()) == (record, False)
+
+        # A different payload under the same id drops the newcomer instead of
+        # failing the engine; the push in flight keeps the id.
         changed = copy.copy(spec)
         changed.mm_hash = "other"
-        with pytest.raises(ValueError, match="changed identity"):
-            manager.reserve(changed, lambda: Future())
+        assert manager.reserve(changed, lambda: Future()) == (record, False)
+        assert record.spec.mm_hash == "hash"
 
         source = torch.empty(16)
         manager.bind_source("hash", source, None)
@@ -2751,8 +3010,9 @@ class TestECMooncakeWorkerTransfer:
                 ) as send_control:
                     assert not scheduler.has_cache_item("hash")
                     assert not scheduler.has_cache_item("hash")
-                    # The channel is built once, not per call: the roster is
-                    # fetched and every shard subscribed to on the first one.
+                    _drain_until_subscribed(scheduler._scheduler)
+                    # The channel is built once, not per drain: the roster is
+                    # fetched and every shard subscribed to exactly once.
                     assert [call.args[1] for call in send_control.call_args_list] == [
                         {"op": "peers"},
                         {"op": "event_port"},
