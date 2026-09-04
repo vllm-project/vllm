@@ -55,7 +55,7 @@ Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or 
 
 ## Streaming state and logprobs
 
-Streaming derender is stateless server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`) and `role_sent`, the state carries two fields for logprob handling:
+Streaming derender is stateless on the server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`) and `role_sent`, the state carries two fields for logprob handling:
 
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
