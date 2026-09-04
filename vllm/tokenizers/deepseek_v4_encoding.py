@@ -114,9 +114,9 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
 def to_json(value: Any) -> str:
     """Serialize a value to JSON string."""
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return json.dumps(value, ensure_ascii=False)
     except Exception:
-        return json.dumps(value, ensure_ascii=True, sort_keys=True)
+        return json.dumps(value, ensure_ascii=True)
 
 
 def tools_from_openai_format(tools):

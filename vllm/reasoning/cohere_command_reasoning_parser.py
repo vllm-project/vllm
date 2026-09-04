@@ -109,7 +109,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_dictionary: dict[str, str] = {}
     for tool in tool_schema:
         tool_name = tool["name"]
-        tool_parameters = json.dumps(tool["parameters"], sort_keys=True)
+        tool_parameters = json.dumps(tool["parameters"])
         json_schema = f"""{{
                         "type": "object",
                         "properties": {{
