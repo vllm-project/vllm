@@ -385,7 +385,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
-        with DeviceMemoryProfiler() as m:
+        # Activate the JIT-warmup registry so kernel owners constructed during
+        # model (and speculator) load self-register their warmup keys.
+        with (
+            DeviceMemoryProfiler() as m,
+            self.jit_warmup_registry.activate(),
+        ):
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info_once("Loading model from scratch...")
 
