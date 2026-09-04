@@ -58,12 +58,6 @@ def prepare_deepseek_fp8_x_sf(x: torch.Tensor, x_sf: torch.Tensor) -> torch.Tens
     return x_sf.t().contiguous()
 
 
-_SWIGLU_CLAMP_QUANT_KEYS = (
-    (kMxfp8Static, kMxfp8Dynamic),
-    (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-)
-
-
 class TrtLlmFp8ExpertsBase:
     """
     Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
@@ -94,7 +88,11 @@ class TrtLlmFp8ExpertsBase:
             or moe_config.swiglu_alpha is not None
             or moe_config.swiglu_beta is not None
         ) and (
-            (weight_key, activation_key) not in _SWIGLU_CLAMP_QUANT_KEYS
+            (weight_key, activation_key)
+            not in (
+                (kMxfp8Static, kMxfp8Dynamic),
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            )
             or activation_to_flashinfer_type(moe_config.activation)
             != activation_to_flashinfer_type(MoEActivation.SILU)
         ):
