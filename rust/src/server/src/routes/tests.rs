@@ -615,6 +615,7 @@ async fn test_models_with_engine_outputs_and_backend_inner(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     expected_prompt_token_ids: Option<Vec<u32>>,
     backend: Arc<dyn ChatTextBackend>,
+    terminal_stop_reason: Option<StopReason>,
 ) -> (ChatLlm, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -634,11 +635,13 @@ async fn test_models_with_engine_outputs_and_backend_inner(
                         Some(expected_prompt_token_ids.as_slice())
                     );
                 }
-                send_outputs(
-                    push,
-                    engine_outputs_for_request(&request.request_id, output_specs),
-                )
-                .await;
+                let mut outputs = engine_outputs_for_request(&request.request_id, output_specs);
+                if let Some(output) =
+                    outputs.as_request_batch_mut().expect("request batch").outputs.last_mut()
+                {
+                    output.stop_reason = terminal_stop_reason;
+                }
+                send_outputs(push, outputs).await;
             })
         },
     ));
@@ -665,7 +668,8 @@ async fn test_models_with_engine_outputs_and_backend(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
     backend: Arc<dyn ChatTextBackend>,
 ) -> (ChatLlm, MockEngineTask) {
-    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend).await
+    test_models_with_engine_outputs_and_backend_inner(engine_id, output_specs, None, backend, None)
+        .await
 }
 
 async fn test_chat_with_engine_outputs(
@@ -1150,6 +1154,24 @@ async fn test_app_with_stream_output_specs(
     )
 }
 
+async fn test_app_with_engine_rejection(message: &str) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-openai-rejection",
+        vec![(vec![], Some(EngineCoreFinishReason::Rejected))],
+        None,
+        Arc::new(FakeChatBackend::new()),
+        Some(StopReason::Text(message.to_string())),
+    )
+    .await;
+    (
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
+        engine_task,
+    )
+}
+
 async fn test_app_with_backend_and_stream_output_specs(
     backend: Arc<dyn ChatTextBackend>,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
@@ -1460,6 +1482,7 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         default_stream_output_specs(),
         Some(token_ids),
         Arc::new(FakeChatBackend::new()),
+        None,
     )
     .await;
     let mut generate_app = build_router_with_scale_out_endpoints(
@@ -3247,41 +3270,61 @@ async fn stream_error_is_returned_as_openai_error_sse() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
-    let (app, engine_task) =
-        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
-            .await;
-    let response = app
-        .clone()
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/chat/completions")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "Qwen/Qwen1.5-0.5B-Chat",
-                        "stream": true,
-                        "stream_options": {"include_usage": true},
-                        "messages": [{"role": "user", "content": "hello"}]
-                    })
-                    .to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
+    let rejection_message = "per-request capacity 8192 exceeded";
+    for (rejection, expected_type, expected_message) in [
+        (None, "server_error", "Internal server error"),
+        (
+            Some(rejection_message),
+            "invalid_request_error",
+            rejection_message,
+        ),
+    ] {
+        let (app, engine_task) = match rejection {
+            None => {
+                test_app_with_stream_output_specs(vec![(
+                    vec![],
+                    Some(EngineCoreFinishReason::Error),
+                )])
+                .await
+            }
+            Some(message) => test_app_with_engine_rejection(message).await,
+        };
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "stream": true,
+                            "stream_options": {"include_usage": true},
+                            "messages": [{"role": "user", "content": "hello"}]
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
 
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    engine_task.await.expect("mock engine task");
-    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
 
-    assert!(text.contains("\"role\":\"assistant\""), "{text}");
-    assert!(text.contains("\"type\":\"server_error\""), "{text}");
-    assert!(text.contains("Internal server error"), "{text}");
-    assert!(!text.contains("\"usage\":"), "{text}");
-    assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+        assert!(text.contains("\"role\":\"assistant\""), "{text}");
+        assert!(
+            text.contains(&format!("\"type\":\"{expected_type}\"")),
+            "{text}"
+        );
+        assert!(text.contains(expected_message), "{text}");
+        assert!(!text.contains("\"usage\":"), "{text}");
+        assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3491,6 +3534,87 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
             .expect("message string")
             .contains("allowed_token_ids should not be empty")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_engine_rejection_returns_invalid_request() {
+    let rejection_message = "per-request capacity 8192 exceeded";
+    let (mut app, engine_task) = test_app_with_engine_rejection(rejection_message).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "logprobs": 1,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["message"], rejection_message);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_completions_engine_rejection_returns_invalid_request_sse() {
+    let rejection_message = "per-request capacity 8192 exceeded";
+    // A plain stream, and a prompt-only stream whose start event has no prompt
+    // logprobs to render; both ask for logprobs the rejection cannot carry.
+    for body in [
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "logprobs": 1,
+            "stream": true
+        }),
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello world",
+            "echo": true,
+            "max_tokens": 0,
+            "logprobs": 1,
+            "stream": true
+        }),
+    ] {
+        let (mut app, engine_task) = test_app_with_engine_rejection(rejection_message).await;
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert!(
+            text.contains("\"type\":\"invalid_request_error\""),
+            "{text}"
+        );
+        assert!(text.contains(rejection_message), "{text}");
+        assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4509,6 +4633,40 @@ async fn stream_raw_generate_emits_empty_finish_chunk() {
     assert_eq!(second["choices"][0]["token_ids"], json!([]));
     assert_eq!(second["choices"][0]["finish_reason"], "stop");
     assert_eq!(payloads[2], "[DONE]");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_raw_generate_error_finish_returns_server_error() {
+    let (mut app, engine_task) =
+        test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
+            .await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "token_ids": [11, 22],
+                        "stream": false,
+                        "sampling_params": {"max_tokens": 2}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "server_error");
+    assert_eq!(json["error"]["message"], "Internal server error");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

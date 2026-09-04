@@ -438,9 +438,10 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
-            (PbFinishReason::Aborted as i32, None)
-        }
+        FinishReason::Abort
+        | FinishReason::Error
+        | FinishReason::Rejected(_)
+        | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
     };
 
     pb::FinishInfo {

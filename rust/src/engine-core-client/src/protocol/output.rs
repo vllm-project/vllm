@@ -30,7 +30,7 @@ pub enum StopReason {
     Text(String),
 }
 
-/// Reason a request finished: stop, length, abort, error, or repetition.
+/// Reason a request finished: stop, length, abort, error, repetition, or rejected.
 ///
 /// This mirrors the Python enum and uses integer encoding for compact wire
 /// representation.
@@ -50,6 +50,9 @@ pub enum EngineCoreFinishReason {
     Error = 3,
     /// A repetitive token pattern was detected.
     Repetition = 4,
+    /// The engine refused the request for a reason stated in `stop_reason`;
+    /// a client error converted to 400 Bad Request.
+    Rejected = 5,
 }
 
 /// Event types emitted by engine-core for one request.

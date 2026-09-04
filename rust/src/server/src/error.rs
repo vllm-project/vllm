@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use thiserror_ext::{AsReport as _, Construct, Macro};
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
+use vllm_engine_core_client::protocol::output::StopReason;
 
 /// Small OpenAI-style error family used by the minimal HTTP layer.
 #[derive(Debug, Construct, Macro)]
@@ -26,6 +27,19 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// The engine refused the request; its stated reason is the message when
+    /// it gave one as text.
+    pub fn engine_rejection(reason: Option<&StopReason>) -> Self {
+        let message = match reason {
+            Some(StopReason::Text(message)) => message.clone(),
+            _ => "request rejected by the engine".to_string(),
+        };
+        Self::InvalidRequest {
+            message,
+            param: None,
+        }
+    }
+
     /// Return the HTTP status code associated with this API error.
     pub fn status_code(&self) -> StatusCode {
         match self {
