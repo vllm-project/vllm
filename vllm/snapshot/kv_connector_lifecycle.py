@@ -32,11 +32,11 @@ def rotate_engine_id(engine_id: str) -> str:
     return f"{prefix}-{uuid4().hex}{dp_suffix}"
 
 
-def refresh_scheduler_after_snapshot_restore(
+def refresh_scheduler_kv_transfer_identity_after_snapshot_restore(
     engine_core: SnapshotEngine,
     local_ip: str,
 ) -> None:
-    """Refresh scheduler-side KV transport identity and address state."""
+    """Refresh scheduler-side KV transport identity before worker restore."""
     kv_config = engine_core.vllm_config.kv_transfer_config
     if kv_config is None or not (kv_config.is_kv_producer or kv_config.is_kv_consumer):
         return
@@ -44,6 +44,14 @@ def refresh_scheduler_after_snapshot_restore(
     connector = engine_core.scheduler.connector
     if connector is None:
         return
+
+    assert kv_config.engine_id is not None
+    old_engine_id = str(kv_config.engine_id)
+    new_engine_id = rotate_engine_id(old_engine_id)
+    kv_config.engine_id = new_engine_id
+    if hasattr(connector, "engine_id"):
+        connector.engine_id = new_engine_id
+
     connector_scheduler = getattr(connector, "connector_scheduler", None)
     if connector_scheduler is not None and hasattr(
         connector_scheduler, "side_channel_host"
@@ -58,18 +66,27 @@ def refresh_scheduler_after_snapshot_restore(
         )
 
     if connector_scheduler is not None and hasattr(connector_scheduler, "engine_id"):
-        old_engine_id = str(connector_scheduler.engine_id)
-        new_engine_id = rotate_engine_id(old_engine_id)
         connector_scheduler.engine_id = new_engine_id
-        if hasattr(connector, "engine_id"):
-            connector.engine_id = new_engine_id
-        kv_config.engine_id = new_engine_id
-        logger.info(
-            "[snapshot][kv-transfer] scheduler engine ID updated: old=%s new=%s",
-            old_engine_id,
-            new_engine_id,
-        )
 
+    logger.info(
+        "[snapshot][kv-transfer] scheduler engine ID updated: old=%s new=%s",
+        old_engine_id,
+        new_engine_id,
+    )
+
+
+def rebuild_scheduler_kv_transfer_endpoint_after_snapshot_restore(
+    engine_core: SnapshotEngine,
+    local_ip: str,
+) -> None:
+    """Rebuild the scheduler KV endpoint after worker device restore."""
+    kv_config = engine_core.vllm_config.kv_transfer_config
+    if kv_config is None or not (kv_config.is_kv_producer or kv_config.is_kv_consumer):
+        return
+
+    connector = engine_core.scheduler.connector
+    if connector is None:
+        return
     engine_id = str(kv_config.engine_id) if kv_config.engine_id is not None else None
     connector.rebuild_kv_transfer_endpoint(local_ip, engine_id)
 
