@@ -91,17 +91,17 @@ CASES = [
     ),
     pytest.param(
         torch.bfloat16,
+        32,
         8,
-        2,
+        256,
         128,
-        128,
-        16,
-        8,
-        8,
+        32,
+        17,
+        13,
         KVCacheLayout.BHLNC,
         0,
         True,
-        id="gqa-block-head-layer-layout",
+        id="gqa-head256-multicycle-block-head-layer-layout",
     ),
 ]
 
