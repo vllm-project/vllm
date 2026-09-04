@@ -8,10 +8,11 @@ cannot free a destination while Mooncake may still be writing into it.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 
 import torch
@@ -26,11 +27,8 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
 class ConsumerReservationState(Enum):
     """Lifecycle of one Consumer destination reservation."""
 
-    RESERVED = auto()
     WRITING = auto()
     READY = auto()
-    TAKEN = auto()
-    RESIDENT = auto()
     CANCEL_PENDING = auto()
     EXPIRE_PENDING = auto()
     CANCELLED = auto()
@@ -38,10 +36,6 @@ class ConsumerReservationState(Enum):
 
 
 _ALLOWED_TRANSITIONS = {
-    ConsumerReservationState.RESERVED: {
-        ConsumerReservationState.WRITING,
-        ConsumerReservationState.CANCELLED,
-    },
     ConsumerReservationState.WRITING: {
         ConsumerReservationState.READY,
         ConsumerReservationState.CANCEL_PENDING,
@@ -49,12 +43,9 @@ _ALLOWED_TRANSITIONS = {
         ConsumerReservationState.CANCELLED,
     },
     ConsumerReservationState.READY: {
-        ConsumerReservationState.TAKEN,
         ConsumerReservationState.CANCELLED,
         ConsumerReservationState.EXPIRED,
     },
-    ConsumerReservationState.TAKEN: {ConsumerReservationState.RESIDENT},
-    ConsumerReservationState.RESIDENT: set(),
     ConsumerReservationState.CANCEL_PENDING: {ConsumerReservationState.CANCELLED},
     ConsumerReservationState.EXPIRE_PENDING: {
         ConsumerReservationState.CANCELLED,
@@ -74,24 +65,16 @@ _DEFERRED_STATES = {
     ConsumerReservationState.CANCEL_PENDING,
     ConsumerReservationState.EXPIRE_PENDING,
 }
+_WRITER_OWNED_STATES = {
+    ConsumerReservationState.WRITING,
+    ConsumerReservationState.CANCEL_PENDING,
+    ConsumerReservationState.EXPIRE_PENDING,
+}
 
 
 @dataclass
 class ConsumerReservation:
-    """Own the identity and destination allocation of one remote push.
-
-    Attributes:
-        transfer_id: Cross-process identity of the transfer.
-        mm_hash: Stable identifier of the encoder-cache item.
-        reservation_id: Consumer-issued identity required for completion.
-        state: Current destination reservation state.
-        shape: Expected tensor shape.
-        dtype: Unqualified expected ``torch.dtype`` name.
-        allocation: Receive-slab allocation while this record owns it.
-        lease: Borrowed resident allocation used for a cache hit.
-        created_at: Monotonic creation time used for diagnostics.
-        expires_at: Deadline for the active record or terminal tombstone.
-    """
+    """Own the identity and destination allocation of one remote push."""
 
     transfer_id: str
     mm_hash: str
@@ -101,46 +84,15 @@ class ConsumerReservation:
     dtype: str = ""
     allocation: MemoryAllocation | None = None
     lease: ResidentLease[MemoryAllocation] | None = None
-    created_at: float = field(default_factory=time.monotonic)
     expires_at: float = 0
-
-
-@dataclass(frozen=True)
-class CompletionResult:
-    """Describe how a completion request affected a reservation.
-
-    Attributes:
-        accepted: Whether transfer and reservation identities matched.
-        became_ready: Whether the call transitioned WRITING to READY.
-        repeated: Whether the reservation was already ready.
-        discarded: Whether deferred cancellation consumed the completion.
-    """
-
-    accepted: bool
-    became_ready: bool = False
-    repeated: bool = False
-    discarded: bool = False
-
-
-class CancellationOutcome(Enum):
-    """Outcome categories used for control responses and metrics."""
-
-    REJECTED = auto()
-    PRE_RESERVED = auto()
-    DEFERRED = auto()
-    CANCELLED = auto()
 
 
 class ConsumerReservationManager:
     """Own reservation transitions and destination allocation releases.
 
-    Attributes:
-        _memory: Consumer memory pool that owns destination allocations.
-        _lease_ttl: Lifetime of active reservations and terminal tombstones.
-        _tombstone_limit: Maximum retained terminal cancellation records.
-        _records: Active and terminal records keyed by transfer ID.
-        _active_ids: Transfer IDs requiring expiry scans.
-        _tombstones: Terminal records retained in expiry order.
+    A remote writer owns a ``WRITING`` allocation. Cancellation and expiry are
+    therefore deferred until completion, unless refresh explicitly abandons
+    that writer before replacing its reservation.
     """
 
     def __init__(
@@ -155,12 +107,8 @@ class ConsumerReservationManager:
         self._records: dict[str, ConsumerReservation] = {}
         self._active_ids: dict[str, None] = {}
         self._tombstones: OrderedDict[str, None] = OrderedDict()
-
-    def get(self, transfer_id: str) -> ConsumerReservation | None:
-        return self._records.get(transfer_id)
-
-    def active_records(self) -> list[ConsumerReservation]:
-        return [self._records[transfer_id] for transfer_id in self._active_ids]
+        self._condition = threading.Condition(memory.lock)
+        self._shutting_down = False
 
     def reserve(
         self,
@@ -170,14 +118,16 @@ class ConsumerReservationManager:
         shape: tuple[int, ...],
         dtype_name: str,
         dtype: torch.dtype,
-    ) -> tuple[ConsumerReservation | None, bool, bool, tuple[int, int, int]]:
-        with self._memory.lock:
+    ) -> tuple[ConsumerReservation | None, bool]:
+        with self._condition:
+            if self._shutting_down:
+                raise RuntimeError("Consumer reservation manager is shutting down")
             existing = self._records.get(transfer_id)
             if (
                 existing is not None
                 and existing.state is ConsumerReservationState.CANCELLED
             ):
-                return existing, False, False, (0, 0, 0)
+                return existing, False
             if (
                 existing is not None
                 and existing.state is ConsumerReservationState.EXPIRED
@@ -205,7 +155,7 @@ class ConsumerReservationManager:
                     )
                 if existing.state is ConsumerReservationState.WRITING:
                     existing.expires_at = time.monotonic() + self._lease_ttl
-                return existing, False, True, (0, 0, 0)
+                return existing, False
 
             lease = self._memory.acquire_cached(mm_hash, shape, dtype)
             now = time.monotonic()
@@ -219,35 +169,31 @@ class ConsumerReservationManager:
                     dtype_name,
                     lease.value,
                     lease,
-                    now,
                     now + self._lease_ttl,
                 )
                 self._insert(record)
-                return record, False, False, (0, 0, 0)
-            expiry_counts = (0, 0, 0)
+                return record, False
             allocation = self._memory.try_allocate(nbytes, shape, dtype)
             if allocation is None:
-                expiry_counts = self._expire_locked(time.monotonic())
+                self._expire_locked(time.monotonic())
                 allocation = self._memory.try_allocate(nbytes, shape, dtype)
             if allocation is None:
                 allocation = self._memory.reclaim_and_allocate(nbytes, shape, dtype)
             if allocation is None:
-                return None, False, False, expiry_counts
+                return None, False
             record = ConsumerReservation(
                 transfer_id,
                 mm_hash,
                 uuid.uuid4().hex,
-                ConsumerReservationState.RESERVED,
+                ConsumerReservationState.WRITING,
                 shape,
                 dtype_name,
                 allocation,
                 None,
-                now,
                 now + self._lease_ttl,
             )
-            self._transition(record, ConsumerReservationState.WRITING)
             self._insert(record)
-            return record, True, False, expiry_counts
+            return record, True
 
     def status(self, transfer_id: str) -> ConsumerReservation | None:
         with self._memory.lock:
@@ -256,26 +202,55 @@ class ConsumerReservationManager:
                 return None
             return record
 
-    def complete(self, transfer_id: str, reservation_id: str) -> CompletionResult:
-        with self._memory.lock:
-            record = self._records.get(transfer_id)
-            if record is None or record.reservation_id != reservation_id:
-                return CompletionResult(False)
-            if record.state is ConsumerReservationState.READY:
-                return CompletionResult(True, repeated=True)
-            if record.state in _DEFERRED_STATES:
-                terminal = (
-                    ConsumerReservationState.CANCELLED
-                    if record.state is ConsumerReservationState.CANCEL_PENDING
-                    else ConsumerReservationState.EXPIRED
-                )
-                self._terminate(record, terminal)
-                return CompletionResult(True, discarded=True)
-            if record.state is not ConsumerReservationState.WRITING:
-                return CompletionResult(False)
-            self._transition(record, ConsumerReservationState.READY)
-            record.expires_at = time.monotonic() + self._lease_ttl
-            return CompletionResult(True, became_ready=True)
+    def complete(self, transfer_id: str, reservation_id: str) -> tuple[bool, bool]:
+        with self._condition:
+            try:
+                record = self._records.get(transfer_id)
+                if record is None or record.reservation_id != reservation_id:
+                    return False, False
+                if record.state is ConsumerReservationState.READY:
+                    return True, False
+                if record.state in _DEFERRED_STATES:
+                    terminal = (
+                        ConsumerReservationState.CANCELLED
+                        if record.state is ConsumerReservationState.CANCEL_PENDING
+                        else ConsumerReservationState.EXPIRED
+                    )
+                    self._terminate(record, terminal)
+                    return True, False
+                if record.state is not ConsumerReservationState.WRITING:
+                    return False, False
+                self._transition(record, ConsumerReservationState.READY)
+                record.expires_at = time.monotonic() + self._lease_ttl
+                return True, True
+            finally:
+                self._condition.notify_all()
+
+    def begin_shutdown(self) -> None:
+        """Stop new reservations and cancel everything without a remote writer."""
+        with self._condition:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+            for transfer_id in list(self._active_ids):
+                record = self._records[transfer_id]
+                if record.state is ConsumerReservationState.READY:
+                    self._terminate(record, ConsumerReservationState.CANCELLED)
+                elif record.state is ConsumerReservationState.WRITING:
+                    self._transition(record, ConsumerReservationState.CANCEL_PENDING)
+            self._condition.notify_all()
+
+    def wait_for_writers(self, timeout: float) -> bool:
+        """Wait until no reservation is still owned by a remote writer."""
+
+        def writers_finished() -> bool:
+            return not any(
+                self._records[transfer_id].state in _WRITER_OWNED_STATES
+                for transfer_id in self._active_ids
+            )
+
+        with self._condition:
+            return self._condition.wait_for(writers_finished, timeout=max(0, timeout))
 
     def cancel(
         self,
@@ -283,7 +258,7 @@ class ConsumerReservationManager:
         reservation_id: str,
         abandon: bool = False,
         refresh: bool = False,
-    ) -> tuple[CancellationOutcome, int]:
+    ) -> bool:
         with self._memory.lock:
             record = self._records.get(transfer_id)
             if (
@@ -291,48 +266,46 @@ class ConsumerReservationManager:
                 and reservation_id
                 and record.reservation_id != reservation_id
             ):
-                return CancellationOutcome.REJECTED, 0
+                return False
             if record is None:
-                now = time.monotonic()
                 record = ConsumerReservation(
                     transfer_id,
                     "",
                     "",
                     ConsumerReservationState.CANCELLED,
-                    created_at=now,
                 )
                 self._insert(record)
                 self._set_tombstone_deadline(record)
-                dropped = self._reap_tombstones(now)
-                return CancellationOutcome.PRE_RESERVED, dropped
+                self._reap_tombstones(time.monotonic())
+                return True
             if record.state is ConsumerReservationState.CANCELLED:
                 self._set_tombstone_deadline(record)
-                dropped = self._reap_tombstones(time.monotonic())
-                return CancellationOutcome.PRE_RESERVED, dropped
+                self._reap_tombstones(time.monotonic())
+                return True
             if refresh:
                 if not abandon or record.state not in {
                     ConsumerReservationState.WRITING,
                     ConsumerReservationState.EXPIRE_PENDING,
                 }:
-                    return CancellationOutcome.REJECTED, 0
+                    return False
                 if record.state is ConsumerReservationState.WRITING:
                     self._transition(record, ConsumerReservationState.EXPIRE_PENDING)
                 self._terminate(record, ConsumerReservationState.EXPIRED)
-                dropped = self._reap_tombstones(time.monotonic())
-                return CancellationOutcome.CANCELLED, dropped
+                self._condition.notify_all()
+                self._reap_tombstones(time.monotonic())
+                return True
             if record.state in _DEFERRED_STATES and not abandon:
-                return CancellationOutcome.DEFERRED, 0
+                return True
             if record.state is ConsumerReservationState.WRITING and not abandon:
                 self._transition(record, ConsumerReservationState.CANCEL_PENDING)
-                return CancellationOutcome.DEFERRED, 0
-            if (
-                record.state not in _ACTIVE_STATES
-                and record.state is not ConsumerReservationState.RESERVED
-            ):
-                return CancellationOutcome.REJECTED, 0
+                return True
+            if record.state not in _ACTIVE_STATES:
+                return False
             self._terminate(record, ConsumerReservationState.CANCELLED)
-            dropped = self._reap_tombstones(time.monotonic())
-            return CancellationOutcome.CANCELLED, dropped
+            if self._shutting_down:
+                self._condition.notify_all()
+            self._reap_tombstones(time.monotonic())
+            return True
 
     def take(self, transfer_id: str, mm_hash: str) -> MemoryAllocation:
         with self._memory.lock:
@@ -346,26 +319,25 @@ class ConsumerReservationManager:
                 raise RuntimeError(
                     f"Pushed EC tensor is not ready for mm_hash={mm_hash}"
                 )
-            self._transition(record, ConsumerReservationState.TAKEN)
             allocation = self._memory.publish(mm_hash, record.allocation, record.lease)
             record.allocation = None
             record.lease = None
-            self._transition(record, ConsumerReservationState.RESIDENT)
             self._remove(transfer_id)
             return allocation
 
-    def expire(self) -> tuple[int, int, int]:
+    def expire(self) -> int:
         with self._memory.lock:
             return self._expire_locked(time.monotonic())
 
     def retire_stale(self, encoder_cache: dict[str, torch.Tensor]) -> None:
         with self._memory.lock:
-            reserved_hashes = {record.mm_hash for record in self.active_records()}
+            reserved_hashes = {
+                self._records[transfer_id].mm_hash for transfer_id in self._active_ids
+            }
             self._memory.retire_stale(encoder_cache, reserved_hashes)
 
-    def _expire_locked(self, now: float) -> tuple[int, int, int]:
+    def _expire_locked(self, now: float) -> int:
         expired = 0
-        deferred = 0
         for transfer_id in list(self._active_ids):
             record = self._records[transfer_id]
             if record.expires_at > now:
@@ -375,9 +347,8 @@ class ConsumerReservationManager:
                 expired += 1
             elif record.state is ConsumerReservationState.WRITING:
                 self._transition(record, ConsumerReservationState.EXPIRE_PENDING)
-                deferred += 1
-        dropped = self._reap_tombstones(now)
-        return expired, deferred, dropped
+        self._reap_tombstones(now)
+        return expired
 
     def _terminate(
         self, record: ConsumerReservation, state: ConsumerReservationState

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -16,9 +15,6 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
-    ECMooncakeLoadSpec,
-    ECMooncakePushSpec,
-    ECMooncakeWorkerMetadata,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.scheduler import (
     ECMooncakeScheduler,
@@ -33,23 +29,9 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import ECConnectorOutput
     from vllm.v1.request import Request
 
-__all__ = [
-    "ECMooncakeConnector",
-    "ECMooncakeConnectorMetadata",
-    "ECMooncakeLoadSpec",
-    "ECMooncakePushSpec",
-    "ECMooncakeWorkerMetadata",
-]
-
 
 class ECMooncakeConnector(ECConnectorBase):
-    """Preserve the public API while delegating to one process-role component.
-
-    Attributes:
-        _scheduler: Scheduler implementation when constructed for that role.
-        _worker: Worker implementation when constructed for that role.
-        _closed: Whether role-specific resources have already been released.
-    """
+    """Preserve the public API while delegating to one process-role component."""
 
     def __init__(self, vllm_config: VllmConfig, role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
@@ -59,9 +41,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._closed = False
 
         if role == ECConnectorRole.SCHEDULER:
-            self._scheduler = ECMooncakeScheduler.from_vllm_config(vllm_config)
+            self._scheduler = ECMooncakeScheduler(vllm_config)
         elif role == ECConnectorRole.WORKER:
-            self._worker = ECMooncakeWorker.from_vllm_config(vllm_config)
+            self._worker = ECMooncakeWorker(vllm_config)
         else:
             raise ValueError(f"Unknown EC connector role: {role}")
 
@@ -111,7 +93,15 @@ class ECMooncakeConnector(ECConnectorBase):
         self,
         request: Request,
         num_computed_tokens: int,
-        local_cache_hashes: Collection[str] | None = None,
+    ) -> bool:
+        assert self._scheduler is not None
+        return self._scheduler.ensure_cache_available(request, num_computed_tokens)
+
+    def _ensure_cache_available(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str],
     ) -> bool:
         assert self._scheduler is not None
         return self._scheduler.ensure_cache_available(
@@ -152,7 +142,3 @@ class ECMooncakeConnector(ECConnectorBase):
             self._scheduler.close()
         if self._worker is not None:
             self._worker.close()
-
-    def __del__(self) -> None:
-        with suppress(Exception):
-            self.shutdown()

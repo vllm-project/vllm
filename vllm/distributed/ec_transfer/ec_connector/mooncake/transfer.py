@@ -17,21 +17,24 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_MOONCAKE_IMPORT_ERROR: ImportError | None = None
 try:
     from mooncake.engine import TransferEngine
-except ImportError:
+except ImportError as error:
     TransferEngine = None  # type: ignore[misc, assignment]
+    _MOONCAKE_IMPORT_ERROR = error
+
+
+def ensure_mooncake_available() -> None:
+    if _MOONCAKE_IMPORT_ERROR is not None:
+        raise ImportError(
+            "Install mooncake-transfer-engine to use ECMooncakeConnector."
+        ) from _MOONCAKE_IMPORT_ERROR
 
 
 @dataclass
 class _SourceRegistration:
-    """Retain one transient source range while batches reference it.
-
-    Attributes:
-        tensor: Tensor keeping the registered storage alive.
-        nbytes: Exact registered byte length.
-        users: Number of active acquisitions of this address.
-    """
+    """Retain one transient source range while batches reference it."""
 
     tensor: torch.Tensor
     nbytes: int
@@ -39,18 +42,7 @@ class _SourceRegistration:
 
 
 class MooncakeTransfer:
-    """Own a lazy Mooncake engine and transient memory registrations.
-
-    Attributes:
-        _hostname: Address advertised in the Mooncake session identifier.
-        _protocol: Transport protocol used to initialize ``TransferEngine``.
-        _engine: Lazily initialized Mooncake engine.
-        _engine_lock: Lock serializing first engine initialization.
-        _source_registrations: Reference-counted transient source ranges.
-        _pending_unregister: Tensors retained after an unregister failure.
-        _registration_lock: Lock protecting registration ownership.
-        _closed: Whether final data-plane cleanup has begun.
-    """
+    """Own a lazy Mooncake engine and transient memory registrations."""
 
     def __init__(self, hostname: str, protocol: str) -> None:
         self._hostname = hostname

@@ -11,14 +11,12 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Literal, TypedDict, cast
+from typing import Any
 
 import torch
 import zmq
-from typing_extensions import NotRequired
 
 from vllm.logger import init_logger
 
@@ -28,112 +26,18 @@ _MAX_PENDING_EVENTS = 4096
 _RESERVATION_REAP_INTERVAL_SECONDS = 1
 
 
-class ReservationItem(TypedDict):
-    """Identify one Consumer reservation in a batch control request."""
-
-    transfer_id: str
-    reservation_id: str
-
-
-class PeersRequest(TypedDict):
-    """Request the control ports of every Consumer TP shard."""
-
-    op: Literal["peers"]
-
-
-class EventPortRequest(TypedDict):
-    """Request the PUSH socket port used for readiness events."""
-
-    op: Literal["event_port"]
-
-
-class StatusRequest(TypedDict):
-    """Request the current status of a transfer reservation."""
-
-    op: Literal["status"]
-    transfer_id: str
-
-
-class ReserveRequest(TypedDict):
-    """Request destination memory for an encoder-cache tensor."""
-
-    op: Literal["reserve"]
-    transfer_id: str
-    mm_hash: str
-    nbytes: int
-    shape: list[int]
-    dtype: str
-
-
-class CompleteBatchRequest(TypedDict):
-    """Mark several destination writes complete in one exchange."""
-
-    op: Literal["complete_batch"]
-    items: list[ReservationItem]
-
-
-class ReservationActionRequest(ReservationItem):
-    """Complete or cancel one previously created reservation."""
-
-    op: Literal["complete", "cancel"]
-    abandon: NotRequired[bool]
-    refresh: NotRequired[bool]
-
-
-ControlRequest = (
-    PeersRequest
-    | EventPortRequest
-    | StatusRequest
-    | ReserveRequest
-    | ReservationActionRequest
-    | CompleteBatchRequest
-)
-
-
-class ControlSuccess(TypedDict):
-    """Successful wire response with an optional operation result."""
-
-    ok: Literal[True]
-    result: NotRequired[Any]
-
-
-class ControlFailure(TypedDict):
-    """Failed wire response containing a user-facing error message."""
-
-    ok: Literal[False]
-    error: str
-
-
-ControlResponse = ControlSuccess | ControlFailure
-
-
-@dataclass(frozen=True)
-class ControlCompletion:
-    """Summarize the effect of a Consumer completion request.
-
-    Attributes:
-        accepted: Whether the reservation identity was valid.
-        became_ready: Whether this call newly made the tensor readable.
-    """
-
-    accepted: bool
-    became_ready: bool = False
+ControlRequest = dict[str, Any]
+ControlResponse = dict[str, Any]
 
 
 class ControlClient:
-    """Send control requests through reusable, thread-local REQ sockets.
-
-    Attributes:
-        _context: ZMQ context that owns all client sockets.
-        _timeout_ms: Send and receive timeout for each exchange.
-        _local: Thread-local mapping from address to REQ socket.
-        _closed: Whether the client context has been destroyed.
-    """
+    """Send control requests through reusable, thread-local REQ sockets."""
 
     def __init__(self, timeout_ms: int) -> None:
         self._context = zmq.Context()
         self._timeout_ms = timeout_ms
         self._local = threading.local()
+        self._topologies: dict[str, list[str]] = {}
         self._closed = False
 
     def _sockets(self) -> dict[str, zmq.Socket]:
@@ -165,13 +69,33 @@ class ControlClient:
             self._discard(addr)
             raise
         assert isinstance(response, dict)
-        return cast(ControlResponse, response)
+        return response
 
     def request(self, addr: str, payload: ControlRequest) -> Any:
         response = self._exchange(addr, payload)
         if not response.get("ok"):
             raise RuntimeError(response.get("error", "EC control request failed"))
         return response.get("result")
+
+    def discover_shards(self, base_addr: str) -> list[str] | None:
+        if base_addr in self._topologies:
+            return self._topologies[base_addr]
+        try:
+            reply = self.request(base_addr, {"op": "peers"})
+            ports = reply.get("ports") if isinstance(reply, dict) else None
+            if not isinstance(ports, list) or not ports:
+                raise ValueError("invalid or empty peer list")
+            prefix = base_addr.rsplit(":", 1)[0]
+            shards = [f"{prefix}:{int(port)}" for port in ports]
+        except Exception:
+            logger.warning(
+                "EC Mooncake consumer at %s did not report its shards",
+                base_addr,
+                exc_info=True,
+            )
+            return None
+        self._topologies[base_addr] = shards
+        return shards
 
     def close(self) -> None:
         if self._closed:
@@ -182,12 +106,12 @@ class ControlClient:
 
 def make_cancel_request(
     transfer_id: str,
-    reservation_id: str,
+    reservation_id: str = "",
     *,
     abandon: bool = False,
     refresh: bool = False,
-) -> ReservationActionRequest:
-    request: ReservationActionRequest = {
+) -> ControlRequest:
+    request: ControlRequest = {
         "op": "cancel",
         "transfer_id": transfer_id,
         "reservation_id": reservation_id,
@@ -199,65 +123,11 @@ def make_cancel_request(
     return request
 
 
-class ShardTopology:
-    """Discover and cache every control address for a Consumer.
-
-    Attributes:
-        _client: Client used to query the Consumer's ``peers`` operation.
-        _cache: Base Consumer addresses mapped to all TP-shard addresses.
-    """
+class EventInbox:
+    """Receive Consumer readiness events without blocking the Scheduler."""
 
     def __init__(self, client: ControlClient) -> None:
         self._client = client
-        self._cache: dict[str, list[str]] = {}
-
-    def discover(self, base_addr: str) -> list[str] | None:
-        """Return a confirmed complete topology, retrying transient failures."""
-        cached = self._cache.get(base_addr)
-        if cached is not None:
-            return cached
-        try:
-            reply = self._client.request(base_addr, {"op": "peers"})
-            ports = reply.get("ports") if isinstance(reply, dict) else None
-            if not isinstance(ports, list) or not ports:
-                raise ValueError("invalid or empty peer list")
-            prefix = base_addr.rsplit(":", 1)[0]
-            shards = [f"{prefix}:{int(port)}" for port in ports]
-        except Exception:
-            logger.warning(
-                "EC Mooncake consumer at %s did not report its shards; "
-                "using it directly for this attempt.",
-                base_addr,
-                exc_info=True,
-            )
-            return None
-        self._cache[base_addr] = shards
-        if len(shards) > 1:
-            logger.info(
-                "EC Mooncake consumer at %s has %d shards", base_addr, len(shards)
-            )
-        return shards
-
-    def shards(self, base_addr: str) -> list[str]:
-        """Return confirmed shards or a one-attempt data-plane fallback."""
-        return self.discover(base_addr) or [base_addr]
-
-
-class EventInbox:
-    """Receive Consumer readiness events without blocking the Scheduler.
-
-    Attributes:
-        _client: Control client used to discover event ports.
-        _topology: Source of Consumer TP-shard addresses.
-        _context: Lazily created context for the PULL socket.
-        _socket: PULL socket connected to every expected Consumer shard.
-        _closed: Whether event resources have been released.
-        shard_count: Number of event channels in the complete topology.
-    """
-
-    def __init__(self, client: ControlClient, topology: ShardTopology) -> None:
-        self._client = client
-        self._topology = topology
         self._context: zmq.Context | None = None
         self._socket: zmq.Socket | None = None
         self._closed = False
@@ -266,7 +136,7 @@ class EventInbox:
     def _connect(self, base_addr: str) -> None:
         if self._socket is not None:
             return
-        shards = self._topology.discover(base_addr)
+        shards = self._client.discover_shards(base_addr)
         if shards is None:
             return
         endpoints = []
@@ -317,23 +187,6 @@ class ConsumerControlServer:
     One server runs on every receiving TP rank.  The REP channel handles
     reservation operations, while a PUSH channel publishes newly ready items
     to the Scheduler.
-
-    Attributes:
-        host: Interface on which the control server listens.
-        port: Rank-local REP control port.
-        peer_ports: Control ports for every Consumer TP shard.
-        event_port: Dynamically allocated PUSH event port after startup.
-        _device: Device selected in the control thread when CUDA is used.
-        _reserve: Callback that allocates or reuses destination memory.
-        _status: Callback that reports active reservation state.
-        _complete: Callback that marks destination writes complete.
-        _cancel: Callback that cancels or abandons reservations.
-        _reap: Callback that expires stale reservations.
-        _metrics_log_interval: Interval for aggregate control-plane logs.
-        _stop: Signal requesting termination of the server loop.
-        _started: Signal indicating that socket binding has completed.
-        _thread: Background server thread.
-        _startup_error: Socket binding error captured from the server thread.
     """
 
     def __init__(
@@ -342,10 +195,9 @@ class ConsumerControlServer:
         port: int,
         reserve: Callable[[dict[str, Any]], dict[str, Any]],
         status: Callable[[str], dict[str, Any] | None],
-        complete: Callable[[str, str], ControlCompletion],
+        complete: Callable[[str, str], tuple[bool, bool]],
         cancel: Callable[[str, str, bool, bool], bool],
         reap: Callable[[], int],
-        metrics_log_interval: float = 10,
         peer_ports: list[int] | None = None,
         device: torch.device | None = None,
     ) -> None:
@@ -359,7 +211,6 @@ class ConsumerControlServer:
         self._complete = complete
         self._cancel = cancel
         self._reap = reap
-        self._metrics_log_interval = metrics_log_interval
         self._stop = threading.Event()
         self._started = threading.Event()
         self._thread: threading.Thread | None = None
@@ -373,18 +224,19 @@ class ConsumerControlServer:
             socket = context.socket(zmq.REP)
             event_socket = context.socket(zmq.PUSH)
             pending_events: deque[dict[str, Any]] = deque()
-            metrics: Counter[str] = Counter()
 
             def queue_event(event: dict[str, Any]) -> None:
                 event["shard"] = self.port
                 if len(pending_events) >= _MAX_PENDING_EVENTS:
                     pending_events.popleft()
-                    metrics["events_dropped"] += 1
                 pending_events.append(event)
-                metrics["events_queued"] += 1
 
-            metrics_started_at = time.monotonic()
-            last_reap_at = metrics_started_at
+            def queue_ready(transfer_id: str) -> None:
+                status = self._status(transfer_id)
+                if status is not None:
+                    queue_event({"transfer_id": transfer_id, **status})
+
+            last_reap_at = time.monotonic()
             socket.setsockopt(zmq.RCVTIMEO, 100)
             try:
                 socket.bind(f"tcp://{self.host}:{self.port}")
@@ -407,32 +259,10 @@ class ConsumerControlServer:
                         except zmq.Again:
                             break
                         pending_events.popleft()
-                        metrics["events_sent"] += 1
                     now = time.monotonic()
                     if now - last_reap_at >= _RESERVATION_REAP_INTERVAL_SECONDS:
-                        metrics["reservations_reaped"] += self._reap()
+                        self._reap()
                         last_reap_at = now
-                    if (
-                        self._metrics_log_interval > 0
-                        and now - metrics_started_at >= self._metrics_log_interval
-                    ):
-                        logger.info(
-                            "EC Mooncake consumer control: requests=%s, "
-                            "events_queued=%d, events_sent=%d, events_dropped=%d, "
-                            "event_backlog=%d, reservations_reaped=%d",
-                            {
-                                key.removeprefix("request_"): value
-                                for key, value in metrics.items()
-                                if key.startswith("request_")
-                            },
-                            metrics["events_queued"],
-                            metrics["events_sent"],
-                            metrics["events_dropped"],
-                            len(pending_events),
-                            metrics["reservations_reaped"],
-                        )
-                        metrics.clear()
-                        metrics_started_at = now
                     try:
                         request = socket.recv_json()
                     except zmq.Again:
@@ -440,14 +270,10 @@ class ConsumerControlServer:
                     try:
                         op = request.get("op")
                         result: Any = None
-                        metrics[f"request_{op}"] += 1
                         if op == "reserve":
                             result = self._reserve(request)
                             if result.get("ready"):
-                                transfer_id = str(request["transfer_id"])
-                                status = self._status(transfer_id)
-                                if status is not None:
-                                    queue_event({"transfer_id": transfer_id, **status})
+                                queue_ready(str(request["transfer_id"]))
                         elif op == "status":
                             result = self._status(str(request["transfer_id"]))
                         elif op == "event_port":
@@ -463,20 +289,18 @@ class ConsumerControlServer:
                             completions = []
                             for item in items:
                                 transfer_id = str(item["transfer_id"])
-                                completion = self._complete(
+                                accepted, became_ready = self._complete(
                                     transfer_id, str(item["reservation_id"])
                                 )
                                 completions.append(
                                     {
-                                        "completed": completion.accepted,
-                                        "became_ready": completion.became_ready,
+                                        "completed": accepted,
+                                        "became_ready": became_ready,
                                     }
                                 )
-                                if not completion.became_ready:
+                                if not became_ready:
                                     continue
-                                status = self._status(transfer_id)
-                                if status is not None:
-                                    queue_event({"transfer_id": transfer_id, **status})
+                                queue_ready(transfer_id)
                             result = (
                                 {"items": completions}
                                 if op == "complete_batch"

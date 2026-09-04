@@ -54,6 +54,7 @@ export WITH_NVIDIA_PEERMEM="${WITH_NVIDIA_PEERMEM:-0}"
 LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_epd_mooncake_baseline.txt}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1200}"
+PIDS=()
 
 mkdir -p "$LOG_PATH"
 
@@ -76,11 +77,10 @@ import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
+    "ec_ip": os.environ.get("EC_MOONCAKE_RESERVATION_HOST", "127.0.0.1"),
+    "ec_port": int(os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")),
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "rdma"),
-        "reservation_zmq_port": int(
-            os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")
-        ),
     },
 }, separators=(",", ":")))
 PY
@@ -89,20 +89,41 @@ PY
 wait_for_server() {
   local port=$1
   timeout "$TIMEOUT_SECONDS" bash -c "
-        until curl -s -o /dev/null -w '' localhost:${port}/v1/chat/completions; do
+        until curl -fsS http://localhost:${port}/health >/dev/null 2>&1; do
             sleep 2
         done" && return 0 || return 1
 }
 
 cleanup_instances() {
-  echo "Cleaning up vLLM / proxy processes..."
-  pkill -f "vllm serve" 2>/dev/null || true
-  pkill -f "vllm.entrypoints.cli.main serve" 2>/dev/null || true
-  pkill -f "disagg_epd_proxy.py" 2>/dev/null || true
-  sleep 2
+  if ((${#PIDS[@]} == 0)); then
+    return
+  fi
+  echo "Cleaning up tracked vLLM / proxy processes..."
+  for pid in "${PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  for _ in {1..10}; do
+    local alive=0
+    for pid in "${PIDS[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    ((alive == 0)) && break
+    sleep 1
+  done
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+  PIDS=()
 }
 
-trap 'cleanup_instances; kill $(jobs -pr) 2>/dev/null || true' EXIT INT TERM
+trap cleanup_instances EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 run_baseline() {
   echo "================================"
@@ -118,6 +139,7 @@ run_baseline() {
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     >"${LOG_PATH}/mooncake_epd_baseline.log" 2>&1 &
   local BASELINE_PID=$!
+  PIDS+=("$BASELINE_PID")
   echo "Waiting for baseline..."
   wait_for_server "$PORT" || { echo "Baseline failed to start; tail log:"; tail -80 "${LOG_PATH}/mooncake_epd_baseline.log"; return 1; }
   curl -s "http://127.0.0.1:${PORT}/v1/models" | head -c 200 || true
@@ -128,8 +150,6 @@ run_baseline() {
     --mode baseline \
     --baseline_file "$BASELINE_FILE" \
     $MM_FLAG
-  kill "$BASELINE_PID" 2>/dev/null || true
-  sleep 2
   cleanup_instances
 }
 
@@ -140,8 +160,6 @@ run_epd_mooncake() {
   echo "Mooncake protocol: $MOONCAKE_EC_PROTOCOL"
   echo "================================"
   cleanup_instances
-
-  declare -a PIDS=()
 
   echo "Starting ENCODER on GPU $GPU_E port $ENCODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
@@ -155,7 +173,7 @@ run_epd_mooncake() {
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$ENC_EC_JSON" \
     >"${LOG_PATH}/mooncake_epd_encoder.log" 2>&1 &
-  PIDS+=($!)
+  PIDS+=("$!")
 
   echo "Starting PD on GPU $GPU_PD port $PREFILL_DECODE_PORT"
   CUDA_VISIBLE_DEVICES="$GPU_PD" "${VLLM_SERVE[@]}" "$MODEL" \
@@ -168,7 +186,7 @@ run_epd_mooncake() {
     --allowed-local-media-path "${GIT_ROOT}/tests/v1/ec_connector/integration" \
     --ec-transfer-config "$PD_EC_JSON" \
     >"${LOG_PATH}/mooncake_epd_pd.log" 2>&1 &
-  PIDS+=($!)
+  PIDS+=("$!")
 
   echo "Waiting for encoder..."
   wait_for_server "$ENCODE_PORT" || { echo "Encoder log:"; tail -100 "${LOG_PATH}/mooncake_epd_encoder.log"; return 1; }
@@ -185,7 +203,7 @@ run_epd_mooncake() {
     --ec-consumer-zmq-addrs \
       "tcp://localhost:$EC_MOONCAKE_RESERVATION_PORT" \
     >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
-  PIDS+=($!)
+  PIDS+=("$!")
 
   echo "Waiting for proxy..."
   wait_for_server "$ENDPOINT_PORT" || { echo "Proxy log:"; tail -80 "${LOG_PATH}/mooncake_epd_proxy.log"; return 1; }
@@ -199,15 +217,11 @@ run_epd_mooncake() {
     --baseline_file "$BASELINE_FILE" \
     $MM_FLAG
 
-  for pid in "${PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  sleep 2
   cleanup_instances
 }
 
 echo "================================"
-echo "EPD + ECMooncake full pipeline"
+echo "1E + 1PD ECMooncake end-to-end correctness"
 echo "MODEL=$MODEL"
 echo "================================"
 

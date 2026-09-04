@@ -34,18 +34,7 @@ class SchedulerTransferState(Enum):
 
 @dataclass
 class SchedulerTransfer:
-    """Track one transfer as observed by the Scheduler.
-
-    Attributes:
-        transfer_id: Cross-process identity of the transfer.
-        request_id: Request currently waiting for the transfer.
-        mm_hash: Stable identifier of the encoder-cache item.
-        state: Current Scheduler lifecycle state.
-        spec: Load metadata once the Consumer reports the tensor ready.
-        deadline: Expiry time for waiting, available, or terminal records.
-        last_error: Last terminal error associated with the transfer.
-        notified_requests: Requests already told that the item is unavailable.
-    """
+    """Track one transfer as observed by the Scheduler."""
 
     transfer_id: str
     request_id: str
@@ -53,45 +42,8 @@ class SchedulerTransfer:
     state: SchedulerTransferState
     spec: ECMooncakeLoadSpec | None
     deadline: float | None
-    last_error: str | None = None
     notified_requests: set[str] = field(default_factory=set, repr=False)
 
-
-class InvalidSchedulerTransferTransition(RuntimeError):
-    """Raised when code attempts an unsupported Scheduler state transition."""
-
-    pass
-
-
-_ALLOWED_TRANSITIONS = {
-    SchedulerTransferState.WAITING_EVENT: {
-        SchedulerTransferState.AVAILABLE,
-        SchedulerTransferState.UNAVAILABLE,
-        SchedulerTransferState.CANCELLED,
-    },
-    SchedulerTransferState.AVAILABLE: {
-        SchedulerTransferState.LOADING,
-        SchedulerTransferState.EXPIRED,
-        SchedulerTransferState.CANCELLED,
-    },
-    SchedulerTransferState.LOADING: {
-        SchedulerTransferState.READY,
-        SchedulerTransferState.FAILED,
-        SchedulerTransferState.CANCELLED,
-    },
-    SchedulerTransferState.READY: {
-        SchedulerTransferState.RESIDENT,
-        SchedulerTransferState.EXPIRED,
-    },
-    SchedulerTransferState.RESIDENT: {
-        SchedulerTransferState.LOADING,
-        SchedulerTransferState.EXPIRED,
-    },
-    SchedulerTransferState.UNAVAILABLE: {SchedulerTransferState.CANCELLED},
-    SchedulerTransferState.EXPIRED: {SchedulerTransferState.CANCELLED},
-    SchedulerTransferState.FAILED: set(),
-    SchedulerTransferState.CANCELLED: set(),
-}
 
 _TERMINAL_STATES = {
     SchedulerTransferState.UNAVAILABLE,
@@ -104,13 +56,9 @@ _TERMINAL_STATES = {
 class SchedulerTransferTable:
     """Own Scheduler transfer state, lookup indexes, and dispatch queues.
 
-    Attributes:
-        _resident_capacity: Maximum bytes represented by resident records.
-        _tombstone_ttl: Retention time for terminal records.
-        _records: Ordered transfer records keyed by transfer ID.
-        _hash_index: Transfer IDs grouped by encoder-cache hash.
-        _loads_to_dispatch: Ordered IDs awaiting Worker metadata emission.
-        _unavailable_requests: Requests awaiting retryable failure reporting.
+    The Scheduler is single-threaded, so direct transitions are sufficient;
+    the Producer and Consumer managers retain stricter transition matrices
+    because callbacks and control requests can race there.
     """
 
     def __init__(self, resident_capacity: int, tombstone_ttl: float) -> None:
@@ -157,21 +105,23 @@ class SchedulerTransferTable:
         mm_hash: str,
         states: Iterable[SchedulerTransferState],
     ) -> SchedulerTransfer | None:
-        return next(iter(self.records_for_hash(mm_hash, states)), None)
+        states = tuple(states)
+        if len(states) == 1:
+            wanted_state = states[0]
+            for transfer_id in self._hash_index.get(mm_hash, ()):
+                record = self._records.get(transfer_id)
+                if record is not None and record.state is wanted_state:
+                    return record
+            return None
+        wanted_states = set(states)
+        for transfer_id in self._hash_index.get(mm_hash, ()):
+            record = self._records.get(transfer_id)
+            if record is not None and record.state in wanted_states:
+                return record
+        return None
 
     def has_state(self, mm_hash: str, states: Iterable[SchedulerTransferState]) -> bool:
         return self.first_for_hash(mm_hash, states) is not None
-
-    def count(self, state: SchedulerTransferState) -> int:
-        return sum(record.state is state for record in self._records.values())
-
-    @property
-    def resident_bytes(self) -> int:
-        return sum(
-            record.spec.nbytes
-            for record in self._records.values()
-            if record.state is SchedulerTransferState.RESIDENT and record.spec
-        )
 
     def wait_for_event(
         self,
@@ -202,7 +152,7 @@ class SchedulerTransferTable:
     def observe_ready(
         self, spec: ECMooncakeLoadSpec, deadline: float
     ) -> tuple[SchedulerTransfer, bool]:
-        transfer_id = spec.transfer_id or spec.mm_hash
+        transfer_id = spec.transfer_id
         record = self._records.get(transfer_id)
         if record is None:
             record = SchedulerTransfer(
@@ -231,7 +181,6 @@ class SchedulerTransferTable:
     def begin_load(
         self,
         mm_hash: str,
-        num_token: int,
         transfer_id: str | None = None,
         request_id: str = "",
     ) -> SchedulerTransfer | None:
@@ -253,7 +202,6 @@ class SchedulerTransferTable:
             return None
         if not record.request_id:
             record.request_id = request_id
-        record.spec = replace(record.spec, num_token=num_token)
         record.deadline = None
         self._transition(record, SchedulerTransferState.LOADING)
         self._loads_to_dispatch[record.transfer_id] = None
@@ -276,20 +224,15 @@ class SchedulerTransferTable:
         self._transition(record, SchedulerTransferState.READY)
         return True
 
-    def fail_load(self, mm_hash: str, error: str, now: float) -> bool:
+    def fail_load(self, mm_hash: str, now: float) -> bool:
         record = self.first_for_hash(mm_hash, (SchedulerTransferState.LOADING,))
         if record is None:
             return self.has_state(mm_hash, (SchedulerTransferState.FAILED,))
-        self._transition(record, SchedulerTransferState.FAILED, error, now=now)
+        self._transition(record, SchedulerTransferState.FAILED, now=now)
         return True
 
     def release_ready(self, mm_hash: str, now: float) -> None:
-        ready = [
-            record
-            for record in self._records.values()
-            if record.mm_hash == mm_hash
-            and record.state is SchedulerTransferState.READY
-        ]
+        ready = self.records_for_hash(mm_hash, (SchedulerTransferState.READY,))
         if ready:
             canonical = ready[-1]
             for record in self.records_for_hash(
@@ -301,7 +244,7 @@ class SchedulerTransferTable:
             if canonical.spec is None:
                 self._transition(canonical, SchedulerTransferState.EXPIRED, now=now)
             else:
-                canonical.spec = replace(canonical.spec, num_token=0, local=True)
+                canonical.spec = replace(canonical.spec, local=True)
                 self._transition(canonical, SchedulerTransferState.RESIDENT)
         self._evict_residents(now)
 
@@ -315,9 +258,9 @@ class SchedulerTransferTable:
             else:
                 self._transition(record, SchedulerTransferState.EXPIRED, now=now)
 
-    def mark_unavailable(self, transfer_id: str, error: str, now: float) -> None:
+    def mark_unavailable(self, transfer_id: str, now: float) -> None:
         record = self._records[transfer_id]
-        self._transition(record, SchedulerTransferState.UNAVAILABLE, error, now=now)
+        self._transition(record, SchedulerTransferState.UNAVAILABLE, now=now)
         if record.request_id:
             self._notify_unavailable(record, record.request_id)
 
@@ -350,13 +293,10 @@ class SchedulerTransferTable:
         self._loads_to_dispatch.pop(transfer_id, None)
         return True
 
-    def expire(
-        self, now: float, terminal_limit: int
-    ) -> tuple[list[SchedulerTransfer], int]:
+    def expire(self, now: float, terminal_limit: int) -> list[SchedulerTransfer]:
         if terminal_limit < 0:
             raise ValueError("terminal_limit must be non-negative")
         expired = []
-        dropped = 0
         for record in list(self._records.values()):
             if record.deadline is None or record.deadline > now:
                 continue
@@ -364,13 +304,11 @@ class SchedulerTransferTable:
                 self._transition(
                     record,
                     SchedulerTransferState.EXPIRED,
-                    "lease expired",
                     now=now,
                 )
                 expired.append(record)
             elif record.state in _TERMINAL_STATES:
                 self._remove(record.transfer_id)
-                dropped += 1
         terminal_ids = [
             record.transfer_id
             for record in self._records.values()
@@ -379,8 +317,7 @@ class SchedulerTransferTable:
         excess = max(0, len(terminal_ids) - terminal_limit)
         for transfer_id in terminal_ids[:excess]:
             self._remove(transfer_id)
-            dropped += 1
-        return expired, dropped
+        return expired
 
     def take_unavailable_requests(self) -> set[str]:
         unavailable = self._unavailable_requests
@@ -411,17 +348,13 @@ class SchedulerTransferTable:
         self,
         record: SchedulerTransfer,
         state: SchedulerTransferState,
-        error: str | None = None,
         now: float | None = None,
     ) -> None:
-        if state not in _ALLOWED_TRANSITIONS[record.state]:
-            raise InvalidSchedulerTransferTransition(
-                f"Cannot transition {record.transfer_id!r} from "
-                f"{record.state.name} to {state.name}"
-            )
         if state in _TERMINAL_STATES:
             if now is None:
                 raise ValueError("Terminal transition requires a timestamp")
+            # Keep a bounded tombstone so late events and repeat request IDs
+            # remain idempotent instead of reviving a finished transfer.
             record.deadline = now + self._tombstone_ttl
         if state is SchedulerTransferState.EXPIRED and record.state in (
             SchedulerTransferState.READY,
@@ -429,17 +362,23 @@ class SchedulerTransferTable:
         ):
             self._orphaned.append(record.transfer_id)
         record.state = state
-        record.last_error = error
         self._records.move_to_end(record.transfer_id)
 
     def _evict_residents(self, now: float) -> None:
-        while self.resident_bytes > self._resident_capacity:
-            record = next(
-                record
-                for record in self._records.values()
-                if record.state is SchedulerTransferState.RESIDENT
-            )
+        residents: list[SchedulerTransfer] = []
+        resident_bytes = 0
+        for record in self._records.values():
+            if record.state is not SchedulerTransferState.RESIDENT:
+                continue
+            residents.append(record)
+            if record.spec is not None:
+                resident_bytes += record.spec.nbytes
+        for record in residents:
+            if resident_bytes <= self._resident_capacity:
+                break
             self._transition(record, SchedulerTransferState.EXPIRED, now=now)
+            if record.spec is not None:
+                resident_bytes -= record.spec.nbytes
 
     def _remove(self, transfer_id: str) -> None:
         record = self._records.pop(transfer_id, None)

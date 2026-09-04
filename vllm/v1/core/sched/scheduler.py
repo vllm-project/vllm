@@ -593,7 +593,7 @@ class Scheduler(SchedulerInterface):
             if (
                 self.ec_connector is not None
                 and request.mm_features
-                and not self.ec_connector.ensure_cache_available(
+                and not self.ec_connector._ensure_cache_available(
                     request,
                     request.num_computed_tokens - request.num_output_placeholders,
                     self.encoder_cache_manager.cached.keys(),
@@ -934,7 +934,7 @@ class Scheduler(SchedulerInterface):
                     if (
                         self.ec_connector is not None
                         and request.mm_features
-                        and not self.ec_connector.ensure_cache_available(
+                        and not self.ec_connector._ensure_cache_available(
                             request,
                             num_computed_tokens,
                             self.encoder_cache_manager.cached.keys(),

@@ -10,9 +10,8 @@ resident reuse, CUDA-safe retirement, and pressure-driven reclamation.
 from __future__ import annotations
 
 import bisect
-import math
 import threading
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
@@ -31,13 +30,7 @@ _T = TypeVar("_T")
 
 @dataclass
 class MemoryAllocation:
-    """Describe a tensor view carved from the Consumer receive slab.
-
-    Attributes:
-        offset: Byte offset of the allocation within the slab.
-        size: Aligned number of slab bytes owned by the allocation.
-        tensor: Typed tensor view exposed to transfer and cache code.
-    """
+    """Describe a tensor view carved from the Consumer receive slab."""
 
     offset: int
     size: int
@@ -46,30 +39,16 @@ class MemoryAllocation:
 
 @dataclass
 class _ResidentEntry(Generic[_T]):
-    """Store one resident value and its ownership accounting.
-
-    Attributes:
-        value: Resident value owned by the pool.
-        nbytes: Capacity charged to the resident pool.
-        pinned: Whether active cache state prevents LRU eviction.
-        leases: Number of in-flight reservations borrowing this value.
-    """
+    """Store one resident value and its ownership accounting."""
 
     value: _T
-    nbytes: int
     pinned: bool = True
     leases: int = 0
 
 
 @dataclass
 class ResidentLease(Generic[_T]):
-    """Represent a borrow of one resident entry.
-
-    Attributes:
-        key: Cache identifier used to find the canonical resident entry.
-        _entry: Entry retained even if the canonical mapping is replaced.
-        _active: Whether this lease still contributes to the reference count.
-    """
+    """Represent a borrow of one resident entry."""
 
     key: str
     _entry: _ResidentEntry[_T]
@@ -81,21 +60,14 @@ class ResidentLease(Generic[_T]):
 
 
 class ContiguousAllocator:
-    """Allocate aligned regions from one contiguous byte range.
-
-    Attributes:
-        capacity: Total number of bytes managed by the allocator.
-        alignment: Allocation granularity in bytes.
-        _free: Sorted free ranges represented as ``(offset, size)`` pairs.
-    """
+    """Allocate aligned regions from one contiguous byte range."""
 
     def __init__(self, capacity: int, alignment: int = 256):
-        self.capacity = capacity
         self.alignment = alignment
         self._free = [(0, capacity)]
 
     def allocate(self, nbytes: int) -> tuple[int, int] | None:
-        size = math.ceil(nbytes / self.alignment) * self.alignment
+        size = (nbytes + self.alignment - 1) // self.alignment * self.alignment
         for index, (offset, available) in enumerate(self._free):
             if size > available:
                 continue
@@ -126,25 +98,11 @@ class ContiguousAllocator:
 
 
 class ResidentPool(Generic[_T]):
-    """Track resident values, active leases, and LRU eviction eligibility.
-
-    Attributes:
-        used: Total bytes charged by current and leased displaced entries.
-        _entries: Canonical resident entries keyed by cache identifier.
-        _evictable: Unpinned and unleased entries in LRU order.
-    """
+    """Track resident values, active leases, and LRU eviction eligibility."""
 
     def __init__(self):
-        self.used = 0
         self._entries: dict[str, _ResidentEntry[_T]] = {}
         self._evictable: OrderedDict[str, None] = OrderedDict()
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    @property
-    def num_evictable(self) -> int:
-        return len(self._evictable)
 
     def referenced(self) -> list[str]:
         return [key for key, entry in self._entries.items() if entry.pinned]
@@ -157,15 +115,11 @@ class ResidentPool(Generic[_T]):
         self,
         key: str,
         value: _T,
-        nbytes: int,
     ) -> _T | None:
         """Pin an entry and return a displaced value that has no owners."""
         previous = self._entries.get(key)
-        entry = _ResidentEntry(value, nbytes)
-        if previous is not None and previous.leases == 0:
-            self.used -= previous.nbytes
+        entry = _ResidentEntry(value)
         self._entries[key] = entry
-        self.used += nbytes
         self._evictable.pop(key, None)
         if previous is not None and previous.leases == 0:
             return previous.value
@@ -196,7 +150,6 @@ class ResidentPool(Generic[_T]):
         current = self._entries.get(lease.key)
         if current is not entry:
             if entry.leases == 0:
-                self.used -= entry.nbytes
                 return entry.value
             return None
         if not entry.pinned and entry.leases == 0:
@@ -225,40 +178,24 @@ class ResidentPool(Generic[_T]):
                 continue
             self._evictable.pop(key, None)
             del self._entries[key]
-            self.used -= entry.nbytes
             return key
         return None
 
     def clear(self) -> None:
         self._entries.clear()
         self._evictable.clear()
-        self.used = 0
 
 
 @dataclass
 class StagedSources:
-    """Own Producer tensor views and their staging-slab regions.
-
-    Attributes:
-        tensors: Registered tensor views used as Mooncake sources.
-        regions: Allocator regions released after the write finishes.
-    """
+    """Own Producer tensor views and their staging-slab regions."""
 
     tensors: list[torch.Tensor]
     regions: list[tuple[int, int]]
 
 
 class ProducerMemoryPool:
-    """Own the Producer staging slab and regions carved from it.
-
-    Attributes:
-        _capacity: Requested staging-slab size in bytes.
-        _transfer: Data-plane owner used to register the slab.
-        _pool: Lazily allocated registered byte tensor.
-        _allocator: Region allocator for the staging slab.
-        _disabled: Whether initialization failed and fallback is required.
-        _lock: Lock protecting initialization and region allocation.
-    """
+    """Own the Producer staging slab and regions carved from it."""
 
     def __init__(self, capacity: int, transfer: MooncakeTransfer) -> None:
         self._capacity = capacity
@@ -267,10 +204,6 @@ class ProducerMemoryPool:
         self._allocator: ContiguousAllocator | None = None
         self._disabled = False
         self._lock = threading.Lock()
-
-    @property
-    def tensor(self) -> torch.Tensor | None:
-        return self._pool
 
     def _ensure_pool(self, device: torch.device) -> None:
         if self._pool is not None or self._disabled:
@@ -337,25 +270,16 @@ class ProducerMemoryPool:
             self._free_regions(staged.regions)
 
     def close(self) -> None:
-        """Retain the registered slab until the full close phase owns it."""
+        with self._lock:
+            pool = self._pool
+            if pool is None or not self._transfer.unregister_memory(pool):
+                return
+            self._pool = None
+            self._allocator = None
 
 
 class ConsumerMemoryPool:
-    """Own the registered receive slab and resident allocation lifecycle.
-
-    Attributes:
-        _capacity: Requested receive-slab size in bytes.
-        _transfer: Data-plane owner used to register the slab.
-        _metrics: Counters describing resident-cache behavior.
-        _pool: Registered byte tensor that receives Mooncake writes.
-        _allocator: Region allocator for the receive slab.
-        _residents: Published allocations available for local reuse.
-        _retire_events: CUDA events guarding retired resident entries.
-        _pending_frees: Allocations waiting for CUDA consumers to finish.
-        _reclaimed: Cache identifiers evicted under allocation pressure.
-        _disabled: Whether receive-slab initialization has failed.
-        lock: Reentrant lock shared with reservation state transitions.
-    """
+    """Own the registered receive slab and resident allocation lifecycle."""
 
     def __init__(
         self,
@@ -364,7 +288,6 @@ class ConsumerMemoryPool:
     ) -> None:
         self._capacity = capacity
         self._transfer = transfer
-        self._metrics: Counter[str] = Counter()
         self._pool: torch.Tensor | None = None
         self._allocator: ContiguousAllocator | None = None
         self._residents: ResidentPool[MemoryAllocation] = ResidentPool()
@@ -381,17 +304,8 @@ class ConsumerMemoryPool:
     def prepare(
         self,
         device: torch.device,
-        *,
-        receiving_rank: bool,
-        allow_host: bool = False,
     ) -> None:
-        if not receiving_rank:
-            return
-        if (
-            self._pool is not None
-            or self._disabled
-            or (device.type != "cuda" and not allow_host)
-        ):
+        if self._pool is not None or self._disabled:
             return
         try:
             pool = torch.empty(self._capacity, dtype=torch.uint8, device=device)
@@ -401,17 +315,15 @@ class ConsumerMemoryPool:
         except (RuntimeError, torch.OutOfMemoryError) as error:
             self._disabled = True
             logger.warning(
-                "Could not initialize the EC consumer buffer pool; falling back "
-                "to per-tensor registration: %s",
+                "Could not initialize the EC consumer buffer pool: %s",
                 error,
             )
             return
         self._pool = pool
         self._allocator = ContiguousAllocator(pool.nbytes)
         logger.info(
-            "Prepared %d-byte CUDA receive pool for Mooncake EC (registered=%s)",
+            "Prepared %d-byte receive pool for Mooncake EC",
             pool.nbytes,
-            receiving_rank,
         )
 
     def _free(self, allocation: MemoryAllocation) -> None:
@@ -446,7 +358,6 @@ class ConsumerMemoryPool:
             event = self._retire_events.pop(mm_hash, None)
             self._defer_or_free(allocation, event)
             self._reclaimed.add(mm_hash)
-            self._metrics["residents_reclaimed"] += 1
             return True
 
         while self._residents.evict_lru(evict) is not None:
@@ -508,18 +419,15 @@ class ConsumerMemoryPool:
         with self.lock:
             allocation = self._residents.get(mm_hash)
             if allocation is None:
-                self._metrics["residents_missed"] += 1
                 return None
             tensor = allocation.tensor
             if (
                 tuple(tensor.shape) != shape
                 or str(tensor.dtype).split(".")[-1] != dtype_name
             ):
-                self._metrics["residents_mismatched"] += 1
                 return None
             self._residents.pin(mm_hash)
             self._retire_events.pop(mm_hash, None)
-            self._metrics["residents_promoted"] += 1
             return tensor
 
     def _record_release_event(self) -> torch.Event | None:
@@ -549,7 +457,7 @@ class ConsumerMemoryPool:
                     self._defer_or_free(released, self._record_release_event())
                 return canonical
             previous = self._residents.get(mm_hash)
-            displaced = self._residents.insert(mm_hash, allocation, allocation.size)
+            displaced = self._residents.insert(mm_hash, allocation)
             event = None
             if previous is not None and previous is not allocation:
                 event = self._retire_events.pop(mm_hash, None)
@@ -576,11 +484,10 @@ class ConsumerMemoryPool:
                     continue
                 if mm_hash in reserved_hashes:
                     continue
-                event = torch.Event()
-                event.record(torch.accelerator.current_stream(self._pool.device))
-                self._retire_events[mm_hash] = event
+                event = self._record_release_event()
+                if event is not None:
+                    self._retire_events[mm_hash] = event
                 self._residents.retire(mm_hash)
-                self._metrics["residents_retired"] += 1
             self._poll_frees_locked()
 
     def drain_reclaimed(self) -> set[str]:
@@ -588,21 +495,6 @@ class ConsumerMemoryPool:
             reclaimed = self._reclaimed
             self._reclaimed = set()
             return reclaimed
-
-    def stats(self) -> tuple[int, int, int, int]:
-        with self.lock:
-            return (
-                len(self._residents),
-                len(self._residents.referenced()),
-                self._residents.num_evictable,
-                len(self._pending_frees),
-            )
-
-    def take_metrics(self) -> dict[str, int]:
-        with self.lock:
-            metrics = dict(self._metrics)
-            self._metrics.clear()
-            return metrics
 
     def close(self) -> None:
         with self.lock:

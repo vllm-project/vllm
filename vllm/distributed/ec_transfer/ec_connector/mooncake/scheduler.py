@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
@@ -20,19 +20,17 @@ import torch
 
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
-    ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     _get_encoder_cache_hidden_dim,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake._availability import (
-    ensure_mooncake_available,
+from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
+    _RESERVATION_TTL_SECONDS,
+    MooncakeECConfig,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake.config import MooncakeECConfig
 from vllm.distributed.ec_transfer.ec_connector.mooncake.control import (
     ControlClient,
     EventInbox,
-    ShardTopology,
     make_cancel_request,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
@@ -45,12 +43,15 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
     SchedulerTransferState,
     SchedulerTransferTable,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
+    ensure_mooncake_available,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ECConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -58,115 +59,52 @@ logger = init_logger(__name__)
 # event: warn on the first few, then only once in a while.
 _MAX_UNRESOLVED_TRANSFER_ID_WARNINGS = 5
 
-_LEASE_TTL_SECONDS = 300
 _DRAIN_MIN_INTERVAL = 0.005
 _MAX_PENDING_EVENTS = 4096
 _MAX_TERMINAL_TRANSFER_RECORDS = 1 << 16
 _CANCEL_ATTEMPTS = 2
+_CONTROL_WORKERS = 8
 
 
 class ECMooncakeScheduler:
-    """Coordinate Mooncake transfers from the vLLM Scheduler process.
+    """Coordinate Mooncake transfers from the vLLM Scheduler process."""
 
-    Attributes:
-        _is_producer: Whether this Scheduler prepares outbound pushes.
-        _is_consumer: Whether this Scheduler waits for inbound pushes.
-        _reservation_zmq_addr: Base Consumer control-plane address.
-        _consumer_pool_capacity: Capacity mirrored for resident-state limits.
-        _push_wait_timeout: Maximum wait for a Consumer readiness event.
-        _consumer_metrics_log_interval: Interval for Scheduler metrics logs.
-        _encoder_cache_hidden_dim: Hidden width used to derive push shapes.
-        _model_config: Model metadata used for dtypes and multimodal fields.
-        _control_client: Client for reservation status and cancellation.
-        _topology: Discovery cache for Consumer TP shards.
-        _event_inbox: Non-blocking source of Consumer readiness events.
-        _control_executor: Executor for cancellation requests.
-        _metadata_fields_cache: Placeholder metadata fields by modality.
-        _consumer_metrics_started_at: Start time of the current metric window.
-        _consumer_scheduler_metrics: Counters for scheduling decisions.
-        _drain_pending: Whether the next scheduling pass should drain events.
-        _drained_at: Time of the most recent readiness-event drain.
-        _pending_cancels: Asynchronous cancellations by transfer ID.
-        _transfers: Scheduler-owned transfer lifecycle table.
-        _scheduler_pending_work: Whether Workers reported unfinished work.
-        _pushes_to_prepare: Push specs awaiting metadata emission.
-        _prepared_push_transfer_ids: Transfer IDs already prepared once.
-        _event_shard_count: Number of Consumer event channels in the topology.
-        _event_ready_shards: Ready shard IDs accumulated per transfer.
-    """
-
-    @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig) -> ECMooncakeScheduler:
+    def __init__(self, vllm_config: VllmConfig) -> None:
         ensure_mooncake_available()
-        config = MooncakeECConfig.from_vllm_config(
-            vllm_config, ECConnectorRole.SCHEDULER
-        )
+        config = MooncakeECConfig.from_vllm_config(vllm_config)
 
-        control_client = ControlClient(config.control_timeout_ms)
-        topology = ShardTopology(control_client)
-        event_inbox = EventInbox(control_client, topology)
-        control_executor = ThreadPoolExecutor(
-            max_workers=config.control_workers,
-            thread_name_prefix="ec-mooncake-control",
-        )
-        encoder_cache_hidden_dim = (
-            _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
-        )
-        return cls(
-            config,
-            encoder_cache_hidden_dim,
-            model_config=vllm_config.model_config,
-            control_client=control_client,
-            topology=topology,
-            event_inbox=event_inbox,
-            control_executor=control_executor,
-        )
-
-    def __init__(
-        self,
-        config: MooncakeECConfig,
-        encoder_cache_hidden_dim: int | None,
-        model_config: ModelConfig,
-        control_client: ControlClient,
-        topology: ShardTopology,
-        event_inbox: EventInbox,
-        control_executor: ThreadPoolExecutor,
-    ) -> None:
         self._is_producer = config.is_producer
         self._is_consumer = config.is_consumer
-        self._reservation_zmq_addr = config.reservation_addr
-        self._consumer_pool_capacity = config.consumer_pool_size
+        self._control_addr = config.control_addr
         self._push_wait_timeout = config.push_wait_timeout_s
-        self._consumer_metrics_log_interval = config.consumer_metrics_log_interval
-        self._encoder_cache_hidden_dim = encoder_cache_hidden_dim
-        self._model_config = model_config
-        self._control_client = control_client
-        self._topology = topology
-        self._event_inbox = event_inbox
-        self._control_executor = control_executor
+        self._encoder_cache_hidden_dim = (
+            _get_encoder_cache_hidden_dim(vllm_config) if config.is_producer else None
+        )
+        self._model_config = vllm_config.model_config
+        self._control_client = ControlClient(config.control_timeout_ms)
+        self._event_inbox = EventInbox(self._control_client)
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=_CONTROL_WORKERS,
+            thread_name_prefix="ec-mooncake-control",
+        )
 
         self._metadata_fields_cache: dict[str, set[str]] = {}
-        self._consumer_metrics_started_at = time.monotonic()
-        self._consumer_scheduler_metrics: Counter[str] = Counter()
         self._unresolved_transfer_ids = 0
         self._drain_pending = True
         self._drained_at = 0.0
         self._pending_cancels: dict[str, Future[Any]] = {}
         self._transfers = SchedulerTransferTable(
-            self._consumer_pool_capacity, _LEASE_TTL_SECONDS
+            config.pool_size, _RESERVATION_TTL_SECONDS
         )
         self._scheduler_pending_work = False
         self._pushes_to_prepare: dict[str, ECMooncakePushSpec] = {}
         self._prepared_push_transfer_ids: set[str] = set()
-        self._event_shard_count = 1
         self._event_ready_shards: OrderedDict[str, set[int]] = OrderedDict()
 
-    def _cancel_remote(
-        self, consumer_zmq: str, transfer_id: str, reservation_id: str
-    ) -> bool:
+    def _cancel_remote(self, consumer_zmq: str, transfer_id: str) -> bool:
         pending = None
         for _ in range(_CANCEL_ATTEMPTS):
-            pending = self._topology.discover(consumer_zmq)
+            pending = self._control_client.discover_shards(consumer_zmq)
             if pending is not None:
                 break
         if pending is None:
@@ -182,7 +120,7 @@ class ECMooncakeScheduler:
                 try:
                     result = self._control_client.request(
                         addr,
-                        make_cancel_request(transfer_id, reservation_id),
+                        make_cancel_request(transfer_id),
                     )
                 except Exception as exc:
                     if error is None:
@@ -210,64 +148,24 @@ class ECMooncakeScheduler:
             mm_hash,
             now + self._push_wait_timeout,
         )
-        self._consumer_scheduler_metrics["missing_event"] += 1
         if record.state is not SchedulerTransferState.WAITING_EVENT:
             return
         assert record.deadline is not None
         if now < record.deadline:
             return
         elapsed = now - record.deadline + self._push_wait_timeout
-        self._transfers.mark_unavailable(
-            transfer_id, "push readiness event timed out", now
-        )
-        self._consumer_scheduler_metrics["given_up"] += 1
-        self._consumer_scheduler_metrics["stalled"] += 1
-        reservation: Any = "unknown"
-        if self._reservation_zmq_addr is not None:
-            try:
-                reservation = self._control_client.request(
-                    self._reservation_zmq_addr,
-                    {"op": "status", "transfer_id": transfer_id},
-                )
-            except Exception as e:  # noqa: BLE001 - diagnostic only
-                reservation = f"status failed: {e}"
+        self._transfers.mark_unavailable(transfer_id, now)
         logger.warning(
             "EC Mooncake waited %.1fs for a push of mm_hash=%s "
-            "(transfer_id=%s) that never arrived; worker reservation=%s; "
+            "(transfer_id=%s) that never arrived; "
             "requests needing it fail with a retryable error.",
             elapsed,
             mm_hash,
             transfer_id,
-            reservation,
         )
 
     def take_unavailable_requests(self) -> set[str]:
         return self._transfers.take_unavailable_requests()
-
-    def _maybe_log_consumer_scheduler_metrics(self) -> None:
-        now = time.monotonic()
-        if (
-            self._consumer_metrics_log_interval <= 0
-            or now - self._consumer_metrics_started_at
-            < self._consumer_metrics_log_interval
-        ):
-            return
-        missing = self._transfers.count(SchedulerTransferState.WAITING_EVENT)
-        loading = self._transfers.count(SchedulerTransferState.LOADING)
-        pending = self._transfers.count(SchedulerTransferState.AVAILABLE)
-        logger.info(
-            "EC Mooncake consumer scheduler: decisions=%s, ready=%d, loading=%d, "
-            "resident=%d, pending_specs=%d, needs_load=%d, missing=%d",
-            dict(self._consumer_scheduler_metrics),
-            self._transfers.count(SchedulerTransferState.READY),
-            loading,
-            self._transfers.count(SchedulerTransferState.RESIDENT),
-            pending,
-            loading,
-            missing,
-        )
-        self._consumer_scheduler_metrics.clear()
-        self._consumer_metrics_started_at = now
 
     def _poll_pending_cancels(self) -> None:
         pending = {}
@@ -276,19 +174,16 @@ class ECMooncakeScheduler:
                 pending[transfer_id] = future
                 continue
             try:
-                cancelled = future.result()
+                future.result()
             except Exception:
-                self._consumer_scheduler_metrics["cancellations_failed"] += 1
                 logger.warning(
                     "EC Mooncake reservation cancellation failed", exc_info=True
                 )
-            else:
-                key = "cancellations_completed" if cancelled else "cancellations_stale"
-                self._consumer_scheduler_metrics[key] += 1
         self._pending_cancels = pending
 
     def _note_shard_ready(self, data: dict[str, Any]) -> bool:
-        if self._event_shard_count <= 1:
+        shard_count = self._event_inbox.shard_count
+        if shard_count <= 1:
             return True
         transfer_id = str(data["transfer_id"])
         record = self._transfers.get(transfer_id)
@@ -301,14 +196,11 @@ class ECMooncakeScheduler:
         shards = self._event_ready_shards.setdefault(transfer_id, set())
         self._event_ready_shards.move_to_end(transfer_id)
         shards.add(int(shard) if shard is not None else len(shards))
-        if len(shards) < self._event_shard_count:
-            self._consumer_scheduler_metrics["events_awaiting_shards"] += 1
+        if len(shards) < shard_count:
             while len(self._event_ready_shards) > _MAX_PENDING_EVENTS:
                 self._event_ready_shards.popitem(last=False)
-                self._consumer_scheduler_metrics["events_partial_dropped"] += 1
             return False
         self._event_ready_shards.pop(transfer_id, None)
-        self._consumer_scheduler_metrics["events_all_shards_ready"] += 1
         return True
 
     def _forget_shard_readiness(self, transfer_id: str) -> None:
@@ -317,26 +209,21 @@ class ECMooncakeScheduler:
     def _store_pushed_spec(self, data: dict[str, Any]) -> bool:
         transfer_id = str(data["transfer_id"])
         identifier = str(data["mm_hash"])
-        reservation_id = str(data["reservation_id"])
         _, accepted = self._transfers.observe_ready(
             ECMooncakeLoadSpec(
                 mm_hash=identifier,
-                num_token=0,
                 nbytes=int(data["nbytes"]),
                 shape=tuple(int(value) for value in data["shape"]),
                 dtype=str(data["dtype"]),
-                pushed=True,
                 transfer_id=transfer_id,
-                reservation_id=reservation_id,
             ),
-            time.monotonic() + _LEASE_TTL_SECONDS,
+            time.monotonic() + _RESERVATION_TTL_SECONDS,
         )
         return accepted
 
     def _queue_cancel(
         self,
         transfer_id: str,
-        reservation_id: str = "",
         mm_hash: str = "",
         request_id: str = "",
     ) -> None:
@@ -348,21 +235,16 @@ class ECMooncakeScheduler:
         ):
             return
         self._forget_shard_readiness(transfer_id)
-        if self._reservation_zmq_addr is None:
-            return
         self._pending_cancels[transfer_id] = self._control_executor.submit(
             self._cancel_remote,
-            self._reservation_zmq_addr,
+            self._control_addr,
             transfer_id,
-            reservation_id,
         )
 
     def _expire_transfers(self) -> None:
         now = time.monotonic()
-        expired, dropped = self._transfers.expire(now, _MAX_TERMINAL_TRANSFER_RECORDS)
-        self._consumer_scheduler_metrics["cancel_records_dropped"] += dropped
+        expired = self._transfers.expire(now, _MAX_TERMINAL_TRANSFER_RECORDS)
         for record in expired:
-            self._consumer_scheduler_metrics["pending_specs_expired"] += 1
             self._queue_cancel(record.transfer_id)
 
     def _drain_push_notifications(self) -> None:
@@ -373,15 +255,9 @@ class ECMooncakeScheduler:
         self._drained_at = now
         self._poll_pending_cancels()
         self._expire_transfers()
-        if self._reservation_zmq_addr is None:
-            return
-        events = self._event_inbox.drain(self._reservation_zmq_addr)
-        self._event_shard_count = self._event_inbox.shard_count
+        events = self._event_inbox.drain(self._control_addr)
         for data in events:
-            identifier = str(data["mm_hash"])
-            self._consumer_scheduler_metrics["events_received"] += 1
             if data.get("ready"):
-                self._consumer_scheduler_metrics["events_ready"] += 1
                 transfer_id = str(data["transfer_id"])
                 record = self._transfers.get(transfer_id)
                 if record is not None and record.state in {
@@ -390,38 +266,23 @@ class ECMooncakeScheduler:
                     SchedulerTransferState.EXPIRED,
                     SchedulerTransferState.FAILED,
                 }:
-                    self._consumer_scheduler_metrics["events_cancelled"] += 1
                     continue
-                if self._transfers.has_state(
-                    identifier, (SchedulerTransferState.READY,)
-                ):
-                    self._consumer_scheduler_metrics["events_redundant"] += 1
                 if not self._note_shard_ready(data):
                     continue
-                if not self._store_pushed_spec(data):
-                    self._consumer_scheduler_metrics["events_duplicate"] += 1
-            else:
-                self._consumer_scheduler_metrics["events_not_ready"] += 1
+                self._store_pushed_spec(data)
 
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
             return False
         self._drain_push_notifications()
-        self._maybe_log_consumer_scheduler_metrics()
-        if self._transfers.has_state(identifier, (SchedulerTransferState.READY,)):
-            self._consumer_scheduler_metrics["ready"] += 1
-            return True
-        if self._transfers.has_state(identifier, (SchedulerTransferState.LOADING,)):
-            self._consumer_scheduler_metrics["loading"] += 1
-            return False
-        if self._transfers.has_state(identifier, (SchedulerTransferState.RESIDENT,)):
-            self._consumer_scheduler_metrics["resident"] += 1
-            return True
-        if self._transfers.has_state(identifier, (SchedulerTransferState.AVAILABLE,)):
-            self._consumer_scheduler_metrics["pending_spec"] += 1
-            return True
-        self._consumer_scheduler_metrics["missing_event"] += 1
-        return False
+        return self._transfers.has_state(
+            identifier,
+            (
+                SchedulerTransferState.READY,
+                SchedulerTransferState.RESIDENT,
+                SchedulerTransferState.AVAILABLE,
+            ),
+        )
 
     def _warn_unresolved_transfer_id(
         self, request: Any, index: int, where: str
@@ -504,22 +365,17 @@ class ECMooncakeScheduler:
             transfer_id = self._request_transfer_id(request, index)
             if transfer_id is not None:
                 self._transfers.touch_available(
-                    transfer_id, time.monotonic() + _LEASE_TTL_SECONDS
+                    transfer_id, time.monotonic() + _RESERVATION_TTL_SECONDS
                 )
             if mm_hash in local_cache_hashes:
                 continue
             if self._transfers.has_state(mm_hash, (SchedulerTransferState.READY,)):
-                self._consumer_scheduler_metrics["ready"] += 1
                 continue
             if self._transfers.has_state(mm_hash, (SchedulerTransferState.LOADING,)):
-                self._consumer_scheduler_metrics["loading"] += 1
                 all_ready = False
                 continue
-            if self._transfers.has_state(mm_hash, (SchedulerTransferState.RESIDENT,)):
-                self._consumer_scheduler_metrics["resident_hit"] += 1
             record = self._transfers.begin_load(
                 mm_hash,
-                request.get_num_encoder_embeds(index),
                 transfer_id,
                 request.request_id,
             )
@@ -589,17 +445,15 @@ class ECMooncakeScheduler:
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self._transfers.release_ready(mm_hash, time.monotonic())
         for transfer_id in self._transfers.drain_orphaned():
-            self._consumer_scheduler_metrics["reservations_orphaned"] += 1
             self._queue_cancel(transfer_id)
         meta = ECMooncakeConnectorMetadata()
         for push_spec in self._pushes_to_prepare.values():
-            meta.add_push(push_spec)
+            meta.pushes.append(push_spec)
         self._pushes_to_prepare.clear()
         for record in self._transfers.take_loads_to_dispatch():
             assert record.spec is not None
-            meta.add_load(record.spec)
+            meta.loads.append(record.spec)
         self._poll_pending_cancels()
-        self._maybe_log_consumer_scheduler_metrics()
         self._drain_pending = True
         return meta
 
@@ -609,16 +463,11 @@ class ECMooncakeScheduler:
             return
         for mm_hash in meta.loaded:
             self._transfers.complete_load(mm_hash)
-            self._consumer_scheduler_metrics["loads_completed"] += 1
         for mm_hash in meta.failed_loads:
-            self._transfers.fail_load(
-                mm_hash, "worker failed to load", time.monotonic()
-            )
-            self._consumer_scheduler_metrics["loads_failed"] += 1
+            self._transfers.fail_load(mm_hash, time.monotonic())
         for mm_hash in meta.reclaimed:
             self._transfers.reclaim(mm_hash, time.monotonic())
-            self._consumer_scheduler_metrics["resident_reclaimed"] += 1
-        self._scheduler_pending_work = meta.pending_loads or meta.pending_saves
+        self._scheduler_pending_work = meta.pending_saves
 
     def has_pending_push_work(self) -> bool:
         return self._scheduler_pending_work

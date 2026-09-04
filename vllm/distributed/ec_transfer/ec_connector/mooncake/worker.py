@@ -12,36 +12,28 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
-from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
-from vllm.distributed.ec_transfer.ec_connector.mooncake._availability import (
-    ensure_mooncake_available,
+from vllm.distributed.ec_transfer.ec_connector.mooncake.config import (
+    _RESERVATION_TTL_SECONDS,
+    MooncakeECConfig,
 )
-from vllm.distributed.ec_transfer.ec_connector.mooncake.config import MooncakeECConfig
 from vllm.distributed.ec_transfer.ec_connector.mooncake.control import (
     ConsumerControlServer,
     ControlClient,
-    ControlCompletion,
-    ShardTopology,
     make_cancel_request,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ConsumerMemoryPool,
-    MemoryAllocation,
     ProducerMemoryPool,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
-    ECMooncakeLoadSpec,
     ECMooncakePushSpec,
     ECMooncakeWorkerMetadata,
 )
@@ -50,12 +42,12 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.producer import (
     ProducerPushRecord,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.reservation import (
-    CancellationOutcome,
     ConsumerReservationManager,
     ConsumerReservationState,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
+    ensure_mooncake_available,
 )
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
@@ -67,43 +59,11 @@ _T = TypeVar("_T")
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_LEASE_TTL_SECONDS = 300
-_RESERVATION_REFRESH_SECONDS = _LEASE_TTL_SECONDS / 2
+_RESERVATION_REFRESH_SECONDS = _RESERVATION_TTL_SECONDS / 2
 _MAX_CANCELLED_TRANSFER_IDS = 1 << 16
 _CANCEL_ATTEMPTS = 2
-_PUSH_STAGES = (
-    "reserve",
-    "cuda",
-    "register",
-    "rdma",
-    "unregister",
-    "complete",
-)
-
-
-@dataclass
-class _PushPerfWindow:
-    """Accumulate Producer batch metrics between periodic log messages.
-
-    Attributes:
-        started_at: Monotonic start time of the aggregation window.
-        batches: Number of completed push batches.
-        items: Number of push records included in those batches.
-        bytes: Number of tensor bytes written over the data plane.
-        skipped_items: Items satisfied by cache or cancellation without a write.
-        failures: Number of batches that ended in failure.
-        stage_totals_ms: Accumulated time for every push stage.
-        stage_max_ms: Maximum observed time for every push stage.
-    """
-
-    started_at: float = field(default_factory=time.monotonic)
-    batches: int = 0
-    items: int = 0
-    bytes: int = 0
-    skipped_items: int = 0
-    failures: int = 0
-    stage_totals_ms: dict[str, float] = field(default_factory=dict)
-    stage_max_ms: dict[str, float] = field(default_factory=dict)
+_TRANSFER_WORKERS = 4
+_CONTROL_WORKERS = 8
 
 
 class _FanoutError(RuntimeError):
@@ -114,106 +74,31 @@ class _FanoutError(RuntimeError):
         super().__init__(str(error))
 
 
-class _ReservationFanoutError(RuntimeError):
-    """Expose partial reservations for precise idempotent cleanup retries."""
-
-    def __init__(
-        self,
-        error: BaseException,
-        partial_reservations: list[dict[str, Any]],
-    ) -> None:
-        super().__init__(str(error))
-        self.partial_reservations = partial_reservations
-
-
 class ECMooncakeWorker:
     """Orchestrate consumer reservations and producer push batches.
-
-    ``mooncake_protocol`` selects the transfer protocol. Consumer workers use
-    ``consumer_buffer_pool_size`` and ``reservation_zmq_port`` for their
-    registered receive arena and rank-local control endpoint. Producers use
-    ``producer_buffer_pool_size`` for staging. ``transfer_max_workers`` and
-    ``control_max_workers`` bound the two executor pools; the transfer and
-    consumer metrics intervals control aggregate logging.
 
     Consumers may use TP, PP, and DP. Only the first PP stage receives encoder
     outputs, and each TP rank exposes a consecutive control port and receives
     the same source concurrently. Producers remain unsharded and unreplicated.
     With DP, the caller must route both halves of a request to the same replica
     and pass that replica's control address to the producer.
-
-    Attributes:
-        is_producer: Whether this Worker originates encoder-cache pushes.
-        is_consumer: Whether this Worker accepts encoder-cache pushes.
-        _buffer_device: Device requested for registered memory pools.
-        _reservation_zmq_port: Base Consumer control port for this DP replica.
-        _transfer: Owner of the Mooncake engine and memory registrations.
-        _consumer_worker_metrics: Consumer lifecycle metric counters.
-        _consumer_memory: Registered receive slab and resident cache.
-        _reservations: Consumer destination reservation state manager.
-        _consumer_rank_resolved: Whether TP/PP placement has been discovered.
-        _is_receiving_rank: Whether this PP stage owns encoder outputs.
-        _tp_rank: Tensor-parallel rank used to derive the local control port.
-        _tp_size: Number of Consumer tensor-parallel destination shards.
-        _control_server: Rank-local Consumer reservation server.
-        _consumer_metrics_log_interval: Consumer metrics log interval.
-        _consumer_metrics_started_at: Start time of the Consumer metric window.
-        _producer_memory: Registered Producer source staging slab.
-        _transfer_metrics_log_interval: Producer performance log interval.
-        _control_client: Client for remote Consumer control operations.
-        _topology: Discovery cache for remote Consumer TP shards.
-        _producer_metrics: Producer lifecycle metric counters.
-        _io_executor: Executor that owns transfer and cancellation batches.
-        _control_executor: Executor that creates remote reservations.
-        _shard_pool: Lazily created executor for concurrent TP-shard work.
-        _shard_pool_lock: Lock protecting shard-pool initialization.
-        _producer_pushes: Producer lifecycle and source-ownership manager.
-        _push_perf_lock: Lock protecting Producer performance counters.
-        _push_perf: Current Producer performance aggregation window.
-        _active_transfer_batches: Batches currently executing data-plane work.
-        _queued_transfer_batches: Batches submitted but not yet executing.
-        _completed_loads: Successful Consumer loads awaiting reporting.
-        _failed_loads: Failed Consumer loads awaiting reporting.
-        _shutdown: Whether Worker resource shutdown has started.
     """
 
-    @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig) -> ECMooncakeWorker:
+    def __init__(self, vllm_config: VllmConfig) -> None:
         ensure_mooncake_available()
-        config = MooncakeECConfig.from_vllm_config(vllm_config, ECConnectorRole.WORKER)
-        hostname = get_ip()
-        control_client = ControlClient(config.control_timeout_ms)
-        try:
-            return cls(
-                config,
-                hostname,
-                control_client,
-                ShardTopology(control_client),
-            )
-        except Exception:
-            control_client.close()
-            raise
-
-    def __init__(
-        self,
-        config: MooncakeECConfig,
-        hostname: str,
-        control_client: ControlClient,
-        topology: ShardTopology,
-    ) -> None:
+        config = MooncakeECConfig.from_vllm_config(vllm_config)
         self.is_producer = config.is_producer
         self.is_consumer = config.is_consumer
         self._buffer_device = config.buffer_device
-        self._reservation_zmq_port = config.reservation_port
-        self._transfer = MooncakeTransfer(hostname, config.protocol)
-        self._consumer_worker_metrics: Counter[str] = Counter()
+        self._control_port = config.control_port
+        self._transfer = MooncakeTransfer(get_ip(), config.protocol)
         self._consumer_memory = ConsumerMemoryPool(
-            config.consumer_pool_size,
+            config.pool_size,
             self._transfer,
         )
         self._reservations = ConsumerReservationManager(
             self._consumer_memory,
-            _LEASE_TTL_SECONDS,
+            _RESERVATION_TTL_SECONDS,
             _MAX_CANCELLED_TRANSFER_IDS,
         )
         self._consumer_rank_resolved = False
@@ -221,32 +106,24 @@ class ECMooncakeWorker:
         self._tp_rank = 0
         self._tp_size = 1
         self._control_server: ConsumerControlServer | None = None
-        self._consumer_metrics_log_interval = config.consumer_metrics_log_interval
-        self._consumer_metrics_started_at = time.monotonic()
         # Worker producer
         self._producer_memory = ProducerMemoryPool(
-            config.producer_pool_size,
+            config.pool_size,
             self._transfer,
         )
-        self._transfer_metrics_log_interval = config.transfer_metrics_log_interval
-        self._control_client = control_client
-        self._topology = topology
-        self._producer_metrics: Counter[str] = Counter()
+        self._control_client = ControlClient(config.control_timeout_ms)
+        self._shutdown_drain_timeout_s = config.control_timeout_ms / 1000
         self._io_executor = ThreadPoolExecutor(
-            max_workers=config.transfer_workers,
+            max_workers=_TRANSFER_WORKERS,
             thread_name_prefix="ec-mooncake-transfer",
         )
         self._control_executor = ThreadPoolExecutor(
-            max_workers=config.control_workers,
+            max_workers=_CONTROL_WORKERS,
             thread_name_prefix="ec-mooncake-control",
         )
         self._shard_pool: ThreadPoolExecutor | None = None
         self._shard_pool_lock = threading.Lock()
         self._producer_pushes = ProducerPushManager()
-        self._push_perf_lock = threading.Lock()
-        self._push_perf = _PushPerfWindow()
-        self._active_transfer_batches = 0
-        self._queued_transfer_batches = 0
         self._completed_loads: set[str] = set()
         self._failed_loads: set[str] = set()
         self._shutdown = False
@@ -271,41 +148,28 @@ class ECMooncakeWorker:
             self._is_receiving_rank = True
 
     def start_services(self) -> None:
-        if (
-            not self.is_consumer
-            or self._reservation_zmq_port is None
-            or self._control_server is not None
-        ):
+        if not self.is_consumer or self._control_server is not None:
             return
         self._resolve_consumer_rank()
         if not self._is_receiving_rank:
             # Later pipeline stages hold no encoder outputs, so they need
             # neither a receive pool nor a control channel.
             return
-        raw_device = self._buffer_device
-        device_name = (
-            raw_device.lower() if isinstance(raw_device, str) and raw_device else "cuda"
-        )
-        self._consumer_memory.prepare(
-            torch.device(device_name),
-            receiving_rank=self._is_receiving_rank,
-            allow_host=True,
-        )
+        self._consumer_memory.prepare(torch.device(self._buffer_device))
         consumer_pool = self._consumer_memory.tensor
         if consumer_pool is None:
             raise RuntimeError(
                 "Mooncake push mode requires a registered consumer buffer pool."
             )
-        base_port = self._reservation_zmq_port
+        base_port = self._control_port
         self._control_server = ConsumerControlServer(
             "0.0.0.0",
             base_port + self._tp_rank,
             self._reserve_push_destination,
             self._push_status,
-            self._complete_push,
-            self._cancel_push,
-            self._expire_push_reservations,
-            self._consumer_metrics_log_interval,
+            self._reservations.complete,
+            self._reservations.cancel,
+            self._reservations.expire,
             peer_ports=[base_port + rank for rank in range(self._tp_size)],
             device=consumer_pool.device,
         )
@@ -315,62 +179,6 @@ class ECMooncakeWorker:
             self._control_server.close()
             self._control_server = None
             raise
-
-    def _maybe_log_consumer_worker_metrics(self) -> None:
-        now = time.monotonic()
-        if (
-            self._consumer_metrics_log_interval <= 0
-            or now - self._consumer_metrics_started_at
-            < self._consumer_metrics_log_interval
-        ):
-            return
-        with self._consumer_memory.lock:
-            reservations = self._reservations.active_records()
-            ready = [
-                record.mm_hash
-                for record in reservations
-                if record.state is ConsumerReservationState.READY
-            ]
-            pending = [
-                record.mm_hash
-                for record in reservations
-                if record.state is not ConsumerReservationState.READY
-            ]
-            metrics = dict(self._consumer_worker_metrics)
-            self._consumer_worker_metrics.clear()
-            metrics.update(self._consumer_memory.take_metrics())
-            residents, live, retired, pending_frees = self._consumer_memory.stats()
-            oldest_reservation_ms = max(
-                ((now - reservation.created_at) * 1000 for reservation in reservations),
-                default=0.0,
-            )
-        logger.info(
-            "EC Mooncake consumer worker: lifecycle=%s, reservations_ready=%d, "
-            "reservations_pending=%d, residents=%d, live=%d, retired=%d, "
-            "pending_frees=%d, "
-            "oldest_reservation_ms=%.1f, ready_hashes=%s, pending_hashes=%s",
-            metrics,
-            len(ready),
-            len(pending),
-            residents,
-            live,
-            retired,
-            pending_frees,
-            oldest_reservation_ms,
-            [value[:16] for value in ready[:5]],
-            [value[:16] for value in pending[:5]],
-        )
-        self._consumer_metrics_started_at = now
-
-    def _expire_push_reservations(self) -> int:
-        return self._record_expiry_metrics(self._reservations.expire())
-
-    def _record_expiry_metrics(self, counts: tuple[int, int, int]) -> int:
-        expired, deferred, tombstones_dropped = counts
-        self._consumer_worker_metrics["reservations_expired"] += expired
-        self._consumer_worker_metrics["cancellations_deferred"] += deferred
-        self._consumer_worker_metrics["cancel_records_dropped"] += tombstones_dropped
-        return expired
 
     def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
         transfer_id = str(payload["transfer_id"])
@@ -385,18 +193,16 @@ class ECMooncakeWorker:
         if expected_nbytes != nbytes:
             raise ValueError("shape and dtype do not match nbytes")
 
-        self._expire_push_reservations()
-        reservation, should_write, reused, expiry_counts = self._reservations.reserve(
+        self._reservations.expire()
+        reservation, should_write = self._reservations.reserve(
             transfer_id, mm_hash, nbytes, shape, dtype_name, dtype
         )
-        self._record_expiry_metrics(expiry_counts)
         if reservation is None:
             raise RuntimeError("EC consumer buffer pool is full")
         if reservation.state in {
             ConsumerReservationState.CANCEL_PENDING,
             ConsumerReservationState.CANCELLED,
         }:
-            self._consumer_worker_metrics["reservations_cancelled_early"] += 1
             return {
                 "reservation_id": "",
                 "dst_session": "",
@@ -406,17 +212,6 @@ class ECMooncakeWorker:
                 "ready": False,
                 "cancelled": True,
             }
-        if reused:
-            key = (
-                "reservations_reused_ready"
-                if reservation.state is ConsumerReservationState.READY
-                else "reservations_reused_pending"
-            )
-            self._consumer_worker_metrics[key] += 1
-        elif reservation.lease is not None:
-            self._consumer_worker_metrics["reservations_cached"] += 1
-        else:
-            self._consumer_worker_metrics["reservations_created"] += 1
         assert reservation.allocation is not None
 
         return {
@@ -442,51 +237,6 @@ class ECMooncakeWorker:
             "shape": list(reservation.shape),
             "dtype": reservation.dtype,
         }
-
-    def _complete_push(
-        self, transfer_id: str, reservation_id: str
-    ) -> ControlCompletion:
-        result = self._reservations.complete(transfer_id, reservation_id)
-        if not result.accepted:
-            self._consumer_worker_metrics["completions_rejected"] += 1
-        elif result.repeated:
-            self._consumer_worker_metrics["completions_repeated"] += 1
-        else:
-            self._consumer_worker_metrics["completions_accepted"] += 1
-        if result.discarded:
-            self._consumer_worker_metrics["reservations_discarded"] += 1
-        return ControlCompletion(result.accepted, result.became_ready)
-
-    def _cancel_push(
-        self,
-        transfer_id: str,
-        reservation_id: str,
-        abandon: bool = False,
-        refresh: bool = False,
-    ) -> bool:
-        outcome, tombstones_dropped = self._reservations.cancel(
-            transfer_id, reservation_id, abandon, refresh
-        )
-        metrics = {
-            CancellationOutcome.REJECTED: "cancellations_rejected",
-            CancellationOutcome.PRE_RESERVED: "cancellations_pre_reserved",
-            CancellationOutcome.DEFERRED: "cancellations_deferred",
-            CancellationOutcome.CANCELLED: "reservations_cancelled",
-        }
-        self._consumer_worker_metrics[metrics[outcome]] += 1
-        self._consumer_worker_metrics["cancel_records_dropped"] += tombstones_dropped
-        return outcome is not CancellationOutcome.REJECTED
-
-    def _take_pushed_tensor(
-        self, spec: ECMooncakeLoadSpec
-    ) -> tuple[torch.Tensor, MemoryAllocation]:
-        try:
-            allocation = self._reservations.take(spec.transfer_id, spec.mm_hash)
-        except RuntimeError:
-            self._consumer_worker_metrics["takes_rejected"] += 1
-            raise
-        self._consumer_worker_metrics["reservations_taken"] += 1
-        return allocation.tensor, allocation
 
     def _shard_executor(self) -> ThreadPoolExecutor:
         """Use a separate pool so nested shard fan-out cannot deadlock."""
@@ -520,6 +270,11 @@ class ECMooncakeWorker:
         tasks: list[Callable[[], _T]],
         on_submit: Callable[[int, Future[_T]], None] | None = None,
     ) -> list[_T]:
+        """Run every started shard task and retain partial results on failure.
+
+        Waiting for all submitted tasks is what makes source-memory release and
+        partial-reservation cleanup safe after one shard fails.
+        """
         if not tasks:
             return []
         futures: list[tuple[int, Future[_T]]] = []
@@ -564,8 +319,13 @@ class ECMooncakeWorker:
             return
 
         def cancel(shard: dict[str, Any]) -> dict[str, Any]:
+            addr = shard.get("addr")
+            if not isinstance(addr, str) or not addr:
+                raise RuntimeError(
+                    "EC reservation is missing a confirmed shard address"
+                )
             result = self._control_client.request(
-                str(shard.get("addr", spec.consumer_zmq)),
+                addr,
                 make_cancel_request(
                     spec.transfer_id,
                     str(shard.get("reservation_id", "")),
@@ -611,19 +371,38 @@ class ECMooncakeWorker:
 
     def _reserve_remote(self, spec: ECMooncakePushSpec) -> list[dict[str, Any]]:
         """Reserve a destination on every shard of the consumer."""
-        shards = self._topology.shards(spec.consumer_zmq)
+        shards = None
+        for _ in range(_CANCEL_ATTEMPTS):
+            shards = self._control_client.discover_shards(spec.consumer_zmq)
+            if shards is not None:
+                break
+        if shards is None:
+            raise RuntimeError(
+                f"Could not discover every EC consumer shard at {spec.consumer_zmq}"
+            )
         tasks: list[Callable[[], dict[str, Any]]] = [
             partial(self._reserve_one, addr, spec) for addr in shards
         ]
         try:
             return self._run_fanout(tasks)
         except _FanoutError as exc:
-            successful = [result for result in exc.results if isinstance(result, dict)]
+            # Keep one cleanup entry per confirmed shard.  A missing result
+            # means the reservation outcome is unknown, so transfer-level
+            # cancellation with an empty reservation ID is the only safe
+            # idempotent action for that exact address.
+            reservations = []
+            for addr, result in zip(shards, exc.results):
+                if isinstance(result, dict):
+                    result["addr"] = addr
+                    reservations.append(result)
+                else:
+                    reservations.append({"addr": addr, "reservation_id": ""})
+            exc.results[:] = reservations
             try:
-                self._retry_cancel_reservations(spec, successful)
+                self._retry_cancel_reservations(spec, reservations)
             except _FanoutError as cleanup_error:
-                raise _ReservationFanoutError(exc, successful) from cleanup_error
-            raise _ReservationFanoutError(exc, successful) from exc
+                raise exc from cleanup_error
+            raise
 
     def _refresh_remote_reservations(
         self,
@@ -653,9 +432,8 @@ class ECMooncakeWorker:
 
     @staticmethod
     def _validate_push_source(push: ProducerPushRecord) -> None:
-        source = push.source
-        assert source is not None
-        tensor = source.tensor
+        tensor = push.source_tensor
+        assert tensor is not None
         spec = push.spec
         if tuple(tensor.shape) != tuple(spec.shape):
             raise ValueError(f"EC source shape mismatch for mm_hash={spec.mm_hash}")
@@ -700,9 +478,7 @@ class ECMooncakeWorker:
             # Later pipeline stages never gather multimodal embeddings.
             return
         self._transfer.ensure_ready()
-        raw_buf = self._buffer_device
-        buf = raw_buf.lower() if isinstance(raw_buf, str) and raw_buf else "cuda"
-        if buf == "cuda" and not torch.accelerator.is_available():
+        if self._buffer_device == "cuda" and not torch.accelerator.is_available():
             raise RuntimeError(
                 "ECMooncakeConnector requires CUDA for ec_buffer_device=cuda"
             )
@@ -710,27 +486,22 @@ class ECMooncakeWorker:
 
         for spec in metadata.loads:
             if spec.mm_hash in encoder_cache:
-                if spec.pushed:
+                if not spec.local:
                     # The spec's id is one shard's; cancel by transfer.
-                    self._cancel_push(spec.transfer_id, "")
+                    self._reservations.cancel(spec.transfer_id, "")
                 self._completed_loads.add(spec.mm_hash)
                 continue
             if spec.local:
                 tensor = self._consumer_memory.take_resident(
                     spec.mm_hash, tuple(spec.shape), spec.dtype
                 )
-            elif spec.pushed:
+            else:
                 try:
-                    tensor, _ = self._take_pushed_tensor(spec)
+                    allocation = self._reservations.take(spec.transfer_id, spec.mm_hash)
+                    tensor = allocation.tensor
                 except RuntimeError as e:
                     logger.warning("EC Mooncake pushed load failed: %s", e)
                     tensor = None
-            else:
-                logger.warning(
-                    "EC Mooncake load for mm_hash=%s has no transfer to take",
-                    spec.mm_hash,
-                )
-                tensor = None
             if tensor is None:
                 self._failed_loads.add(spec.mm_hash)
             else:
@@ -739,23 +510,12 @@ class ECMooncakeWorker:
 
     def _push_batch(self, pushes: list[ProducerPushRecord]) -> None:
         started_at = time.monotonic()
-        with self._push_perf_lock:
-            self._queued_transfer_batches -= 1
-            self._active_transfer_batches += 1
-
-        queue_waits_ms = []
-        for push in pushes:
-            assert push.source_at is not None
-            queue_waits_ms.append(max(0, started_at - push.source_at) * 1000)
-        stage_ms = {"queue": sum(queue_waits_ms), **dict.fromkeys(_PUSH_STAGES, 0.0)}
         ready: list[tuple[ProducerPushRecord, dict[str, Any]]] = []
         written_pushes: dict[str, ProducerPushRecord] = {}
-        failed = False
         failure: Exception | None = None
         try:
             for push in pushes:
                 self._validate_push_source(push)
-                stage_started_at = time.monotonic()
                 reservations = self._producer_pushes.resolve_reservations(push)
                 stale = [
                     index
@@ -770,7 +530,6 @@ class ECMooncakeWorker:
                         push.spec, reservations, push
                     )
                     self._producer_pushes.replace_reservations(push, reservations)
-                stage_ms["reserve"] += (time.monotonic() - stage_started_at) * 1000
                 self._producer_pushes.begin_writing(push)
                 writable = [
                     shard
@@ -779,14 +538,12 @@ class ECMooncakeWorker:
                     and not shard.get("cancelled", False)
                     and shard.get("write", True)
                 ]
-                source = push.source
+                source = push.source_tensor
                 assert source is not None
-                if writable and source.ready_event is not None:
-                    stage_started_at = time.monotonic()
-                    source.ready_event.synchronize()
-                    stage_ms["cuda"] += (time.monotonic() - stage_started_at) * 1000
+                if writable and push.source_event is not None:
+                    push.source_event.synchronize()
                 for shard in writable:
-                    if int(shard["nbytes"]) != source.tensor.nbytes:
+                    if int(shard["nbytes"]) != source.nbytes:
                         raise RuntimeError(
                             "Reserved EC size does not match tensor for "
                             f"mm_hash={push.spec.mm_hash}"
@@ -800,12 +557,11 @@ class ECMooncakeWorker:
                     for index, push in enumerate(written_pushes.values())
                 }
                 tensors = [
-                    push.source.tensor
+                    cast(torch.Tensor, push.source_tensor)
                     for push in written_pushes.values()
-                    if push.source
+                    if push.source_tensor is not None
                 ]
                 lengths = [tensor.nbytes for tensor in tensors]
-                stage_started_at = time.monotonic()
                 staged = self._producer_memory.stage(tensors)
                 registered_sources: list[int] = []
                 if staged is not None:
@@ -819,7 +575,6 @@ class ECMooncakeWorker:
                     sources = tensors
                     registered_sources = self._transfer.acquire_sources(tensors)
                 addresses = [tensor.data_ptr() for tensor in sources]
-                stage_ms["register"] = (time.monotonic() - stage_started_at) * 1000
                 try:
                     by_session: dict[str, list[tuple[int, int]]] = {}
                     session_records: dict[str, dict[str, ProducerPushRecord]] = {}
@@ -831,7 +586,6 @@ class ECMooncakeWorker:
                         session_records.setdefault(session, {})[
                             push.spec.transfer_id
                         ] = push
-                    stage_started_at = time.monotonic()
 
                     def write(session: str, items: list[tuple[int, int]]) -> None:
                         self._transfer.write(
@@ -854,24 +608,16 @@ class ECMooncakeWorker:
                         partial(write, *session) for session in sessions
                     ]
                     self._run_fanout(writes, track_write)
-                    stage_ms["rdma"] = (time.monotonic() - stage_started_at) * 1000
                 finally:
-                    stage_started_at = time.monotonic()
                     if staged is not None:
                         self._producer_memory.release(staged)
                     self._transfer.release_sources(registered_sources)
-                    stage_ms["unregister"] = (
-                        time.monotonic() - stage_started_at
-                    ) * 1000
 
             self._producer_pushes.begin_notifying(pushes)
-            stage_started_at = time.monotonic()
             self._notify_completions(ready)
-            stage_ms["complete"] = (time.monotonic() - stage_started_at) * 1000
             self._producer_pushes.complete(pushes)
         except Exception as exc:
             # Report asynchronously; raising here would fail EngineCore.
-            failed = True
             failure = exc
             logger.exception(
                 "EC Mooncake push batch failed for mm_hashes=%s",
@@ -882,15 +628,6 @@ class ECMooncakeWorker:
         finally:
             if failure is not None:
                 self._producer_pushes.fail(pushes, failure)
-            stage_ms["total"] = (time.monotonic() - started_at) * 1000
-            self._record_push_perf(
-                stage_ms,
-                stage_max_ms={"queue": max(queue_waits_ms, default=0.0)},
-                item_count=len(pushes),
-                byte_count=sum(push.spec.nbytes for push in written_pushes.values()),
-                skipped_items=len(pushes) - len(written_pushes),
-                failed=failed,
-            )
 
     def _notify_completions(
         self, notifications: list[tuple[ProducerPushRecord, dict[str, Any]]]
@@ -949,22 +686,22 @@ class ECMooncakeWorker:
     def _known_reservations(record: ProducerPushRecord) -> list[dict[str, Any]]:
         if record.reservations:
             return list(record.reservations)
-        reservations: list[dict[str, Any]] = []
-        for future in record.reservation_futures:
-            try:
-                reservations.extend(future.result())
-            except _ReservationFanoutError as exc:
-                reservations.extend(exc.partial_reservations)
-            except Exception:
-                continue
-        return reservations
+        try:
+            return list(record.reservation_future.result())
+        except _FanoutError as exc:
+            return [result for result in exc.results if isinstance(result, dict)]
+        except Exception:
+            return []
 
     def _abandon_pushes(self, pushes: list[ProducerPushRecord]) -> None:
         """Release the consumer-side reservations of a batch that failed."""
         for push in pushes:
             shards = self._known_reservations(push)
             if not shards:
-                shards = [{"addr": push.spec.consumer_zmq, "reservation_id": ""}]
+                # No confirmed topology means there is no safe address to
+                # cancel.  The original push failure remains observable via
+                # ProducerPushManager.fail below.
+                continue
             try:
                 self._retry_cancel_reservations(push.spec, shards, record=push)
             except _FanoutError:
@@ -973,84 +710,11 @@ class ECMooncakeWorker:
                     push.spec.transfer_id,
                 )
 
-    def _record_push_perf(
-        self,
-        stage_ms: dict[str, float],
-        *,
-        stage_max_ms: dict[str, float],
-        item_count: int,
-        byte_count: int,
-        skipped_items: int,
-        failed: bool,
-    ) -> None:
-        now = time.monotonic()
-        report: tuple[_PushPerfWindow, int, int] | None = None
-        with self._push_perf_lock:
-            self._active_transfer_batches -= 1
-            perf = self._push_perf
-            perf.batches += 1
-            perf.items += item_count
-            perf.bytes += byte_count
-            perf.skipped_items += skipped_items
-            perf.failures += int(failed)
-            for stage, elapsed_ms in stage_ms.items():
-                perf.stage_totals_ms[stage] = (
-                    perf.stage_totals_ms.get(stage, 0.0) + elapsed_ms
-                )
-                perf.stage_max_ms[stage] = max(
-                    perf.stage_max_ms.get(stage, 0.0),
-                    stage_max_ms.get(stage, elapsed_ms),
-                )
-            if (
-                self._transfer_metrics_log_interval > 0
-                and now - perf.started_at >= self._transfer_metrics_log_interval
-            ):
-                report = (
-                    perf,
-                    self._active_transfer_batches,
-                    self._queued_transfer_batches,
-                )
-                self._push_perf = _PushPerfWindow(started_at=now)
-        if report is None:
-            return
-        perf, active_batches, queued_batches = report
-        batches = max(perf.batches, 1)
-        items = max(perf.items, 1)
-        stage_parts = []
-        for stage in ("queue", *_PUSH_STAGES, "total"):
-            divisor = items if stage == "queue" else batches
-            average = perf.stage_totals_ms.get(stage, 0.0) / divisor
-            maximum = perf.stage_max_ms.get(stage, 0.0)
-            stage_parts.append(f"{stage}_ms={average:.1f}/{maximum:.1f}")
-        stage_summary = " ".join(stage_parts)
-        producer_metrics = dict(self._producer_metrics)
-        self._producer_metrics.clear()
-        logger.info(
-            "EC Mooncake push perf: batches=%d items=%d bytes=%d "
-            "batch_items=%.1f skipped=%d failures=%d active=%d queued=%d "
-            "producer=%s queue_item_avg/max and stage_batch_avg/max: %s",
-            perf.batches,
-            perf.items,
-            perf.bytes,
-            perf.items / batches,
-            perf.skipped_items,
-            perf.failures,
-            active_batches,
-            queued_batches,
-            producer_metrics,
-            stage_summary,
-        )
-
     def _flush_pending_pushes(self) -> None:
         self._producer_pushes.submit_batches(
             self._io_executor,
             self._push_batch,
-            self._note_push_batch_queued,
         )
-
-    def _note_push_batch_queued(self) -> None:
-        with self._push_perf_lock:
-            self._queued_transfer_batches += 1
 
     def _bind_push_source(self, tensor: torch.Tensor, mm_hash: str) -> None:
         ready_event = None
@@ -1060,26 +724,37 @@ class ECMooncakeWorker:
         self._producer_pushes.bind_source(mm_hash, tensor, ready_event)
 
     def _cancel_orphaned_reservation(self, record: ProducerPushRecord) -> None:
+        resolution_error: Exception | None = None
         try:
             reservations = self._producer_pushes.resolve_reservations(record)
-        except Exception:
+        except Exception as exc:
+            resolution_error = exc
             reservations = self._known_reservations(record)
-        known = bool(reservations)
         reservations = [
-            shard
-            for shard in reservations
-            if not shard.get("cached", False) and not shard.get("cancelled", False)
+            shard for shard in reservations if not shard.get("cancelled", False)
         ]
-        if not known:
-            reservations = [{"addr": record.spec.consumer_zmq, "reservation_id": ""}]
-        error = None
+        if not reservations:
+            if resolution_error is not None:
+                self._producer_pushes.fail([record], resolution_error)
+            else:
+                self._producer_pushes.finish_cancel(record)
+            return
         try:
             self._retry_cancel_reservations(record.spec, reservations, record=record)
-        except _FanoutError as exc:
-            error = exc
-        self._producer_pushes.finish_cancel(record)
-        if error is not None:
-            raise error
+        except Exception as cleanup_error:
+            if resolution_error is not None:
+                combined_error = RuntimeError(
+                    f"EC reservation resolution failed ({resolution_error}); "
+                    f"cleanup also failed ({cleanup_error})"
+                )
+                combined_error.__cause__ = resolution_error
+                cleanup_error = combined_error
+            self._producer_pushes.fail([record], cleanup_error)
+            return
+        if resolution_error is not None:
+            self._producer_pushes.fail([record], resolution_error)
+        else:
+            self._producer_pushes.finish_cancel(record)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1111,7 +786,6 @@ class ECMooncakeWorker:
 
         self._flush_pending_pushes()
         failures = self._producer_pushes.poll()
-        self._producer_metrics["saves_failed"] += len(failures)
         for mm_hash, error in failures:
             logger.error(
                 "EC Mooncake async save failed for mm_hash=%s: %s",
@@ -1123,32 +797,43 @@ class ECMooncakeWorker:
             loaded=self._completed_loads,
             failed_loads=self._failed_loads,
             reclaimed=reclaimed,
-            pending_loads=False,
             pending_saves=self._producer_pushes.pending,
         )
         self._completed_loads = set()
         self._failed_loads = set()
-        if self.is_consumer:
-            self._maybe_log_consumer_worker_metrics()
         return meta
 
     def close(self) -> None:
         if self._shutdown:
             return
         self._shutdown = True
-        self._flush_pending_pushes()
-        self._io_executor.shutdown(wait=True, cancel_futures=True)
-        if self._shard_pool is not None:
-            self._shard_pool.shutdown(wait=True, cancel_futures=True)
-        self._control_executor.shutdown(wait=True, cancel_futures=True)
-        # Every thread that could hold a control socket is stopped by now.
-        self._control_client.close()
         if self._control_server is not None:
+            self._reservations.begin_shutdown()
+        self._flush_pending_pushes()
+        for record in self._producer_pushes.cancel_requests(None):
+            self._producer_pushes.submit_cancel(
+                record,
+                self._io_executor,
+                self._cancel_orphaned_reservation,
+            )
+        self._io_executor.shutdown(wait=True)
+        self._control_executor.shutdown(wait=True)
+        if self._shard_pool is not None:
+            self._shard_pool.shutdown(wait=True)
+        # Every producer-side thread that could hold a control socket is stopped.
+        self._control_client.close()
+        drained = True
+        if self._control_server is not None:
+            drained = self._reservations.wait_for_writers(
+                self._shutdown_drain_timeout_s
+            )
             self._control_server.close()
-        self._consumer_memory.close()
+        if drained:
+            self._consumer_memory.close()
+        else:
+            logger.error(
+                "Timed out waiting for Mooncake EC writers; keeping the consumer "
+                "receive pool registered"
+            )
         self._producer_memory.close()
         self._transfer.close()
-
-    def __del__(self) -> None:
-        with suppress(Exception):
-            self.close()

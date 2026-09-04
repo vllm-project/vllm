@@ -86,6 +86,17 @@ def encoder_rr_assignment(
     return urls, next_start
 
 
+def validate_ec_consumer_routing(
+    prefill_urls: list[str], consumer_addrs: list[str]
+) -> None:
+    """Reject the topology whose EC destination cannot be routed safely."""
+    if prefill_urls and consumer_addrs:
+        raise ValueError(
+            "Mooncake EC consumer routing supports E+PD only; disable independent "
+            "prefill or omit --ec-consumer-zmq-addrs."
+        )
+
+
 # Diagnostic switch: forward the original request to the decoder so the
 # only difference from the rewrite path is the rewrite itself.
 NO_REWRITE = False
@@ -914,9 +925,9 @@ if __name__ == "__main__":
         default="",
         help=(
             "Comma-separated Mooncake EC consumer control addresses, aligned "
-            "with --decode-servers-urls. Required when the consumers use the "
-            "Mooncake EC connector. With --ec-consumer-dp-size > 1, list each "
-            "server's replicas consecutively: s0r0,s0r1,s1r0,s1r1."
+            "with --decode-servers-urls. Required for Mooncake EC consumers and "
+            "supported only in E+PD mode. With --ec-consumer-dp-size > 1, list "
+            "each server's replicas consecutively: s0r0,s0r1,s1r0,s1r1."
         ),
     )
     parser.add_argument(
@@ -968,6 +979,10 @@ if __name__ == "__main__":
             u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
         ]
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
+    try:
+        validate_ec_consumer_routing(app.state.p_urls, app.state.d_ec_urls)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)
     logger.info("Encode servers: %s", app.state.e_urls)
