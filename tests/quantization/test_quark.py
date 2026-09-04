@@ -1125,6 +1125,44 @@ class AccuracyTestConfig:
         return model_args
 
 
+WIKITEXT_ACCURACY_CONFIGS = [
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
+        excepted_value=11.3,
+    ),
+    AccuracyTestConfig(
+        model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
+        excepted_value=10.6,
+    ),
+]
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize(
+    "config", WIKITEXT_ACCURACY_CONFIGS, ids=lambda config: config.model_name
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(
+            tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
+        ),
+        tasks="wikitext",
+        batch_size=64,
+    )
+
+    measured_value = results["results"]["wikitext"]["word_perplexity,none"]
+    assert measured_value == pytest.approx(config.excepted_value, abs=0.1)
+
+
 GSM8K_ACCURACY_CONFIGS = [
     # Private model.
     AccuracyTestConfig(
