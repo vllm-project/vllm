@@ -673,6 +673,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w.kv_caches_base_addr = {}
     w.dst_num_blocks = {}
     w.tp_mappings = {}
+    w._mamba_conv_replicated = {}
     w.transfer_topo = None
     w._logical_to_kernel_block_ids = lambda blocks, ratio: blocks
     w.writes = []
@@ -702,6 +703,7 @@ def test_stale_engine_evicted_on_push():
     across D scale up/down (S1)."""
     w = _eviction_worker(engine_ttl=30.0)
     w._remote_agents["D-old"] = {(0, 0): "agent-D-old"}
+    w._mamba_conv_replicated["D-old"] = True
     w._engine_last_active["D-old"] = time.perf_counter() - 10_000.0
     # The engine being pushed to is already connected.
     w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
@@ -710,6 +712,7 @@ def test_stale_engine_evicted_on_push():
 
     assert "D-old" not in w._remote_agents
     assert "D-old" not in w._engine_last_active
+    assert "D-old" not in w._mamba_conv_replicated
     w.nixl_wrapper.remove_remote_agent.assert_called_once_with("agent-D-old")
 
 

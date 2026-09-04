@@ -888,7 +888,8 @@ def _make_mock_worker_for_desc_ids(
 
 
 @pytest.mark.cpu_test
-def test_get_block_descs_ids_hybrid_ssm():
+@pytest.mark.parametrize("skip_replicated_conv", [False, True])
+def test_get_block_descs_ids_hybrid_ssm(skip_replicated_conv):
     """Test _compute_desc_ids uses per-group strides for hybrid
     FA+SSM when ratio=1 (no kernel block size mismatch)."""
     from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
@@ -907,9 +908,14 @@ def test_get_block_descs_ids_hybrid_ssm():
         dst_num_blocks=100,
         block_size_ratio=None,
         physical_blocks_per_logical=1,
+        skip_replicated_conv=skip_replicated_conv,
     )
 
-    expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
+    expected = (
+        [3, 5, 103, 105, 201, 202, 501, 502]
+        if skip_replicated_conv
+        else [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
+    )
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
@@ -1353,6 +1359,9 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
 @pytest.mark.parametrize(
     "mamba_type,local_tp,conv_dim_local,conv_rows,temporal_shape,expected_proj_dims",
     [
+        # Falcon-H1-0.5B: single B/C group is replicated across TP ranks.
+        ("mamba2", 1, 1792, 3, (24, 64, 128), (1536, 128, 128)),
+        ("mamba2", 2, 1024, 3, (12, 64, 128), (768, 128, 128)),
         # nvidia/Nemotron-H-8B-Base-8K (Mamba2)
         # mamba_num_heads=128, head_dim=64, n_groups=8, ssm_state_size=128
         pytest.param(
@@ -1505,6 +1514,54 @@ def test_derive_mamba_conv_split(
     out = derive_mamba_conv_split(spec, local_tp=local_tp)
     assert out.local_proj_dims == expected_proj_dims
     assert out.conv_rows == conv_rows
+    if mamba_type == "mamba2":
+        assert out.mamba2_state_size == temporal_shape[2]
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "x_dim,tp_ratio,rank,remote_bytes,expected",
+    [
+        (768, 2, 0, 10752, [(0, 4608), (9216, 768), (9984, 768)]),
+        (768, 2, 1, 10752, [(4608, 4608), (9216, 768), (9984, 768)]),
+        (1536, -2, 0, 6144, [(0, 4608), (4608, 768), (5376, 768)]),
+    ],
+)
+def test_mamba_remote_conv_replicated_offsets(
+    x_dim, tp_ratio, rank, remote_bytes, expected
+):
+    """Single-group B/C reads stay whole in both TP transfer directions."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    split = MambaConvSplitInfo(3, (x_dim, 128, 128), 2, (0, 0), 128)
+    assert split.remote_conv_offsets(rank, tp_ratio, remote_bytes) == expected
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("remote_conv_bytes", [0, 10751, 10754, 11520, 19968])
+def test_mamba_remote_conv_rejects_incompatible_layout(remote_conv_bytes):
+    """Reject partial columns, mismatched groups and invalid advertised sizes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    split = MambaConvSplitInfo(3, (768, 128, 128), 2, (6144, 196608), 128)
+    with pytest.raises(ValueError):
+        split.remote_conv_offsets(0, 2, remote_conv_bytes)
+
+
+@pytest.mark.cpu_test
+def test_mamba_remote_conv_rejects_read_into_next_projection():
+    """An invalid rank offset must not read B while remaining inside conv."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        MambaConvSplitInfo,
+    )
+
+    split = MambaConvSplitInfo(3, (768, 128, 128), 2, (6144, 196608), 128)
+    with pytest.raises(ValueError, match="exceeds its remote projection"):
+        split.remote_conv_offsets(2, 2, 10752)
 
 
 @pytest.mark.cpu_test

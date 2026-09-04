@@ -656,17 +656,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
 
         # Get descs ids.
+        skip_replicated_conv = self._skip_replicated_mamba_conv(
+            dst_engine_id, remote_rank
+        )
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            skip_replicated_conv=skip_replicated_conv,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            skip_replicated_conv=skip_replicated_conv,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)

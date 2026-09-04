@@ -98,7 +98,9 @@ class _RecordingNixl:
         pass
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, state_tp_size=2
+):
     """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
@@ -124,7 +126,8 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     unified_page = mla_spec.page_size_bytes
     kda_spec = MambaSpec(
         block_size=local_block_size,
-        shapes=((8, 3), (1, 4, 4)),
+        # Keep complete convolution columns in every TP shard.
+        shapes=((4 * state_tp_size, 3), (state_tp_size, 2, 4)),
         dtypes=(torch.float16, torch.float32),
         page_size_padded=unified_page,
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
@@ -553,15 +556,15 @@ def _run_hetero_case(
         local_block_size=local_block,
         kernel_block_size=kernel,
         num_logical_blocks=max(2 * n_local + 4, 8),
+        state_tp_size=tp_size,
     )
-    # Local KDA state pages are (48, 64) bytes; the remote holds 1/tp_size
-    # shards of each.
+    # The remote holds 1/tp_size of every state projection.
     meta_r = _make_remote_meta(
         worker,
         remote_block_size=remote_block,
         remote_kernel_block_size=remote_kernel,
         remote_num_logical=max(2 * n_remote + 4, 8),
-        remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
+        remote_ssm_sizes=tuple(size // tp_size for size in worker._mamba_ssm_size),
     )
     for rank in range(tp_size):
         worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=tp_size)
