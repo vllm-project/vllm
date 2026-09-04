@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import typing
 from collections.abc import Callable, Iterable
 from inspect import signature
@@ -1224,6 +1225,25 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 activation_clamp=activation_clamp,
                 fast_math=fast_math,
             )
+        if os.getenv("MEGAMOE_FINITE_CHECK") == "1":
+            torch.accelerator.synchronize()
+            hidden_finite = torch.isfinite(hidden_states).all().item()
+            weights_finite = torch.isfinite(topk_weights).all().item()
+            output_finite = torch.isfinite(y).all().item()
+            if get_tensor_model_parallel_rank() == 0:
+                logger.warning(
+                    "MegaMoE finite check %s: hidden=%s max=%g, routing=%s "
+                    "max=%g, output=%s max=%g",
+                    self.prefix,
+                    hidden_finite,
+                    hidden_states.float().abs().max().item(),
+                    weights_finite,
+                    topk_weights.float().abs().max().item(),
+                    output_finite,
+                    y.float().abs().max().item(),
+                )
+            if not hidden_finite or not weights_finite or not output_finite:
+                raise RuntimeError(f"Non-finite MegaMoE tensor in {self.prefix}")
         return y
 
 
