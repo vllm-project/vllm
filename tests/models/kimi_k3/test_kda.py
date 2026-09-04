@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -22,8 +23,12 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
 from vllm.models.kimi_k3.nvidia.kda import (
+    _flashinfer_fused_kda_decode,
+    _flashinfer_kda_prefill,
     _flashkda_prefill,
     _store_cache_checkpoints_kernel,
+    is_flashinfer_fused_kda_decode_supported,
+    is_flashinfer_recurrent_kda_prefill_supported,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
@@ -87,6 +92,7 @@ def test_kda_recoverssm_config_state_layout():
         ),
         cache_config=SimpleNamespace(
             mamba_cache_dtype="auto",
+            mamba_ssm_cache_dtype="auto",
             use_kda_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
@@ -909,6 +915,7 @@ def test_kda_recoverssm_verify_and_group_commit(
         (96, 1, -5.0, True, "DS"),
     ],
 )
+@pytest.mark.parametrize("decode_backend", ["native", "flashinfer"])
 @torch.inference_mode()
 def test_fused_kda_decode_correctness(
     num_heads: int,
@@ -916,17 +923,36 @@ def test_fused_kda_decode_correctness(
     lower_bound: float | None,
     fuse_output_norm: bool,
     conv_layout: str,
+    decode_backend: str,
 ):
     D, W = 128, 4
-    if not is_fused_kda_decode_supported(
-        num_heads,
-        D,
-        W,
-        num_spec=0,
-        input_dtype=torch.bfloat16,
-        conv_state_dtype=torch.bfloat16,
-    ):
-        pytest.skip("Fused KDA decode is not supported on this platform")
+    state_dtype = torch.bfloat16 if decode_backend == "flashinfer" else torch.float32
+    if decode_backend == "flashinfer":
+        if conv_layout == "DS":
+            pytest.skip("FlashInfer fused decode requires SD conv-state layout")
+        if not fuse_output_norm:
+            pytest.skip("FlashInfer's fused decode always applies output norm")
+        supported = is_flashinfer_fused_kda_decode_supported(
+            num_heads,
+            D,
+            W,
+            num_spec=0,
+            input_dtype=torch.bfloat16,
+            conv_state_dtype=torch.bfloat16,
+            recurrent_state_dtype=state_dtype,
+        )
+    else:
+        supported = is_fused_kda_decode_supported(
+            num_heads,
+            D,
+            W,
+            num_spec=0,
+            input_dtype=torch.bfloat16,
+            conv_state_dtype=torch.bfloat16,
+            recurrent_state_dtype=state_dtype,
+        )
+    if not supported:
+        pytest.skip(f"{decode_backend} fused KDA decode is not supported")
     torch.manual_seed(967 + num_heads + num_seqs + (conv_layout == "DS"))
     dim = num_heads * D
     slots = num_seqs + 2
@@ -995,7 +1021,7 @@ def test_fused_kda_decode_correctness(
         D,
         dtype=torch.float32,
         device=DEVICE,
-    )
+    ).to(state_dtype)
 
     conv_ref = conv_seed.clone()
     state_ref = state_seed.clone()
@@ -1030,7 +1056,7 @@ def test_fused_kda_decode_correctness(
     conv_slot_elements = 3 * dim * (W - 1)
     state_slot_elements = num_heads * D * D
     conv_slot_bytes = conv_slot_elements * torch.bfloat16.itemsize
-    page_bytes = conv_slot_bytes + state_slot_elements * torch.float32.itemsize
+    page_bytes = conv_slot_bytes + state_slot_elements * state_dtype.itemsize
     cache_storage = torch.empty(slots * page_bytes, dtype=torch.uint8, device=DEVICE)
     conv_actual = torch.as_strided(
         cache_storage.view(torch.bfloat16),
@@ -1042,30 +1068,69 @@ def test_fused_kda_decode_correctness(
         ),
     )
     state_actual = torch.as_strided(
-        cache_storage.view(torch.float32),
+        cache_storage.view(state_dtype),
         size=(slots, num_heads, D, D),
-        stride=(page_bytes // torch.float32.itemsize, D * D, D, 1),
-        storage_offset=conv_slot_bytes // torch.float32.itemsize,
+        stride=(page_bytes // state_dtype.itemsize, D * D, D, 1),
+        storage_offset=conv_slot_bytes // state_dtype.itemsize,
     )
     conv_actual.copy_(conv_seed)
     state_actual.copy_(state_seed)
     fused_weight = weight.reshape(3, dim, W).transpose(1, 2).contiguous()
-    actual = ops.fused_kda_decode(
-        x=packed_x,
-        weight=fused_weight,
-        bias=None,
-        conv_state=conv_actual,
-        raw_g=raw_g,
-        raw_beta=raw_beta,
-        A_log=A_log,
-        dt_bias=dt_bias,
-        state_indices=state_indices,
-        state=state_actual,
-        lower_bound=lower_bound,
-        output_gate=output_gate if fuse_output_norm else None,
-        norm_weight=norm_weight if fuse_output_norm else None,
-        norm_eps=norm_eps,
-    )
+    if decode_backend == "flashinfer":
+        output = torch.empty(
+            1,
+            num_seqs,
+            num_heads,
+            D,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+
+        def run_flashinfer_decode() -> torch.Tensor:
+            return _flashinfer_fused_kda_decode(
+                x=packed_x,
+                weight=fused_weight,
+                conv_state=conv_actual,
+                raw_g=raw_g,
+                raw_beta=raw_beta,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                state_indices=state_indices,
+                state=state_actual,
+                output_gate=output_gate,
+                norm_weight=norm_weight,
+                lower_bound=lower_bound,
+                norm_eps=norm_eps,
+                out=output,
+            )
+
+        run_flashinfer_decode()
+        conv_actual.copy_(conv_seed)
+        state_actual.copy_(state_seed)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run_flashinfer_decode()
+        conv_actual.copy_(conv_seed)
+        state_actual.copy_(state_seed)
+        graph.replay()
+        torch.accelerator.synchronize()
+    else:
+        actual = ops.fused_kda_decode(
+            x=packed_x,
+            weight=fused_weight,
+            bias=None,
+            conv_state=conv_actual,
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            state_indices=state_indices,
+            state=state_actual,
+            lower_bound=lower_bound,
+            output_gate=output_gate if fuse_output_norm else None,
+            norm_weight=norm_weight if fuse_output_norm else None,
+            norm_eps=norm_eps,
+        )
 
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
     torch.testing.assert_close(conv_actual, conv_ref, atol=0, rtol=0)
@@ -1080,6 +1145,7 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
         num_spec=2,
         input_dtype=torch.bfloat16,
         conv_state_dtype=torch.bfloat16,
+        recurrent_state_dtype=torch.float32,
     )
 
 
@@ -1087,7 +1153,7 @@ def test_fused_kda_decode_rejects_speculative_conv_state():
 def test_flashkda_near_collinear_keys_remain_finite():
     """Guard against unstable inversion of near-collinear key blocks."""
     lower_bound = -5.0
-    if not is_flashkda_supported(128, torch.bfloat16, lower_bound):
+    if not is_flashkda_supported(128, torch.bfloat16, torch.float32, lower_bound):
         pytest.skip("FlashKDA is not supported on this platform")
 
     import vllm._flashkda_C  # noqa: F401
@@ -1134,8 +1200,134 @@ def test_flashkda_near_collinear_keys_remain_finite():
 
 
 @torch.inference_mode()
+def test_flashinfer_kda_prefill_correctness():
+    lower_bound = -5.0
+    if not is_flashinfer_recurrent_kda_prefill_supported(
+        128,
+        torch.bfloat16,
+        torch.bfloat16,
+        lower_bound,
+    ):
+        pytest.skip("FlashInfer KDA prefill is not supported on this platform")
+
+    B, T, H, D = 1, 48, 2, 128
+    torch.manual_seed(11)
+    q, k, v, raw_g = [
+        torch.randn(B, T, H, D, dtype=torch.bfloat16, device=DEVICE) for _ in range(4)
+    ]
+    raw_beta = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
+    A_log = torch.randn(H, dtype=torch.float32, device=DEVICE) * 0.5
+    dt_bias = torch.randn(H, D, dtype=torch.float32, device=DEVICE) * 0.1
+    initial_state = torch.randn(2, H, D, D, dtype=torch.bfloat16, device=DEVICE)
+    expected_initial_state = initial_state.clone()
+    cu_seqlens = torch.tensor([0, 17, T], dtype=torch.int64, device=DEVICE)
+
+    gate = lower_bound * torch.sigmoid(
+        A_log.exp()[None, None, :, None] * (raw_g.float() + dt_bias[None, None])
+    )
+    beta = raw_beta.float().sigmoid()
+    q_norm = l2norm_fwd(q.contiguous())
+    k_norm = l2norm_fwd(k.contiguous())
+
+    expected_outputs = []
+    expected_states = []
+    for i, (start, end) in enumerate(
+        zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist())
+    ):
+        output, final_state = naive_recurrent_kda(
+            q_norm[:, start:end],
+            k_norm[:, start:end],
+            v[:, start:end],
+            gate[:, start:end],
+            beta[:, start:end],
+            initial_state=expected_initial_state[i : i + 1].transpose(-1, -2),
+            output_final_state=True,
+        )
+        expected_outputs.append(output)
+        expected_states.append(final_state)
+    expected_out = torch.cat(expected_outputs, dim=1)
+    expected_state = torch.cat(expected_states).transpose(-1, -2).contiguous()
+
+    actual_out, actual_state = _flashinfer_kda_prefill(
+        q=q,
+        k=k,
+        v=v,
+        raw_g=raw_g,
+        raw_beta=raw_beta,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        lower_bound=lower_bound,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        out=torch.empty_like(v),
+        seq_order=torch.tensor([1, 0], dtype=torch.int32, device=DEVICE),
+    )
+
+    assert_close("o", expected_out, actual_out, 0.03)
+    assert_close("ht", expected_state, actual_state, 0.03)
+
+
+@torch.inference_mode()
+def test_flashinfer_kda_prefill_breakable_graph_cross_stream():
+    if not is_flashinfer_recurrent_kda_prefill_supported(
+        128,
+        torch.bfloat16,
+        torch.bfloat16,
+        -5.0,
+    ):
+        pytest.skip("FlashInfer KDA prefill is not supported on this platform")
+
+    B, T, H, D = 1, 8, 12, 128
+    q, k, v, raw_g = [
+        torch.randn(B, T, H, D, dtype=torch.bfloat16, device=DEVICE) for _ in range(4)
+    ]
+    raw_beta = torch.randn(B, T, H, dtype=torch.bfloat16, device=DEVICE)
+    initial_state = torch.randn(
+        B,
+        H,
+        D,
+        D,
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    kwargs = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "raw_g": raw_g,
+        "raw_beta": raw_beta,
+        "A_log": torch.randn(H, dtype=torch.float32, device=DEVICE),
+        "dt_bias": torch.randn(H, D, dtype=torch.float32, device=DEVICE),
+        "lower_bound": -5.0,
+        "initial_state": initial_state,
+        "cu_seqlens": torch.tensor([0, T], dtype=torch.int64, device=DEVICE),
+        "out": torch.empty_like(q),
+        "seq_order": torch.zeros(B, dtype=torch.int32, device=DEVICE),
+    }
+
+    capture_stream = torch.Stream(device=DEVICE)
+    original_stream = torch.accelerator.current_stream()
+    torch.accelerator.set_stream(capture_stream)
+    try:
+        graph_value = torch.zeros(1, device=DEVICE)
+        capture = BreakableCUDAGraphCapture()
+        with capture:
+            graph_value.add_(1)
+            capture.add_eager(lambda: _flashinfer_kda_prefill(**kwargs))
+            graph_value.add_(1)
+        capture_stream.synchronize()
+    finally:
+        torch.accelerator.set_stream(original_stream)
+
+    torch.testing.assert_close(graph_value, torch.zeros_like(graph_value))
+    capture.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(graph_value, torch.full_like(graph_value, 2))
+
+
+@torch.inference_mode()
 def test_flashkda_correctness():
-    if not is_flashkda_supported(128, torch.bfloat16, -3.0):
+    if not is_flashkda_supported(128, torch.bfloat16, torch.float32, -3.0):
         pytest.skip("FlashKDA is not supported on this platform")
 
     import vllm._flashkda_C  # noqa: F401
