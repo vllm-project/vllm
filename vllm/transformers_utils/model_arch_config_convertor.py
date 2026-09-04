@@ -332,6 +332,7 @@ class ModelArchConfigConvertorBase:
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",
+            "xingchen4",
             "hy_v4",
             "hy_v4_mtp",
         ):
