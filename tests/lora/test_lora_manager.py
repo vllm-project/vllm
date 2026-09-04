@@ -1065,6 +1065,24 @@ def _test_target_modules(
         assert not isinstance(model.get_submodule(module_path), lora_cls)
 
 
+def test_pooling_target_modules_ignore_runtime_model_prefix(dist_init, dummy_model):
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=8,
+        max_cpu_loras=1,
+        max_loras=1,
+        lora_dtype=DEFAULT_DTYPE,
+        target_modules=["layers.0.self_attn.o_proj"],
+    )
+    manager.packed_modules_mapping = {}
+    manager.is_pooling_model = True
+    manager.supported_lora_modules = ["o_proj"]
+
+    assert manager._match_target_modules(
+        "model.layers.0.self_attn.o_proj", dummy_model.dense1
+    )
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_target_modules_config(default_vllm_config, dist_init, dummy_model, device):
     """Test that target_modules config restricts which modules get LoRA applied."""

@@ -64,6 +64,13 @@ class TestIsInTargetModules:
             module_name_prefix="model.",
         )
 
+    def test_runtime_prefix_missing_from_target_module_name(self):
+        assert is_in_target_modules(
+            "model.foo.q_proj",
+            ["foo.q_proj"],
+            module_name_prefix="model.",
+        )
+
     def test_fused_parent_matches_child_target_modules(self):
         assert is_in_target_modules(
             "model.layers.0.self_attn.fused_qkv_a_proj",
