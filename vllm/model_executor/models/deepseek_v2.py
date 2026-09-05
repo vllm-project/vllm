@@ -318,6 +318,13 @@ class DeepseekV2MoE(nn.Module):
             config.hidden_size,
             config.n_routed_experts,
             out_dtype=self.router_dtype,
+            # When fp32 routing is requested, hold the weight in fp32 too.
+            # GateLinear only casts when the platform has no specialized kernel
+            # that expects the model dtype, so this is a no-op on the paths that
+            # already have one -- but it is what makes the fp32 router GEMMs
+            # reachable, including the gfx950 kernel whose shape table lists
+            # (6144, 256).
+            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
