@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -249,6 +250,72 @@ def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
     assert result.tools_called is False
     assert len(result.tool_calls) == 0
     assert result.content == model_output
+
+
+def test_extract_tool_calls_brace_in_trailing_text(parser):
+    # A brace in trailing prose must not discard the valid tool call
+    model_output = (
+        '{"name": "searchTool", "parameters": {"query": "test"}} '
+        "I used {searchTool} for this."
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "searchTool"
+
+
+def test_extract_tool_calls_json_fragment_in_trailing_text(parser):
+    # A JSON object without a "name" key in trailing prose (e.g. the model
+    # quoting its arguments) must not discard the valid tool call
+    model_output = (
+        '{"name": "searchTool", "parameters": {"query": "test"}} '
+        'The arguments I passed were {"query": "test"}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "searchTool"
+
+
+def _stream_chunks(parser, model_output, chunk_size=7):
+    """Drive extract_tool_calls_streaming with character chunks and collect
+    the streamed tool calls as (name, arguments) tuples."""
+    names: dict[int, str] = {}
+    args: dict[int, str] = {}
+    previous_text = ""
+    for i in range(0, len(model_output), chunk_size):
+        delta_text = model_output[i : i + chunk_size]
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text, current_text, delta_text, [], [], [], None
+        )
+        if delta is not None and delta.tool_calls:
+            for tool_call in delta.tool_calls:
+                if tool_call.function.name:
+                    names[tool_call.index] = tool_call.function.name
+                if tool_call.function.arguments:
+                    args[tool_call.index] = (
+                        args.get(tool_call.index, "") + tool_call.function.arguments
+                    )
+        previous_text = current_text
+    return [(names[i], args.get(i, "")) for i in sorted(names)]
+
+
+@pytest.mark.parametrize("separator", ["; ", ";", ";\n", "\n"])
+def test_extract_tool_calls_streaming_parallel_separators(parser, separator):
+    # Parallel tool calls may be separated by "; ", a bare ";", or a newline;
+    # every variant must stream both calls intact
+    model_output = (
+        '{"name": "searchTool", "parameters": {"query": "test1"}}'
+        + separator
+        + '{"name": "getOpenIncidentsTool", "parameters": {}}'
+    )
+    streamed = _stream_chunks(parser, model_output)
+
+    assert [name for name, _ in streamed] == ["searchTool", "getOpenIncidentsTool"]
+    assert json.loads(streamed[0][1]) == {"query": "test1"}
 
 
 def test_regex_timeout_handling(parser):
