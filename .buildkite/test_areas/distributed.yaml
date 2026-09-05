@@ -333,6 +333,7 @@ steps:
   - tests/v1/distributed/test_pp_dp_v2.py
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
+  - pytest -v -s distributed/test_pp_encoder_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
