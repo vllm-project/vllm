@@ -7,9 +7,16 @@ Automatic Prefix Caching (APC in short) caches the KV cache of existing queries,
 !!! note
     Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
 
-## Enabling APC in vLLM
+## Using APC in vLLM
 
-Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example:
+Automatic Prefix Caching is **enabled by default** (`enable_prefix_caching=True` in the cache config). You do not need to pass any extra flag for typical workloads.
+
+To disable APC:
+
+- Python: `LLM(..., enable_prefix_caching=False)`
+- CLI: `vllm serve ... --no-enable-prefix-caching`
+
+Example that demonstrates APC reuse across prompts that share a long prefix:
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
