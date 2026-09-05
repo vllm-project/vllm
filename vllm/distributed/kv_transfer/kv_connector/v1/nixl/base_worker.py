@@ -1505,6 +1505,8 @@ class NixlBaseConnectorWorker:
                 )
                 if region_key in region_indices:
                     region_index = region_indices[region_key]
+                    assert region_mem_types[region_index] == mem_type
+                    self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
