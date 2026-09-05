@@ -322,6 +322,17 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # `prefill_schedule_interval` is driven by the DP engine core, which
+        # aligns it across ranks from a shared step counter. A single engine has
+        # no such counter and never throttles, so apply the interval here
+        # instead, timed from the last prefill-carrying step.
+        self.local_prefill_interval = (
+            self.scheduler_config.prefill_schedule_interval
+            if self.parallel_config.data_parallel_size == 1
+            else 1
+        )
+        # A full interval back, so the first step is never gated.
+        self.last_prefill_step = -self.local_prefill_interval
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -541,6 +552,9 @@ class Scheduler(SchedulerInterface):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether a waiting request was admitted with prompt left to compute.
+        # Separate from `prefill_scheduled`, which covers only the running loop.
+        prefill_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
 
@@ -554,6 +568,18 @@ class Scheduler(SchedulerInterface):
         defer_prefills = (
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
+
+        # Single-engine prefill cadence: hold prefill until the interval since
+        # the last prefill-carrying step has elapsed, so decode runs in long
+        # uninterrupted stretches. As above, only defer when something else can
+        # decode in prefill's place.
+        if (
+            not defer_prefills
+            and self.local_prefill_interval > 1
+            and self.current_step - self.last_prefill_step < self.local_prefill_interval
+            and any(not r.is_prefill_chunk for r in self.running)
+        ):
+            defer_prefills = True
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1195,6 +1221,8 @@ class Scheduler(SchedulerInterface):
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+                # A resumed request past its prompt is decode work, not prefill.
+                prefill_admitted |= num_computed_tokens < request.num_prompt_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1222,6 +1250,11 @@ class Scheduler(SchedulerInterface):
             # record whether it was capacity-bound.
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
+
+        # Restart the cadence interval from any step that carried prefill,
+        # whether a new admission or a running chunk.
+        if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
+            self.last_prefill_step = self.current_step
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
