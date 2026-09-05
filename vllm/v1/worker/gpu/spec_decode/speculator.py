@@ -90,6 +90,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.vllm_config = vllm_config
         self.device = device
 
+        # Reuse the target model's attention metadata and slot mappings for
+        # the draft prefill pass (identical padded batch layout and KV cache
+        # slots, so rebuilding them is redundant work). Features that
+        # transform the target batch between the target forward and the
+        # drafter (e.g. a PCP-sharded target with a replicated drafter) must
+        # clear this so the drafter builds its own metadata from the input
+        # batch; cudagraph capture follows the same choice of builders.
+        self.reuse_target_attn_metadata = True
+
         assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
         self.method = self.speculative_config.method

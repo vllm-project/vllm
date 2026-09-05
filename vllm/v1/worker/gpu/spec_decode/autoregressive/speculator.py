@@ -81,6 +81,45 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         """
         return True
 
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
+        """Build attention metadata and slot mappings for the draft prefill pass.
+
+        The draft prefill keeps the target batch's padded query layout, so the
+        metadata is built from the input batch through the drafter's own
+        attention groups rather than reusing the target model's metadata.
+        """
+        num_reqs = input_batch.num_reqs
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        self.block_tables.gather_block_tables(
+            input_batch.idx_mapping,
+            num_reqs_padded=num_reqs_padded,
+        )
+        # Slot mappings must use input_batch.positions: the drafter's own
+        # positions buffer is stale at rejected token slots, which would
+        # produce KV writes into live cache slots.
+        slot_mappings_tensor = self.block_tables.compute_slot_mappings(
+            input_batch.idx_mapping,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            batch_desc.num_tokens,
+        )
+        slot_mappings = build_slot_mappings_by_layer(
+            slot_mappings_tensor, self.kv_cache_config
+        )
+        attn_metadata = self._build_draft_attn_metadata(
+            num_reqs=num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            num_tokens_padded=batch_desc.num_tokens,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=0,
+            query_start_loc_np=input_batch.query_start_loc_np,
+        )
+        return attn_metadata, slot_mappings
+
     def set_attn(
         self,
         model_state: ModelState,
@@ -159,20 +198,26 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # For FULL graphs, the entire routine is recorded as one graph.
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
-        # Draft prefill reuses the target model's attention metadata at
-        # runtime, so capture builds its dummy metadata through the target
-        # model runner's builders and buffers.
+        # Capture must build its dummy metadata through the same builders and
+        # buffers the runtime metadata comes from: the target model runner's
+        # when reusing the target's metadata, the drafter's own otherwise.
         assert self.prefill_cudagraph_manager is not None
         if self.prefill_cudagraph_manager.use_breakable_cg:
             self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
 
+        if self.reuse_target_attn_metadata:
+            prefill_input_buffers = self.target_input_buffers
+            prefill_attn_groups = self.target_attn_groups
+        else:
+            prefill_input_buffers = self.input_buffers
+            prefill_attn_groups = self.attn_groups
         self.on_prefill_begin(self.max_num_reqs)
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
-            self.target_input_buffers,
+            prefill_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            prefill_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -240,9 +285,12 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
+        # request's query length to include any rejected positions. By doing
+        # so, we can also reuse the attention metadata (e.g., query_start_loc,
+        # seq_lens) of the target model — unless the target batch was
+        # transformed (reuse_target_attn_metadata is False), in which case
+        # prepare_attn rebuilds it over the same padded layout through the
+        # drafter's own attention groups.
         if aux_hidden_states:
             assert self.method == "eagle3"
             hidden_states = self.model.combine_hidden_states(
@@ -298,6 +346,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else None
         )
 
+        # When the drafter cannot reuse the target's metadata, build it here —
+        # even for FULL replay, since builder.build() refreshes the persistent
+        # state the captured graph reads, mirroring the decode steps.
+        prefill_attn_metadata: dict[str, Any] | None = attn_metadata
+        prefill_slot_mappings: dict[str, torch.Tensor] | None = slot_mappings
+        if not self.reuse_target_attn_metadata:
+            if dummy_run and skip_attn_for_dummy_run:
+                prefill_attn_metadata, prefill_slot_mappings = None, None
+            else:
+                prefill_attn_metadata, prefill_slot_mappings = self.prepare_attn(
+                    input_batch, prefill_batch_desc
+                )
+
         self._prepare_eplb_forward(num_tokens)
 
         self.on_prefill_begin(num_reqs)
@@ -306,14 +367,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
         else:
-            # The target model's attention metadata and slot mappings
-            # can directly be used for draft prefill, because of the
-            # identical batch shape and KV cache layout.
             self._prefill(
                 num_reqs,
                 prefill_batch_desc.num_tokens,
-                attn_metadata,
-                slot_mappings,
+                prefill_attn_metadata,
+                prefill_slot_mappings,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=prefill_batch_desc.cg_mode,
                 mm_inputs=mm_inputs,
