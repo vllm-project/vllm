@@ -846,6 +846,45 @@ def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
         )
 
 
+@pytest.mark.parametrize("is_last_rank", [False, True])
+def test_update_states_pp_async_spec_decode_trims_output_token_ids(
+    model_runner, dist_init, monkeypatch, is_last_rank: bool
+):
+    """Optimistic spec-decode placeholders must be trimmed on every PP rank.
+
+    If only the last rank trims, non-last ranks accumulate overshoot in
+    output_token_ids, discard masks diverge, and PP broadcast deadlocks.
+    """
+    req_id = "req_0"
+    model_runner.use_async_scheduling = True
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=is_last_rank, world_size=2),
+    )
+    model_runner._update_states(_schedule_new_request(req_id))
+
+    req_state = model_runner.requests[req_id]
+    req_index = model_runner.input_batch.req_id_to_index[req_id]
+    sampled_token_id = 101
+    req_state.output_token_ids.append(sampled_token_id)
+    req_state.prev_num_draft_len = 2
+    model_runner.input_batch.num_tokens_no_spec[req_index] = req_state.num_tokens
+
+    scheduler_output = _schedule_cached_requests(
+        req_ids=[req_id],
+        num_scheduled_tokens={req_id: 1},
+        new_token_ids=[],
+        num_computed_tokens=[req_state.num_tokens],
+        num_output_tokens=[1],
+    )
+    model_runner._update_states(scheduler_output)
+
+    assert req_state.output_token_ids == [sampled_token_id]
+    assert (
+        model_runner.input_batch.num_tokens_no_spec[req_index] == req_state.num_tokens
+    )
+
+
 def test_update_config(model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
