@@ -249,6 +249,30 @@ def test_reinterpret_u64_as_i64_preserves_pointer_bits():
     assert ptr_tensor.numpy().view(np.uint64).tolist() == ptrs
 
 
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_batch_memcpy_without_triton(monkeypatch):
+    """Copy bytes when Triton is unavailable or the kernel is not launchable."""
+    from vllm.v1.worker import mamba_utils
+
+    monkeypatch.setattr(mamba_utils, "HAS_TRITON", False)
+    monkeypatch.setattr(mamba_utils, "batch_memcpy_kernel", object())
+
+    srcs = [
+        torch.arange(64, dtype=torch.float32),
+        torch.arange(17, dtype=torch.float32),
+    ]
+    dsts = [torch.zeros_like(src) for src in srcs]
+    src_ptrs = torch.tensor([src.data_ptr() for src in srcs], dtype=torch.uint64)
+    dst_ptrs = torch.tensor([dst.data_ptr() for dst in dsts], dtype=torch.uint64)
+    sizes = torch.tensor([src.nbytes for src in srcs], dtype=torch.int64)
+
+    batch_memcpy(src_ptrs, dst_ptrs, sizes)
+
+    for src, dst in zip(srcs, dsts):
+        torch.testing.assert_close(dst, src)
+
+
 def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")

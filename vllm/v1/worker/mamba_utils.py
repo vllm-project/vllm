@@ -15,7 +15,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     get_temporal_copy_spec,
     is_conv_state_dim_first,
 )
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -661,6 +661,12 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch = src_ptrs.shape[0]
     assert dst_ptrs.shape[0] == batch
     assert sizes.shape[0] == batch
+
+    if not HAS_TRITON or not hasattr(batch_memcpy_kernel, "__getitem__"):
+        from vllm.utils.cpu_triton_utils import _batch_memcpy_impl
+
+        _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes)
+        return
 
     grid = (batch,)
     BLOCK_SIZE = 1024
