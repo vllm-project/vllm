@@ -956,11 +956,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
         )
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -969,8 +964,23 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
+
         # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
+        i = max_num_blocks - 1
+        while i >= 0:
+            # Fast-path optimization: jump by sliding_window_contiguous_blocks
+            # if the start of the candidate sequence is a cache miss.
+            if num_contiguous_blocks == 0 and i >= sliding_window_contiguous_blocks - 1:
+                start_idx = i - sliding_window_contiguous_blocks + 1
+                if not block_pool.get_cached_block(
+                    block_hashes[start_idx], kv_cache_group_ids
+                ):
+                    # Cache miss at the boundary. No valid contiguous sequence can
+                    # exist that includes `start_idx`. Jump backwards.
+                    i = start_idx - 1
+                    continue
+
+            # Standard check if we are accumulating hits or didn't jump
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
@@ -979,11 +989,14 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 if num_contiguous_blocks == 0 and block_size != alignment_tokens:
                     post_pop_blocks = i if drop_eagle_block else i + 1
                     if (post_pop_blocks * block_size) % alignment_tokens != 0:
+                        i -= 1
                         continue
+
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
+
                 if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
@@ -994,6 +1007,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                     break
             else:
                 num_contiguous_blocks = 0
+
+            i -= 1
+
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
