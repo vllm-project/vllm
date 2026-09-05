@@ -890,6 +890,7 @@ _SPLIT_FANOUT = 8
 _SPLIT_ROUNDS = 5
 
 _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
+_TRITON_SPLIT_WARMED: set[tuple[torch.device, int]] = set()
 
 
 @triton.jit
@@ -1077,7 +1078,7 @@ def _topp_sb_combine(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROUND"])
 def _topp_sb_step_kernel(
     LOGITS,
     LOGITS_STRIDE_0,
@@ -1313,6 +1314,85 @@ def _topp_sb_mask_kernel(
         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)
 
 
+def _split_count(batch_size: int, num_sm: int) -> int:
+    # S is a Triton compile-time constant, so derive it from the
+    # power-of-two floor of the batch size: the specialization space is then
+    # one variant per bucket (5 total on >=128-SM GPUs), all precompiled on
+    # first use (see _precompile_split_kernels). Deriving it from the exact
+    # batch size instead would JIT-compile a new variant mid-decode whenever
+    # an unseen row count shows up (spec-decode expansion makes the row
+    # count vary per step).
+    bucket = 1 << (batch_size.bit_length() - 1)
+    splits = 1
+    while splits < _SPLIT_MAX_SPLITS and splits * 2 * bucket <= num_sm:
+        splits *= 2
+    return splits
+
+
+def _precompile_split_kernels(
+    device: torch.device,
+    num_sm: int,
+    vocab_size: int,
+    ws: dict[str, torch.Tensor],
+) -> None:
+    """Compile every (splits, has_k) pipeline variant on a 1-row dummy.
+
+    The dummy rows are all-zero logits, which take the uniform-row early
+    exit; only compilation matters here, the results are discarded.
+    """
+    dummy_logits = torch.zeros((1, vocab_size), dtype=torch.float32, device=device)
+    dummy_p = torch.full((1,), 0.5, dtype=torch.float32, device=device)
+    dummy_k = torch.ones((1,), dtype=torch.int32, device=device)
+    variants = {_split_count(b, num_sm) for b in (1, 2, 4, 8, 16, 32, 64)}
+    for s in sorted(variants):
+        for has_k in (False, True):
+            k_ptr = dummy_k if has_k else dummy_logits
+            _topp_sb_stats_kernel[(s,)](
+                dummy_logits,
+                vocab_size,
+                ws["stats"],
+                k_ptr,
+                dummy_p,
+                HAS_K=has_k,
+                VOCAB_SIZE=vocab_size,
+                S=s,
+                BLOCK=8192,
+                num_warps=8,
+            )
+            _topp_sb_step_kernel[(s,)](
+                dummy_logits,
+                vocab_size,
+                ws["stats"],
+                ws["parts"],
+                k_ptr,
+                dummy_p,
+                0,
+                HAS_K=has_k,
+                S=s,
+                F=_SPLIT_FANOUT,
+                NUM_ROUNDS=_SPLIT_ROUNDS,
+                VOCAB_SIZE=vocab_size,
+                BLOCK=2048,
+                num_warps=8,
+            )
+            _topp_sb_mask_kernel[(s,)](
+                dummy_logits,
+                vocab_size,
+                ws["stats"],
+                ws["parts"],
+                k_ptr,
+                dummy_p,
+                HAS_K=has_k,
+                MASK_VALUE=float("-inf"),
+                S=s,
+                F=_SPLIT_FANOUT,
+                NUM_ROUNDS=_SPLIT_ROUNDS,
+                VOCAB_SIZE=vocab_size,
+                BLOCK=8192,
+                num_warps=8,
+            )
+
+
 def _apply_topp_split(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -1322,9 +1402,7 @@ def _apply_topp_split(
 ) -> None:
     """Split-row top-p pipeline for small batches; masks logits in place."""
     batch_size, vocab_size = logits.shape
-    splits = 1
-    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
-        splits *= 2
+    splits = _split_count(batch_size, num_sm)
 
     ws = _TRITON_SPLIT_CACHE.get(logits.device)
     if ws is None:
@@ -1335,6 +1413,11 @@ def _apply_topp_split(
             ),
         }
         _TRITON_SPLIT_CACHE[logits.device] = ws
+
+    warm_key = (logits.device, vocab_size)
+    if warm_key not in _TRITON_SPLIT_WARMED:
+        _TRITON_SPLIT_WARMED.add(warm_key)
+        _precompile_split_kernels(logits.device, num_sm, vocab_size, ws)
 
     k_ptr = k if k is not None else logits  # dummy pointer when HAS_K=False
     has_k = k is not None
@@ -1521,4 +1604,5 @@ def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
+    _TRITON_SPLIT_WARMED.clear()
     torch.accelerator.empty_cache()
