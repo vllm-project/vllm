@@ -1,0 +1,39 @@
+# Python tooling and runtime libraries consumed while building the source-based
+# ROCm artifacts. Keep this list independent of the runtime and test inputs: a
+# test-only lock update must not invalidate the multi-hour base/native builds.
+cmake==3.31.10
+Cython==3.3.0
+flydsl==0.3.2
+ninja
+packaging
+pybind11==3.0.4
+setuptools>=77.0.3,<80.0.0
+setuptools-rust>=1.9.0
+setuptools-scm>=9.2.0
+vcs-versioning
+wheel
+
+# Runtime dependencies of the locally built Torch, TorchVision, FlashAttention,
+# AITER, and LMCache wheels that are needed by later source-build stages.
+einops
+filelock
+fsspec
+jinja2
+networkx
+numpy==2.2.6
+pandas
+pillow
+psutil
+pyyaml
+soundfile==0.13.1
+sympy>=1.13.3
+typing-extensions>=4.10.0
+
+# Python packages installed while assembling the Mori base and release wheel.
+aiohttp
+blinker
+cffi==1.17.1
+msgpack
+pyzmq
+quart
+regex

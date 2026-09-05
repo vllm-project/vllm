@@ -103,6 +103,20 @@ variable "DEEPEP_CACHE_KEY" {
   default = ""
 }
 
+# ci-bake-rocm.sh keeps the canonical dependency refs read-only for untrusted
+# builds and supplies source-scoped refs for their cache imports/exports.
+variable "NIXL_CACHE_WRITE_REF" {
+  default = ""
+}
+
+variable "ROCSHMEM_CACHE_WRITE_REF" {
+  default = ""
+}
+
+variable "DEEPEP_CACHE_WRITE_REF" {
+  default = ""
+}
+
 # Docker Hub registry cache for AMD builds.
 #
 # A separate repo (rocm/vllm-ci-cache) is used for BuildKit layer cache.
@@ -247,27 +261,30 @@ function "get_cache_from_rocm_deps" {
     NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY}" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH}" : ""),
     ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH}" : ""),
     DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY}" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH}" : ""),
+    NIXL_CACHE_WRITE_REF != "" ? "type=registry,ref=${NIXL_CACHE_WRITE_REF}" : "",
+    ROCSHMEM_CACHE_WRITE_REF != "" ? "type=registry,ref=${ROCSHMEM_CACHE_WRITE_REF}" : "",
+    DEEPEP_CACHE_WRITE_REF != "" ? "type=registry,ref=${DEEPEP_CACHE_WRITE_REF}" : "",
   ])
 }
 
 function "get_cache_to_rocm_nixl" {
   params = []
   result = compact([
-    NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : ""),
+    NIXL_CACHE_WRITE_REF != "" ? "type=registry,ref=${NIXL_CACHE_WRITE_REF},mode=min" : (NIXL_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_CACHE_KEY},mode=min" : (NIXL_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:nixl-rocm-${NIXL_BRANCH}-ucx-${UCX_BRANCH},mode=min" : "")),
   ])
 }
 
 function "get_cache_to_rocm_rocshmem" {
   params = []
   result = compact([
-    ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : ""),
+    ROCSHMEM_CACHE_WRITE_REF != "" ? "type=registry,ref=${ROCSHMEM_CACHE_WRITE_REF},mode=min" : (ROCSHMEM_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY},mode=min" : (ROCSHMEM_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocshmem-rocm-${ROCSHMEM_BRANCH},mode=min" : "")),
   ])
 }
 
 function "get_cache_to_rocm_deepep" {
   params = []
   result = compact([
-    DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : ""),
+    DEEPEP_CACHE_WRITE_REF != "" ? "type=registry,ref=${DEEPEP_CACHE_WRITE_REF},mode=min" : (DEEPEP_CACHE_KEY != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_CACHE_KEY},mode=min" : (DEEPEP_BRANCH != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH},mode=min" : "")),
   ])
 }
 

@@ -6,14 +6,32 @@ steps:
   timeout_in_minutes: 20
   device: cpu-small
   source_file_dependencies:
+    - .dockerignore
     - .buildkite/release-pipeline.yaml
+    - .buildkite/scripts/build-rocm-base-wheels.sh
+    - .buildkite/scripts/cache-rocm-base-wheels.sh
+    - .buildkite/scripts/ci-bake-rocm.sh
     - .buildkite/scripts/docker-build-metadata-args.sh
+    - .buildkite/scripts/rocm/refresh-base-image.sh
+    - .buildkite/scripts/rocm/smoke-test-image.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
+    - docker/Dockerfile.rocm
+    - docker/Dockerfile.rocm_base
+    - docker/ci-rocm.hcl
     - docker/docker-bake.hcl
+    - docker/docker-bake-rocm.hcl
+    - requirements/common.txt
+    - requirements/build/rocm.in
+    - requirements/build/rocm.txt
+    - requirements/rocm.txt
+    - requirements/test/rocm.in
+    - requirements/test/rocm.txt
     - tests/tools/test_docker_build_metadata_args.py
+    - tests/tools/test_rocm_release_build.py
+    - tools/install_torchcodec_rocm.sh
   commands:
-    - pytest -v -s tools/test_docker_build_metadata_args.py
+    - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_release_build.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
@@ -23,10 +41,24 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - .dockerignore
+      - .buildkite/release-pipeline.yaml
+      - .buildkite/scripts/build-rocm-base-wheels.sh
+      - .buildkite/scripts/cache-rocm-base-wheels.sh
       - .buildkite/scripts/docker-build-metadata-args.sh
       - .buildkite/scripts/ci-bake-rocm.sh
+      - .buildkite/scripts/rocm/refresh-base-image.sh
+      - .buildkite/scripts/rocm/smoke-test-image.sh
       - docker/Dockerfile.rocm
       - docker/Dockerfile.rocm_base
       - docker/ci-rocm.hcl
       - docker/docker-bake-rocm.hcl
+      - requirements/common.txt
+      - requirements/build/rocm.in
+      - requirements/build/rocm.txt
+      - requirements/rocm.txt
+      - requirements/test/rocm.in
+      - requirements/test/rocm.txt
       - tests/tools/test_docker_build_metadata_args.py
+      - tests/tools/test_rocm_release_build.py
+      - tools/install_torchcodec_rocm.sh

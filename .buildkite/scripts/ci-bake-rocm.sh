@@ -13,17 +13,23 @@
 
 set -euo pipefail
 
+# Build arguments are visible in Bake output/provenance, not a secrets channel.
+if [[ "${SCCACHE_ENDPOINT:-}" =~ [[:space:][:cntrl:]@?#] ]]; then
+    echo "SCCACHE_ENDPOINT must not contain userinfo, query, fragment, or whitespace; use the AWS credential provider for authentication" >&2
+    exit 1
+fi
+
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/build/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base_system build_decord ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
-DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
+DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/build/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt requirements/build/rocm.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
@@ -569,7 +575,7 @@ hash_dockerfile_stages() {
             }
             emit = 0
         }
-        $1 == "FROM" {
+        toupper($1) == "FROM" {
             stage = ""
             for (idx = 1; idx <= NF; idx++) {
                 if (tolower($idx) == "as" && idx < NF) {
@@ -613,7 +619,7 @@ discover_dockerfile_stage_args() {
         }
         {
             line = $0
-            if ($1 == "FROM") {
+            if (toupper($1) == "FROM") {
                 stage = ""
                 for (idx = 1; idx <= NF; idx++) {
                     if (tolower($idx) == "as" && idx < NF) {
@@ -680,6 +686,10 @@ compute_ci_base_content_hash() {
     local stages="${CI_BASE_DOCKERFILE_STAGES:-}"
 
     read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "CI_BASE_CONTENT_FILES must name at least one path" >&2
+        return 1
+    fi
     mapfile -t content_args < <(
         get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
     )
@@ -1449,9 +1459,9 @@ maybe_skip_existing_image() {
 
     if is_commit_image_target; then
         remote_revision=$(get_remote_image_label "${IMAGE_TAG}" "org.opencontainers.image.revision")
-        if [[ -n "${remote_revision}" && "${remote_revision}" != "${BUILDKITE_COMMIT}" ]]; then
+        if [[ "${remote_revision}" != "${BUILDKITE_COMMIT}" ]]; then
             echo "Existing image revision does not match ${BUILDKITE_COMMIT}"
-            echo "  found revision: ${remote_revision}"
+            echo "  found revision: ${remote_revision:-<missing>}"
             echo "Rebuilding image"
             return 0
         fi
@@ -1639,6 +1649,10 @@ ci_base_metadata_pairs() {
     local -a content_args=()
 
     read -r -a content_paths <<< "${content_files}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "CI_BASE_CONTENT_FILES must name at least one path" >&2
+        return 1
+    fi
     if [[ ${#content_paths[@]} -gt 0 ]]; then
         if ! content_files_hash=$(compute_content_hash "${content_paths[@]}"); then
             echo "Failed to hash ci_base metadata content files" >&2
@@ -1670,6 +1684,8 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.rocm.base_image" "${base_image_digest}"
     metadata_pair "vllm.rocm.base_image_digest" "${base_image_digest}"
     metadata_pair "vllm.rocm.pytorch_rocm_arch" "${PYTORCH_ROCM_ARCH:-}"
+    metadata_pair "vllm.rocm.sccache_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "SCCACHE_VERSION")"
+    metadata_pair "vllm.rocm.sccache_sha256" "$(resolve_dockerfile_arg_value "${dockerfile}" "SCCACHE_DOWNLOAD_SHA256")"
     metadata_pair "vllm.rocm.nic_backend" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIC_BACKEND")"
     metadata_pair "vllm.rocm.ainic_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "AINIC_VERSION")"
     metadata_pair "vllm.rocm.ubuntu_codename" "$(resolve_dockerfile_arg_value "${dockerfile}" "UBUNTU_CODENAME")"
@@ -1806,6 +1822,10 @@ compute_rocm_csrc_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     read -r -a content_paths <<< "${content_files}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "ROCM_CSRC_CONTENT_FILES must name at least one path" >&2
+        return 1
+    fi
     mapfile -t content_args < <(
         get_content_arg_names "${dockerfile_rocm}" "${stages}" "${ROCM_CSRC_CONTENT_ARGS:-}"
     )
@@ -1855,6 +1875,10 @@ compute_rocm_rust_content_hash() {
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
     read -r -a content_paths <<< "${content_files}"
+    if ((${#content_paths[@]} == 0)); then
+        echo "ROCM_RUST_CONTENT_FILES must name at least one path" >&2
+        return 1
+    fi
     mapfile -t content_args < <(
         get_content_arg_names \
             "${dockerfile_rocm}" "${stages}" "${ROCM_RUST_CONTENT_ARGS:-}"
@@ -1900,9 +1924,7 @@ write_hcl_string_list_entries() {
     shift
 
     for value in "$@"; do
-        value="${value//\\/\\\\}"
-        value="${value//\"/\\\"}"
-        printf '%s"%s",\n' "${indent}" "${value}"
+        printf '%s"%s",\n' "${indent}" "$(hcl_escape_string "${value}")"
     done
 }
 
@@ -1911,6 +1933,12 @@ hcl_escape_string() {
 
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    # Environment values are data, not HCL expressions or template directives.
+    value="${value//\$\{/\$\$\{}"
+    value="${value//'%{'/'%%{'}"
     printf '%s' "${value}"
 }
 
@@ -1941,6 +1969,7 @@ write_rocm_build_arg_override() {
     local -a arg_names=()
     local arg_name=""
     local arg_value=""
+    local endpoint_is_listed=0
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
     dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
@@ -1960,6 +1989,20 @@ write_rocm_build_arg_override() {
                 "${ROCM_RUST_CONTENT_ARGS:-}"
         } | awk 'NF && !seen[$0]++'
     )
+    # SCCACHE_ENDPOINT is a transport setting consumed by sccache itself, not
+    # by a Dockerfile command. Forward it explicitly, but keep it out of the
+    # content-identity ARG discovery above.
+    if [[ -n "${SCCACHE_ENDPOINT:-}" ]]; then
+        for arg_name in "${arg_names[@]}"; do
+            if [[ "${arg_name}" == "SCCACHE_ENDPOINT" ]]; then
+                endpoint_is_listed=1
+                break
+            fi
+        done
+        if ((endpoint_is_listed == 0)); then
+            arg_names+=(SCCACHE_ENDPOINT)
+        fi
+    fi
 
     {
         cat <<EOF
@@ -1969,6 +2012,9 @@ EOF
         for arg_name in "${arg_names[@]}"; do
             [[ -n "${arg_name}" ]] || continue
             arg_value=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "${arg_name}")
+            if [[ "${arg_name}" == "USE_SCCACHE" && "${arg_value}" == "0" ]]; then
+                arg_value=""
+            fi
             [[ -n "${arg_value}" ]] || continue
             printf '    %s = "%s"\n' "${arg_name}" "$(hcl_escape_string "${arg_value}")"
         done
@@ -2170,8 +2216,15 @@ write_rocm_cache_override() {
         )
     fi
 
-    # Standalone image/wheel targets reach rust-build but not the cache-only
-    # exporter unless it is requested explicitly.
+    # Standalone image/wheel targets reach both native build stages but not
+    # their cache-only exporters unless those are requested explicitly.
+    if ((${#csrc_cache_to[@]} > 0)); then
+        case "${TARGET}" in
+            test-rocm-ci|export-wheel-rocm|smoke-test-rocm-ci)
+                BAKE_TARGETS=("csrc-rocm-ci" "${BAKE_TARGETS[@]}")
+                ;;
+        esac
+    fi
     if ((${#rust_cache_to[@]} > 0)); then
         case "${TARGET}" in
             test-rocm-ci|export-wheel-rocm|smoke-test-rocm-ci)
@@ -2357,7 +2410,7 @@ dependency_cache_ref_exists() {
     registry_ref_exists_with_retry imagetools "${cache_ref}"
 }
 
-dependency_cache_ref_for_target() {
+trusted_dependency_cache_ref_for_target() {
     local target="$1"
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
 
@@ -2384,6 +2437,79 @@ dependency_cache_ref_for_target() {
             fi
             ;;
     esac
+}
+
+dependency_cache_ref_for_target() {
+    local target="$1"
+    local trusted_ref=""
+    local scope="${CI_BASE_WRITE_SCOPE:-}"
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local cache_name=""
+    local writer_id="${BUILDKITE_BUILD_ID:-}"
+
+    trusted_ref=$(trusted_dependency_cache_ref_for_target "${target}")
+    [[ -n "${trusted_ref}" ]] || return 0
+    if [[ -z "${scope}" ]]; then
+        printf '%s\n' "${trusted_ref}"
+        return 0
+    fi
+    if [[ -n "${writer_id}" ]]; then
+        scope="${scope}-build-$(hash_string_short "${writer_id}")"
+    fi
+
+    case "${target}" in
+        nixl-rocm-ci) cache_name="nixl-rocm" ;;
+        rocshmem-rocm-ci) cache_name="rocshmem-rocm" ;;
+        deepep-rocm-ci) cache_name="deepep-rocm" ;;
+        *) return 1 ;;
+    esac
+    # Keep the tag comfortably below Docker's 128-character limit while
+    # retaining a collision-resistant binding to the complete trusted ref.
+    printf '%s:%s-%s-%s\n' \
+        "${cache_repo}" "${cache_name}" "${scope}" \
+        "$(hash_string_short "${trusted_ref}")"
+}
+
+configure_dependency_cache_write_refs() {
+    NIXL_CACHE_WRITE_REF=""
+    ROCSHMEM_CACHE_WRITE_REF=""
+    DEEPEP_CACHE_WRITE_REF=""
+    if [[ -n "${CI_BASE_WRITE_SCOPE:-}" ]]; then
+        NIXL_CACHE_WRITE_REF=$(dependency_cache_ref_for_target "nixl-rocm-ci")
+        ROCSHMEM_CACHE_WRITE_REF=$(dependency_cache_ref_for_target "rocshmem-rocm-ci")
+        DEEPEP_CACHE_WRITE_REF=$(dependency_cache_ref_for_target "deepep-rocm-ci")
+    fi
+    export NIXL_CACHE_WRITE_REF
+    export ROCSHMEM_CACHE_WRITE_REF
+    export DEEPEP_CACHE_WRITE_REF
+
+    if [[ -n "${CI_BASE_WRITE_SCOPE:-}" ]]; then
+        echo "Dependency cache writes are isolated from canonical refs:"
+        printf '  %s\n' \
+            "${NIXL_CACHE_WRITE_REF:-<NIXL disabled>}" \
+            "${ROCSHMEM_CACHE_WRITE_REF:-<ROCShmem disabled>}" \
+            "${DEEPEP_CACHE_WRITE_REF:-<DeepEP disabled>}"
+    fi
+}
+
+find_existing_dependency_cache_ref() {
+    local target="$1"
+    local trusted_ref=""
+    local writable_ref=""
+
+    trusted_ref=$(trusted_dependency_cache_ref_for_target "${target}")
+    writable_ref=$(dependency_cache_ref_for_target "${target}")
+    if [[ -n "${trusted_ref}" ]] \
+        && dependency_cache_ref_exists "${trusted_ref}"; then
+        printf '%s\n' "${trusted_ref}"
+        return 0
+    fi
+    if [[ -n "${writable_ref}" && "${writable_ref}" != "${trusted_ref}" ]] \
+        && dependency_cache_ref_exists "${writable_ref}"; then
+        printf '%s\n' "${writable_ref}"
+        return 0
+    fi
+    return 1
 }
 
 add_dependency_cache_target() {
@@ -2428,9 +2554,10 @@ resolve_ci_base_dependency_targets() {
 
     if [[ "${mode}" != "always" && -n "${NIXL_CACHE_KEY:-}" ]]; then
         nixl_ref=$(dependency_cache_ref_for_target "nixl-rocm-ci")
-        if dependency_cache_ref_exists "${nixl_ref}"; then
+        if nixl_ref=$(find_existing_dependency_cache_ref "nixl-rocm-ci"); then
             echo "NIXL dependency cache exists: ${nixl_ref}"
         else
+            nixl_ref=$(dependency_cache_ref_for_target "nixl-rocm-ci")
             echo "NIXL dependency cache missing; will seed: ${nixl_ref}"
             add_dependency_cache_target "nixl-rocm-ci"
         fi
@@ -2438,9 +2565,10 @@ resolve_ci_base_dependency_targets() {
 
     if [[ "${mode}" != "always" && -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
         rocshmem_ref=$(dependency_cache_ref_for_target "rocshmem-rocm-ci")
-        if dependency_cache_ref_exists "${rocshmem_ref}"; then
+        if rocshmem_ref=$(find_existing_dependency_cache_ref "rocshmem-rocm-ci"); then
             echo "ROCShmem dependency cache exists: ${rocshmem_ref}"
         else
+            rocshmem_ref=$(dependency_cache_ref_for_target "rocshmem-rocm-ci")
             echo "ROCShmem dependency cache missing; will seed: ${rocshmem_ref}"
             add_dependency_cache_target "rocshmem-rocm-ci"
         fi
@@ -2448,9 +2576,10 @@ resolve_ci_base_dependency_targets() {
 
     if [[ "${mode}" != "always" && -n "${DEEPEP_CACHE_KEY:-}" ]]; then
         deepep_ref=$(dependency_cache_ref_for_target "deepep-rocm-ci")
-        if dependency_cache_ref_exists "${deepep_ref}"; then
+        if deepep_ref=$(find_existing_dependency_cache_ref "deepep-rocm-ci"); then
             echo "DeepEP dependency cache exists: ${deepep_ref}"
         else
+            deepep_ref=$(dependency_cache_ref_for_target "deepep-rocm-ci")
             echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
             add_dependency_cache_target "deepep-rocm-ci"
         fi
@@ -2567,15 +2696,21 @@ seed_dependency_caches_if_needed() {
 
 run_bake() {
     local confirmation_ref="${IMAGE_TAG:-}"
+    local -a cache_policy_args=()
 
     if is_ci_base_target && [[ -n "${CI_BASE_IMAGE_TAG_BUILD_REF:-}" ]]; then
         confirmation_ref="${CI_BASE_IMAGE_TAG_BUILD_REF}"
+    fi
+    if [[ "${FORCE_BUILD:-0}" == "1" ]]; then
+        cache_policy_args+=(--no-cache)
+        echo "FORCE_BUILD=1; disabling BuildKit layer reuse for ${TARGET}"
     fi
 
     echo "--- :docker: Building ${TARGET}"
     docker buildx bake \
         "${BAKE_ALLOW_ARGS[@]}" \
         "${BAKE_FILES[@]}" \
+        "${cache_policy_args[@]}" \
         --progress "${BUILDKIT_PROGRESS:-plain}" \
         "${BAKE_TARGETS[@]}"
 
@@ -2701,6 +2836,7 @@ main() {
     extract_dependency_pins
     write_rocm_build_arg_override
     compute_dependency_cache_keys
+    configure_dependency_cache_write_refs
     write_ci_base_label_override
     compute_rocm_csrc_content_hash_if_needed
     compute_rocm_rust_content_hash_if_needed
@@ -2723,8 +2859,17 @@ main() {
         # from an earlier build or retry.
         rm -rf ./build/rocm-smoke-export
     fi
-    seed_dependency_caches_if_needed
-    run_bake
+    if [[ "${FORCE_BUILD:-0}" == "1" \
+        && ${#DEPENDENCY_CACHE_TARGETS[@]} -gt 0 ]]; then
+        # Build ci_base once from scratch, then let the serial cache-only
+        # exporters reuse that just-computed local result. Seeding first would
+        # compile the same dependency graph twice during a forced run.
+        run_bake
+        seed_dependency_caches_if_needed
+    else
+        seed_dependency_caches_if_needed
+        run_bake
+    fi
     verify_rocm_smoke_export
     promote_stable_ci_base_tag
     publish_ci_base_handoff_ref
