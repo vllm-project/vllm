@@ -2521,6 +2521,7 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
 def test_hybrid_mla_block_alignment_uses_packed_state_size(
     monkeypatch, cache_dtype, bytes_per_token, expected_block_size
 ):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
     from vllm.model_executor.models import ModelRegistry
     from vllm.platforms.interface import Platform
 
@@ -2557,6 +2558,14 @@ def test_hybrid_mla_block_alignment_uses_packed_state_size(
         config.cache_config.mamba_page_size_padded
         == expected_block_size * bytes_per_token
     )
+    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=512,
+        sliding_window=None,
+        non_causal_multi_token_decode=False,
+    )
+    spec = MLAAttention.get_kv_cache_spec(layer, config)
+    assert config.cache_config.mamba_page_size_padded == spec.page_size_bytes
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
