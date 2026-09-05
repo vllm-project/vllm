@@ -324,8 +324,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
     assert not coordinator.all_context_pages_resident(scheduled)
 
 
-def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
+def test_hisparse_indexer_only_import_lands_on_gpu_when_capacity_allows():
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -370,10 +369,10 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    # The local prefix is adopted from shadow pages (GPU-resident), while the
-    # externally imported page stays host-backed until its tail allocation.
+    # The local prefix is adopted from shadow pages and the external page lands
+    # directly in the resident cache because this pool has capacity.
     assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
+    assert not resident[2].is_null
     assert not resident[3].is_null
 
 
@@ -413,6 +412,7 @@ def allocate_external_prefix(
         num_external_computed_tokens=num_tokens,
         delay_cache_blocks=True,
         full_sequence_must_fit=True,
+        allow_hisparse_host_import=True,
     )
 
 
@@ -558,7 +558,7 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     """An in-flight host import must reserve its unwritten resident pages."""
     manager = make_hisparse_kv_cache_manager(
-        10,
+        11,
         16,
         transfer_device_cache=True,
     )
@@ -797,13 +797,15 @@ def test_hisparse_external_import_uses_hard_gpu_footprint():
     allocated = allocate_external_prefix(manager, request, num_prompt_tokens)
 
     assert allocated is not None
+    assert request.hisparse_host_import
+    assert request.hisparse_host_import_pending
     source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
     assert len(resident) == num_prompt_blocks
     assert all(block.is_null for block in resident)
     assert len(hot) == 2
-    assert manager.block_pools[0].get_num_free_blocks() == 0
+    assert manager.block_pools[0].get_num_free_blocks() == 1
 
 
 def test_hisparse_external_import_survives_capacity_retry():
@@ -817,11 +819,17 @@ def test_hisparse_external_import_survives_capacity_retry():
     second = make_request("second", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert allocate_external_prefix(manager, first, len(tokens)) is not None
+    assert not first.hisparse_host_import
+    assert not first.hisparse_host_import_pending
 
     assert allocate_external_prefix(manager, second, len(tokens)) is None
+    assert second.hisparse_host_import
+    assert not second.hisparse_host_import_pending
 
     manager.free(first)
     assert allocate_external_prefix(manager, second, len(tokens)) is not None
+    assert second.hisparse_host_import
+    assert second.hisparse_host_import_pending
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
     assert all(block.is_null for block in resident)
     assert len(hot) == 2

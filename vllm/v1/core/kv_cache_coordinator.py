@@ -222,6 +222,7 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        hisparse_host_import: bool = False,
     ) -> int:
         return sum(
             self.get_num_blocks_to_allocate_by_pool(
@@ -233,6 +234,7 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_tokens_main_model,
                 apply_admission_cap=apply_admission_cap,
+                hisparse_host_import=hisparse_host_import,
             )
         )
 
@@ -246,14 +248,12 @@ class KVCacheCoordinator(ABC):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        hisparse_host_import: bool = False,
     ) -> tuple[int, ...]:
         """Get allocation requirements independently for each block pool."""
         needs_hot = self.hisparse_coordinator.needs_hot(new_computed_blocks)
         num_external_computed_tokens = total_computed_tokens - num_local_computed_tokens
-        host_import = (
-            num_external_computed_tokens > 0
-            and self.hisparse_coordinator.has_host_cache
-        )
+        host_import = hisparse_host_import and num_external_computed_tokens > 0
         required = [0] * len(self.block_pools)
         for i, manager in enumerate(self.single_type_managers):
             group = self.kv_cache_config.kv_cache_groups[i]
@@ -300,6 +300,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
+        hisparse_host_import: bool = False,
     ) -> None:
         """
         Add the new computed blocks to the request. Optionally allocate new
@@ -336,10 +337,7 @@ class KVCacheCoordinator(ABC):
             request_id,
             new_computed_blocks,
         )
-        host_import = (
-            num_external_computed_tokens > 0
-            and self.hisparse_coordinator.has_host_cache
-        )
+        host_import = hisparse_host_import and num_external_computed_tokens > 0
         if host_import:
             for manager in self.single_type_managers:
                 if isinstance(manager, HiSparseHotManager):

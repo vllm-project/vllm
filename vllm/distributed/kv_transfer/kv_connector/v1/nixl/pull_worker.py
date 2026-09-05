@@ -162,8 +162,27 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        groups_differ = local_region_groups != remote_region_groups
-        if groups_differ:
+        if not local_block_ids:
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=[],
+                    remote_block_ids=[],
+                )
+                for rank in plan.all_source_ranks
+            ]
+        elif meta.hisparse_host_block_ids is not None:
+            if self._hisparse_destination is None:
+                raise RuntimeError("HiSparse NIXL metadata requires its destination")
+            self._hisparse_destination.read_host_blocks(
+                self,
+                req_id,
+                meta,
+                plan,
+                remote_region_groups,
+            )
+            return
+        elif local_region_groups != remote_region_groups:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "

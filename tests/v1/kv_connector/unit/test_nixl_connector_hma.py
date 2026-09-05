@@ -25,6 +25,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupRole,
     KVCacheGroupSpec,
@@ -450,6 +452,69 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
+    )
+
+
+@pytest.mark.cpu_test
+def test_divergent_regions_notify_prefill_when_decode_request_is_aborted():
+    """An aborted decode request must release remote KV without local blocks."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+        NixlPullConnectorWorker,
+    )
+
+    worker = object.__new__(NixlPullConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker._engine_last_active = {}
+    worker._recving_transfers = {}
+    worker._bidirectional_kv_xfer_enabled = False
+    worker._has_mamba = False
+    worker._hisparse_destination = None
+    worker.use_mla = True
+    worker.dcp_size = 1
+    worker.region_group_ids = [0, 1]
+
+    remote_engine_id = "remote-engine"
+    remote_info = MagicMock()
+    remote_info.remote_block_size = 16
+    remote_info.remote_dcp_size = 1
+    remote_info.remote_physical_blocks_per_logical = 1
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = remote_info
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_topo.block_size_ratio.return_value = 1
+
+    plan = MagicMock()
+    plan.all_source_ranks = (0,)
+    plan.local_consumers = 1
+    worker.tp_mappings = {remote_engine_id: plan}
+    worker.dst_region_group_ids = {remote_engine_id: [0]}
+    worker.src_xfer_handles_by_block_size = {16: 1}
+    worker.dst_xfer_side_handles = {remote_engine_id: {0: 2}}
+    worker._remote_agents = {remote_engine_id: {(0, 0): "remote-agent"}}
+    worker.nixl_wrapper = MagicMock()
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="aborted-request",
+        local_block_ids=[],
+        kv_transfer_params={
+            "remote_block_ids": [[3, 4]],
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-request",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+        },
+    )
+
+    worker._read_blocks_for_req(
+        "aborted-request", metadata.reqs_to_recv["aborted-request"]
+    )
+
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "remote-agent", notif_msg=b"prefill-request:1"
     )
 
 
@@ -1912,6 +1977,61 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
         for block in range(count)
     ]
     assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+
+
+@pytest.mark.cpu_test
+def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
+    """Fallback metadata must route source IDs separately from GPU IDs."""
+    spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
+    scheduler = make_nixl_scheduler(heartbeat=True)
+    scheduler._is_hma_required = False
+    scheduler.kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        num_blocks_by_pool=[32],
+        hisparse_host_num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["source"],
+                spec,
+                block_pool_id=None,
+                enable_kv_transfer=False,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+            KVCacheGroupSpec(
+                ["indexer"],
+                spec,
+                role=KVCacheGroupRole.HISPARSE_INDEXER,
+            ),
+            KVCacheGroupSpec(
+                ["resident"],
+                HiSparseResidentSpec(block_size=16, page_size=32),
+            ),
+            KVCacheGroupSpec(
+                ["hot"],
+                HiSparseHotSpec(block_size=16, page_size=32, blocks_per_request=2),
+                enable_kv_transfer=False,
+            ),
+        ],
+    )
+    request = create_request(do_remote_prefill=True)
+    request.hisparse_host_import = True
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = (
+        [5, 6],
+        [10, 11],
+        [20],
+        [30, 31],
+    )
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
+    metadata = scheduler.build_connector_meta(MagicMock())
+    request_metadata = metadata.reqs_to_recv[request.request_id]
+
+    assert request_metadata.hisparse_host_block_ids == [5, 6]
+    assert request_metadata.local_block_ids == ([10, 11], [20])
 
 
 @pytest.mark.cpu_test

@@ -118,6 +118,12 @@ def test_hisparse_written_rows_preserve_scheduler_page_boundaries():
     )
 
 
+def test_hisparse_gpu_only_partial_page_has_no_row_mirror():
+    source_slots = np.array([100], dtype=np.int64)
+
+    assert _select_written_row_mirrors((), source_slots, 0) == ()
+
+
 def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     """Separate context and query writes must share one mirror phase."""
     worker = _make_hisparse_worker()

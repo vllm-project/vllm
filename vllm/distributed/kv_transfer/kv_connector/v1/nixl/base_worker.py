@@ -37,6 +37,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorTransferResults,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
+    make_hisparse_nixl_destination,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
@@ -424,6 +427,9 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
+        self._hisparse_destination = make_hisparse_nixl_destination(
+            kv_cache_config, vllm_config
+        )
         attention_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -1203,6 +1209,9 @@ class NixlBaseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
+        if self._hisparse_destination is not None:
+            self._hisparse_destination.reset_regions()
+
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1256,6 +1265,7 @@ class NixlBaseConnectorWorker:
         registration_ranges: dict[tuple[int, str], tuple[int, int, int]] = {}
         region_mem_types: list[str] = []
         seen_base_addresses: list[int] = []
+        region_indices: dict[tuple[int, str | None], int] = {}
         tensor_configs = {
             layer_name: tensor_config
             for tensor_config in self.kv_cache_config.kv_cache_tensors
@@ -1301,12 +1311,17 @@ class NixlBaseConnectorWorker:
         # P and D may allocate equivalent transferable layers in different
         # cache-group orders. Keep their region lists aligned without putting
         # layers.10 before layers.2, which would break PP region slicing.
+        def transfer_layer_name(layer_name: str) -> str:
+            if self._hisparse_destination is None:
+                return layer_name
+            return self._hisparse_destination.transfer_layer_name(layer_name)
+
         layer_names = (
             xfer_buffers
             if self._is_csa_linear
             else sorted(
                 xfer_buffers,
-                key=_region_sort_key,
+                key=lambda name: _region_sort_key(transfer_layer_name(name)),
             )
         )
         for layer_name in layer_names:
@@ -1350,6 +1365,9 @@ class NixlBaseConnectorWorker:
             base_addr = cache.data_ptr()
             is_mla_region = isinstance(
                 layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+            ) or (
+                self._hisparse_destination is not None
+                and self._hisparse_destination.is_mla_region(layer_spec)
             )
             logger.debug(
                 "Registering layer %s with cache shape: %s", layer_name, cache.shape
@@ -1480,8 +1498,13 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
-                    region_index = seen_base_addresses.index(base_addr)
+                region_name = transfer_layer_name(layer_name)
+                region_key = (
+                    base_addr,
+                    region_name if self._hisparse_destination is not None else None,
+                )
+                if region_key in region_indices:
+                    region_index = region_indices[region_key]
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
@@ -1492,14 +1515,19 @@ class NixlBaseConnectorWorker:
                         self.region_group_ids[region_index] = _SHARED_REGION_GROUP_ID
                 else:
                     region_index = len(seen_base_addresses)
+                    region_indices[region_key] = region_index
                     seen_base_addresses.append(base_addr)
                     self.block_len_per_layer.append(block_len)
                     self.block_stride_per_layer.append(block_stride)
                     self.region_group_ids.append(group_id)
-                    self.region_names.append(layer_name)
+                    self.region_names.append(region_name)
                     self.region_num_blocks.append(num_blocks)
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
+                    if self._hisparse_destination is not None:
+                        self._hisparse_destination.register_region(
+                            layer_name, block_len, kv_caches
+                        )
 
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:
@@ -1545,6 +1573,10 @@ class NixlBaseConnectorWorker:
             == len(self.region_names)
             == len(self.region_num_blocks)
         )
+        if self._hisparse_destination is not None:
+            assert len(self._hisparse_destination.host_regions) == len(
+                self.region_names
+            )
         # Descriptor ids must be region-ordered, matching the remote side.
         self._scratch_region_indices.sort()
 
@@ -1585,6 +1617,8 @@ class NixlBaseConnectorWorker:
             descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
             self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
             self._registered_descs.append(descs)
+        if self._hisparse_destination is not None:
+            self._hisparse_destination.prepare_host_descriptors(self)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
@@ -2648,7 +2682,8 @@ class NixlBaseConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
-            direct_device_recving.add(req_id)
+            if meta.hisparse_host_block_ids is None:
+                direct_device_recving.add(req_id)
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -2733,7 +2768,9 @@ class NixlBaseConnectorWorker:
 
     def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
         """Make direct NIXL writes visible before model execution."""
-        requires_sync = current_platform.is_rocm() and self._has_mamba
+        requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
+            current_platform.is_cuda() and self._hisparse_destination is not None
+        )
         if self.use_host_buffer or not done_recving or not requires_sync:
             return
 
@@ -3288,6 +3325,8 @@ class NixlBaseConnectorWorker:
     def _finish_shutdown(self) -> None:
         self._recving_transfers.clear()
         try:
+            if self._hisparse_destination is not None:
+                self._hisparse_destination.release(self)
             for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
             for handles in self.src_xfer_handles_by_tp_ratio.values():
