@@ -104,6 +104,7 @@ from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
 )
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import (
+    KimiK3LowLatencyLinearMethod,
     enable_kimi_k3_low_latency_gemm,
 )
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
@@ -343,6 +344,11 @@ class KimiRoutedOutputTransform(nn.Module):
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
         if residual is not None:
+            quant_method = self.up_proj.quant_method
+            if isinstance(quant_method, KimiK3LowLatencyLinearMethod):
+                return quant_method.apply_with_residual(
+                    self.up_proj, hidden_states, residual
+                )
             return residual.addmm_(hidden_states, self.up_proj.weight.t())
         hidden_states, _ = self.up_proj(hidden_states)
         return hidden_states

@@ -403,6 +403,12 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
             (1, _cute(1, 64, 4, 2)),
             (2, _cute(2, 64, 4, 2)),
         ),
+        residual_configs=(
+            (1, _cute(1, 64, 4, 2)),
+            (2, _cute(2, 64, 4, 1)),
+            (3, _cute(3, 64, 4, 2, 4)),
+            (4, _cute(4, 32, 2, 4, 4)),
+        ),
         name="routed_expert_up_proj",
     ),
     (7168, 8448): ProjectionSpec(
@@ -932,7 +938,7 @@ class KimiK3LowLatencyLinearMethod(_KimiK3LowLatencyApply, UnquantizedLinearMeth
             output = _run_residual_plan(self._residual_plan, x, layer.weight, residual)
             if output is not None:
                 return output
-        return torch.addmm(residual, x, layer.weight.t())
+        return residual.addmm_(x, layer.weight.t())
 
 
 class KimiK3LowLatencyEmbeddingMethod(

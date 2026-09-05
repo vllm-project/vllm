@@ -68,8 +68,12 @@ CUTE_CASES = [
 ]
 
 RESIDUAL_CUTE_CASES = [
-    (spec.n, spec.k, num_tokens)
-    for spec in k3_gemm.KIMI_K3_PROJECTIONS.values()
+    (capability, spec.n, spec.k, num_tokens)
+    for capability, table in (
+        ((10, 3), k3_gemm.KIMI_K3_PROJECTIONS),
+        ((10, 0), k3_gemm.KIMI_K3_PROJECTIONS_SM100),
+    )
+    for spec in table.values()
     for num_tokens, _ in spec.residual_configs
 ]
 
@@ -147,6 +151,13 @@ EXPECTED_RESIDUAL_CUTE_CONFIGS = {
     (7168, 3584, 2): (64, 7, 2, 8),
     (7168, 3584, 3): (64, 2, 1, 8),
     (7168, 3584, 4): (64, 2, 1, 8),
+}
+
+EXPECTED_RESIDUAL_CUTE_CONFIGS_SM100 = {
+    (7168, 3584, 1): (64, 4, 2, 8),
+    (7168, 3584, 2): (64, 4, 1, 8),
+    (7168, 3584, 3): (64, 4, 2, 4),
+    (7168, 3584, 4): (32, 2, 4, 4),
 }
 
 
@@ -252,6 +263,13 @@ def test_residual_cute_configs_match_measured_table() -> None:
         for num_tokens, config in spec.residual_configs
     }
     assert actual == EXPECTED_RESIDUAL_CUTE_CONFIGS
+
+    sm100_actual = {
+        (spec.n, spec.k, num_tokens): _config_tuple(config)
+        for spec in k3_gemm.KIMI_K3_PROJECTIONS_SM100.values()
+        for num_tokens, config in spec.residual_configs
+    }
+    assert sm100_actual == EXPECTED_RESIDUAL_CUTE_CONFIGS_SM100
 
 
 def test_kda_overlap_configs_match_measured_table() -> None:
@@ -700,6 +718,44 @@ def test_installation_is_shape_specific_and_unquantized(
     }
 
 
+def test_sm100_installation_registers_residual_warmups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLinear(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.quant_method = k3_gemm.UnquantizedLinearMethod()
+            self.weight = torch.empty(7168, 3584)
+
+    root = nn.Module()
+    root.up_proj = FakeLinear()
+    monkeypatch.setattr(k3_gemm, "LinearBase", FakeLinear)
+    monkeypatch.setattr(
+        k3_gemm,
+        "_low_latency_table",
+        lambda: k3_gemm.KIMI_K3_PROJECTIONS_SM100,
+    )
+    residual_warmups: set[SkinnyGemmConfig] = set()
+    monkeypatch.setattr(k3_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: True)
+    monkeypatch.setattr(
+        k3_gemm.shape_dynamic_skinny_gemm,
+        "request_warmup_configs",
+        lambda dtype, configs, *, has_residual=False: (
+            residual_warmups.update(configs) if has_residual else None
+        ),
+    )
+
+    k3_gemm.enable_kimi_k3_low_latency_gemm(root, torch.bfloat16)
+
+    assert isinstance(root.up_proj.quant_method, k3_gemm.KimiK3LowLatencyLinearMethod)
+    assert residual_warmups == {
+        config
+        for _, config in k3_gemm.KIMI_K3_PROJECTIONS_SM100[
+            (7168, 3584)
+        ].residual_configs
+    }
+
+
 @pytest.mark.parametrize(
     "dtype,platform_enabled",
     [(torch.float16, True), (torch.bfloat16, False)],
@@ -1080,14 +1136,21 @@ def test_dsv3_cuda_graph_capture_tile_branches(num_tokens: int) -> None:
     assert cosine > 0.999
 
 
-@pytest.mark.parametrize("n,k,num_tokens", RESIDUAL_CUTE_CASES)
-def test_cute_residual_epilogue(n: int, k: int, num_tokens: int) -> None:
-    _require_sm103_and_cute()
+@pytest.mark.parametrize("capability,n,k,num_tokens", RESIDUAL_CUTE_CASES)
+def test_cute_residual_epilogue(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
+) -> None:
+    _require_capability_and_cute(capability)
     torch.manual_seed(42 + num_tokens)
     x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(n, k, dtype=torch.bfloat16, device="cuda")
     residual = torch.randn(num_tokens, n, dtype=torch.bfloat16, device="cuda")
-    spec = k3_gemm.KIMI_K3_PROJECTIONS[(n, k)]
+    table = (
+        k3_gemm.KIMI_K3_PROJECTIONS
+        if capability == (10, 3)
+        else k3_gemm.KIMI_K3_PROJECTIONS_SM100
+    )
+    spec = table[(n, k)]
     config = spec.residual_config(num_tokens)
     assert config is not None
 
@@ -1119,10 +1182,17 @@ def test_cute_residual_epilogue_all_supported_token_counts(num_tokens: int) -> N
     torch.testing.assert_close(output.float(), reference, rtol=2e-2, atol=2e-1)
 
 
-@pytest.mark.parametrize("num_tokens", range(1, 5))
-def test_cute_residual_epilogue_cuda_graph_capture(num_tokens: int) -> None:
-    _require_sm103_and_cute()
-    spec = k3_gemm.KIMI_K3_PROJECTIONS[(7168, 3584)]
+@pytest.mark.parametrize("capability,n,k,num_tokens", RESIDUAL_CUTE_CASES)
+def test_cute_residual_epilogue_cuda_graph_capture(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
+) -> None:
+    _require_capability_and_cute(capability)
+    table = (
+        k3_gemm.KIMI_K3_PROJECTIONS
+        if capability == (10, 3)
+        else k3_gemm.KIMI_K3_PROJECTIONS_SM100
+    )
+    spec = table[(n, k)]
     config = spec.residual_config(num_tokens)
     assert config is not None
     x = torch.randn(num_tokens, spec.k, dtype=torch.bfloat16, device="cuda")
@@ -1157,6 +1227,38 @@ class _SkinnyGemmSpy:
 
     def is_available(self) -> bool:
         return self._real.is_available()
+
+
+@pytest.mark.parametrize("num_tokens", range(1, 5))
+def test_kimi_routed_output_transform_uses_sm100_residual_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+    num_tokens: int,
+) -> None:
+    _require_capability_and_cute((10, 0))
+    from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
+
+    latent_dim, hidden_dim = 3584, 7168
+    torch.manual_seed(7 + num_tokens)
+    latent = torch.randn(num_tokens, latent_dim, dtype=torch.bfloat16, device="cuda")
+    residual = torch.randn(num_tokens, hidden_dim, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(hidden_dim, latent_dim, dtype=torch.bfloat16, device="cuda")
+    spec = k3_gemm.KIMI_K3_PROJECTIONS_SM100[(hidden_dim, latent_dim)]
+    method = k3_gemm.KimiK3LowLatencyLinearMethod(
+        k3_gemm._build_plan(spec), k3_gemm._build_residual_plan(spec)
+    )
+    up_proj = SimpleNamespace(weight=weight, quant_method=method)
+    transform = KimiRoutedOutputTransform(None, up_proj)
+    spy = _SkinnyGemmSpy(k3_gemm.shape_dynamic_skinny_gemm)
+    monkeypatch.setattr(k3_gemm, "shape_dynamic_skinny_gemm", spy)
+
+    output = transform(latent, residual)
+
+    reference = latent.float() @ weight.float().t() + residual.float()
+    cosine = torch.nn.functional.cosine_similarity(
+        output.float().flatten(), reference.flatten(), dim=0
+    ).item()
+    assert cosine > 0.999
+    assert spy.calls == [num_tokens]
 
 
 @pytest.mark.parametrize("num_tokens", [1, 2, 3, 4])
@@ -1201,20 +1303,37 @@ def test_latent_moe_production_layout_residual(
     )
 
 
-def test_residual_dispatch_falls_back_to_addmm(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fallback = torch.randn(2, 3)
+def test_residual_dispatch_falls_back_to_inplace_addmm() -> None:
     residual = torch.randn(2, 3)
     x = torch.randn(2, 4)
     weight = torch.randn(3, 4)
-    monkeypatch.setattr(torch, "addmm", lambda *args: fallback)
+    expected = residual + x @ weight.t()
     # CPU tensors fail the runtime check, forcing the addmm fallback.
     method = k3_gemm.KimiK3LowLatencyLinearMethod({}, {})
 
     output = method.apply_with_residual(SimpleNamespace(weight=weight), x, residual)
 
-    assert output is fallback
+    assert output is residual
+    torch.testing.assert_close(output, expected)
+
+
+def test_kimi_routed_output_transform_dispatches_residual_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
+
+    expected = torch.randn(2, 3)
+    method = k3_gemm.KimiK3LowLatencyLinearMethod({}, {})
+    monkeypatch.setattr(method, "apply_with_residual", lambda *args: expected)
+    up_proj = SimpleNamespace(
+        weight=torch.randn(3, 4),
+        quant_method=method,
+    )
+    transform = KimiRoutedOutputTransform(None, up_proj)
+
+    output = transform(torch.randn(2, 4), torch.randn(2, 3))
+
+    assert output is expected
 
 
 @pytest.mark.skipif(
