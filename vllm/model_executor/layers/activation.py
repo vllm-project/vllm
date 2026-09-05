@@ -229,9 +229,14 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_xpu():
             self._forward_method = self.forward_native
         elif current_platform.is_cuda_alike():
+            # ROCm included: the kernel carries no HIP-specific guard and is
+            # built and numerically correct on gfx950. SiluAndMul above already
+            # takes the same is_cuda_alike() path on ROCm; the exclusion here
+            # only sent HIP to forward_native, which costs six eager kernels
+            # (two clamps, a sigmoid, two muls and an add) per invocation.
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
