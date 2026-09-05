@@ -57,8 +57,7 @@ pub(crate) fn content_str(delta: &ReasoningDelta) -> Option<&str> {
 #[test]
 fn delimited_content_only_stream() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let delta = parser.push(DecodedText::unattributed("plain content"));
     assert_eq!(content_str(&delta), Some("plain content"));
@@ -67,8 +66,7 @@ fn delimited_content_only_stream() {
 #[test]
 fn delimited_single_chunk_with_reasoning_and_content() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let delta = parser.push(DecodedText::unattributed("<think>reason</think>answer"));
     assert_eq!(reasoning_str(&delta), Some("reason"));
@@ -78,8 +76,7 @@ fn delimited_single_chunk_with_reasoning_and_content() {
 #[test]
 fn delimited_partial_tokens_across_chunks() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     assert!(parser.push(DecodedText::unattributed("<thi")).is_empty());
     let delta = parser.push(DecodedText::unattributed("nk>reason</think>answer"));
@@ -90,8 +87,7 @@ fn delimited_partial_tokens_across_chunks() {
 #[test]
 fn delimited_finish_flushes_buffer() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
     parser.initialize(&[THINK_START_ID]);
 
     let delta = parser.push(DecodedText::unattributed("unfinished</thi"));
@@ -101,144 +97,9 @@ fn delimited_finish_flushes_buffer() {
 }
 
 #[test]
-fn qwen3_without_prompt_markers_expects_start_token() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = push_str(&mut parser, "reason</think>answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("reason</think>answer"));
-}
-
-#[test]
-fn qwen3_prompt_end_marker_starts_in_content() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[THINK_END_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn qwen3_tolerates_old_and_new_formats() {
-    let tokenizer = Arc::new(fake_tokenizer());
-
-    let mut old_parser = Qwen3ReasoningParser::new(tokenizer.clone()).unwrap();
-    let old = push_str(&mut old_parser, "<think>reason</think>answer");
-    assert_eq!(reasoning_str(&old), Some("reason"));
-    assert_eq!(content_str(&old), Some("answer"));
-
-    let mut new_parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-    new_parser.initialize(&[THINK_START_ID]).unwrap();
-    let new = push_str(&mut new_parser, "reason</think>answer");
-    assert_eq!(reasoning_str(&new), Some("reason"));
-    assert_eq!(content_str(&new), Some("answer"));
-}
-
-#[test]
-fn qwen3_stops_scanning_at_last_special_token() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-
-    parser.initialize(&[THINK_START_ID, SPECIAL_BOUNDARY_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = push_str(&mut parser, "reason</think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn deepseek_r1_stops_scanning_at_last_special_token() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
-
-    parser.initialize(&[THINK_END_ID, SPECIAL_BOUNDARY_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "reason</think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn minimax_m3_handles_explicit_think_delimiters() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = push_str(&mut parser, "<mm:think>reason</mm:think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn minimax_m3_drops_leading_end_marker() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = push_str(&mut parser, "</mm:think>answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn minimax_m3_preserves_non_leading_end_marker() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = push_str(&mut parser, "XXX</mm:think>YYY");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("XXX</mm:think>YYY"));
-}
-
-#[test]
-fn minimax_m3_drops_split_leading_end_marker() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-
-    assert!(push_str(&mut parser, "</mm").is_empty());
-    let delta = push_str(&mut parser, ":think>answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn minimax_m3_uses_prompt_prefilled_start_marker() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[MM_THINK_START_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "reason</mm:think>answer");
-    assert_eq!(reasoning_str(&delta), Some("reason"));
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
-fn minimax_m3_uses_prompt_prefilled_end_marker() {
-    let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[MM_THINK_END_ID]).unwrap();
-
-    let delta = push_str(&mut parser, "answer");
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(content_str(&delta), Some("answer"));
-}
-
-#[test]
 fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
     parser.initialize(&[THINK_START_ID]);
 
     // A filtered special token produces a zero-width attribution with no text;
@@ -269,8 +130,7 @@ fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
 #[test]
 fn delimited_marker_tokens_are_dropped_from_attributions() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser =
-        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
+    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
 
     let mut collected = CollectedAttributions::default();
     for chunk in attributed_chunks(&[
