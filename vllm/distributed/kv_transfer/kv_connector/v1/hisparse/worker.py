@@ -103,10 +103,8 @@ def _select_written_row_mirrors(
 ) -> tuple[SparseKVRowMirror, ...]:
     """Select and coalesce GPU-written rows from a scheduler-owned envelope."""
     source_slots = source_slots[source_slots >= 0]
-    if source_slots.size == 0:
+    if source_slots.size == 0 or not candidates:
         return ()
-    if not candidates:
-        raise RuntimeError("HiSparse GPU slots have no scheduler mapping envelope.")
     starts = np.asarray([mirror.source_starts for mirror in candidates], dtype=np.int64)
     counts = np.fromiter((mirror.num_rows for mirror in candidates), dtype=np.int64)
     destinations = np.fromiter(

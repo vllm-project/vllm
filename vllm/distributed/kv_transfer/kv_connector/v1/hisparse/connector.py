@@ -231,7 +231,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.finish_step()
 
-    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
+    def prepare_forward(self, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
@@ -246,6 +246,9 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             request_state_indices,
             request_ids,
         )
+
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
+        return
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
