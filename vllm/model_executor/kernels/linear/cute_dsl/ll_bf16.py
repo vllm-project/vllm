@@ -20,6 +20,12 @@ def is_available() -> bool:
     global _cutedsl_available
     if _cutedsl_available is not None:
         return _cutedsl_available
+    # Central gate honors VLLM_DISABLE_CUTEDSL=1 (CuTeDSL ICEs on SM12.1/GB10).
+    from vllm.utils.import_utils import has_cutedsl
+
+    if not has_cutedsl():
+        _cutedsl_available = False
+        return False
     try:
         import cutlass  # noqa: F401
         import cutlass.cute  # noqa: F401
