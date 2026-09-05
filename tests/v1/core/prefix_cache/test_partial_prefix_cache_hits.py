@@ -22,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KpoolTailSpec,
     KVCacheConfig,
@@ -2279,3 +2280,99 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     offered = [b for _, _, b in drain_boundary_state_offloads(manager).get("0", [])]
     assert 2 * block_size in offered
     assert req0.num_prompt_tokens < 2 * block_size
+
+
+def _fine_grained_gate_coordinator(
+    extra_group: KVCacheGroupSpec,
+    hash_block_size: int = 2,
+    mamba_block_size: int = 8,
+):
+    """Full-attention + Mamba("align") geometry that enables fine-grained hits,
+    plus one extra group for the gate to consider. Returns the coordinator and
+    the extra group's id."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            extra_group,
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    return manager.coordinator, len(kv_cache_config.kv_cache_groups) - 1
+
+
+def test_scratch_group_does_not_veto_fine_grained_hits():
+    """A non-prefix-cacheable group is never looked up, so its block-aligned
+    lookup capability must not pin every other group's hits to
+    ``scheduler_block_size``."""
+    coordinator, gid = _fine_grained_gate_coordinator(
+        KVCacheGroupSpec(
+            ["compressor_state"],
+            CircularBufferSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=8,
+                head_size_v=0,
+                dtype=torch.float32,
+            ),
+        )
+    )
+    scratch_spec = coordinator.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+    scratch_manager = coordinator.single_type_managers[gid]
+    # Exactly the shape the gate reacts to: block-aligned lookups only, and a
+    # block size that differs from the hash block size.
+    assert not scratch_spec.prefix_cacheable
+    assert not scratch_manager.supports_fine_grained_hash_lookup
+    assert scratch_manager.block_size != coordinator.hash_block_size
+
+    assert coordinator.enable_partial_hash_hits
+    assert coordinator._cache_hit_alignment_tokens == coordinator.hash_block_size
+    assert all(gid not in group.group_ids for group in coordinator.attention_groups)
+
+
+def test_prefix_cacheable_group_without_fine_lookup_still_vetoes():
+    """Negative control: a prefix-cacheable sliding-window group with the same
+    two properties is looked up, so the gate must still veto."""
+    coordinator, gid = _fine_grained_gate_coordinator(
+        KVCacheGroupSpec(
+            ["swa"],
+            SlidingWindowSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=4,
+            ),
+        )
+    )
+    swa_spec = coordinator.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+    swa_manager = coordinator.single_type_managers[gid]
+    assert swa_spec.prefix_cacheable
+    assert not swa_manager.supports_fine_grained_hash_lookup
+    assert swa_manager.block_size != coordinator.hash_block_size
+
+    assert not coordinator.enable_partial_hash_hits
+    assert coordinator._cache_hit_alignment_tokens == coordinator.scheduler_block_size
