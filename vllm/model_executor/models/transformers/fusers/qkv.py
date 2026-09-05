@@ -126,9 +126,12 @@ class QKVFuser(StackedFuser):
                 and any(ast.dump(arg) in arg_dumps for arg in node.args)
             ):
                 raise ValueError("another linear consumes the same input")
-        blocks = [innermost_block(funcdef.body, call) for call in calls]
-        if any(found is None for found in blocks):
-            raise ValueError("projection calls not found in the function body")
+        blocks = []
+        for call in calls:
+            found = innermost_block(funcdef.body, call)
+            if found is None:
+                raise ValueError("projection calls not found in the function body")
+            blocks.append(found)
         if len({id(block) for block, _ in blocks}) != 1:
             raise ValueError("projection calls are in different blocks")
 

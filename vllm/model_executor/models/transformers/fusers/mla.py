@@ -25,6 +25,7 @@ from vllm.model_executor.models.transformers.fx_utils import (
     upstream_linear,
 )
 from vllm.model_executor.models.transformers.utils import (
+    Style,
     log_replacement,
     replace_linear_class,
 )
@@ -149,6 +150,7 @@ class MLAFuser(StackedFuser):
     def shards(self) -> list[tuple[str, ShardId]]:
         """`q_a_proj` and `kv_a_proj_with_mqa` stack into one down-projection."""
         if self.has_q_lora:
+            assert self.q_a_proj_name is not None
             return [(self.q_a_proj_name, 0), (self.kv_a_proj_name, 1)]
         return []
 
@@ -240,6 +242,7 @@ class MLAFuser(StackedFuser):
         attention interface unexpanded."""
         funcdef, fn = recover_forward(type(module))
         if self.has_q_lora:
+            assert self.q_a_proj_name is not None
             # q_a_proj is usually inside the `else` of `if self.q_lora_rank is None`.
             # The fused call is inserted at the top-level statement preceding both.
             q_call = single_self_call(funcdef, self.q_a_proj_name)
@@ -281,7 +284,7 @@ class MLAFuser(StackedFuser):
     def update_attrs(self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"):
         quant_config = vllm_config.quant_config
 
-        def replace_linear_by_name(name: str, style: str):
+        def replace_linear_by_name(name: str, style: Style):
             linear = module.get_submodule(name)
             replacement = replace_linear_class(
                 linear, style, quant_config, prefix=maybe_prefix(prefix, name)
@@ -290,6 +293,8 @@ class MLAFuser(StackedFuser):
             log_replacement(maybe_prefix(prefix, name), linear, replacement)
 
         if self.has_q_lora:
+            assert self.q_a_proj_name is not None
+            assert self.q_b_proj_name is not None
             q_a = module.get_submodule(self.q_a_proj_name)
             kv_a = module.get_submodule(self.kv_a_proj_name)
             merged = MergedColumnParallelLinear(
@@ -316,6 +321,7 @@ class MLAFuser(StackedFuser):
             delattr(module, self.kv_a_proj_name)
             replace_linear_by_name(self.q_b_proj_name, "colwise")
         else:
+            assert self.q_proj_name is not None
             replace_linear_by_name(self.kv_a_proj_name, "replicate")
             replace_linear_by_name(self.q_proj_name, "colwise")
 

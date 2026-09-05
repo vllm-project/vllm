@@ -42,7 +42,7 @@ def interface_call(cls: type[nn.Module]) -> ast.Call | None:
         return None
 
     # Find the names of the local variables that read from the interface lookup
-    names = set()
+    names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -92,7 +92,7 @@ class AttentionFuser(BaseFuser):
     def match(
         cls, graph: fx.Graph | None, module: nn.Module
     ) -> "AttentionFuser | None":
-        if (call := interface_call(type(module))) is None:
+        if (call := interface_call(module.__class__)) is None:
             return None
         scaling = [kw.value for kw in call.keywords if kw.arg == "scaling"]
         scale_expr = scaling[0] if len(scaling) == 1 else None
