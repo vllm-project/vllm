@@ -67,9 +67,10 @@ If the main process is controlled via the `vllm` command,
 
 - <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/scripts.py#L123-L140>
 
-The `multiproc_xpu_executor` forces the use of `spawn`.
+The XPU platform forces the use of `spawn` when
+`VLLM_WORKER_MULTIPROC_METHOD` is unset.
 
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/executor/multiproc_xpu_executor.py#L14-L18>
+- <https://github.com/vllm-project/vllm/blob/fd4a1512628ad17944095263c1fe89598710a3ce/vllm/platforms/xpu.py#L372-L374>
 
 There are other miscellaneous places hard-coding the use of `spawn`:
 
