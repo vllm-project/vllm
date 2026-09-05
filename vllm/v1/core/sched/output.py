@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -269,6 +269,9 @@ class SchedulerOutput:
     # Used for adjusting acceptance rate calculation.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
+    # Optimistic output positions whose acceptance has not reached the scheduler.
+    num_output_placeholders: dict[str, int] = field(default_factory=dict)
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
@@ -281,12 +284,21 @@ class SchedulerOutput:
     # EC Cache Manager metadata
     ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
-    # The worker zeros the corresponding GPU memory before the blocks are used,
+    # The worker zeros the corresponding cache memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
-    new_block_ids_to_zero: list[int] | None = None
+    new_block_ids_to_zero: dict[int, list[int]] | None = None
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Complete block-table rows that replace incrementally appended block IDs.
+    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
+
+    # Producer partial-tail offload hand-off for external KV connectors:
+    # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at
+    # the durable boundary block of a producer's last-prompt-boundary partial
+    # tail (mamba "align" CoW target). None unless partial hash hits are active.
+    partial_tail_offloads: dict[str, list[tuple[int, int, int]]] | None = None
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None

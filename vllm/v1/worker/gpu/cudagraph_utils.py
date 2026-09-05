@@ -36,7 +36,10 @@ from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.attn_utils import (
+    build_slot_mappings_by_layer,
+    release_hisparse_profiling_cache,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -428,9 +431,16 @@ class CudaGraphManager:
 
     def captured_token_counts(self) -> list[int]:
         """Sorted token counts with a captured graph, ignoring LoRA variants."""
-        return sorted(
-            {desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0}
-        )
+        token_counts = {
+            desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0
+        }
+        if not token_counts and self.breakable_cg_runner is not None:
+            token_counts.update(
+                desc.num_tokens
+                for desc in self.breakable_cg_runner.entries
+                if desc.num_active_loras == 0
+            )
+        return sorted(token_counts)
 
     def dispatch(
         self,
@@ -929,6 +939,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     if (model := getattr(runner, "model", None)) is not None:
         layers = itertools.chain(layers, model.modules())
     clear_layer_kv_caches(layers)
+    release_hisparse_profiling_cache(runner.compilation_config.static_forward_context)
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()

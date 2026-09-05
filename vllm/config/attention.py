@@ -4,7 +4,7 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -15,6 +15,25 @@ logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA KV offloading."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to one top-k per decode query plus one top-k of LRU slack. The
+    physical allocation is rounded up to the GPU cache block size selected
+    from the active backends.
+    """
+
+    eager_host_mirror: bool = True
+    """Mirror decode-written KV rows to the host pool during the forward so
+    page spills complete without moving data. When disabled, decode rows stay
+    resident-only and evicted pages are copied to host at spill time. Prefill
+    rows are always mirrored during the forward."""
 
 
 @config
@@ -73,6 +92,10 @@ class AttentionConfig:
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
+
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""

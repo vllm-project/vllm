@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,26 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+
+def test_shutdown_releases_kv_cache_block_copier_tensors(monkeypatch):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    cache = torch.empty(1)
+    cache_ref = weakref.ref(cache)
+    runner.cudagraph_manager = None
+    runner.device_kv_cache_block_copier = SimpleNamespace(cache=cache)
+    runner.kv_caches = [cache]
+    runner.attn_groups = []
+    runner.vllm_config = SimpleNamespace()
+    del cache
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(model_runner_module, "free_before_shutdown", lambda _: None)
+
+    runner.shutdown()
+
+    assert cache_ref() is None
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):

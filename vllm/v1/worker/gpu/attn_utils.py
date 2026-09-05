@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
-from typing import Any, cast
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -15,11 +15,26 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.core.kv_cache_utils import (
+    HISPARSE_HOT_SUFFIX,
+    HISPARSE_RESIDENT_SUFFIX,
+    get_unique_kv_cache_group_id,
+)
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    allocate_pinned_host_pool,
+    check_hisparse_host_memory,
+    release_pinned_state,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.ubatch_utils import get_num_ubatches
@@ -30,6 +45,9 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 @dataclass(frozen=True)
@@ -95,6 +113,12 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
+        if isinstance(
+            kv_cache_group_spec.kv_cache_spec,
+            (HiSparseHotSpec, HiSparseResidentSpec),
+        ):
+            attn_groups.append([])
+            continue
         if active_layer_names is not None:
             layer_names = list(active_layer_names.intersection(layer_names))
 
@@ -104,7 +128,7 @@ def init_attn_backend(
         group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
         group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
 
-        for layer_name in layer_names:
+        for layer_name in attn_layers:
             attn_backend = attn_layers[layer_name].get_attn_backend()
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
@@ -208,6 +232,228 @@ def get_query_lens_mismatch_unsupported_backend(
     return None
 
 
+def _allocate_hisparse_kv_cache(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[int, torch.Tensor]]:
+    host_bytes = sum(
+        tensor.size
+        for tensor in kv_cache_config.kv_cache_tensors
+        if tensor.host_resident
+    )
+    check_hisparse_host_memory(host_bytes)
+
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    device_backings: dict[int, torch.Tensor] = {}
+    raw_tensors: dict[str, torch.Tensor] = {}
+    kv_caches: dict[str, torch.Tensor] = {}
+    pinned_host_pools: dict[int, torch.Tensor] = {}
+
+    for tensor in kv_cache_config.kv_cache_tensors:
+        if tensor.host_resident:
+            backing, registered_pool = allocate_pinned_host_pool(tensor.size)
+            pinned_host_pools[backing.data_ptr()] = registered_pool
+            num_blocks = kv_cache_config.hisparse_host_num_blocks
+            assert num_blocks is not None
+        else:
+            assert tensor.block_pool_id is not None
+            backing = device_backings.get(tensor.block_pool_id)
+            if backing is None:
+                backing = torch.zeros(tensor.size, dtype=torch.int8, device=device)
+                device_backings[tensor.block_pool_id] = backing
+            else:
+                assert backing.numel() == tensor.size
+            num_blocks = kv_cache_config.num_blocks_by_pool[tensor.block_pool_id]
+
+        for layer_name in tensor.layers:
+            group_id, group = next(
+                (group_id, group)
+                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                if layer_name in group.layer_names
+            )
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[layer_name]
+            raw_tensors[layer_name] = backing
+            if isinstance(spec, (HiSparseHotSpec, HiSparseResidentSpec)):
+                continue
+            layer_tensor = replace(
+                tensor,
+                layers=[layer_name],
+                layer_stride=tensor.layer_stride or tensor.size,
+            )
+            (kv_cache,) = create_kv_cache_views(
+                backing,
+                spec,
+                num_blocks,
+                layout,
+                layer_tensor,
+                kernel_block_size=kernel_block_sizes[group_id],
+            )
+            kv_caches[layer_name] = kv_cache
+
+    return kv_caches, raw_tensors, pinned_host_pools
+
+
+def _get_hisparse_cache(
+    forward_context: dict[str, Any], layer_name: str
+) -> HiSparseCacheHandle:
+    attention_layer = forward_context[layer_name]
+    hisparse_cache = attention_layer.hisparse_cache
+    assert hisparse_cache is not None
+    return hisparse_cache
+
+
+def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
+    cache_handles = [
+        cache
+        for layer in forward_context.values()
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None
+    ]
+    runtimes = {
+        id(cache.runtime): cache.runtime
+        for cache in cache_handles
+        if hasattr(cache.runtime, "_host_cache")
+    }
+    if not runtimes:
+        return
+
+    registered_pools = list(
+        {
+            runtime.registered_host_pool.data_ptr(): runtime.registered_host_pool
+            for runtime in runtimes.values()
+        }.values()
+    )
+    release_pinned_state(list(runtimes.values()), registered_pools)
+    for cache in cache_handles:
+        cache.mirror_staging_cache = None
+        cache.mirror_staging_slots = None
+
+
+def _bind_hisparse_kv_caches(
+    *,
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    raw_tensors: dict[str, torch.Tensor],
+    kv_caches: dict[str, torch.Tensor],
+    block_tables: "BlockTables",
+    pinned_host_pools: dict[int, torch.Tensor],
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> None:
+    tensor_configs = {
+        name: tensor_config
+        for tensor_config in kv_cache_config.kv_cache_tensors
+        for name in tensor_config.layers
+    }
+    num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+
+    resident_source_index = 0
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if not isinstance(group.kv_cache_spec, HiSparseResidentSpec):
+            continue
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_RESIDENT_SUFFIX)
+            layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+            tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
+            cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            cache_handle.bind_cache(
+                raw_tensors[cache_name],
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=group.kv_cache_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+                slot_mapping=block_tables.slot_mappings[group_id],
+            )
+            assert cache_handle.view is not None
+            kv_caches[cache_name] = cache_handle.view.cache
+            cache_handle.runtime.resident_source_index = resident_source_index
+        resident_source_index += 1
+
+    hot_backing: torch.Tensor | None = None
+    cache_handles: list[HiSparseCacheHandle] = []
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        if not isinstance(group.kv_cache_spec, HiSparseHotSpec):
+            continue
+        for cache_name in group.layer_names:
+            assert cache_name.endswith(HISPARSE_HOT_SUFFIX)
+            raw_tensor = raw_tensors[cache_name]
+            if hot_backing is None:
+                hot_backing = raw_tensor
+            elif hot_backing.untyped_storage().data_ptr() != (
+                raw_tensor.untyped_storage().data_ptr()
+            ):
+                raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
+            layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+            cache_handle = _get_hisparse_cache(forward_context, layer_name)
+            tensor_config = tensor_configs[cache_name]
+            assert tensor_config.block_pool_id is not None
+            cache_handle.runtime.bind_hot_cache(
+                raw_tensor,
+                byte_offset=tensor_config.offset,
+                block_stride=tensor_config.block_stride,
+                num_blocks=num_blocks_by_pool[tensor_config.block_pool_id],
+                block_size=group.kv_cache_spec.block_size,
+                block_table=block_tables.input_block_tables[group_id],
+            )
+            resident = cache_handle.view
+            hot = cache_handle.runtime.hot
+            assert resident is not None
+            if (
+                resident.cache.untyped_storage().data_ptr()
+                != hot.cache.untyped_storage().data_ptr()
+                or resident.cache.data_ptr() != hot.cache.data_ptr()
+                or resident.cache.stride() != hot.cache.stride()
+            ):
+                raise RuntimeError("HiSparse resident and hot layouts must match.")
+            source_tensor = raw_tensors[layer_name]
+            cache_handle.runtime.bind_source_cache(
+                kv_caches[layer_name],
+                registered_host_pool=pinned_host_pools[source_tensor.data_ptr()],
+            )
+            cache_handles.append(cache_handle)
+
+    if hot_backing is None or not cache_handles:
+        raise RuntimeError("HiSparse found no hot-cache handles.")
+    request_state_indices = torch.full(
+        (max_num_reqs,), -1, dtype=torch.int32, device=hot_backing.device
+    )
+    for cache_handle in cache_handles:
+        cache_handle.runtime.request_state_indices = request_state_indices
+    source_group_id = get_unique_kv_cache_group_id(
+        kv_cache_config, KVCacheGroupRole.HISPARSE_SOURCE
+    )
+    source_block_table = block_tables.input_block_tables[source_group_id]
+    source_slot_mapping = block_tables.slot_mappings[source_group_id]
+    resident = cache_handles[0].view
+    assert resident is not None
+    staging_blocks = (
+        max_num_batched_tokens + resident.block_size - 1
+    ) // resident.block_size
+    mirror_staging_caches = torch.empty(
+        (
+            len(cache_handles),
+            staging_blocks,
+            resident.block_size,
+            resident.cache.shape[-1],
+        ),
+        dtype=resident.cache.dtype,
+        device=hot_backing.device,
+    )
+    mirror_staging_slots = torch.arange(
+        max_num_batched_tokens, dtype=torch.int64, device=hot_backing.device
+    )
+    for layer_index, cache_handle in enumerate(cache_handles):
+        cache_handle.source_block_table = source_block_table
+        cache_handle.mirror_slot_mapping = source_slot_mapping
+        cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
+        cache_handle.mirror_staging_slots = mirror_staging_slots
+
+
 def init_kv_cache(
     runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
@@ -215,16 +461,34 @@ def init_kv_cache(
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
+    block_tables: "BlockTables",
     kv_cache_allocation_context: AbstractContextManager | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
-        kv_caches = allocate_kv_cache(
-            kv_cache_config,
-            device,
-            vllm_config.cache_config.get_resolved_kv_cache_layout(),
-            kernel_block_sizes,
-        )
+        if vllm_config.attention_config.hisparse_config is not None:
+            kv_caches, raw_tensors, pinned_host_pools = _allocate_hisparse_kv_cache(
+                kv_cache_config, device, kernel_block_sizes, vllm_config
+            )
+            _bind_hisparse_kv_caches(
+                forward_context=forward_context,
+                kv_cache_config=kv_cache_config,
+                raw_tensors=raw_tensors,
+                kv_caches=kv_caches,
+                block_tables=block_tables,
+                pinned_host_pools=pinned_host_pools,
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_num_batched_tokens=(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+            )
+        else:
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                device,
+                vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -235,12 +499,18 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
+    bindable_caches = {
+        name: cache for name, cache in kv_caches.items() if name in forward_context
+    }
     bind_kv_cache(
-        kv_caches,
+        bindable_caches,
         forward_context,
         runner_kv_caches,
         num_attn_module,
         kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
+    runner_kv_caches.extend(
+        cache for name, cache in kv_caches.items() if name not in forward_context
     )
     return kv_caches
 
@@ -288,6 +558,8 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
+        if not attn_groups[i]:
+            continue
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Per-group causal for hybrid drafters (mixed SWA/full attention).

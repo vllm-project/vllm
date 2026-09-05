@@ -437,6 +437,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
+
         self.model.precompute_and_store_context_kv(
             self.hidden_states[:num_target_tokens],
             self.context_positions[:num_target_tokens],
@@ -479,7 +480,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.block_tables.slot_mappings[:, :num_tokens_padded],
             self.kv_cache_config,
         )
-
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)

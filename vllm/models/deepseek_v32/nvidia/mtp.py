@@ -46,6 +46,10 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.index_group import (
+    SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
+)
 
 from .glm52_low_latency_gemm import (
     build_glm52_plan,
@@ -78,6 +82,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
+        index_group_builder = SparseMLAIndexGroupBuilder(
+            topk_indices_buffer,
+            get_sparse_mla_index_group_max_rows(vllm_config),
+        )
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -86,6 +94,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             prefix,
             config=config,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
         )
 
     def forward(

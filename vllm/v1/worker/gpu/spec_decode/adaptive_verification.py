@@ -170,12 +170,14 @@ class AdaptiveVerificationManager:
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
-    def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
+    def batches_to_profile(
+        self, capture_sizes: list[int], max_decode_tokens: int
+    ) -> Iterator[dict[str, int]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
         timings to set_initial_cost_curves."""
-        max_num_tokens = self.req_states.max_num_batched_tokens
+        max_num_tokens = min(self.req_states.max_num_batched_tokens, max_decode_tokens)
         size = self._cudagraph_limit = capture_sizes[-1] if capture_sizes else 0
         # Also profile beyond the capture limit: real steps run there
         # (piecewise/eager) and linear extrapolation badly underestimates

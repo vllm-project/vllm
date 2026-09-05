@@ -404,7 +404,6 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
-
     # The indexer and main MLA may classify the same short extend differently
     # because they use independent decode thresholds. Only the main MLA route
     # can determine whether the top-k indices will be consumed.
@@ -846,6 +845,7 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            False,
         )
 
     def forward_xpu(

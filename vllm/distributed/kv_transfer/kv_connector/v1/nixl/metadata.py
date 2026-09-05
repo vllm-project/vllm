@@ -306,7 +306,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_num_computed_blocks: tuple[int, ...] = (),
     ):
         req = self._add_new_req(
-            local_block_ids, kv_transfer_params, local_num_computed_blocks
+            local_block_ids,
+            kv_transfer_params,
+            local_num_computed_blocks,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],

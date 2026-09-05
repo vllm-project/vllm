@@ -1874,6 +1874,13 @@ class SpeculativeConfig:
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
+    def uses_draft_kv_cache(self) -> bool:
+        return (
+            self.use_eagle()
+            or self.uses_draft_model()
+            or self.uses_extract_hidden_states()
+        )
+
     def uses_extract_hidden_states(self) -> bool:
         return self.method == "extract_hidden_states"
 

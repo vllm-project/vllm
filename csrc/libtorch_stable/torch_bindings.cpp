@@ -964,6 +964,57 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                             int block_size, int block_stride,"
       "                             int entry_stride) -> ()");
 
+#ifndef USE_ROCM
+  ops.def(
+      "hisparse_resolve_residency(Tensor host_cache,"
+      "                 Tensor! hot_cache,"
+      "                 Tensor hot_block_table,"
+      "                 Tensor global_indices,"
+      "                 Tensor! hot_indices,"
+      "                 Tensor! device_global_indices,"
+      "                 Tensor! lru_slots,"
+      "                 Tensor? request_state_indices,"
+      "                 int region_stride,"
+      "                 Tensor(a!)? miss_mask=None,"
+      "                 Tensor(b!)? attention_indices=None,"
+      "                 int attention_block_stride=0,"
+      "                 Tensor? request_ids=None,"
+      "                 Tensor? source_block_table=None,"
+      "                 int source_block_size=0,"
+      "                 Tensor(c!)? resolved_global_indices=None,"
+      "                 Tensor(d!)? valid_counts=None,"
+      "                 Tensor(e!)? swap_host_physical_rows=None,"
+      "                 Tensor(f!)? swap_device_physical_rows=None,"
+      "                 Tensor(g!)? swap_counts=None,"
+      "                 Tensor? resident_block_table=None,"
+      "                 int resident_block_size=0,"
+      "                 int resident_null_block=0) -> ()");
+
+  ops.def(
+      "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
+      "                                   Tensor request_state_indices,"
+      "                                   Tensor req_id_per_token,"
+      "                                   Tensor written_slots) -> ()");
+
+  ops.def(
+      "hisparse_gather_plan(Tensor host_cache,"
+      "                     Tensor! hot_cache,"
+      "                     Tensor global_indices,"
+      "                     Tensor hot_indices,"
+      "                     Tensor miss_mask,"
+      "                     Tensor? request_state_indices,"
+      "                     Tensor(a!)? attention_indices=None,"
+      "                     int attention_block_stride=0) -> ()");
+
+  ops.def(
+      "hisparse_gather_compact(Tensor host_cache,"
+      "                        Tensor! hot_cache,"
+      "                        Tensor miss_global_indices,"
+      "                        Tensor miss_hot_indices,"
+      "                        Tensor miss_counts) -> ()");
+
+#endif  // !USE_ROCM
+
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
       "concat_and_cache_mla_rope_fused("
@@ -1000,7 +1051,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
   ops.def(
       "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
       "Tensor block_table, Tensor workspace_starts, int batch_size, Tensor? "
-      "seq_starts) -> ()");
+      "seq_starts, Tensor? host_cache=None, Tensor? host_row_ids=None, Tensor? "
+      "device_row_ids=None) -> ()");
 
   ops.def(
       "cp_gather_and_upconvert_nvfp4_kv_cache(Tensor src_cache, Tensor! dst, "
@@ -1068,6 +1120,15 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
   ops.impl("concat_and_cache_mla_grouped",
            TORCH_BOX(&concat_and_cache_mla_grouped));
+
+#ifndef USE_ROCM
+  ops.impl("hisparse_resolve_residency",
+           TORCH_BOX(&hisparse_resolve_residency));
+  ops.impl("hisparse_invalidate_written_slots",
+           TORCH_BOX(&hisparse_invalidate_written_slots));
+  ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
+  ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
+#endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));

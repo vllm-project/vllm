@@ -1391,7 +1391,11 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache_page(
     const int32_t block_size, const int32_t total_tokens,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
-    const int32_t* __restrict__ seq_starts) {
+    const int32_t* __restrict__ seq_starts,
+    const uint8_t* __restrict__ host_cache,
+    const int32_t* __restrict__ host_row_ids,
+    const int32_t* __restrict__ device_row_ids,
+    const int64_t host_entry_stride) {
   constexpr int32_t warps_per_cta = 16;
   __shared__ GatherPageTask page;
   __shared__ int32_t physical_block;
@@ -1417,8 +1421,22 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache_page(
        page_token < page.page_token_end; page_token += warps_per_cta) {
     const int32_t output_token =
         page.output_token_begin + page_token - page.page_token_begin;
-    const uint8_t* token_ptr = src_cache + physical_block * cache_block_stride +
-                               page_token * cache_entry_stride;
+    const int32_t source_row = physical_block * block_size + page_token;
+    const uint8_t* token_ptr;
+    if (device_row_ids == nullptr) {
+      token_ptr = src_cache + physical_block * cache_block_stride +
+                  page_token * cache_entry_stride;
+    } else {
+      const int32_t device_row = device_row_ids[source_row];
+      if (device_row >= 0) {
+        token_ptr = src_cache + (device_row / block_size) * cache_block_stride +
+                    (device_row % block_size) * cache_entry_stride;
+      } else {
+        token_ptr =
+            host_cache +
+            static_cast<int64_t>(host_row_ids[source_row]) * host_entry_stride;
+      }
+    }
     __nv_bfloat16* dst_ptr = dst + output_token * dst_entry_stride;
     gather_and_upconvert_fp8_token(token_ptr, dst_ptr, lane_id);
   }
@@ -1627,7 +1645,10 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     torch::stable::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
-    std::optional<torch::stable::Tensor> seq_starts = std::nullopt) {
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt,
+    std::optional<torch::stable::Tensor> host_cache = std::nullopt,
+    std::optional<torch::stable::Tensor> host_row_ids = std::nullopt,
+    std::optional<torch::stable::Tensor> device_row_ids = std::nullopt) {
   torch::stable::accelerator::DeviceGuard device_guard(
       src_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -1647,6 +1668,12 @@ void cp_gather_and_upconvert_fp8_kv_cache(
         "seq_starts must be int32");
   }
 
+  const bool has_host_rows = host_cache.has_value();
+  STD_TORCH_CHECK(
+      has_host_rows == host_row_ids.has_value() &&
+          has_host_rows == device_row_ids.has_value(),
+      "host_cache, host_row_ids, and device_row_ids must be provided together");
+
   STD_TORCH_CHECK(src_cache.device() == dst.device(),
                   "src_cache and dst must be on the same device");
   STD_TORCH_CHECK(src_cache.device() == block_table.device(),
@@ -1656,6 +1683,43 @@ void cp_gather_and_upconvert_fp8_kv_cache(
   if (seq_starts.has_value()) {
     STD_TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
                     "src_cache and seq_starts must be on the same device");
+  }
+  const uint8_t* host_cache_ptr = nullptr;
+  const int32_t* host_row_ids_ptr = nullptr;
+  const int32_t* device_row_ids_ptr = nullptr;
+  int64_t host_entry_stride = 0;
+  if (has_host_rows) {
+    auto const& host = host_cache.value();
+    auto const& host_rows = host_row_ids.value();
+    auto const& device_rows = device_row_ids.value();
+    STD_TORCH_CHECK(
+        host.device().is_cpu() &&
+            host.scalar_type() == torch::headeronly::ScalarType::Byte &&
+            host.dim() == 2 && host.is_contiguous() &&
+            host.size(1) == src_cache.size(2),
+        "host_cache must be a contiguous uint8 CPU row matrix matching "
+        "src_cache");
+    cudaPointerAttributes attributes{};
+    const cudaError_t pointer_status =
+        cudaPointerGetAttributes(&attributes, host.const_data_ptr());
+    if (pointer_status != cudaSuccess) {
+      cudaGetLastError();
+    }
+    STD_TORCH_CHECK(
+        pointer_status == cudaSuccess && attributes.type == cudaMemoryTypeHost,
+        "host_cache must be CUDA-accessible pinned memory");
+    STD_TORCH_CHECK(
+        host_rows.is_cuda() && device_rows.is_cuda() &&
+            host_rows.scalar_type() == torch::headeronly::ScalarType::Int &&
+            device_rows.scalar_type() == torch::headeronly::ScalarType::Int &&
+            host_rows.is_contiguous() && device_rows.is_contiguous() &&
+            host_rows.numel() == device_rows.numel() && host_rows.dim() <= 2 &&
+            device_rows.dim() <= 2,
+        "host/device row maps must be matching contiguous CUDA int32 tensors");
+    host_cache_ptr = reinterpret_cast<const uint8_t*>(host.const_data_ptr());
+    host_row_ids_ptr = host_rows.const_data_ptr<int32_t>();
+    device_row_ids_ptr = device_rows.const_data_ptr<int32_t>();
+    host_entry_stride = host.stride(0);
   }
   auto dtype = src_cache.scalar_type();
   STD_TORCH_CHECK(
@@ -1699,7 +1763,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(
       workspace_starts.const_data_ptr<int32_t>(),
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
-      dst_entry_stride, seq_starts_ptr);
+      dst_entry_stride, seq_starts_ptr, host_cache_ptr, host_row_ids_ptr,
+      device_row_ids_ptr, host_entry_stride);
 }
 
 void cp_gather_and_upconvert_nvfp4_kv_cache(

@@ -42,6 +42,9 @@ from vllm.v1.attention.ops.pcp import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
+    )
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -126,6 +129,7 @@ class DeepseekV32Attention(MLAAttention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
+        index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -209,6 +213,7 @@ class DeepseekV32Attention(MLAAttention):
             use_sparse=True,
             indexer=indexer,
             topk_indices_buffer=topk_indices_buffer,
+            index_group_builder=index_group_builder,
             attn_backend=attn_backend,
         )
 
@@ -304,6 +309,14 @@ class DeepseekV32Attention(MLAAttention):
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        indexer_slot = (
+            slot_mapping.get(self.indexer.k_cache.prefix)
+            if self.indexer is not None
+            else None
+        )
+        hisparse_cache = self.hisparse_cache
+        layer_attn_metadata, _, _, _ = get_attention_context(self.layer_name)
+        self.impl.prepare_for_batch(layer_attn_metadata)
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -331,12 +344,17 @@ class DeepseekV32Attention(MLAAttention):
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+            indexer_slot = None
         else:
-            mla_kv_cache = self.kv_cache
+            mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
-        kv_c_out = torch.empty_like(kv_c)
-        k_pe_out = torch.empty_like(k_pe)
+        if self.use_pcp or hisparse_cache is None:
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
+        else:
+            kv_c_out = torch.empty_like(kv_c)
+            k_pe_out = torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -354,6 +372,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_k_rope_cos_sin_cache,
             self.topk_indices_buffer,
             slot_mapping=mla_slot,
+            indexer_slot_mapping=indexer_slot,
             indexer_k_cache=indexer_k_cache,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
@@ -364,6 +383,18 @@ class DeepseekV32Attention(MLAAttention):
             k_pe_out=k_pe_out,
             index_k_out=index_k_out,
         )
+
+        if hisparse_cache is not None and mla_slot is not None:
+            assert kv_c_out is not None and k_pe_out is not None
+            self.update_kv_cache(
+                kv_c_out,
+                k_pe_out,
+                self.kv_cache,
+                mla_slot,
+                layer_attn_metadata,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -459,6 +490,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
             )
+        self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
             self.layer_name
@@ -467,6 +499,7 @@ class DeepseekV32Attention(MLAAttention):
             output.zero_()
             return
         attn_metadata = cast("MLACommonMetadata", attn_metadata)
+        self.impl.prepare_for_batch(attn_metadata)
 
         if self.use_pcp:
             assert kv_c is not None and k_pe is not None

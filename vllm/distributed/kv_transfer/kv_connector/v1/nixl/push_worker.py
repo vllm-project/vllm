@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -145,7 +148,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
@@ -522,7 +525,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
+        local_region_groups = self.region_group_ids
+        remote_region_groups = self.dst_region_group_ids[engine_id]
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ:
+            raise NotImplementedError(
+                "NixlPushConnector does not support different producer and "
+                "consumer cache-group layouts"
+            )
 
         # MLA latent is replicated across D's TP ranks: the tp-mapping
         # collapses it to one rank (fine for reads), but push must WRITE every
@@ -536,6 +546,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
         else:
             write_ranks = list(plan.all_source_ranks)
+
+        num_groups = len(local_block_ids)
 
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
@@ -775,13 +787,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
         # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
-        done_sending, done_recving = super().get_finished()
+        results = super().get_transfer_results()
+        done_sending = results.finished_sending
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
@@ -803,4 +816,4 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
-        return done_sending, done_recving
+        return results

@@ -23,6 +23,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
+    find_hisparse_connector,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -308,6 +311,14 @@ class Scheduler(SchedulerInterface):
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
         )
+        if self.kv_cache_config.hisparse_host_num_blocks is not None:
+            hisparse_connector = find_hisparse_connector(self.connector)
+            assert hisparse_connector is not None, (
+                "HiSparse host pool requires a configured HiSparseConnector"
+            )
+            hisparse_connector.bind_hisparse_coordinator(
+                self.kv_cache_manager.hisparse_coordinator
+            )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
@@ -330,7 +341,7 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
-        self._skip_zero_block_ids: set[int] = set()
+        self._skip_zero_block_ids: dict[int, set[int]] = {}
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -475,15 +486,22 @@ class Scheduler(SchedulerInterface):
 
     def _get_local_prefix_cache_hit(
         self, request: Request
-    ) -> tuple[KVCacheBlocks, int, int, bool]:
+    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
         connector = self.connector
+        if connector is not None and connector.prefix_completion_group_ids:
+            return self.kv_cache_manager.get_computed_blocks_for_group_completion(
+                request, connector.prefix_completion_group_ids
+            )
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
-            return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+            return (
+                *self.kv_cache_manager.get_computed_blocks_for_connector(request),
+                None,
+            )
 
         blocks, num_local, shared_prefix_boundary = (
             self.kv_cache_manager.get_computed_blocks(request)
         )
-        return blocks, num_local, shared_prefix_boundary, False
+        return blocks, num_local, shared_prefix_boundary, False, None
 
     def _reserve_prefill_lookahead(
         self,
@@ -673,6 +691,14 @@ class Scheduler(SchedulerInterface):
                         # The request can be scheduled.
                         break
 
+                    # HiSparse reclamation is stream ordered and becomes
+                    # allocatable after the worker acknowledges the spill.
+                    # Yield this scheduling iteration instead of preempting a
+                    # request whose resident pages are already being reclaimed.
+                    hisparse_coordinator = self.kv_cache_manager.hisparse_coordinator
+                    if hisparse_coordinator.has_pending_reclamation():
+                        break
+
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -850,6 +876,7 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         request.shared_prefix_boundary,
                         hit_diverged,
+                        max_group_completion_tokens,
                     ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
@@ -861,11 +888,20 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
+                        if max_group_completion_tokens is None:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, block_aligned_local
+                                )
                             )
-                        )
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens_capped(
+                                    request,
+                                    block_aligned_local,
+                                    max_group_completion_tokens + partial_tail,
+                                )
+                            )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -906,7 +942,19 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
-
+                        elif max_group_completion_tokens is not None:
+                            completed_prefix = (
+                                num_new_local_computed_tokens
+                                + num_external_computed_tokens
+                            )
+                            new_computed_blocks = (
+                                self.kv_cache_manager.truncate_group_completion_blocks(
+                                    new_computed_blocks,
+                                    num_new_local_computed_tokens,
+                                    completed_prefix,
+                                    self.connector.prefix_completion_group_ids,
+                                )
+                            )
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
@@ -1075,13 +1123,18 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
+                reserved_blocks: int | tuple[int, ...] = 0
+                reserved_host_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
                     # only if it fits in (free - other in-flight reservations), to
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
+                    if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
+                        reserved_host_blocks = (
+                            self._inflight_prefill_reserved_host_blocks()
+                        )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -1094,6 +1147,7 @@ class Scheduler(SchedulerInterface):
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
+                    reserved_host_blocks=reserved_host_blocks,
                     has_scheduled_reqs=bool(self.running),
                 )
 
@@ -1156,13 +1210,17 @@ class Scheduler(SchedulerInterface):
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
-                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                                request.request_id,
-                                num_new_local_computed_tokens,
-                                num_computed_tokens,
+                        for (
+                            pool_id,
+                            block_ids,
+                        ) in self.kv_cache_manager.get_zeroing_block_ids_in_range(
+                            request.request_id,
+                            num_new_local_computed_tokens,
+                            num_computed_tokens,
+                        ).items():
+                            self._skip_zero_block_ids.setdefault(pool_id, set()).update(
+                                block_ids
                             )
-                        )
                     continue
 
                 self.running.append(request)
@@ -1363,6 +1421,10 @@ class Scheduler(SchedulerInterface):
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            num_output_placeholders={
+                req_id: self.requests[req_id].num_output_placeholders
+                for req_id in num_scheduled_tokens
+            },
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1397,19 +1459,19 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
+    def _get_new_block_ids_to_zero(self) -> dict[int, list[int]] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
         if not self.needs_kv_cache_zeroing:
             return None
 
-        if self._skip_zero_block_ids:
-            skip = self._skip_zero_block_ids
-            new_block_ids_to_zero = [b for b in new_block_ids_to_zero if b not in skip]
-            skip.clear()
+        for pool_id, skip in self._skip_zero_block_ids.items():
+            if block_ids := new_block_ids_to_zero.get(pool_id):
+                new_block_ids_to_zero[pool_id] = [b for b in block_ids if b not in skip]
+        self._skip_zero_block_ids.clear()
 
-        return new_block_ids_to_zero or None
+        return {k: v for k, v in new_block_ids_to_zero.items() if v} or None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
@@ -1836,14 +1898,20 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
-        failed_kv_load_req_ids = None
+        failed_kv_load_req_ids: set[str] = set()
+        if kv_connector_output and kv_connector_output.failed_recving:
+            failed_kv_load_req_ids.update(
+                self._handle_failed_recving(kv_connector_output.failed_recving)
+            )
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids,
-                num_scheduled_tokens,
+            failed_kv_load_req_ids.update(
+                self._handle_invalid_blocks(
+                    kv_connector_output.invalid_block_ids,
+                    num_scheduled_tokens,
+                )
             )
 
         # Persist per-step routed experts into the scheduler-side slot
@@ -2550,7 +2618,7 @@ class Scheduler(SchedulerInterface):
         pool while the step that runs the copy may still be in flight.
         """
         if not self.defer_block_free or fence_seq <= self.processed_step_seq:
-            self.kv_cache_manager.block_pool.free_blocks(blocks)
+            self.kv_cache_manager.free_blocks(blocks)
             return
         self.deferred_frees.append((fence_seq, blocks[::-1]))
 
@@ -2567,7 +2635,7 @@ class Scheduler(SchedulerInterface):
                 break
             _, blocks = self.deferred_frees.popleft()
             # Free in reverse order so that the tail blocks are evicted first.
-            self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+            self.kv_cache_manager.free_blocks(reversed(blocks))
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -2603,6 +2671,7 @@ class Scheduler(SchedulerInterface):
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
+            or self.kv_cache_manager.hisparse_coordinator.has_pending_work()
             or (self.connector is not None and self.connector.has_pending_push_work())
             or (
                 self.ec_connector is not None
@@ -2668,8 +2737,7 @@ class Scheduler(SchedulerInterface):
         if self.connector.reset_cache() is False:
             return False
 
-        if self.log_stats:
-            assert self.connector_prefix_cache_stats is not None
+        if self.connector_prefix_cache_stats is not None:
             self.connector_prefix_cache_stats.reset = True
 
         return True
@@ -2773,7 +2841,7 @@ class Scheduler(SchedulerInterface):
         Returns optional kv transfer parameters to be included with the
         request outputs.
         """
-        if self.connector is None:
+        if self.connector is None or self.vllm_config.kv_transfer_config is None:
             return False, None
 
         finished_partial_tails: list[tuple[int, int, int]] = []
@@ -2820,10 +2888,10 @@ class Scheduler(SchedulerInterface):
             )
         return delay_free or partial_tail_delay, kv_xfer_params
 
-    def _request_remaining_blocks(self, request: Request) -> int:
-        """Blocks `request` still needs to allocate to hold its full sequence."""
+    def _request_remaining_blocks(self, request: Request) -> tuple[int, ...]:
+        """Per-pool blocks needed to hold the request's full sequence."""
         full_num_tokens = min(request.num_tokens, self.max_model_len)
-        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+        return self.kv_cache_manager.coordinator.get_num_blocks_to_allocate_by_pool(
             request_id=request.request_id,
             num_tokens=full_num_tokens,
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
@@ -2834,11 +2902,34 @@ class Scheduler(SchedulerInterface):
             apply_admission_cap=True,
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
+    def _request_remaining_host_blocks(self, request: Request) -> int:
+        """HiSparse host blocks needed to hold the request's full sequence."""
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+        return (
+            self.kv_cache_manager.hisparse_coordinator.get_num_host_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=full_num_tokens,
+                new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
+                total_computed_tokens=request.num_computed_tokens,
+                num_local_computed_tokens=request.num_computed_tokens,
+                num_tokens_main_model=full_num_tokens,
+                apply_admission_cap=True,
+            )
+        )
 
+    def _inflight_prefill_reserved_blocks(self) -> tuple[int, ...]:
+        """Per-pool reservations needed by all in-flight prefills."""
+        reserved = [0] * len(self.kv_cache_manager.block_pools)
+        for request in self._inflight_prefills:
+            for pool_id, count in enumerate(self._request_remaining_blocks(request)):
+                reserved[pool_id] += count
+        return tuple(reserved)
+
+    def _inflight_prefill_reserved_host_blocks(self) -> int:
+        """HiSparse host reservation needed by all in-flight prefills."""
         return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+            self._request_remaining_host_blocks(request)
+            for request in self._inflight_prefills
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
@@ -2875,6 +2966,10 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
+            if self.kv_cache_manager.hisparse_coordinator.has_host_cache:
+                self.kv_cache_manager.hisparse_coordinator.complete_host_import(
+                    request.request_id, request.num_computed_tokens
+                )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 
             # on a full prompt hit, we need to re-compute the last token
@@ -3051,6 +3146,21 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
+
+    def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
+        """Fail closed for layouts whose block IDs are not globally unique."""
+        affected_req_ids: set[str] = set()
+        for req_id in failed_req_ids:
+            request = self.requests.get(req_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                affected_req_ids.add(req_id)
+                if self.recompute_kv_load_failures:
+                    request.num_computed_tokens = 0
+                    self.failed_recving_kv_req_ids.add(req_id)
+        return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]

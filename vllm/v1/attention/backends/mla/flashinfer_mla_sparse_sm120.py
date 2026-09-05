@@ -6,15 +6,15 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.v1.attention.backend import (
-    AttentionLayer,
-    AttentionType,
-    MLAAttentionImpl,
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
 )
+from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
     _get_workspace_buffer,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -29,7 +29,7 @@ def _kv_scale_format_for_model(model_type: str | None) -> str:
     return "pow2_fp32"
 
 
-class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseSM120Impl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
@@ -60,20 +60,28 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 "FLASHINFER_MLA_SPARSE_SM120 only supports decoder self-attention"
             )
 
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        if self.kv_cache_dtype != "fp8_ds_mla":
+        if kv_cache_dtype != "fp8_ds_mla":
             raise NotImplementedError(
                 "FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla "
                 f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
             )
 
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
-        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        topk_indices_buffer = mla_args.pop("topk_indices_buffer", None)
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
+            **mla_args,
+        )
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
@@ -84,13 +92,6 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             )
         self.kv_scale_format = _kv_scale_format_for_model(model_type)
 
-        # Skip-topk layers are built with indexer=None and get the shared
-        # buffer via mla_args instead (cf. FLASHMLA_SPARSE).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer
-            if indexer is not None
-            else mla_args.get("topk_indices_buffer")
-        )
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():
@@ -117,6 +118,72 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        index_group = self.index_group
+        if isinstance(index_group, HiSparseMLAIndexGroup):
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            outputs = []
+            if num_decode_tokens:
+                topk_indices_physical = cast(
+                    torch.Tensor,
+                    index_group.convert_decode_logical_to_physical_topk(
+                        self.index_group_index,
+                        topk_indices[:num_decode_tokens],
+                        attn_metadata,
+                        return_valid_counts=False,
+                    ),
+                )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q[:num_decode_tokens],
+                        index_group.physical_kv_cache(self.index_group_index),
+                        topk_indices_physical,
+                        attn_metadata.topk_tokens,
+                    )
+                )
+            if num_decode_tokens < num_actual_toks:
+                cache = index_group.cache(self.index_group_index)
+                if num_decode_tokens == 0 and cache.all_context_pages_resident:
+                    topk_indices_physical = cast(
+                        torch.Tensor,
+                        index_group.convert_logical_to_physical_topk(
+                            self.index_group_index,
+                            topk_indices,
+                            attn_metadata,
+                            block_stride_rows=None,
+                            return_valid_counts=False,
+                        ),
+                    )
+                    prefill_cache = index_group.physical_kv_cache(
+                        self.index_group_index
+                    )
+                else:
+                    prefill_cache, block_table, req_ids = (
+                        index_group.stage_prefill_rows(
+                            self.index_group_index,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
+                    )
+                    topk_indices_physical = cast(
+                        torch.Tensor,
+                        triton_convert_req_index_to_global_index(
+                            req_ids,
+                            block_table,
+                            topk_indices[num_decode_tokens:],
+                            BLOCK_SIZE=attn_metadata.block_size,
+                            NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        ),
+                    )
+                outputs.append(
+                    self._run_mqa_kernel(
+                        q[num_decode_tokens:],
+                        prefill_cache,
+                        topk_indices_physical,
+                        attn_metadata.topk_tokens,
+                    )
+                )
+            output = torch.cat(outputs) if len(outputs) > 1 else outputs[0]
+            return output, None
 
         topk_indices_physical = cast(
             torch.Tensor,
@@ -128,6 +195,24 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
             ),
         )
+        return (
+            self._run_mqa_kernel(
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices_physical,
+                attn_metadata.topk_tokens,
+            ),
+            None,
+        )
+
+    def _run_mqa_kernel(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        topk_indices_physical: torch.Tensor,
+        topk_tokens: int,
+    ) -> torch.Tensor:
+        num_actual_toks = q.shape[0]
 
         output = q.new_empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),
@@ -143,18 +228,18 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
 
         out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+            kv_cache=kv_cache.view(torch.uint8).unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
             seq_lens=None,
-            max_seq_len=attn_metadata.topk_tokens,
+            max_seq_len=topk_tokens,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+            sparse_mla_top_k=topk_tokens,
             kv_scale_format=self.kv_scale_format,
         )
-        return out.squeeze(1), None
+        return out.squeeze(1)

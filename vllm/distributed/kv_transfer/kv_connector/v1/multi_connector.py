@@ -3,6 +3,7 @@
 import copy
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -17,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
@@ -209,10 +211,25 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
+    def sub_connectors(self) -> list[KVConnectorBase_V1]:
+        return list(self._connectors)
+
+    @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         return bool(self._connectors) and all(
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
+
+    @cached_property
+    def prefix_completion_group_ids(self) -> frozenset[int]:
+        group_sets = [
+            connector.prefix_completion_group_ids
+            for connector in self._connectors
+            if connector.prefix_completion_group_ids
+        ]
+        if not group_sets:
+            return frozenset()
+        return group_sets[0].intersection(*group_sets[1:])
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -292,6 +309,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.start_load_kv(forward_context, **kwargs)
 
+    def finish_forward(self) -> None:
+        for c in self._connectors:
+            c.finish_forward()
+
+    def stage_host_mirror_mapping(
+        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
+    ) -> None:
+        for c in self._connectors:
+            c.stage_host_mirror_mapping(slot_mappings, num_tokens)
+
+    def reset_capture_state(self) -> None:
+        for c in self._connectors:
+            c.reset_capture_state()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         for c in self._connectors:
             c.wait_for_layer_load(layer_name)
@@ -313,29 +344,31 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
-        for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
-                continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
-            # Aggregate finished sending request ids - only include
-            # once we've drained the "extra" count (for cases where
-            # more than one connector is async-saving the same request).
-            for req_id in sending or ():
+        results = self.get_transfer_results(finished_req_ids)
+        return (
+            results.finished_sending or None,
+            results.finished_recving or None,
+        )
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        results = KVConnectorTransferResults()
+        for connector in self._connectors:
+            child_results = connector.get_transfer_results(finished_req_ids)
+            results.finished_recving.update(child_results.finished_recving)
+            results.failed_recving.update(child_results.failed_recving)
+            for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
+                    results.finished_sending.add(req_id)
                 else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
-
-        return finished_sending or None, finished_recving or None
+                    assert extra_pending > 0
+                    if extra_pending == 1:
+                        del self._extra_async_saves[req_id]
+                    else:
+                        self._extra_async_saves[req_id] = extra_pending - 1
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
@@ -408,6 +441,26 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
                 to_return = (toks, load_async)
+        return to_return
+
+    def get_num_new_matched_tokens_capped(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        max_num_new_tokens: int,
+    ) -> tuple[int | None, bool]:
+        to_return = (0, False)
+        for i, connector in enumerate(self._connectors):
+            if not connector.prefix_completion_group_ids:
+                continue
+            tokens, load_async = connector.get_num_new_matched_tokens_capped(
+                request, num_computed_tokens, max_num_new_tokens
+            )
+            if tokens is None:
+                return None, False
+            if to_return[0] == 0 and tokens > 0:
+                self._requests_to_connector[request.request_id] = i
+                to_return = (tokens, load_async)
         return to_return
 
     def update_state_after_alloc(
@@ -630,7 +683,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return MultiKVConnectorStats(data=reconstructed_data)
 
-    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         # Group connector stats by connector type.
         stats_by_connector: MultiKVConnectorStats | None = None
         for c in self._connectors:

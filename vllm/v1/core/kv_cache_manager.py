@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -165,13 +165,19 @@ class KVCacheManager:
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+        self.block_pools = self.coordinator.block_pools
         self.block_pool = self.coordinator.block_pool
+        self.hisparse_coordinator = self.coordinator.hisparse_coordinator
         self.kv_cache_config = kv_cache_config
 
         # Watermark: minimum number of KV cache blocks to keep free when
         # admitting waiting/preempted requests, to avoid frequent preemptions.
         assert watermark >= 0.0, "watermark must be non-negative"
-        self.watermark_blocks = int(watermark * kv_cache_config.num_blocks)
+        self.watermark_blocks_by_pool = tuple(
+            int(watermark * num_blocks)
+            for num_blocks in kv_cache_config.num_blocks_by_pool
+        )
+        self.watermark_blocks = self.watermark_blocks_by_pool[0]
         self.kv_cache_event_metadata = tuple(
             (
                 get_kv_cache_spec_kind(group.kv_cache_spec).value,
@@ -188,6 +194,7 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        self._partial_tail_pins: dict[str, list[KVCacheBlock]] = {}
 
     @property
     def usage(self) -> float:
@@ -196,7 +203,7 @@ class KVCacheManager:
         Returns:
             The KV cache usage (between 0.0 and 1.0).
         """
-        return self.block_pool.get_usage()
+        return max(pool.get_usage() for pool in self.block_pools)
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
@@ -275,7 +282,9 @@ class KVCacheManager:
                 if num_blocks > 0:
                     group = self.kv_cache_config.kv_cache_groups[group_idx]
                     block_size = group.kv_cache_spec.block_size
-                    self.block_pool.emit_cached_block_events(
+                    self.coordinator.single_type_managers[
+                        group_idx
+                    ].block_pool.emit_cached_block_events(
                         request,
                         num_blocks,
                         block_size,
@@ -340,6 +349,79 @@ class KVCacheManager:
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
 
+    def get_computed_blocks_for_group_completion(
+        self,
+        request: Request,
+        completion_group_ids: frozenset[int],
+    ) -> tuple[KVCacheBlocks, int, int, bool, int | None]:
+        """Preserve deeper local groups while a connector restores lagging ones."""
+        if not self.prefix_cache_lookup_enabled(request):
+            return self.empty_kv_cache_blocks, 0, 0, False, None
+
+        persistent_group_ids = {
+            group_id
+            for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
+            if group.enable_prefix_caching
+        }
+        completion_group_ids = completion_group_ids.intersection(persistent_group_ids)
+        fixed_group_ids = persistent_group_ids - completion_group_ids
+        if not completion_group_ids or not fixed_group_ids:
+            return *self.get_computed_blocks(request), False, None
+
+        coordinator = self.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes, request.num_tokens - 1
+        )
+        local_hit = min(per_group_hits[group_id] for group_id in persistent_group_ids)
+        completion_boundary = min(
+            per_group_hits[group_id] for group_id in fixed_group_ids
+        )
+        if completion_boundary <= local_hit:
+            return *self.get_computed_blocks(request), False, 0
+
+        blocks = self.truncate_group_completion_blocks(
+            self.create_kv_cache_blocks(computed),
+            local_hit,
+            completion_boundary,
+            completion_group_ids,
+        )
+        return blocks, local_hit, 0, True, completion_boundary - local_hit
+
+    def _lacks_device_capacity(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> bool:
+        return any(
+            required + watermark > pool.get_num_free_blocks() - reserved
+            for required, watermark, reserved, pool in zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        )
+
+    def _reclaim_resident_shortage(
+        self,
+        required_by_pool: Sequence[int],
+        watermark_by_pool: Sequence[int],
+        reserved_by_pool: Sequence[int],
+    ) -> None:
+        for pool_id, (required, watermark, reserved, pool) in enumerate(
+            zip(
+                required_by_pool,
+                watermark_by_pool,
+                reserved_by_pool,
+                self.block_pools,
+            )
+        ):
+            shortage = required + watermark + reserved - pool.get_num_free_blocks()
+            if shortage > 0:
+                self.hisparse_coordinator.reclaim_resident_blocks(pool_id, shortage)
+
     def allocate_slots(
         self,
         request: Request,
@@ -351,7 +433,8 @@ class KVCacheManager:
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
-        reserved_blocks: int = 0,
+        reserved_blocks: int | Sequence[int] = 0,
+        reserved_host_blocks: int = 0,
         has_scheduled_reqs: bool = True,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
@@ -378,11 +461,11 @@ class KVCacheManager:
                 free blocks to hold the full sequence, accounting for prefix cache hits
                 and sliding window. Used as an admission gate to prevent over-admitting
                 requests when chunked prefill would otherwise only check the first chunk
-            reserved_blocks: Number of free blocks that must be left available for
-                other in-flight sequences to complete. The actual allocation is only
-                made if it fits within (free blocks - reserved_blocks). Used to gate
-                async KV-connector loads so their initial allocation cannot consume
-                blocks an already in-flight (prefilling) sequence is relying on.
+            reserved_blocks: Free blocks that must remain available for other
+                in-flight sequences, either for the traditional single pool or
+                independently per allocator domain.
+            reserved_host_blocks: HiSparse host blocks that must remain available
+                for other in-flight sequences.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
 
@@ -459,31 +542,90 @@ class KVCacheManager:
             self.max_model_len,
         )
 
-        watermark_blocks = 0
+        watermark_blocks = (0,) * len(self.block_pools)
         # The watermark is applied to waiting/preempted requests only, and only
         # when there's at least one request already scheduled.
         if has_scheduled_reqs and request.status in (
             RequestStatus.WAITING,
             RequestStatus.PREEMPTED,
         ):
-            watermark_blocks = self.watermark_blocks
+            watermark_blocks = self.watermark_blocks_by_pool
+
+        if isinstance(reserved_blocks, int):
+            reserved_blocks_by_pool = (reserved_blocks,) * len(self.block_pools)
+        else:
+            reserved_blocks_by_pool = tuple(reserved_blocks)
+            assert len(reserved_blocks_by_pool) == len(self.block_pools)
 
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
 
-            num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-                request_id=request.request_id,
-                num_tokens=full_num_tokens,
-                new_computed_blocks=new_computed_block_list,
-                num_encoder_tokens=num_encoder_tokens,
-                total_computed_tokens=total_computed_tokens,
-                num_local_computed_tokens=num_local_computed_tokens,
-                num_tokens_main_model=full_num_tokens,
-                apply_admission_cap=True,
+            num_blocks_to_allocate = (
+                self.coordinator.get_num_blocks_to_allocate_by_pool(
+                    request_id=request.request_id,
+                    num_tokens=full_num_tokens,
+                    new_computed_blocks=new_computed_block_list,
+                    num_encoder_tokens=num_encoder_tokens,
+                    total_computed_tokens=total_computed_tokens,
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_tokens_main_model=full_num_tokens,
+                    apply_admission_cap=True,
+                )
             )
-            required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            host_blocks_to_allocate = 0
+            if self.hisparse_coordinator.has_host_cache:
+                host_blocks_to_allocate = (
+                    self.hisparse_coordinator.get_num_host_blocks_to_allocate(
+                        request_id=request.request_id,
+                        num_tokens=full_num_tokens,
+                        new_computed_blocks=new_computed_block_list,
+                        total_computed_tokens=total_computed_tokens,
+                        num_local_computed_tokens=num_local_computed_tokens,
+                        num_tokens_main_model=full_num_tokens,
+                        apply_admission_cap=True,
+                    )
+                )
+            host_lacks_capacity = (
+                self.hisparse_coordinator.has_host_cache
+                and not self.hisparse_coordinator.has_host_capacity(
+                    host_blocks_to_allocate
+                )
+            )
+            full_resident_lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+            if full_resident_lacks_capacity:
+                self._reclaim_resident_shortage(
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                )
+                # Reclamation can transition this request from resident
+                # storage to its fixed hot region. Account for that newly
+                # required region before deciding that admission fits.
+                num_blocks_to_allocate = (
+                    self.coordinator.get_num_blocks_to_allocate_by_pool(
+                        request_id=request.request_id,
+                        num_tokens=full_num_tokens,
+                        new_computed_blocks=new_computed_block_list,
+                        num_encoder_tokens=num_encoder_tokens,
+                        total_computed_tokens=total_computed_tokens,
+                        num_local_computed_tokens=num_local_computed_tokens,
+                        num_tokens_main_model=full_num_tokens,
+                        apply_admission_cap=True,
+                    )
+                )
+                full_resident_lacks_capacity = self._lacks_device_capacity(
+                    num_blocks_to_allocate,
+                    watermark_blocks,
+                    reserved_blocks_by_pool,
+                )
+                if full_resident_lacks_capacity:
+                    return None
+            if host_lacks_capacity:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -506,7 +648,7 @@ class KVCacheManager:
             num_prompt_tokens=request.num_prompt_tokens,
         )
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate_by_pool(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -516,12 +658,61 @@ class KVCacheManager:
             num_local_computed_tokens=num_local_computed_tokens,
             num_tokens_main_model=num_tokens_main_model,
         )
-
+        host_blocks_to_allocate = 0
+        if self.hisparse_coordinator.has_host_cache:
+            host_blocks_to_allocate = (
+                self.hisparse_coordinator.get_num_host_blocks_to_allocate(
+                    request_id=request.request_id,
+                    num_tokens=num_tokens_need_slot,
+                    new_computed_blocks=new_computed_block_list,
+                    total_computed_tokens=(
+                        num_local_computed_tokens + num_external_computed_tokens
+                    ),
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_tokens_main_model=num_tokens_main_model,
+                )
+            )
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
-        required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > available_blocks:
+        lacks_capacity = self._lacks_device_capacity(
+            num_blocks_to_allocate,
+            watermark_blocks,
+            reserved_blocks_by_pool,
+        )
+        if self.hisparse_coordinator.has_host_cache and not (
+            self.hisparse_coordinator.has_host_capacity(
+                host_blocks_to_allocate + reserved_host_blocks
+            )
+        ):
+            return None
+        if lacks_capacity:
+            self._reclaim_resident_shortage(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+            # Resident reclamation may require a hot region that was absent
+            # from the pre-reclaim estimate. Recompute rather than admitting
+            # against stale allocator requirements.
+            num_blocks_to_allocate = (
+                self.coordinator.get_num_blocks_to_allocate_by_pool(
+                    request_id=request.request_id,
+                    num_tokens=num_tokens_need_slot,
+                    new_computed_blocks=new_computed_block_list,
+                    num_encoder_tokens=num_encoder_tokens,
+                    total_computed_tokens=(
+                        num_local_computed_tokens + num_external_computed_tokens
+                    ),
+                    num_local_computed_tokens=num_local_computed_tokens,
+                    num_tokens_main_model=num_tokens_main_model,
+                )
+            )
+            lacks_capacity = self._lacks_device_capacity(
+                num_blocks_to_allocate,
+                watermark_blocks,
+                reserved_blocks_by_pool,
+            )
+        if lacks_capacity:
             # Cannot allocate new blocks
             return None
 
@@ -571,6 +762,9 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        pins = self._partial_tail_pins.pop(request.request_id, None)
+        if pins:
+            self.free_blocks(pins)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -603,7 +797,25 @@ class KVCacheManager:
         Returns:
             The request's blocks in allocation order.
         """
-        return self.coordinator.pop_blocks_for_free(request.request_id)
+        blocks = self.coordinator.pop_blocks_for_free(request.request_id)
+        pins = self._partial_tail_pins.pop(request.request_id, None)
+        if pins:
+            blocks = pins + blocks
+        return blocks
+
+    def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
+        """Return blocks to their owning physical pool."""
+        device_blocks = (
+            self.hisparse_coordinator.free_host_blocks(blocks)
+            if self.hisparse_coordinator.has_host_cache
+            else blocks
+        )
+        by_pool: dict[int, list[KVCacheBlock]] = {}
+        for block in device_blocks:
+            assert block.pool_id is not None
+            by_pool.setdefault(block.pool_id, []).append(block)
+        for pool_id, pool_blocks in by_pool.items():
+            self.block_pools[pool_id].free_blocks(pool_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -611,7 +823,10 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        self.block_pool.evict_blocks(block_ids)
+        # Connector eviction IDs refer to the persistent/source domain. Other
+        # pools can reuse the same numeric IDs for ephemeral allocations.
+        if not self.hisparse_coordinator.evict_host_blocks(block_ids):
+            self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -622,7 +837,9 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.block_pool.reset_prefix_cache():
+        if not self.hisparse_coordinator.reset_prefix_cache():
+            return False
+        if not all(pool.reset_prefix_cache() for pool in self.block_pools):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -669,7 +886,8 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        events = self.block_pool.take_events()
+        events = [event for pool in self.block_pools for event in pool.take_events()]
+        events.extend(self.hisparse_coordinator.take_events())
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
@@ -724,6 +942,8 @@ class KVCacheManager:
             self.kv_cache_config.kv_cache_groups,
             self.get_blocks(request.request_id).blocks,
         ):
+            if not group.enable_prefix_caching:
+                continue
             if isinstance(
                 group.kv_cache_spec,
                 (CrossAttentionSpec, EncoderOnlyAttentionSpec),
@@ -796,26 +1016,72 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids(self) -> list[int]:
-        """Drain and return new attention block IDs for zeroing."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            ids.extend(mgr.take_new_block_ids())
-        return ids
+    def truncate_group_completion_blocks(
+        self,
+        blocks: KVCacheBlocks,
+        num_local_computed_tokens: int,
+        num_completed_tokens: int,
+        completion_group_ids: frozenset[int],
+    ) -> KVCacheBlocks:
+        """Keep connector-completed groups at the pre-transfer local boundary."""
+        truncated: list[list[KVCacheBlock]] = []
+        for group_id, (group_blocks, manager, group) in enumerate(
+            zip(
+                blocks.blocks,
+                self.coordinator.single_type_managers,
+                self.kv_cache_config.kv_cache_groups,
+                strict=True,
+            )
+        ):
+            if not group.enable_prefix_caching:
+                truncated.append(list(group_blocks))
+                continue
+            endpoint = (
+                num_local_computed_tokens
+                if group_id in completion_group_ids
+                else num_completed_tokens
+            )
+            assert endpoint % manager.block_size == 0
+            num_blocks = endpoint // manager.block_size
+            assert num_blocks <= len(group_blocks)
+            truncated.append(list(group_blocks[:num_blocks]))
+        return self.create_kv_cache_blocks(tuple(truncated))
+
+    def take_new_block_ids(self) -> dict[int, list[int]]:
+        """Drain new attention block IDs, preserving their allocator pool."""
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
+            ids = mgr.take_new_block_ids()
+            if ids:
+                if group.block_pool_id is None:
+                    continue
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(ids)
+        return ids_by_pool
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
+    ) -> dict[int, list[int]]:
         """The request's block ids covering [start_token, end_token), from
         the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
             if mgr.records_new_block_ids:
+                assert group.block_pool_id is not None
                 start_idx = start_token // mgr.block_size
                 end_idx = cdiv(end_token, mgr.block_size)
                 blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
-        return ids
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(
+                    blk.block_id for blk in blocks[start_idx:end_idx]
+                )
+        return ids_by_pool
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
         """Re-record the request's blocks from start_token onwards for
@@ -835,17 +1101,28 @@ class KVCacheManager:
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending copies and return their retained endpoints."""
-        pending_copies: list[tuple[KVCacheBlock, KVCacheBlock]] = []
-        for mgr in self.coordinator.single_type_managers:
-            pending_copies.extend(mgr.take_pending_cow_copies())
+        pending_copies: list[tuple[int | None, KVCacheBlock, KVCacheBlock]] = []
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+        ):
+            pending_copies.extend(
+                (group.block_pool_id, source, target)
+                for source, target in mgr.take_pending_cow_copies()
+            )
         copies = [
             KVCacheBlockCopy(
                 src_block_id=source_block.block_id,
                 dst_block_id=cow_block.block_id,
+                block_pool_id=pool_id,
             )
-            for source_block, cow_block in pending_copies
+            for pool_id, source_block, cow_block in pending_copies
         ]
-        retained_blocks = [block for pair in pending_copies for block in pair]
+        retained_blocks = [
+            block
+            for _, source_block, cow_block in pending_copies
+            for block in (source_block, cow_block)
+        ]
         return copies, retained_blocks
 
     def take_boundary_state_offloads(
@@ -869,6 +1146,8 @@ class KVCacheManager:
                 block,
                 boundary_tokens,
             ) in mgr.take_pending_boundary_state_offloads():
+                mgr.block_pool.touch((block,))
+                self._partial_tail_pins.setdefault(req_id, []).append(block)
                 offloads.setdefault(req_id, []).append(
                     (group_id, block.block_id, boundary_tokens)
                 )
