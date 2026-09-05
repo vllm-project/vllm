@@ -286,9 +286,12 @@ def memory_profiling(
     The increase of `non_torch_memory` from creating the current vLLM instance
     until after profiling to get (c.).
     """
+    from vllm.compilation import monitor as compilation_monitor
+
     gc.collect()
     torch.accelerator.empty_cache()
     torch.accelerator.reset_peak_memory_stats(baseline_snapshot.device_)
+    compilation_monitor.peak_memory_before_compile = 0
 
     result = MemoryProfilingResult(
         before_create=baseline_snapshot,
@@ -304,6 +307,14 @@ def memory_profiling(
     torch.accelerator.empty_cache()
 
     result.after_profile.measure()
+
+    # On a cold start the model compiles inside this window. Compilation's own
+    # high-water mark was dropped when it finished; fold back the peak that
+    # predates it so a pre-compilation spike is still accounted for.
+    result.after_profile.torch_peak = max(
+        result.after_profile.torch_peak,
+        compilation_monitor.peak_memory_before_compile,
+    )
 
     diff_profile = result.after_profile - result.before_profile
     diff_from_create = result.after_profile - result.before_create
