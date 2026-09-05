@@ -476,6 +476,7 @@ class CpuPlatform(Platform):
         if not (os.path.exists(SYS_NODE) and os.path.exists(SYS_CPU)):
             return []
 
+        use_highest_sibling = cls.get_cpu_architecture() == CpuArchEnum.X86
         core_rsv_for_kv = []
         for node in os.listdir(SYS_NODE):
             if not node.startswith("node") or not node[4:].isdigit():
@@ -508,7 +509,7 @@ class CpuPlatform(Platform):
                 else:
                     siblings = [cpu_id]
 
-                phys = min(siblings)
+                phys = max(siblings) if use_highest_sibling else min(siblings)
 
                 if phys not in seen_phys:
                     seen_phys.add(phys)
