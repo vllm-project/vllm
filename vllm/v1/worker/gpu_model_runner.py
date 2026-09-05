@@ -5222,6 +5222,13 @@ class GPUModelRunner(
 
             _apply_constrain_to_fx_strides_patch()
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
+            debug_dump_path = self.vllm_config.compile_debug_dump_path()
+            if debug_dump_path is not None:
+                from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
+
+                backend = wrap_backend_with_fx_dump(
+                    backend, debug_dump_path / "fx_graphs", "model"
+                )
             compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
             return

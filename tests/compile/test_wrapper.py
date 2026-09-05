@@ -7,6 +7,7 @@ import os
 import pytest
 import torch
 
+from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     CompilationConfig,
@@ -32,6 +33,35 @@ class MyWrapper(TorchCompileWithNoGuardsWrapper):
     def forward(self, x: torch.Tensor):  # type: ignore[override]
         # this is the function to be compiled
         return self.model(x)
+
+
+def test_fx_graph_fake_backend_tracks_dynamo_recompilation(tmp_path):
+    class ShapeBranch(torch.nn.Module):
+        def forward(self, x):
+            if x.shape[0] == 2:
+                return x + 1
+            return x * 2
+
+    def failing_backend(gm, example_inputs, **kwargs):
+        raise AssertionError("the wrapped Inductor backend must not be called")
+
+    torch._dynamo.reset()
+    backend = wrap_backend_with_fx_dump(failing_backend, tmp_path, "test/model")
+    compiled = torch.compile(
+        ShapeBranch(), backend=backend, fullgraph=True, dynamic=False
+    )
+
+    assert torch.equal(compiled(torch.ones(2)), torch.full((2,), 2.0))
+    assert torch.equal(compiled(torch.ones(2)), torch.full((2,), 2.0))
+    assert len(list(tmp_path.glob("fx_graph_test_model_pid*.txt"))) == 1
+
+    assert torch.equal(compiled(torch.ones(3)), torch.full((3,), 2.0))
+    dumped = list(tmp_path.glob("fx_graph_test_model_pid*.txt"))
+    assert len(dumped) == 2
+    assert all(
+        "==== raw graph ====" in path.read_text(encoding="utf-8") for path in dumped
+    )
+    torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
