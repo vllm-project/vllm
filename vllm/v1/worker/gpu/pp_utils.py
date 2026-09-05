@@ -179,7 +179,7 @@ class PPHandler:
     ) -> None:
         """Broadcast draft proposals so non-last ranks can embed real token ids."""
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch) is None:
+        if compute_need_sampled_mask(input_batch, self.always_need_sampled) is None:
             return
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
