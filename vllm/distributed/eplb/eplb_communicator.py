@@ -527,7 +527,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             remote_desc,
         )
 
-        indices = list(range(len(local_descs)))
+        indices = np.arange(len(local_descs), dtype=np.int32)
         xfer_handle = self._nixl_wrapper.make_prepped_xfer(
             "READ",
             local_handle,

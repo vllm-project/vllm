@@ -219,6 +219,7 @@ class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
     # This is an engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
@@ -244,6 +245,7 @@ class FinishedRequestStats:
     request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
+    num_preemptions: int = 0
     num_generation_tokens: int = 0
     max_tokens_param: int | None = None
     queued_time: float = 0.0
@@ -523,6 +525,7 @@ class IterationStats:
                 lora_states.request_running(req_id, lora_name)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                req_stats.num_preemptions += 1
                 lora_states.request_waiting(req_id, lora_name)
 
     def update_from_finished_request(
@@ -563,6 +566,7 @@ class IterationStats:
             request_id=request_id,
             e2e_latency=e2e_latency,
             num_prompt_tokens=num_prompt_tokens,
+            num_preemptions=req_stats.num_preemptions,
             num_generation_tokens=req_stats.num_generation_tokens,
             max_tokens_param=max_tokens_param,
             queued_time=queued_time,

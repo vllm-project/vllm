@@ -324,7 +324,9 @@ def test_h12_aiter_mla_decode_matches_reference():
 
     impl = object.__new__(AiterMLAImpl)
     impl.num_heads = NUM_HEADS
+    impl.dcp_world_size = 1
     impl.kv_lora_rank = KV_LORA_RANK
+    impl.qk_rope_head_dim = QK_ROPE_HEAD_DIM
     impl.scale = SCALE
     impl.kv_cache_dtype = "auto"
 

@@ -14,7 +14,11 @@ use vllm_chat::{
 };
 use vllm_text::TextRequestProcessor;
 
-use crate::{HttpListenerMode, listener::Listener};
+use crate::{
+    HttpListenerMode, TlsConfig,
+    listener::{Listener, MaybeTlsListener},
+    tls,
+};
 
 /// Configuration for the engine-free text rendering server.
 #[derive(Debug)]
@@ -31,6 +35,7 @@ pub struct RenderConfig {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     pub max_model_len: u32,
     pub max_logprobs: Option<i32>,
+    pub tls: Option<TlsConfig>,
 }
 
 impl RenderConfig {
@@ -40,6 +45,9 @@ impl RenderConfig {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         if self.max_logprobs.is_some_and(|value| value < -1) {
             bail!("max_logprobs must be non-negative or -1");
+        }
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
         }
         Ok(())
     }
@@ -87,6 +95,12 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
 /// to an inference engine.
 pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> Result<()> {
     config.validate().context("invalid render server configuration")?;
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(tls::build_server_config)
+        .transpose()
+        .context("invalid TLS configuration")?;
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),
@@ -99,8 +113,18 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         .await
         .with_context(|| format!("failed to bind {}:{}", config.host, config.port))?;
     let address = listener.local_addr_display()?;
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let listener = match tls_config {
+        Some(context) => MaybeTlsListener::tls(listener, context),
+        None => MaybeTlsListener::plain(listener),
+    };
     info!(
         %address,
+        scheme,
         model = %config.model,
         "starting engine-free Rust render server"
     );
@@ -132,6 +156,7 @@ mod tests {
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
                 max_model_len: 128,
                 max_logprobs: None,
+                tls: None,
             },
             shutdown,
         )

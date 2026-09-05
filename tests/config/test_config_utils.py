@@ -7,6 +7,7 @@ from enum import Enum
 import pytest
 
 from vllm.config.cache import CacheConfig
+from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
@@ -214,6 +215,24 @@ def test_cache_config_hash_ignores_kv_cache_sizing_knobs():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(kv_cache_memory_bytes=1 << 30).compute_hash() == base_hash
     assert CacheConfig(gpu_memory_utilization=0.5).compute_hash() == base_hash
+
+
+def test_scheduler_config_hash_includes_max_num_seqs():
+    """Per-request workspace sizes must invalidate compiled graphs."""
+    base_hash = SchedulerConfig(
+        max_model_len=8192,
+        is_encoder_decoder=False,
+        max_num_batched_tokens=8192,
+        max_num_seqs=128,
+    ).compute_hash()
+    larger_batch_hash = SchedulerConfig(
+        max_model_len=8192,
+        is_encoder_decoder=False,
+        max_num_batched_tokens=8192,
+        max_num_seqs=1024,
+    ).compute_hash()
+
+    assert larger_batch_hash != base_hash
 
 
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():

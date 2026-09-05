@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -12,6 +14,7 @@ from vllm.platforms import current_platform
 HIDDEN_SIZE = 7168
 MAX_BLOCKS = 8
 EPS = 1e-5
+attn_res_module = importlib.import_module("vllm.models.kimi_k3.nvidia.ops.attn_res")
 
 
 def _randn_with_row_padding(*shape: int, padding: int = 0) -> torch.Tensor:
@@ -60,6 +63,7 @@ def _reference(
         pytest.param(17, 5, 7, True, True, "triton", id="triton-write-add"),
         pytest.param(3, 8, 0, False, False, "triton", id="triton-full"),
         pytest.param(3, 8, 0, False, True, "triton", id="triton-full-add"),
+        pytest.param(1, 4, 0, False, True, "nvidia", id="nvidia-single-token"),
         pytest.param(320, 1, 0, False, True, "nvidia", id="nvidia-1"),
         pytest.param(320, 4, 0, False, True, "nvidia", id="nvidia-4"),
         pytest.param(320, 8, 0, False, True, "nvidia", id="nvidia-8"),
@@ -192,6 +196,55 @@ def test_attn_res_without_output_norm():
     )
 
     torch.testing.assert_close(actual, expected, atol=8e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize(
+    ("num_blocks", "has_delta", "has_output_norm", "write_block"),
+    [
+        (0, False, True, True),
+        (4, True, True, True),
+        (4, False, True, False),
+        (8, True, False, False),
+    ],
+)
+def test_sm100_variants_do_not_fall_back_to_triton(
+    monkeypatch,
+    num_blocks: int,
+    has_delta: bool,
+    has_output_norm: bool,
+    write_block: bool,
+):
+    if not current_platform.is_device_capability_family(100) or not hasattr(
+        torch.ops._C, "kimi_k3_attn_res"
+    ):
+        pytest.skip("native AttnRes requires an SM100 build")
+
+    class FailingKernel:
+        def __getitem__(self, grid):
+            raise AssertionError(f"unexpected Triton launch with grid {grid}")
+
+    monkeypatch.setattr(attn_res_module, "_attn_res_kernel", FailingKernel())
+    prefix = torch.randn(1, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
+    delta = torch.zeros_like(prefix) if has_delta else None
+    blocks = torch.randn(
+        1, MAX_BLOCKS, HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16
+    )
+    norm_weight = torch.ones(HIDDEN_SIZE, device="cuda", dtype=torch.bfloat16)
+    qk_weight = torch.randn_like(norm_weight) / HIDDEN_SIZE**0.5
+    output_norm_weight = torch.ones_like(norm_weight) if has_output_norm else None
+
+    attn_res(
+        prefix,
+        delta,
+        blocks,
+        norm_weight,
+        qk_weight,
+        output_norm_weight,
+        num_blocks,
+        num_blocks if write_block else -1,
+        EPS,
+        EPS,
+    )
 
 
 @pytest.mark.parametrize("num_tokens", [0, 1, 17])

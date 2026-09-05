@@ -5,16 +5,13 @@ use std::collections::HashMap;
 use std::slice;
 
 use llm_multimodal::ImageDetail;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_llm::TokenUsage;
+use vllm_chat::ChatTokenUsage;
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// Default model identifier used when no model is specified.
-pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 // ============================================================================
 // Default value helpers
@@ -23,6 +20,23 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 /// Helper function for serde default value (returns true).
 pub fn default_true() -> bool {
     true
+}
+
+/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => vllm_text::normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 // ============================================================================
@@ -187,6 +201,29 @@ pub struct InputAudio {
 // Streaming
 // ============================================================================
 
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Mirrors the Python vLLM `StreamOptions` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamOptions {
@@ -201,8 +238,13 @@ pub struct StreamOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
 }
 
 #[serde_with::skip_serializing_none]
@@ -210,6 +252,7 @@ pub struct Tool {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
@@ -397,14 +440,18 @@ pub struct Usage {
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
+    /// Reasoning-token breakdown.
+    /// Always present, 0 when the configured parser has no reasoning channel.
+    pub completion_tokens_details: CompletionTokenUsageInfo,
 }
 
 impl Usage {
-    /// Create a Usage with prompt-token cache details.
+    /// Create a Usage with prompt-token cache and reasoning-token details.
     pub fn from_counts(
         prompt_tokens: usize,
         completion_tokens: usize,
         cached_tokens: Option<usize>,
+        reasoning_tokens: usize,
     ) -> Self {
         Self {
             prompt_tokens,
@@ -413,14 +460,20 @@ impl Usage {
             prompt_tokens_details: cached_tokens
                 .filter(|&c| c > 0)
                 .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
         }
     }
 
-    pub fn from_token_usage(usage: TokenUsage, enable_prompt_tokens_details: bool) -> Self {
+    pub fn from_token_usage(
+        usage: impl Into<ChatTokenUsage>,
+        enable_prompt_tokens_details: bool,
+    ) -> Self {
+        let usage = usage.into();
         Self::from_counts(
             usage.prompt_token_count,
             usage.output_token_count,
             enable_prompt_tokens_details.then_some(usage.cached_token_count),
+            usage.reasoning_tokens,
         )
     }
 }
@@ -431,8 +484,15 @@ pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
 }
 
+/// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CompletionTokenUsageInfo {
+    pub reasoning_tokens: usize,
+}
+
 #[cfg(test)]
 mod usage_tests {
+    use vllm_chat::ChatTokenUsage;
     use vllm_llm::TokenUsage;
 
     use super::Usage;
@@ -469,6 +529,59 @@ mod usage_tests {
             Some(3)
         );
     }
+
+    #[test]
+    fn token_usage_includes_reasoning_token_details() {
+        let usage = Usage::from_token_usage(
+            ChatTokenUsage {
+                engine: TokenUsage {
+                    prompt_token_count: 5,
+                    output_token_count: 4,
+                    cached_token_count: 0,
+                },
+                reasoning_tokens: 3,
+            },
+            false,
+        );
+
+        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 3);
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 3);
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_reasoning_tokens() {
+        let usage = Usage::from_token_usage(
+            ChatTokenUsage {
+                engine: TokenUsage {
+                    prompt_token_count: 5,
+                    output_token_count: 0,
+                    cached_token_count: 0,
+                },
+                reasoning_tokens: 0,
+            },
+            false,
+        );
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+    }
+
+    #[test]
+    fn token_usage_reports_zero_reasoning_tokens_without_reasoning_parser() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 0,
+            },
+            false,
+        );
+
+        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+    }
 }
 
 /// OpenAI completions-style logprobs.
@@ -479,6 +592,16 @@ pub struct LogProbs {
     pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
+
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]

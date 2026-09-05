@@ -9,7 +9,9 @@ use vllm_text::{
     DecodedTokenLogprob,
 };
 
-use super::types::{ChatLogProbs, ChatLogProbsContent, LogProbs, TopLogProb};
+use super::types::{
+    ChatLogProbs, ChatLogProbsContent, LogProbs, PromptLogprob, PromptLogprobs, TopLogProb,
+};
 use crate::error::{ApiError, server_error};
 
 /// Convert decoded token-position logprobs into the OpenAI completions
@@ -105,15 +107,26 @@ pub fn decoded_prompt_logprobs_to_openai(
 pub fn prompt_logprobs_to_maps(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt_token_ids: &[u32],
-    return_tokens_as_token_ids: bool,
-) -> Result<Vec<Option<HashMap<String, f32>>>, ApiError> {
+) -> Result<PromptLogprobs, ApiError> {
     if let Some(prompt_logprobs) = prompt_logprobs {
         return Ok(std::iter::once(None)
             .chain(prompt_logprobs.scored_positions.iter().map(|position| {
-                Some(position_top_logprobs_map(
-                    position,
-                    return_tokens_as_token_ids,
-                ))
+                Some(
+                    position
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.token_id,
+                                PromptLogprob {
+                                    logprob: clamp_logprob(entry.logprob),
+                                    rank: entry.rank,
+                                    decoded_token: entry.token.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                )
             }))
             .collect());
     }
@@ -290,8 +303,30 @@ mod tests {
 
     #[test]
     fn prompt_logprobs_maps_reject_missing_multi_token_payload() {
-        prompt_logprobs_to_maps(None, &[9707, 11], false)
+        prompt_logprobs_to_maps(None, &[9707, 11])
             .expect_err("multi-token prompt without payload is an engine failure");
+    }
+
+    #[test]
+    fn prompt_logprobs_maps_preserve_token_ids_and_metadata() {
+        let prompt_logprobs = vllm_text::DecodedPromptLogprobs {
+            first_token_id: 10,
+            first_token: "first".to_string(),
+            scored_positions: sample_logprobs().positions,
+        };
+
+        let maps = prompt_logprobs_to_maps(Some(&prompt_logprobs), &[10, 1]).expect("maps");
+        assert_eq!(
+            serde_json::to_value(maps).expect("serialize prompt logprobs"),
+            serde_json::json!([
+                null,
+                {
+                    "1": {"logprob": -0.10000000149011612_f64, "rank": 1, "decoded_token": "A"},
+                    "2": {"logprob": -1.0, "rank": 2, "decoded_token": "B"},
+                    "3": {"logprob": -2.0, "rank": 3, "decoded_token": "C"},
+                }
+            ])
+        );
     }
 
     fn sample_logprobs() -> DecodedLogprobs {

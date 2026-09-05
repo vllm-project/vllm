@@ -154,6 +154,26 @@ class TestArgConverter:
         assert result["city"] == "Tokyo"
         assert result["expr"] == "x<5"
 
+    def test_next_parameter_prefix_implicitly_closes_previous(self):
+        raw = (
+            f"<{_PARAM_OPEN.format(name='city', is_str='true')}Tokyo\n"
+            "<｜DSML｜parameter name="
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {"city": "Tokyo\n"}
+
+    def test_implicit_close_preserves_malformed_text(self):
+        raw = (
+            f"<{_PARAM_OPEN.format(name='city', is_str='true')}"
+            "Tokyo</｜DSML｜parameter\n"
+            f"<{_PARAM_OPEN.format(name='unit', is_str='true')}celsius{_PARAM_CLOSE}"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {
+            "city": "Tokyo</｜DSML｜parameter\n",
+            "unit": "celsius",
+        }
+
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))
@@ -164,6 +184,51 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=False))
         assert result["n"] == "42"
         assert isinstance(result["n"], str)
+
+
+class TestImplicitParameterClose:
+    def test_non_streaming_recovers_next_parameter(self, mock_tokenizer, mock_request):
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}Paris "
+            f"<{_PARAM_OPEN.format(name='date', is_str='true')}"
+            f"tomorrow{_PARAM_CLOSE}"
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "Paris ",
+            "date": "tomorrow",
+        }
+
+    def test_streaming_split_next_parameter_tag_is_buffered(
+        self, mock_tokenizer, mock_request
+    ):
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+            "Paris a<b><｜DSML｜parameter",
+            ' name="date" string="true">tomorrow',
+            _PARAM_CLOSE,
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        arguments = collect_tool_arguments(results)
+        assert "<｜DSML｜param" not in arguments
+        assert json.loads(arguments) == {
+            "location": "Paris a<b>",
+            "date": "tomorrow",
+        }
 
 
 # ── Bare </think> absorption and duplicate <think> absorption ─────────

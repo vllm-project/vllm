@@ -113,7 +113,7 @@ def make_job(
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        block_ids=np.array(block_ids, dtype=np.int32),
         is_promotion=False,
         req_context=_CTX,
     )

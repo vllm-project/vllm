@@ -59,9 +59,9 @@ void concat_and_cache_mla_kernel_impl(
 
 // kv_c_normed : [num_tokens, kv_lora_rank]
 // k_pe        : [num_tokens, qk_rope_head_dim] or [num_tokens, 1,
-// qk_rope_head_dim] kv_cache    : [num_blocks, block_size, kv_lora_rank +
-// qk_rope_head_dim] slot_mapping: [num_tokens] int32/int64, absolute physical
-// row index
+//               qk_rope_head_dim]
+// kv_cache    : [num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]
+// slot_mapping: [num_tokens] int32/int64, absolute physical row index
 //               (block_id * block_size + block_offset); negative entries are
 //               skipped (padded tokens), matching `concat_and_cache_mla`.
 void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,

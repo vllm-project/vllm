@@ -334,3 +334,7 @@ class DiskBackend:
             ev = torch.Event()
             ev.record(stream)
             prev_dma_events[buf_slot] = ev
+
+        for ev in prev_dma_events:
+            if ev is not None:
+                ev.synchronize()

@@ -266,11 +266,14 @@ class LongCatFlashMTP(nn.Module):
             loaded_params.add(name)
         spec_layer_id = self.config.num_hidden_layers * 2
         self_attn = self.model.layers[str(spec_layer_id)].mtp_block.self_attn
-        if hasattr(
-            self.quant_config, "weight_block_size"
-        ) and self_attn.kv_b_proj.weight.dtype in (
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
+        if (
+            self.quant_config is not None
+            and hasattr(self.quant_config, "weight_block_size")
+            and self_attn.kv_b_proj.weight.dtype
+            in (
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+            )
         ):
             weight_block_size = self.quant_config.weight_block_size
             if weight_block_size is not None:

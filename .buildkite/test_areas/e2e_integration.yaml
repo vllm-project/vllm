@@ -51,3 +51,23 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepSeek V2-Lite Prefetch Offload Accuracy"
+      dind: false
+      device: mi355_1
+      working_dir: "/vllm-workspace"
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/backends/mla/
+      - vllm/v1/attention/selector.py
+      - .buildkite/scripts/scheduled_integration_test/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py

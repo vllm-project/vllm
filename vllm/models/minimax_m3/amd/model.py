@@ -92,6 +92,13 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_rmsnorm,
     swiglu_oai_split,
 )
+from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+    minimax_m3_alloc_sparse_block_table,
+    minimax_m3_sparse_block_page_stride,
+)
+from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+    MiniMaxM3SparseAiterPAImpl,
+)
 from vllm.models.minimax_m3.common.indexer import MiniMaxM3Indexer
 from vllm.models.minimax_m3.common.mm_preprocess import (
     MiniMaxM3VLDummyInputsBuilder,
@@ -101,6 +108,8 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    MiniMaxM3SparseMetadata,
+    minimax_m3_rebase_slots_to_page16,
     minimax_m3_use_aiter_sparse_pa,
     select_main_impl_cls,
 )
@@ -699,6 +708,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_k = torch.tensor([])
         self.kv_cache_v = torch.tensor([])
         self._aiter_sparse_pa_cache_data_ptr = 0
+        self._aiter_sparse_pa_block_page_stride = 0
         # Self-contained nn.Module: owns its side cache, selects its impl in init
         # (Triton on ROCm, where the SM100 gate is always False).
         self.indexer = MiniMaxM3Indexer(
@@ -755,34 +765,47 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             kv_cache = kv_cache.view(self.impl.kv_cache_fp8_dtype)
         key_cache, value_cache = kv_cache.unbind(1)
-        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
-            raise RuntimeError(
-                "MiniMax-M3 AITER sparse PA requires K/V-separated KV cache "
-                "storage. Set VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1 before "
-                "initializing the engine."
-            )
 
-        x = 16 // key_cache.element_size()
+        x = 16 // kv_cache.element_size()
         if self.head_dim % x != 0:
             raise RuntimeError(
                 "MiniMax-M3 AITER sparse PA requires head_dim divisible by "
                 f"16 / dtype_size, got head_dim={self.head_dim}, x={x}"
             )
-        num_blocks = key_cache.shape[0]
-        num_phys16 = num_blocks * 8
-        self.kv_cache_k = key_cache.view(
+
+        num_blocks, _, block_size, _ = kv_cache.shape
+        pages_in_side = block_size // 16
+        if key_cache.is_contiguous() and value_cache.is_contiguous():
+            k_src, v_src = key_cache, value_cache
+            block_pages, v_page_offset = pages_in_side, 0
+        elif kv_cache.is_contiguous():
+            k_src = v_src = kv_cache
+            block_pages, v_page_offset = 2 * pages_in_side, pages_in_side
+        else:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA needs each K/V head slot stored as "
+                "whole 16-token pages, but the resolved KV cache layout gives "
+                "neither dense planes nor block-contiguous pages."
+            )
+
+        num_phys16 = num_blocks * block_pages
+        self.kv_cache_k = k_src.view(
             num_phys16,
             self.num_kv_heads,
             self.head_dim // x,
             16,
             x,
         )
-        self.kv_cache_v = value_cache.view(
+        # Offsetting V by half a block lets both sides share one page id.
+        self.kv_cache_v = v_src.view(
             num_phys16,
             self.num_kv_heads,
             16 // x,
             self.head_dim,
             x,
+        )[v_page_offset:]
+        self._aiter_sparse_pa_block_page_stride = minimax_m3_sparse_block_page_stride(
+            self.kv_cache_k, self.kv_cache_v
         )
         self._aiter_sparse_pa_cache_data_ptr = self.kv_cache.data_ptr()
 
@@ -807,6 +830,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        if value_cache.shape[0] != key_cache.shape[0]:
+            attn_metadata = get_forward_context().attn_metadata
+            page16_slot_mapping = None
+            if isinstance(attn_metadata, dict):
+                main_md = attn_metadata[self.layer_name]
+                assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                page16_slot_mapping = main_md.page16_slot_mapping
+            if (
+                page16_slot_mapping is None
+                or page16_slot_mapping.shape != slot_mapping.shape
+            ):
+                page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                    slot_mapping, self.kv_cache.shape[2]
+                )
+            slot_mapping = page16_slot_mapping
         kv_cache_dtype = (
             self.kv_cache_dtype
             if is_quantized_kv_cache(self.kv_cache_dtype)
@@ -993,9 +1031,43 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
         # When skip_index_topk is set (ATOM index_topk_freq), reuse the selection
         # the preceding compute layer wrote into the shared buffer this forward.
+        decode_sparse_table: tuple[torch.Tensor, torch.Tensor] | None = None
         if not self.skip_index_topk:
             assert index_query is not None
-            self.indexer(index_query)
+            attn_metadata = get_forward_context().attn_metadata
+            if self.use_aiter_sparse_pa and isinstance(attn_metadata, dict):
+                main_md = attn_metadata[self.layer_name]
+                assert isinstance(main_md, MiniMaxM3SparseMetadata)
+                if main_md.num_decodes > 0:
+                    d = main_md.decode
+                    assert d is not None
+                    topk = self.topk_indices_buffer
+                    assert topk is not None
+                    decode_sparse_table = minimax_m3_alloc_sparse_block_table(
+                        topk[:, : main_md.num_decode_tokens, :]
+                    )
+                    block_page_stride = self._aiter_sparse_pa_block_page_stride
+                    assert block_page_stride > 0
+                    self.indexer(
+                        index_query,
+                        attention_block_table=d.block_table,
+                        sparse_block_table_out=decode_sparse_table[0],
+                        sparse_context_lens_out=decode_sparse_table[1],
+                        block_page_stride=block_page_stride,
+                    )
+                else:
+                    self.indexer(index_query)
+            else:
+                self.indexer(index_query)
+        if self.use_aiter_sparse_pa:
+            assert isinstance(self.impl, MiniMaxM3SparseAiterPAImpl)
+            return self.impl.forward(
+                self,
+                query,
+                self.kv_cache,
+                output,
+                decode_sparse_table=decode_sparse_table,
+            )
         return self.impl.forward(self, query, self.kv_cache, output)
 
 

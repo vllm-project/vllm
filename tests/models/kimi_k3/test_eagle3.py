@@ -42,6 +42,7 @@ def test_kimi_k3_uses_shared_eagle3_layer_configuration():
     object.__setattr__(model, "layers", [None] * 93)
     language_model = SimpleNamespace(
         embed_input_ids=lambda _: None,
+        forward=lambda input_ids, positions: None,
         model=model,
     )
     object.__setattr__(target, "language_model", language_model)

@@ -35,11 +35,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
-    ErrorResponse,
-    OpenAIBaseModel,
-)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
@@ -51,6 +46,11 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreResponse,
 )
 from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+    OpenAIBaseModel,
+)
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,

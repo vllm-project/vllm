@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "exaone_moe_mtp",
     "exaone4_5_mtp",
     "qwen3_next_mtp",
+    "qwen4_exp_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
     "bailing_hybrid_v3_mtp",
@@ -57,8 +58,10 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
+    "hy_v4_mtp",
     "gemma4_mtp",
     "inkling_mtp",
+    "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -424,6 +427,9 @@ class SpeculativeConfig:
     """The specific revision to use for the draft model code on Hugging Face
     Hub. It can be a branch name, a tag name, or a commit id. If unspecified,
     will use the default version."""
+    index_share_for_mtp_iteration: bool | None = None
+    """Override whether MTP iterations reuse the first step's sparse indices.
+    If `None`, use the value from the draft model's Hugging Face config."""
 
     # Advanced control
     disable_padded_drafter_batch: bool = False
@@ -431,6 +437,11 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    disable_eagle_block_drop: bool = False
+    """Disable dropping the trailing prefix-cache block for EAGLE-like
+    speculative methods. This is an experimental option for measuring the
+    acceptance-rate impact of reusing that block. It does not disable the
+    speculative drafter itself."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -622,6 +633,15 @@ class SpeculativeConfig:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
+        if self.method == "mtp" and self.draft_model_config is not None:
+            factors.append(
+                getattr(
+                    self.draft_model_config.hf_config,
+                    "index_share_for_mtp_iteration",
+                    False,
+                )
+            )
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -804,6 +824,27 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
             )
+        if hf_config.model_type in {"qwen4_exp", "qwen4_exp_text"}:
+            hf_config.model_type = "qwen4_exp_mtp"
+        if hf_config.model_type == "qwen4_exp_mtp":
+            text_config = get_hf_text_config(hf_config)
+            n_predict = getattr(
+                text_config,
+                "mtp_num_hidden_layers",
+                getattr(text_config, "num_nextn_predict_layers", None),
+            )
+            share_mtp_indices = getattr(
+                text_config, "index_share_for_mtp_iteration", False
+            )
+            hf_config.update(
+                {
+                    # hc_count is the HC stream multiplier for Qwen MTP feedback.
+                    "hc_mult": int(text_config.hc_count),
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen4ExpMTP"],
+                    "index_share_for_mtp_iteration": share_mtp_indices,
+                }
+            )
 
         architectures = getattr(hf_config, "architectures", []) or []
         if initial_architecture == "BailingMoeV3ForCausalLM":
@@ -917,6 +958,13 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
+        if hf_config.model_type == "hy_v4":
+            hf_config.model_type = "hy_v4_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["HYV4MTPModel"]}
+            )
+
         if hf_config.model_type in ("inkling_mm_model", "inkling_model"):
             mtp_config = getattr(hf_config, "mtp_config", None) or {}
             hf_config = getattr(hf_config, "text_config", hf_config)
@@ -975,6 +1023,12 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_mtp_modules", 1)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        if hf_config.model_type == "glm5_next":
+            hf_config.model_type = "glm5_next_mtp"
+            n_predict = hf_config.num_nextn_predict_layers
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )
 
         return hf_config
@@ -1453,6 +1507,15 @@ class SpeculativeConfig:
                     )
                 )
 
+        if self.index_share_for_mtp_iteration is not None:
+            if self.method != "mtp" or self.draft_model_config is None:
+                raise ValueError(
+                    "index_share_for_mtp_iteration is only supported with method='mtp'"
+                )
+            self.draft_model_config.hf_config.index_share_for_mtp_iteration = (
+                self.index_share_for_mtp_iteration
+            )
+
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
 
@@ -1636,7 +1699,7 @@ class SpeculativeConfig:
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,
+            pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,
@@ -1794,6 +1857,10 @@ class SpeculativeConfig:
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
         return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+
+    def use_eagle_block_drop(self) -> bool:
+        """Whether volatile trailing cache blocks should be discarded."""
+        return self.use_eagle() and not self.disable_eagle_block_drop
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

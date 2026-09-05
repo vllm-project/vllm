@@ -135,8 +135,8 @@ class DSparkSpeculator(DFlashSpeculator):
             buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
             logits = buf
 
-        # sample_pos is the predicted token's position Q; the target verifies
-        # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
+        # sample_pos is the predicted token's position P. Sampling keys a draw
+        # by the position before the sampled token, P-1.
         return gumbel_sample(
             logits,
             idx_map,
@@ -144,6 +144,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
+            is_drafting=True,
             logits_cache=self.draft_logits,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,

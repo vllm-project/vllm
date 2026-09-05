@@ -73,6 +73,12 @@ class _PromptOptions(TypedDict):
     if the model supports it.
     """
 
+    media_io_kwargs: NotRequired[dict[str, dict[str, Any]] | None]
+    """
+    Optional per-modality media loading and decoding arguments.
+    Used only for hash derivation when using multi-modal UUIDs.
+    """
+
     mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the

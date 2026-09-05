@@ -36,7 +36,7 @@
 namespace vllm {
 
 // Use UE4M3 by default.
-template <class Type, bool UE8M0_SF = false>
+template <class Type, bool UE8M0_SF = false, bool PADDED_OUTPUT = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, int32_t outputCols,
                     int32_t num_padded_cols, Type const* __restrict__ in,
@@ -55,7 +55,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 #endif
 
   // Precompute SF layout parameter (constant for entire kernel).
-  int32_t const numKTiles = (outputCols + 63) / 64;
+  int32_t const numKTiles = ((PADDED_OUTPUT ? outputCols : numCols) + 63) / 64;
 
   int sf_m = round_up<int>(numRows, 128);
   int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
@@ -74,16 +74,15 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
 
       // If we are outside valid columns, feed zeros
-      bool valid_input = (rowIdx < numRows) && (elem_idx < numCols);
-      bool valid_output = (rowIdx < numRows) && (elem_idx < outputCols);
+      bool valid = (rowIdx < numRows) && (elem_idx < numCols);
       if constexpr (CVT_FP4_PACK16) {
         ld256_cg_or_zero(reinterpret_cast<u32x8_t&>(in_vec),
                          &reinterpret_cast<const uint32_t*>(in)[inOffset * 8],
-                         valid_input);
+                         valid);
       } else {
         ld128_cg_or_zero(reinterpret_cast<uint4&>(in_vec),
                          &reinterpret_cast<const uint32_t*>(in)[inOffset * 4],
-                         valid_input);
+                         valid);
       }
 
       auto sf_out =
@@ -91,20 +90,42 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, numKTiles, SFout);
 
-      auto out_val =
-          cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-              in_vec, global_scale, sf_out);
+      fp4_packed_t out_val{};
+      if (valid) {
+        out_val =
+            cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+                in_vec, global_scale, sf_out);
+      } else if (sf_out != nullptr) {
+        // The swizzled scale tensor is allocated with torch.empty. Explicitly
+        // initialize padded rows and columns in this kernel so downstream
+        // NVFP4 GEMMs never observe stale scale factors.
+        *sf_out = 0;
+      }
 
-      if (valid_output) {
+      if constexpr (PADDED_OUTPUT) {
+        bool valid_output = (rowIdx < numRows) && (elem_idx < outputCols);
+        if (valid_output) {
+          if constexpr (CVT_FP4_PACK16) {
+            int64_t outOffset = rowIdx * (outputCols / 8) + colIdx * 2;
+            uint64_t packed64 =
+                (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
+            reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
+          } else {
+            int64_t outOffset =
+                rowIdx * (outputCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+            reinterpret_cast<fp4_packed_t*>(out)[outOffset] = out_val;
+          }
+        }
+      } else if (valid) {
+        // #32520 fast path: input and output widths are identical, so avoid
+        // the padded-output predicate and use the original address arithmetic.
         if constexpr (CVT_FP4_PACK16) {
-          int64_t outOffset = rowIdx * (outputCols / 8) + colIdx * 2;
+          int64_t outOffset = rowIdx * (numCols / 8) + colIdx * 2;
           uint64_t packed64 =
               (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
           reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
         } else {
-          int64_t outOffset =
-              rowIdx * (outputCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-          out[outOffset] = out_val;
+          reinterpret_cast<fp4_packed_t*>(out)[inOffset] = out_val;
         }
       }
     }
@@ -244,11 +265,19 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
           attrs[0].val.programmaticStreamSerializationAllowed = 1;
           config.numAttrs = 1;
           config.attrs = attrs;
-          cudaLaunchKernelEx(&config, vllm::cvt_fp16_to_fp4<cuda_type, false>,
-                             m, n, output_n, num_padded_cols, input_ptr,
-                             input_sf_ptr,
-                             reinterpret_cast<uint32_t*>(output_ptr),
-                             reinterpret_cast<uint32_t*>(sf_out));
+          if (output_n == n) {
+            cudaLaunchKernelEx(
+                &config, vllm::cvt_fp16_to_fp4<cuda_type, false, false>, m, n,
+                output_n, num_padded_cols, input_ptr, input_sf_ptr,
+                reinterpret_cast<uint32_t*>(output_ptr),
+                reinterpret_cast<uint32_t*>(sf_out));
+          } else {
+            cudaLaunchKernelEx(
+                &config, vllm::cvt_fp16_to_fp4<cuda_type, false, true>, m, n,
+                output_n, num_padded_cols, input_ptr, input_sf_ptr,
+                reinterpret_cast<uint32_t*>(output_ptr),
+                reinterpret_cast<uint32_t*>(sf_out));
+          }
         });
   } else {
     int num_packed_cols = output_n / CVT_FP4_ELTS_PER_THREAD;

@@ -20,7 +20,7 @@ from torch import nn
 from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import (
@@ -299,8 +299,9 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_feature_lengths: torch.Tensor,
+        audio_feature_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert audio_feature_lengths is not None
         if input_features.numel() == 0:
             return input_features.new_empty((1, 0, self.conv1.out_channels))
         device = self.conv1.weight.device
@@ -431,11 +432,13 @@ class MossTranscribeDiarizeDummyInputsBuilder(
             return {}
 
         feature_extractor = self.info.get_feature_extractor()
+        audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
         return {
             "audio": self._get_dummy_audios(
                 length=_get_max_audio_samples(feature_extractor),
                 num_audios=num_audios,
-                overrides=mm_options.get("audio"),
+                overrides=audio_overrides,
             )
         }
 

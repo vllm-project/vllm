@@ -48,6 +48,7 @@ class LLBf16Dotprod:
         main_vec_width: int = 8,
         tail_vec_width: int = 4,
         use_pdl: bool = False,
+        prefetch_pdl_weights: bool = False,
     ):
         """Initialize the dot-product kernel configuration.
 
@@ -70,8 +71,10 @@ class LLBf16Dotprod:
         self.main_vec_width = main_vec_width
         self.tail_vec_width = tail_vec_width
         self.use_pdl = use_pdl
+        self.prefetch_pdl_weights = prefetch_pdl_weights
         self.num_warps = bs // cute.arch.WARP_SIZE
         self._init_k_tiles(k)
+        self.main_prefetch_tiles = min(self.main_tiles, 8)
 
     def _vectorized_elems(self, k_extent: int, vec_width: int) -> int:
         vector_tile = vec_width * self.bs
@@ -109,6 +112,33 @@ class LLBf16Dotprod:
             cute.autovec_copy(bt, br)
             br_f32 = br.load().to(cutlass.Float32)
 
+            for m in cutlass.range_constexpr(M):
+                at = tA[m, None, tile]
+                ar = cute.make_rmem_tensor_like(at)
+                cute.autovec_copy(at, ar)
+                vec_width: cutlass.Constexpr = cute.size(ar)
+                for v in cutlass.range_constexpr(vec_width):
+                    acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
+
+    @cute.jit
+    def _vector_dotprod_prefetched(
+        self,
+        acc: cute.Tensor,
+        tA: cute.Tensor,
+        tB: cute.Tensor,
+        rB: cute.Tensor,
+        M: cutlass.Constexpr,
+        num_tiles: cutlass.Constexpr,
+        prefetch_tiles: cutlass.Constexpr,
+    ):
+        for tile in cutlass.range_constexpr(num_tiles):
+            if const_expr(tile < prefetch_tiles):
+                br_f32 = rB[tile, None].load().to(cutlass.Float32)
+            else:
+                bt = tB[None, tile]
+                br = cute.make_rmem_tensor_like(bt)
+                cute.autovec_copy(bt, br)
+                br_f32 = br.load().to(cutlass.Float32)
             for m in cutlass.range_constexpr(M):
                 at = tA[m, None, tile]
                 ar = cute.make_rmem_tensor_like(at)
@@ -240,17 +270,43 @@ class LLBf16Dotprod:
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
         acc.fill(0.0)
 
-        if const_expr(self.use_pdl):
-            cute.arch.griddepcontrol_wait()
-
-        # 128-bit vectorized main loop
+        # In the K3 C=1 specialization, the static weight stripe is independent
+        # of the producer and can be resident while PDL waits for activation A.
         if const_expr(k_main_elems > 0):
             gA_main = self._make_k_slice(gA, 0, k_main_elems)
             gB_main = self._make_k_slice(gB, 0, k_main_elems)
             gA_vec = cute.logical_divide(gA_main, (None, main_vec_width))
             gB_vec = cute.logical_divide(gB_main, (None, main_vec_width))
             tA, tB = self._make_thread_vector_slice(gA_vec, gB_vec, tidx, n_idx, bs)
-            self._vector_dotprod(acc, tA, tB, M, main_tiles, 16)
+            if const_expr(self.use_pdl and self.prefetch_pdl_weights):
+                prefetch_tiles: cutlass.Constexpr = self.main_prefetch_tiles
+                prefetched_b = cute.make_rmem_tensor(
+                    cute.make_layout(
+                        (prefetch_tiles, main_vec_width),
+                        stride=(main_vec_width, 1),
+                    ),
+                    cutlass.BFloat16,
+                )
+                for tile in cutlass.range_constexpr(prefetch_tiles):
+                    cute.autovec_copy(tB[None, tile], prefetched_b[tile, None])
+
+        if const_expr(self.use_pdl):
+            cute.arch.griddepcontrol_wait()
+
+        # 128-bit vectorized main loop
+        if const_expr(k_main_elems > 0):
+            if const_expr(self.use_pdl and self.prefetch_pdl_weights):
+                self._vector_dotprod_prefetched(
+                    acc,
+                    tA,
+                    tB,
+                    prefetched_b,
+                    M,
+                    main_tiles,
+                    prefetch_tiles,
+                )
+            else:
+                self._vector_dotprod(acc, tA, tB, M, main_tiles, 16)
 
         # 64-bit vectorized tail (K remainder after main loop)
         if const_expr(k_tail_elems > 0):

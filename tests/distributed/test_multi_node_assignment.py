@@ -11,6 +11,7 @@ pytest distributed/test_multi_node_assignment.py
 """
 
 import os
+import time
 
 import pytest
 import ray
@@ -19,7 +20,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm import initialize_ray_cluster
 from vllm.config import ParallelConfig
 from vllm.utils.network_utils import get_ip
-from vllm.v1.executor.ray_utils import _wait_until_pg_removed
+from vllm.v1.executor.ray_utils import available_resources_per_node
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
@@ -61,4 +62,18 @@ def test_multi_node_assignment() -> None:
         for worker in workers:
             ray.kill(worker)
 
-        _wait_until_pg_removed(config.placement_group)
+        ray.util.remove_placement_group(config.placement_group)
+
+        gpus_needed = len(workers)
+        deadline = time.monotonic() + 60
+        node_id = ray.get_runtime_context().get_node_id()
+        while True:
+            free_gpus = available_resources_per_node().get(node_id, {}).get("GPU", 0)
+            if free_gpus >= gpus_needed:
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("placement group resources were not released")
+
+            time.sleep(min(1, remaining))

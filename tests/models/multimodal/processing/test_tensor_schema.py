@@ -164,6 +164,14 @@ def test_model_tensor_schema(model_id: str):
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
+    if model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Deepseek V4 is only supported on CUDA")
+
+    if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
+        pytest.skip("GLM-5.3-Flash is not supported on XPU")
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import weakref
+from bisect import bisect_right
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -32,6 +34,7 @@ from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
@@ -46,13 +49,18 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
-    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
-    from vllm.model_executor.models.interfaces_base import VllmModel
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFunc,
+        MambaStateCopyFuncsByType,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -119,7 +127,9 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 # Cache results of `SupportsMultiModal.get_language_model`
-_language_model_by_module = dict[nn.Module, "VllmModel"]()
+_language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @runtime_checkable
@@ -128,12 +138,22 @@ class SupportsMultiModalEmbeddings(Protocol):
 
     supports_multimodal_embeddings: ClassVar[Literal[True]] = True
 
+    @overload
     def embed_input_ids(
         self,
         input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        multimodal_embeddings: None = None,
         *,
         is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
     ) -> Tensor: ...
 
 
@@ -243,26 +263,30 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             torch.nn.Module: The core language model component.
         """
         # Cached
-        if self in _language_model_by_module:
-            return _language_model_by_module[self]
+        assert isinstance(self, nn.Module)
+        self_module = self
+        if self_module in _language_model_by_module:
+            return _language_model_by_module[self_module]
 
         if self._language_model_names:
-            mod = self
+            mod = self_module
             for attr in common_prefix(
                 [name.split(".") for name in self._language_model_names]
             ):
                 if attr:
                     mod = getattr(mod, attr)
 
-            if mod is not self and hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+            candidate: object = mod
+            if candidate is not self_module and isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         # Fallback
-        for mod in self.children():
-            if hasattr(mod, "embed_input_ids"):
-                _language_model_by_module[self] = mod
-                return mod
+        for mod in self_module.children():
+            candidate = mod
+            if isinstance(candidate, VllmModel):
+                _language_model_by_module[self_module] = candidate
+                return candidate
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
@@ -289,7 +313,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         """
         from .utils import StageMissingLayer, collect_children, no_init_weights
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -339,7 +363,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         else:
             stage_name = "_".join([*modalities, "tower"])
 
-        mm_config = vllm_config.model_config.multimodal_config
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         with collect_children(self, targets=targets) as children_names:  # noqa: SIM117
             with (
@@ -361,7 +385,8 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         offloader = get_offloader()
         if offloader.supports_tower_offload:
             for name in children_names:
-                offloader.wrap_modules(iter([attrgetter(name)(self)]), prefix=name)
+                modules = (module for module in [attrgetter(name)(self)])
+                offloader.wrap_modules(modules, prefix=name)
 
     @contextmanager
     def _mark_composite_model(
@@ -434,18 +459,6 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             num_connector_tokens if isinstance(num_connector_tokens, int) else None,
         )
 
-    @overload
-    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
-
-    @overload
-    def embed_input_ids(
-        self,
-        input_ids: Tensor,
-        multimodal_embeddings: MultiModalEmbeddings,
-        *,
-        is_multimodal: torch.Tensor,
-    ) -> Tensor: ...
-
     def _embed_text_input_ids(
         self,
         input_ids: Tensor,
@@ -464,6 +477,24 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: None = None,
+        *,
+        is_multimodal: Tensor | None = None,
+    ) -> Tensor: ...
+
+    @overload
+    def embed_input_ids(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: Tensor,
+    ) -> Tensor: ...
 
     def embed_input_ids(
         self,
@@ -671,7 +702,7 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
     lora_manager: "LoRAModelManager | None"
@@ -864,11 +895,11 @@ class HasInnerState(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 @overload
-def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
+def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
 
 
 def has_inner_state(
@@ -891,11 +922,11 @@ class IsAttentionFree(Protocol):
 
 
 @overload
-def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 @overload
-def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
 
 
 def is_attention_free(
@@ -944,13 +975,21 @@ class IsHybrid(Protocol):
         """
         ...
 
-
-@overload
-def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload
 def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
+
+
+@overload
+def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
 
 
 def is_hybrid(
@@ -1025,7 +1064,7 @@ class MixtureOfExperts(Protocol):
         self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
+            self.expert_weights.append(list(layer.get_expert_weights()))
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
                 expert_load_view=expert_load_view,
@@ -1083,11 +1122,11 @@ class HasNoOps(Protocol):
 
 
 @overload
-def has_noops(model: object) -> TypeIs[HasNoOps]: ...
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 @overload
-def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
+def has_noops(model: object) -> TypeIs[HasNoOps]: ...
 
 
 def has_noops(
@@ -1105,17 +1144,31 @@ class SupportsMambaPrefixCaching(Protocol):
 
     supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
+        """Return copy functions for the model's Mamba states."""
+        ...
 
-@overload
-def supports_mamba_prefix_caching(
-    model: object,
-) -> TypeIs[SupportsMambaPrefixCaching]: ...
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        """Map legacy copy functions to each requested Mamba backend."""
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload
 def supports_mamba_prefix_caching(
     model: type[object],
 ) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
 
 
 def supports_mamba_prefix_caching(
@@ -1136,11 +1189,11 @@ class SupportsReplaySSM(Protocol):
 
 
 @overload
-def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
+def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
 
 
 @overload
-def supports_replayssm(model: type[object]) -> TypeIs[type[SupportsReplaySSM]]: ...
+def supports_replayssm(model: object) -> TypeIs[SupportsReplaySSM]: ...
 
 
 def supports_replayssm(
@@ -1172,7 +1225,7 @@ class SupportsQuant:
     """The interface required for all models that support quantization."""
 
     hf_to_vllm_mapper: "WeightsMapper | None" = None
-    packed_modules_mapping: ClassVar[dict[str, list[str]]]
+    packed_modules_mapping: dict[str, list[str]]
     quant_config: QuantizationConfig | None = None
 
     def __new__(cls, *args, **kwargs) -> Self:
@@ -1504,6 +1557,9 @@ class LocalArgmaxMixin:
         ``self.draft_id_to_target_id`` (optional): nn.Parameter
     """
 
+    logits_processor: "LogitsProcessor"
+    lm_head: "ParallelLMHead"
+
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""
         top = self.logits_processor.get_top_tokens(
@@ -1517,10 +1573,36 @@ class LocalArgmaxMixin:
 
 
 class EagleModelMixin:
+    start_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
+    supports_aux_hidden_states_over_pp: ClassVar[bool] = False
+    AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
+    _aux_slot_base_cached: int = 0
+    _aux_upstream_total_cached: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.aux_hidden_state_layers = layers
+        self.aux_hidden_state_layers = tuple(sorted(set(layers)))
+        self._aux_slot_base_cached = 0
+        self._aux_upstream_total_cached = 0
+        self._cache_aux_pp_layout()
+
+    def _cache_aux_pp_layout(self) -> None:
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
+
+        if not model_parallel_is_initialized():
+            return
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return
+        if not pp.is_first_rank:
+            self._aux_slot_base_cached = bisect_right(
+                self.aux_hidden_state_layers, self.start_layer
+            )
+        if pp.is_last_rank:
+            self._aux_upstream_total_cached = self._aux_slot_base_cached
 
     def _maybe_add_hidden_state(
         self,
@@ -1533,6 +1615,36 @@ class EagleModelMixin:
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states
+
+    def pack_local_aux_hidden_states(
+        self, aux_hidden_states: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if not aux_hidden_states:
+            return {}
+        base = self._aux_slot_base_cached
+        return {
+            f"{self.AUX_HIDDEN_STATE_KEY}{base + i}": t
+            for i, t in enumerate(aux_hidden_states)
+        }
+
+    def collect_remote_aux_hidden_states(
+        self, intermediate_tensors: "IntermediateTensors | None"
+    ) -> list[torch.Tensor]:
+        total = self._aux_upstream_total_cached
+        if total == 0:
+            return []
+
+        assert intermediate_tensors is not None
+        out: list[torch.Tensor] = []
+        for i in range(total):
+            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+            if key not in intermediate_tensors.tensors:
+                raise RuntimeError(
+                    f"Missing {key} from PP intermediate tensors: "
+                    f"{sorted(intermediate_tensors.tensors)}"
+                )
+            out.append(intermediate_tensors[key])
+        return out
 
 
 @runtime_checkable

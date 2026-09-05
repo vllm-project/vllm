@@ -12,9 +12,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from typing_extensions import TypedDict
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -68,6 +73,18 @@ from .qwen2_5_vl import (
 )
 from .qwen2_vl import _create_qwen2vl_field_factory
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
+
+
+class MiMoV2OmniAudioInputs(TypedDict):
+    type: str
+    audio_features: torch.Tensor | list[torch.Tensor]
+    audio_token_lens: torch.Tensor | list[int] | None
+
+
+class MiMoV2OmniMultiModalInputs(TypedDict, total=False):
+    image: Qwen2_5_VLImageInputs | None
+    video: Qwen2_5_VLVideoInputs | None
+    audio: MiMoV2OmniAudioInputs | None
 
 
 class MiMoVisionMLP(Qwen2_5_VisionMLP):
@@ -937,11 +954,14 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
         if "video_audio" in mm_data:
             va_converted: list[VideoAudioInput] = []
-            for va_item in mm_data["video_audio"]:
+            video_audio_items = mm_data["video_audio"]
+            assert isinstance(video_audio_items, Sequence)
+            for va_item in video_audio_items:
                 if isinstance(va_item, VideoAudioInput):
                     vid = va_item.video
                 else:
                     # Expect (video_frames, audio_source) tuple
+                    assert isinstance(va_item, (list, tuple)) and len(va_item) == 2
                     vid, audio_src = va_item
                     va_item = VideoAudioInput(video=vid, audio=audio_src)
                     vid = vid
@@ -976,7 +996,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
-            for video in mm_data["videos"]:
+            videos = mm_data["videos"]
+            assert isinstance(videos, Sequence)
+            for video in videos:
                 if (
                     isinstance(video, tuple)
                     and len(video) == 2
@@ -1037,30 +1059,47 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         video_end_id = p.video_end_token_id
         audio_start_id = p.audio_start_token_id
         audio_end_id = p.audio_end_token_id
+        assert isinstance(vision_start_id, int)
+        assert isinstance(vision_end_id, int)
+        assert isinstance(video_start_id, int)
+        assert isinstance(video_end_id, int)
 
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
             n_tokens = int(grid_thw.prod()) // merge_size**2
-            return [image_pad_id] * n_tokens
+            return PromptUpdateDetails.from_seq([image_pad_id] * n_tokens)
 
         def get_video_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
-            spt = float(out_item["second_per_grid_ts"].data)
-            start = float(out_item["video_start_times"].data)
+            second_per_grid_ts = out_item["second_per_grid_ts"].data
+            video_start_time = out_item["video_start_times"].data
+            assert isinstance(grid_thw, torch.Tensor)
+            assert isinstance(second_per_grid_ts, (int, float, torch.Tensor))
+            assert isinstance(video_start_time, (int, float, torch.Tensor))
+            spt = float(second_per_grid_ts)
+            start = float(video_start_time)
 
             T, H, W = map(int, grid_thw)
             n_per_grid = H * W // (merge_size * merge_size)
 
             # Check if this is a video_audio item
             n_segs_field = out_item.get("video_audio_n_segs")
-            n_segs_val = int(n_segs_field.data) if n_segs_field is not None else 0
+            if n_segs_field is None:
+                n_segs_val = 0
+            else:
+                n_segs_data = n_segs_field.data
+                assert isinstance(n_segs_data, (int, torch.Tensor))
+                n_segs_val = int(n_segs_data)
             va_seg_lens: list[int] | None = None
             if n_segs_val > 0:
                 seg_lens_field = out_item.get("video_audio_seg_lens")
                 if seg_lens_field is not None:
-                    va_seg_lens = seg_lens_field.data[:n_segs_val].tolist()
+                    seg_lens_data = seg_lens_field.data
+                    assert isinstance(seg_lens_data, torch.Tensor)
+                    va_seg_lens = seg_lens_data[:n_segs_val].tolist()
 
             full: list[int] = [video_start_id]
             is_embed_mask: list[bool] = [False]
@@ -1099,6 +1138,9 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         is_embed_mask.append(False)
                     # Audio tokens for this group
                     seg_len = va_seg_lens[g]
+                    assert audio_start_id is not None
+                    assert audio_pad_id is not None
+                    assert audio_end_id is not None
                     full.append(audio_start_id)
                     is_embed_mask.append(False)
                     full.extend([audio_pad_id] * seg_len)
@@ -1117,8 +1159,11 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
 
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["audio"][item_idx]
-            tok_len = int(out_item["audio_token_lens"].data)
-            return [audio_pad_id] * tok_len
+            audio_token_lens = out_item["audio_token_lens"].data
+            assert isinstance(audio_token_lens, (int, torch.Tensor))
+            assert audio_pad_id is not None
+            tok_len = int(audio_token_lens)
+            return PromptUpdateDetails.from_seq([audio_pad_id] * tok_len)
 
         updates: list[PromptUpdate] = [
             PromptReplacement(
@@ -1166,20 +1211,24 @@ class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingIn
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        assert image_overrides is None or isinstance(image_overrides, ImageDummyOptions)
+        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=mm_options.get("image"),
+                overrides=image_overrides,
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
-                overrides=mm_options.get("video"),
+                overrides=video_overrides,
             ),
         }
 
@@ -1235,6 +1284,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             )
         audio_config = getattr(config, "audio_config", None)
         model_path = vllm_config.model_config.model
+        self.audio_encoder: MimoAudioEncoder | None
         if audio_config is not None:
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_encoder = MimoAudioEncoder(
@@ -1269,12 +1319,12 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            return Qwen2_5_VLImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
+        assert image_embeds is not None
+        return Qwen2_5_VLImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
@@ -1295,13 +1345,13 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 second_per_grid_ts=second_per_grid_ts,
             )
 
-        if video_embeds is not None:
-            return Qwen2_5_VLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-            )
+        assert video_embeds is not None
+        return Qwen2_5_VLVideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+        )
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
@@ -1339,19 +1389,29 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_audio_input(self, **kwargs: object) -> dict | None:
+    def _parse_and_validate_audio_input(
+        self, **kwargs: object
+    ) -> MiMoV2OmniAudioInputs | None:
         audio_features = kwargs.pop("audio_features", None)
         audio_token_lens = kwargs.pop("audio_token_lens", None)
         if audio_features is None:
             return None
+        assert isinstance(audio_features, (torch.Tensor, list))
+        if isinstance(audio_features, list):
+            assert all(isinstance(item, torch.Tensor) for item in audio_features)
+        assert audio_token_lens is None or isinstance(
+            audio_token_lens, (torch.Tensor, list)
+        )
         return {
             "type": "audio",
             "audio_features": audio_features,
             "audio_token_lens": audio_token_lens,
         }
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> MiMoV2OmniMultiModalInputs:
+        mm_input_by_modality: MiMoV2OmniMultiModalInputs = {}
 
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
@@ -1376,7 +1436,9 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                 )
         return mm_input_by_modality
 
-    def _process_audio_input(self, audio_input: dict) -> tuple[torch.Tensor, ...]:
+    def _process_audio_input(
+        self, audio_input: MiMoV2OmniAudioInputs
+    ) -> tuple[torch.Tensor, ...]:
         mel_specs = audio_input["audio_features"]
         if self.audio_encoder is None:
             return ()
@@ -1407,38 +1469,52 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
 
         # Pre-process va audio: one mel spec per va video → per-video audio embeddings
         # keyed by va video index (0-based among va videos only)
-        va_audio_embs_list: list[tuple[torch.Tensor, ...]] = []
+        va_audio_embs_list: list[torch.Tensor] = []
         if va_audio_features is not None and self.audio_encoder is not None:
-            mel_list = (
-                list(va_audio_features)
-                if isinstance(va_audio_features, torch.Tensor)
-                else list(va_audio_features)
-            )
+            assert isinstance(va_audio_features, (torch.Tensor, list, tuple))
+            mel_list: list[torch.Tensor] = []
+            for mel_spec in va_audio_features:
+                assert isinstance(mel_spec, torch.Tensor)
+                mel_list.append(mel_spec)
             for mel_spec in mel_list:
                 embs, tok_lens = self.audio_encoder.get_audio_feature([mel_spec])
                 # tok_lens is a list/tensor with one entry (total tokens for this mel)
                 va_audio_embs_list.append(embs)  # shape (total_tok, hidden)
 
         va_cursor = 0  # index into va_audio_embs_list
+        assert video_audio_n_segs is None or isinstance(
+            video_audio_n_segs, torch.Tensor
+        )
+        assert video_audio_seg_lens is None or isinstance(
+            video_audio_seg_lens, torch.Tensor
+        )
 
         # NOTE: Iterate in dict insertion order to preserve token sequence order.
         for modality in mm_input_by_modality:
-            multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                multimodal_embeddings.extend(
-                    self._process_image_input(multimodal_input)
+                image_input = mm_input_by_modality["image"]
+                assert isinstance(
+                    image_input,
+                    (Qwen2_5_VLImagePixelInputs, Qwen2_5_VLImageEmbeddingInputs),
                 )
+                multimodal_embeddings.extend(self._process_image_input(image_input))
             elif modality == "video":
-                video_embs_tuple = self._process_video_input(multimodal_input)
+                video_input = mm_input_by_modality["video"]
+                assert isinstance(
+                    video_input,
+                    (Qwen2_5_VLVideoPixelInputs, Qwen2_5_VLVideoEmbeddingInputs),
+                )
+                video_embs_tuple = self._process_video_input(video_input)
                 if video_audio_n_segs is None:
                     multimodal_embeddings.extend(video_embs_tuple)
                 else:
-                    grid_thw = multimodal_input["video_grid_thw"]
+                    grid_thw = video_input["video_grid_thw"]
                     for i, vid_embs in enumerate(video_embs_tuple):
                         n_segs = int(video_audio_n_segs[i])
                         if n_segs == 0 or not va_audio_embs_list:
                             multimodal_embeddings.append(vid_embs)
                         else:
+                            assert video_audio_seg_lens is not None
                             T = int(grid_thw[i][0])
                             n_per_grid = vid_embs.shape[0] // T
                             frames = list(vid_embs.split(n_per_grid, dim=0))
@@ -1459,9 +1535,9 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
                                     )
                                 multimodal_embeddings.append(group_audio_embs[g])
             elif modality == "audio":
-                multimodal_embeddings.extend(
-                    self._process_audio_input(multimodal_input)
-                )
+                audio_input = mm_input_by_modality["audio"]
+                assert audio_input is not None
+                multimodal_embeddings.extend(self._process_audio_input(audio_input))
         return tuple(multimodal_embeddings)
 
     def forward(

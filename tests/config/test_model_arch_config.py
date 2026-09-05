@@ -465,3 +465,34 @@ def test_draft_model_arch_config(
     _assert_model_config_methods(
         model_config, expected, check_head_size=check_head_size
     )
+
+
+def test_deepseek_v4_convertor_splits_vision_architecture():
+    """The vision checkpoint shares model_type/architectures with the
+    text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
+    by rewriting hf_config.architectures (model-class resolution reads the
+    raw attribute)."""
+    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        DeepseekV4ModelArchConfigConvertor,
+    )
+
+    text_cfg = DeepseekV4Config(architectures=["DeepseekV4ForCausalLM"])
+    conv = DeepseekV4ModelArchConfigConvertor(text_cfg, text_cfg)
+    assert conv.get_architectures() == ["DeepseekV4ForCausalLM"]
+    assert text_cfg.architectures == ["DeepseekV4ForCausalLM"]
+
+    vl_cfg = DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"], vision_n_layers=32
+    )
+    conv = DeepseekV4ModelArchConfigConvertor(vl_cfg, vl_cfg)
+    assert conv.get_architectures() == ["DeepseekV4ForConditionalGeneration"]
+    assert vl_cfg.architectures == ["DeepseekV4ForConditionalGeneration"]
+
+    # Speculative-draft configs (set by SpeculativeConfig.hf_config_override)
+    # keep their own architecture even with a vision tower in the config.
+    for draft_arch in ("DSparkDraftModel", "DeepSeekV4MTPModel"):
+        draft_cfg = DeepseekV4Config(architectures=[draft_arch], vision_n_layers=32)
+        conv = DeepseekV4ModelArchConfigConvertor(draft_cfg, draft_cfg)
+        assert conv.get_architectures() == [draft_arch]
+        assert draft_cfg.architectures == [draft_arch]

@@ -393,6 +393,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -401,6 +402,7 @@ async fn chat_streams_text_events() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "i".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -500,6 +502,7 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "你".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -586,6 +589,7 @@ async fn chat_stream_flushes_held_text_on_finish() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "ok st".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -773,6 +777,7 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "Hi!".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -880,6 +885,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "reason ".to_string(),
+            token_count: Some(7),
         }
     );
     assert_eq!(
@@ -888,6 +894,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 0,
             kind: AssistantBlockKind::Reasoning,
             delta: "more".to_string(),
+            token_count: Some(4),
         }
     );
     assert_eq!(
@@ -912,6 +919,7 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
             index: 1,
             kind: AssistantBlockKind::Text,
             delta: "answer".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(
@@ -927,12 +935,15 @@ async fn chat_stream_separates_reasoning_blocks_automatically() {
     match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
+            usage,
             finish_reason,
             ..
         })) => {
             assert_eq!(message.reasoning().unwrap(), "reason more");
             assert_eq!(message.text(), "answer");
             assert_eq!(finish_reason, FinishReason::Length);
+            // 7 tokens for "reason " plus 4 for "more"; markers are excluded.
+            assert_eq!(usage.reasoning_tokens, 11);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -1000,6 +1011,8 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
         message.usage.output_token_count,
         "<think>inner</think>outer".len()
     );
+    // 5 tokens for "inner"; markers are excluded.
+    assert_eq!(message.usage.reasoning_tokens, 5);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1079,6 +1092,7 @@ async fn chat_explicitly_disables_reasoning_parser() {
     assert_eq!(message.message.reasoning(), None);
     assert_eq!(message.message.text(), "<think>reason more</think>answer");
     assert_eq!(message.finish_reason, FinishReason::Length);
+    assert_eq!(message.usage.reasoning_tokens, 0);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1379,6 +1393,7 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
             index: 0,
             kind: AssistantBlockKind::Text,
             delta: "H".to_string(),
+            token_count: None,
         }
     );
     assert_eq!(

@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    _use_masked_mha,
     build_mla_chunked_context_metadata,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -66,6 +67,124 @@ if current_platform.is_rocm():
     BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.parametrize(
+    ("tensor_parallel_size", "query_len", "expected"),
+    [
+        (1, 8192, True),
+        (1, 9216, False),
+        (2, 20480, True),
+        (2, 24576, False),
+        (4, 48 * 1024, True),
+        (4, 56 * 1024, False),
+        (8, 112 * 1024, True),
+        (8, 128 * 1024, False),
+    ],
+)
+def test_glm5_masked_mha_pure_prefill_routing(
+    tensor_parallel_size, query_len, expected
+):
+    assert (
+        _use_masked_mha(
+            backend_name="FLASHMLA_SPARSE",
+            tensor_parallel_size=tensor_parallel_size,
+            qk_head_dim=256,
+            v_head_dim=256,
+            query_len=query_len,
+            seq_len=query_len,
+            has_context=False,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tensor_parallel_size", "query_len", "seq_len", "expected"),
+    [
+        (1, 8192, 8192, False),
+        (2, 4096, 6144, True),
+        (2, 4096, 8192, False),
+        (2, 8192, 10240, True),
+        (4, 16384, 24576, True),
+        (4, 16384, 32768, False),
+        (4, 32768, 34 * 1024, True),
+        (4, 32768, 36 * 1024, False),
+        (8, 32768, 49152, True),
+        (8, 32768, 65536, False),
+    ],
+)
+def test_glm5_masked_mha_context_routing(
+    tensor_parallel_size, query_len, seq_len, expected
+):
+    assert (
+        _use_masked_mha(
+            backend_name="FLASHMLA_SPARSE",
+            tensor_parallel_size=tensor_parallel_size,
+            qk_head_dim=256,
+            v_head_dim=256,
+            query_len=query_len,
+            seq_len=seq_len,
+            has_context=True,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tensor_parallel_size", "query_len", "seq_len", "has_context", "expected"),
+    [
+        (4, 36 * 1024, 36 * 1024, False, True),
+        (4, 40 * 1024, 40 * 1024, False, False),
+        (4, 4 * 1024, 12 * 1024, True, True),
+        (4, 4 * 1024, 16 * 1024, True, False),
+        (4, 24 * 1024, 28 * 1024, True, True),
+        (4, 32 * 1024, 36 * 1024, True, False),
+        (8, 64 * 1024, 64 * 1024, False, True),
+        (8, 68 * 1024, 68 * 1024, False, False),
+        (8, 4 * 1024, 20 * 1024, True, True),
+        (8, 16 * 1024, 32 * 1024, True, True),
+        (8, 48 * 1024, 64 * 1024, True, True),
+        (8, 56 * 1024, 72 * 1024, True, True),
+        (8, 63 * 1024, 79 * 1024, True, False),
+    ],
+)
+def test_glm5_flashinfer_masked_mha_routing(
+    tensor_parallel_size, query_len, seq_len, has_context, expected
+):
+    assert (
+        _use_masked_mha(
+            backend_name="FLASHINFER_MLA_SPARSE",
+            tensor_parallel_size=tensor_parallel_size,
+            qk_head_dim=256,
+            v_head_dim=256,
+            query_len=query_len,
+            seq_len=seq_len,
+            has_context=has_context,
+        )
+        is expected
+    )
+
+
+def test_masked_mha_routing_is_dimension_specific():
+    assert _use_masked_mha(
+        backend_name="FLASHMLA_SPARSE",
+        tensor_parallel_size=1,
+        qk_head_dim=192,
+        v_head_dim=128,
+        query_len=1536,
+        seq_len=2048,
+        has_context=True,
+    )
+    assert not _use_masked_mha(
+        backend_name="FLASHMLA_SPARSE",
+        tensor_parallel_size=1,
+        qk_head_dim=128,
+        v_head_dim=128,
+        query_len=1536,
+        seq_len=2048,
+        has_context=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -386,7 +505,10 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    fp8_attention = kv_cache_dtype and kv_cache_dtype.startswith("fp8")
+    use_nvfp4_ds_mla = kv_cache_dtype == "nvfp4_ds_mla"
+    fp8_attention = (
+        bool(kv_cache_dtype and kv_cache_dtype.startswith("fp8")) or use_nvfp4_ds_mla
+    )
     use_fp8_ds_mla = kv_cache_dtype == "fp8_ds_mla"
 
     if fp8_attention:
@@ -396,6 +518,14 @@ def create_and_prepopulate_kv_cache(
             # 4 * 4: 4 float32 scale values for 128-element tiles
             # 2 * rope_dim: 16-bit RoPE values
             kv_entry_size = kv_lora_rank + 4 * 4 + 2 * rope_dim
+        elif use_nvfp4_ds_mla:
+            kv_lora_rank = kv_c_contexts[0].shape[-1]
+            rope_dim = k_pe_contexts[0].shape[-1]
+            # e2m1-packed NoPE + unscaled e4m3 rope + per-16 e4m3 NoPE SFs,
+            # padded to 16B
+            kv_entry_size = (
+                cdiv(kv_lora_rank // 2 + rope_dim + kv_lora_rank // 16, 16) * 16
+            )
         else:
             kv_entry_size = head_size
 
@@ -902,7 +1032,7 @@ def test_tokenspeed_mla_noncausal_capability():
     assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
 
 
-def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
+def test_flashinfer_mla_dspark_dcp_supports_target_and_draft(monkeypatch):
     flashinfer_mla_module = pytest.importorskip(
         "vllm.v1.attention.backends.mla.flashinfer_mla"
     )
@@ -931,26 +1061,10 @@ def test_flashinfer_mla_dspark_support_is_tp_only(monkeypatch):
         device_capability=SimpleNamespace(),
     )
 
-    assert reason == "FlashInfer MLA does not support DSpark with DCP"
+    assert reason is None
     assert backend.supports_non_causal()
     assert builder.supports_non_causal_multi_token_decode
-    assert not backend.supports_non_causal_dcp()
-
-    vllm_config.parallel_config.decode_context_parallel_size = 1
-    assert (
-        backend.supports_combination(
-            head_size=576,
-            dtype=torch.bfloat16,
-            kv_cache_dtype="fp8",
-            block_size=64,
-            use_mla=True,
-            has_sink=False,
-            use_sparse=False,
-            use_mm_prefix=False,
-            device_capability=SimpleNamespace(),
-        )
-        is None
-    )
+    assert backend.supports_non_causal_dcp()
 
 
 @pytest.mark.parametrize(

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     )
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     convert_to_int8_moe_kernel_format,
     make_int8_moe_kernel,
@@ -38,9 +39,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         *,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
     ):
-        super().__init__(layer.moe_config)
+        super().__init__(moe)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
             weight_key=kInt8StaticChannelSym,

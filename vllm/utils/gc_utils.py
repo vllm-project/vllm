@@ -4,7 +4,7 @@ import gc
 import json
 import time
 from collections import Counter
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import vllm.envs as envs
@@ -91,6 +91,34 @@ class GCDebugger:
                     else ""
                 ),
             )
+
+
+@contextmanager
+def freeze_gc_for_cudagraph_capture():
+    """Freeze and disable gc for the duration of bulk CUDA graph capture.
+
+    A gc cycle during stream capture can invalidate the captured graph, e.g.
+    a finalized Triton kernel unloads its module. Opt out with
+    VLLM_ENABLE_CUDAGRAPH_GC=1.
+    """
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+    if should_freeze:
+        gc.freeze()
+        gc.disable()
+    try:
+        yield
+    finally:
+        if should_freeze:
+            try:
+                gc.unfreeze()
+                gc.collect()
+            finally:
+                if gc_was_enabled:
+                    gc.enable()
+                else:
+                    gc.disable()
 
 
 def freeze_gc_heap() -> None:

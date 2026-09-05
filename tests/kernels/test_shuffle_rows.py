@@ -103,6 +103,21 @@ def test_shuffle_rows_expansion(num_tokens: int, hidden_size: int):
         )
 
 
+def test_shuffle_rows_invalid_indices_are_zeroed():
+    """Invalid sentinel indices should produce zero rows instead of OOB reads."""
+    if not current_platform.is_cuda():
+        pytest.skip("shuffle_rows requires CUDA")
+
+    input_tensor = torch.randn(3, 128, device="cuda", dtype=torch.bfloat16)
+    dst2src_map = torch.tensor([-1, 1, 3], device="cuda", dtype=torch.int32)
+
+    output = shuffle_rows(input_tensor, dst2src_map)
+
+    torch.testing.assert_close(output[0], torch.zeros_like(output[0]))
+    torch.testing.assert_close(output[1], input_tensor[1])
+    torch.testing.assert_close(output[2], torch.zeros_like(output[2]))
+
+
 @pytest.mark.parametrize("num_tokens", [16, 64])
 @pytest.mark.parametrize("hidden_size", [128, 512])
 def test_shuffle_rows_random_permutation(num_tokens: int, hidden_size: int):
