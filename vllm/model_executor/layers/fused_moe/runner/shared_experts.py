@@ -184,3 +184,5 @@ class SharedExperts(torch.nn.Module):
         self._output[self._output_idx] = self._layer(shared_experts_input)
 
         assert self._output[self._output_idx] is not None
+
+        return None
