@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the fused EAGLE slot mapping kernel."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     eagle_step_update_slot_mapping_and_metadata,
@@ -92,6 +95,90 @@ def test_eagle_step_slot_mapping_kernel():
     assert torch.equal(seq_lens_copy, ref_seq_lens), (
         f"seq_lens: {seq_lens_copy} vs {ref_seq_lens}"
     )
+
+
+@pytest.mark.parametrize(
+    ("position", "seq_len", "expected_position", "expected_slot", "expected_seq_len"),
+    [
+        (109, 110, 110, 1710, 111),
+        (1023, 1024, 0, PADDING_SLOT_ID, 1),
+    ],
+)
+def test_eagle_step_slot_mapping_kernel_in_place_positions(
+    position: int,
+    seq_len: int,
+    expected_position: int,
+    expected_slot: int,
+    expected_seq_len: int,
+):
+    """The M-RoPE caller aliases position input and output scratch buffers."""
+    device = torch.device(DEVICE_TYPE)
+    positions = torch.tensor([position], dtype=torch.int64, device=device)
+    block_table = torch.arange(100, 164, dtype=torch.int32, device=device).unsqueeze(0)
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32, device=device)
+    out_slot = torch.empty(1, dtype=torch.int64, device=device)
+
+    eagle_step_update_slot_mapping_and_metadata(
+        positions_1d=positions,
+        block_table_tensor=block_table,
+        seq_lens=seq_lens,
+        block_size=16,
+        max_model_len=1024,
+        out_clamped_positions=positions,
+        out_slot_mapping=out_slot,
+    )
+
+    assert positions.tolist() == [expected_position]
+    assert out_slot.tolist() == [expected_slot]
+    assert seq_lens.tolist() == [expected_seq_len]
+
+
+def test_mrope_proposer_uses_absolute_slots_with_real_kernel():
+    """Run the fixed proposer and fused kernel together on image-style positions."""
+    device = torch.device(DEVICE_TYPE)
+    proposer = EagleProposer.__new__(EagleProposer)
+    proposer.uses_mrope = True
+    proposer.uses_xdrope_dim = 0
+    proposer.draft_uses_xdrope_dim = 0
+    proposer.max_model_len = 1024
+    proposer._slot_positions = torch.empty(2, dtype=torch.int64, device=device)
+    proposer._slot_mapping_buffer = torch.empty(4, dtype=torch.int64, device=device)
+    proposer.mrope_positions = torch.empty((3, 5), dtype=torch.int64, device=device)
+
+    positions = torch.tensor(
+        [[19, 25], [19, 25], [19, 25]], dtype=torch.int64, device=device
+    )
+    block_table = torch.stack(
+        (
+            torch.arange(100, 164, dtype=torch.int32, device=device),
+            torch.arange(200, 264, dtype=torch.int32, device=device),
+        )
+    )
+    metadata = SimpleNamespace(
+        block_table_tensor=block_table,
+        seq_lens=torch.tensor([110, 130], dtype=torch.int32, device=device),
+        slot_mapping=None,
+        max_seq_len=130,
+        _seq_lens_cpu=None,
+        _num_computed_tokens_cpu=None,
+        seq_lens_cpu_upper_bound=None,
+    )
+
+    updated_positions = proposer._update_positions_dependent_metadata(
+        positions,
+        metadata,
+        batch_size=2,
+        input_batch_size=4,
+        block_size=16,
+    )
+
+    assert metadata.slot_mapping.tolist() == [1710, 3330]
+    assert proposer._slot_mapping_buffer[2:].tolist() == [
+        PADDING_SLOT_ID,
+        PADDING_SLOT_ID,
+    ]
+    assert metadata.seq_lens.tolist() == [111, 131]
+    assert updated_positions.tolist() == [[20, 26], [20, 26], [20, 26]]
 
 
 def test_eagle_step_slot_mapping_kernel_exceeds_max():
