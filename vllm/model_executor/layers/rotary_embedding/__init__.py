@@ -30,6 +30,14 @@ from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
 
 
+def _make_hashable(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in obj.items()))
+    if isinstance(obj, (list, tuple)):
+        return tuple(_make_hashable(x) for x in obj)
+    return obj
+
+
 def get_rope(
     head_size: int,
     max_position: int,
@@ -41,12 +49,7 @@ def get_rope(
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_parameters is not None:
-        # Transforms every value that is a list into a tuple for caching calls
-        rope_parameters_tuple = {
-            k: tuple(v) if isinstance(v, list) else v
-            for k, v in rope_parameters.items()
-        }
-        rope_parameters_args = tuple(rope_parameters_tuple.items())
+        rope_parameters_args = _make_hashable(rope_parameters)
     else:
         rope_parameters_args = None
 
