@@ -9,23 +9,86 @@ use serde_json::{Map, Value};
 use validator::Validate;
 use vllm_text::SamplingParams;
 
-use crate::routes::openai::utils::types::{ChatLogProbs, Normalizable, StreamOptions, Usage};
+use crate::routes::openai::utils::types::{
+    ChatLogProbs, Normalizable, StreamOptions, StringOrArray, Usage,
+};
 
-/// Sampling parameters for the token-in/token-out generate API.
+/// Sampling parameters accepted by `/generate`.
 ///
-/// Wraps [`SamplingParams`] to additionally capture `n`, which the shared
-/// northbound type intentionally omits (parallel sampling is handled by
-/// higher layers, and the Rust frontend does not implement it). Capturing it
-/// here lets validation reject `n > 1` explicitly instead of silently
-/// dropping the key and returning a single choice.
+/// Python's `GenerateRequest.sampling_params` is the full `vllm.SamplingParams`,
+/// so the detokenization-side options travel inside the same object as the
+/// sampler-side ones. `vllm_text::SamplingParams` stops at the sampler
+/// boundary, so the decode-side half is split back out here and lowered into
+/// `TextDecodeOptions`. `n` is captured for the same reason: the shared type
+/// omits it, and validation rejects `n > 1` rather than silently returning one
+/// choice.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(try_from = "Map<String, Value>")]
 pub struct GenerateSamplingParams {
     /// Number of output sequences to generate. Only `1` is supported.
     pub n: Option<u32>,
     /// The supported sampling parameters, lowered to the engine.
     #[serde(flatten)]
     pub inner: SamplingParams,
+    pub stop: Option<StringOrArray>,
+    pub include_stop_str_in_output: bool,
+    pub skip_special_tokens: bool,
+    /// Accepted for Python parity. The Rust frontend always runs the shared
+    /// detokenizer, so this only gates `stop`.
+    pub detokenize: bool,
+}
+
+impl Default for GenerateSamplingParams {
+    fn default() -> Self {
+        Self {
+            n: None,
+            inner: SamplingParams::default(),
+            stop: None,
+            include_stop_str_in_output: false,
+            skip_special_tokens: true,
+            detokenize: true,
+        }
+    }
+}
+
+impl TryFrom<Map<String, Value>> for GenerateSamplingParams {
+    type Error = serde_json::Error;
+
+    /// `#[serde(flatten)]` is used on the serialize side only. On deserialize it
+    /// routes the whole object through serde's buffered `Content`, whose map
+    /// keys arrive as strings, so a flattened `SamplingParams` would reject the
+    /// integer keys of `logit_bias`. Splitting the object by hand keeps those
+    /// keys on the plain deserializer.
+    fn try_from(mut object: Map<String, Value>) -> Result<Self, Self::Error> {
+        let defaults = Self::default();
+        Ok(Self {
+            n: take_field(&mut object, "n")?.flatten(),
+            stop: take_field::<Option<StringOrArray>>(&mut object, "stop")?.flatten(),
+            include_stop_str_in_output: take_field(&mut object, "include_stop_str_in_output")?
+                .unwrap_or(defaults.include_stop_str_in_output),
+            skip_special_tokens: take_field(&mut object, "skip_special_tokens")?
+                .unwrap_or(defaults.skip_special_tokens),
+            detokenize: take_field(&mut object, "detokenize")?.unwrap_or(defaults.detokenize),
+            inner: serde_json::from_value(Value::Object(object))?,
+        })
+    }
+}
+
+/// Remove one optional field from a JSON object, tagging errors with its key.
+fn take_field<T: serde::de::DeserializeOwned>(
+    object: &mut Map<String, Value>,
+    key: &str,
+) -> Result<Option<T>, serde_json::Error> {
+    use serde::de::Error as _;
+
+    object
+        .remove(key)
+        .map(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| serde_json::Error::custom(format!("`{key}`: {error}")))
+        })
+        .transpose()
 }
 
 /// vLLM-compatible request type for the token-in/token-out generate API.
