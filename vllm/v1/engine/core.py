@@ -112,6 +112,7 @@ class EngineCore:
         log_stats: bool,
         executor_fail_callback: Callable | None = None,
         include_finished_set: bool = False,
+        freeze_gc_heap_on_init: bool = True,
     ):
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -240,10 +241,13 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        self._shutdown = False
+        self._freeze_gc_heap_on_init = freeze_gc_heap_on_init
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
+        if self._freeze_gc_heap_on_init:
+            freeze_gc_heap()
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
         # Enable environment variable cache (e.g. assume no more
@@ -773,21 +777,32 @@ class EngineCore:
             self.abort_requests(request_ids)
 
     def shutdown(self):
+        if self._shutdown:
+            return
+        self._shutdown = True
         logger.debug_once("[shutdown] EngineCore: tearing down local resources")
-        self.structured_output_manager.clear_backend()
-        if self.model_executor:
-            self.model_executor.shutdown()
-        if self.scheduler:
-            self.scheduler.shutdown()
 
-        # Undo the gc.freeze() from __init__ so that the objects allocated
-        # during engine startup (model weights, KV caches, etc.) become
-        # visible to the garbage collector again. Without this, deleting
-        # the engine in-process (e.g. unit tests) leaks GPU memory.
-        gc.unfreeze()
-        # Tear down distributed state initialized in this EngineCore process
-        # before it exits and release cached memory.
-        cleanup_dist_env_and_memory()
+        # ExitStack runs every callback even if an earlier one fails. Register
+        # in reverse teardown order and detach each component even if its
+        # shutdown fails, so errors cannot keep object graphs reachable.
+        with ExitStack() as teardown:
+            teardown.callback(cleanup_dist_env_and_memory)
+            teardown.callback(gc.collect)
+            if self._freeze_gc_heap_on_init:
+                teardown.callback(gc.unfreeze)
+
+            if getattr(self, "scheduler", None):
+                teardown.callback(setattr, self, "scheduler", None)
+                teardown.callback(self.scheduler.shutdown)
+
+            if getattr(self, "model_executor", None):
+                teardown.callback(setattr, self, "model_executor", None)
+                teardown.callback(self.model_executor.shutdown)
+
+            if getattr(self, "structured_output_manager", None):
+                teardown.callback(setattr, self, "structured_output_manager", None)
+                teardown.callback(self.structured_output_manager.clear_backend)
+
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
@@ -2083,6 +2098,7 @@ class DPEngineCoreProc(EngineCoreProc):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+            self.dp_group = None
 
     def _pause_complete(self) -> bool:
         """Two-phase DP-aware pause.
