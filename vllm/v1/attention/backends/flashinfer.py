@@ -16,6 +16,7 @@ from flashinfer import (
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
+    get_seq_lens,
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
@@ -44,6 +45,7 @@ from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,
     force_use_trtllm_attention,
+    pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
 )
@@ -426,6 +428,7 @@ class BatchDCPPrefillWrapper:
         paged_kv_indptr_cpu: torch.Tensor,
         paged_kv_indices: torch.Tensor,
         paged_kv_last_page_len_cpu: torch.Tensor,
+        kv_lens_cpu: torch.Tensor,
         page_size: int,
         num_qo_heads: int,
         dcp_world_size: int,
@@ -445,6 +448,7 @@ class BatchDCPPrefillWrapper:
             paged_kv_indptr=paged_kv_indptr_cpu,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+            seq_lens=kv_lens_cpu,
             num_qo_heads=num_qo_heads * dcp_world_size,
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
@@ -2391,6 +2395,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     paged_kv_last_page_len_prefill_cpu = (
                         paged_kv_last_page_len_prefill_cpu.pin_memory()
                     )
+                # plan() also copies kv_lens to the GPU with non_blocking=True,
+                # deriving them via get_seq_lens() into unpinned memory when
+                # seq_lens is not passed; pass an explicit pinned copy of the
+                # same values so that copy stays async too.
+                kv_lens_prefill_cpu = get_seq_lens(
+                    paged_kv_indptr_prefill_cpu,
+                    paged_kv_last_page_len_prefill_cpu,
+                    page_size,
+                )
+                if PIN_MEMORY:
+                    kv_lens_prefill_cpu = kv_lens_prefill_cpu.pin_memory()
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     prefill_wrapper.plan(
@@ -2398,6 +2413,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
                         paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
+                        kv_lens_cpu=kv_lens_prefill_cpu,
                         page_size=self.page_size,
                         num_qo_heads=self.num_qo_heads,
                         dcp_world_size=self.dcp_world_size,
@@ -2438,6 +2454,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         paged_kv_indptr=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
                         paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
+                        seq_lens=kv_lens_prefill_cpu,
                         num_qo_heads=self.num_qo_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
@@ -2519,21 +2536,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph
                 )
-                indptr_cpu = self.paged_kv_indptr.cpu[: num_input_tokens + 1]
-                last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_input_tokens]
-                # The sizing probe and plan() both copy these to the GPU with
-                # non_blocking=True; stage them in pinned memory so the copies stay
-                # async (the reused buffers themselves are intentionally not pinned).
+                paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: num_input_tokens + 1]
+                paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[
+                    :num_input_tokens
+                ]
+                # plan() copies these to the GPU with non_blocking=True;
+                # stage them in pinned memory so the copies stay async
+                # (the reused buffers themselves are intentionally not pinned).
+                # The sizing probe below reads the same staged tensors.
                 if PIN_MEMORY:
-                    indptr_cpu = indptr_cpu.pin_memory()
-                    last_page_len_cpu = last_page_len_cpu.pin_memory()
+                    paged_kv_indptr_cpu = paged_kv_indptr_cpu.pin_memory()
+                    paged_kv_last_page_len_cpu = paged_kv_last_page_len_cpu.pin_memory()
                 self._ensure_flashinfer_wrapper_workspace(
                     decode_wrapper,
                     self._get_decode_workspace_size(
                         decode_wrapper=decode_wrapper,
-                        indptr_cpu=indptr_cpu,
+                        indptr_cpu=paged_kv_indptr_cpu,
                         indices=paged_kv_indices,
-                        last_page_len_cpu=last_page_len_cpu,
+                        last_page_len_cpu=paged_kv_last_page_len_cpu,
                         fixed_split_size=self.decode_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     ),
@@ -2541,14 +2561,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
-                # Native FlashInfer wrappers (fa2/fa3) reject FP8 output; only the
-                # trtllm-gen kernels require it, and those bypass wrapper planning.
-                o_dtype = self.model_config.dtype
+                # NVFP4 trtllm kernel only supports FP8 output;
+                # use FP8 o_data_type so the wrapper matches the
+                # FP8 output buffer allocated in forward().
+                o_dtype = (
+                    FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                )
+                # plan() also copies kv_lens to the GPU with non_blocking=True
+                # (trtllm-gen/cute-dsl backends), deriving them via
+                # get_seq_lens() into unpinned memory when seq_lens is not
+                # passed; pass an explicit pinned copy of the same values
+                # so that copy stays async too.
+                kv_lens_decode_cpu = get_seq_lens(
+                    paged_kv_indptr_cpu, paged_kv_last_page_len_cpu, page_size
+                )
+                if PIN_MEMORY:
+                    kv_lens_decode_cpu = kv_lens_decode_cpu.pin_memory()
                 fast_plan_decode(
                     decode_wrapper,
-                    indptr_cpu=indptr_cpu,
+                    indptr_cpu=paged_kv_indptr_cpu,
                     indices=paged_kv_indices,
-                    last_page_len_cpu=last_page_len_cpu,
+                    last_page_len_cpu=paged_kv_last_page_len_cpu,
+                    seq_lens_cpu=kv_lens_decode_cpu,
                     num_qo_heads=self.num_qo_heads * self.dcp_world_size,
                     num_kv_heads=self.num_kv_heads,
                     head_dim=self.head_dim,
@@ -3407,6 +3441,7 @@ def fast_plan_decode(
     indptr_cpu: torch.Tensor,
     indices: torch.Tensor,
     last_page_len_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
     num_qo_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -3442,6 +3477,10 @@ def fast_plan_decode(
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
     # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
+        # plan() copies qo_indptr from flashinfer's internal cached host
+        # arange buffer (_get_range_buf) with non_blocking=True; pin the
+        # cache entry so the copy stays async.
+        pin_host_range_buf(len(last_page_len_cpu) + 1)
         self.plan(
             indptr=indptr_cpu,
             indices=indices,
@@ -3462,7 +3501,7 @@ def fast_plan_decode(
             rope_theta=rope_theta,
             non_blocking=non_blocking,
             block_tables=None,
-            seq_lens=None,
+            seq_lens=seq_lens_cpu,
             fixed_split_size=fixed_split_size,
             disable_split_kv=disable_split_kv,
         )

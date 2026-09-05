@@ -828,11 +828,17 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        # Reserve first, so the kernel warmup below runs against the arena the
+        # profiling sized rather than growing one of its own.
         profile_persistent_workspace = (
             requires_persistent_attention_workspace_profiling(self.vllm_config)
         )
         if profile_persistent_workspace:
             self.model_runner.reserve_persistent_attention_workspace()
+
+        if self.use_v2_model_runner:
+            # A workspace resize after capture frees what the graphs point at.
+            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -935,10 +941,7 @@ class Worker(WorkerBase):
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
-        if self.use_v2_model_runner:
-            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
-            warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
-        elif get_pp_group().is_last_rank:
+        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.
