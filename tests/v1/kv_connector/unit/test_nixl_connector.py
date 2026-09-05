@@ -70,6 +70,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 from .utils import (
+    create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
@@ -338,6 +339,57 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
     assert req_meta.remote.request_id == f"prefill-{42}"
     # do_remote_prefill is consumed by request_finished to prevent re-issuing.
     assert request.kv_transfer_params["do_remote_prefill"] is False
+
+
+def test_prefill_exports_cached_tokens_in_kv_transfer_params():
+    """The P worker reports its own prefix-cache hits in the returned
+    kv_transfer_params so the D worker can surface them in
+    prompt_tokens_details instead of the ~100% local hit it measures
+    when pulling the KVs from the remote."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = BLOCK_SIZE * 3
+
+    # Warm the prefix cache with a request sharing the full prompt.
+    warmup = create_request(
+        request_id=1,
+        num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
+        block_size=BLOCK_SIZE,
+    )
+    scheduler.add_request(warmup)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output([warmup], use_eos=True)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # P-side request with the same prompt hits the local cache on all but
+    # the last block (recomputed to obtain logits).
+    request = create_request(
+        request_id=2,
+        num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
+        block_size=BLOCK_SIZE,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert request.num_cached_tokens == NUM_TOKENS - BLOCK_SIZE
+
+    # max_tokens=1, so the request finishes and returns kv_transfer_params.
+    model_runner_output = create_model_runner_output([request])
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    output = engine_core_outputs[0].outputs[0]
+    assert output.finish_reason is not None
+    assert output.kv_transfer_params is not None
+    assert (
+        output.kv_transfer_params["remote_prefill_cached_tokens"]
+        == NUM_TOKENS - BLOCK_SIZE
+    )
 
 
 @patch(

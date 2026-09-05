@@ -288,4 +288,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_num_tokens=remote_num_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
             transfer_mode=self._TRANSFER_MODE,
+            # P-side cache hits, so D can report them in prompt_tokens_details
+            # instead of its own (~100%) hit rate from the KV transfer.
+            remote_prefill_cached_tokens=(
+                request.num_cached_tokens if is_p_node else None
+            ),
         )

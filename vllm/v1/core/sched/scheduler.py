@@ -933,6 +933,7 @@ class Scheduler(SchedulerInterface):
                     # Track first scheduled prefill, not post-preemption repeat prefills
                     if request.prefill_stats and request.num_preemptions <= 0:
                         assert num_computed_tokens <= request.num_prompt_tokens
+                        request.num_cached_tokens = num_computed_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
