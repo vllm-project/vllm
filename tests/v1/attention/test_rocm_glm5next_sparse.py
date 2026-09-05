@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     _use_rocm_sparse_triton,
     fit_kpool_indices_to_aiter,
@@ -97,6 +100,55 @@ def test_rocm_sparse_triton_route(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize("num_heads", [8, 12])
+def test_rocm_sparse_triton_route_preserves_padded_sinks(monkeypatch, num_heads):
+    captured = {}
+
+    def fake_rocm_sparse_attn_prefill(**kwargs):
+        output = kwargs["output"]
+        captured["attn_sink"] = kwargs["attn_sink"]
+        output.copy_(
+            captured["attn_sink"].to(output.dtype).view(1, -1, 1).expand_as(output)
+        )
+
+    monkeypatch.setattr(
+        sparse_mod, "rocm_sparse_attn_prefill", fake_rocm_sparse_attn_prefill
+    )
+
+    impl = object.__new__(sparse_mod.ROCMAiterMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = 512
+    impl.kv_cache_dtype = "auto"
+    impl.scale = 512**-0.5
+    impl.sinks = torch.arange(num_heads, dtype=torch.float32)
+
+    q = torch.zeros(2, 16, 512, dtype=torch.bfloat16)
+    kv = torch.zeros(4, 1, 512, dtype=torch.bfloat16)
+    metadata = SimpleNamespace(
+        attn_out_dtype=torch.bfloat16,
+        num_prefills=1,
+        num_decodes=0,
+        num_decode_tokens=0,
+        max_query_len=2,
+        paged_kv_indices=torch.empty(0, dtype=torch.int32),
+        paged_kv_indptr=torch.zeros(3, dtype=torch.int32),
+    )
+
+    output, lse = impl._forward_mla(SimpleNamespace(), q, kv, metadata)
+
+    if num_heads == 8:
+        expected_sinks = impl.sinks.repeat_interleave(2)
+    else:
+        expected_sinks = torch.cat((impl.sinks, impl.sinks[:4]))
+    torch.testing.assert_close(captured["attn_sink"], expected_sinks)
+    assert output.shape == (2, num_heads, 512)
+    torch.testing.assert_close(
+        output[:, :, 0].float(),
+        impl.sinks.expand(2, -1),
+    )
+    assert lse is None
 
 
 def test_rocm_sparse_attention_accepts_glm_nope_dimensions():
