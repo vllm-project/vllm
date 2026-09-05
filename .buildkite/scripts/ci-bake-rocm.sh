@@ -13,17 +13,23 @@
 
 set -euo pipefail
 
+# Build arguments are visible in Bake output/provenance, not a secrets channel.
+if [[ "${SCCACHE_ENDPOINT:-}" =~ [[:space:][:cntrl:]@?#] ]]; then
+    echo "SCCACHE_ENDPOINT must not contain userinfo, query, fragment, or whitespace; use the AWS credential provider for authentication" >&2
+    exit 1
+fi
+
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/build/rocm-constraints.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES=".dockerignore requirements/common.txt requirements/rocm.txt requirements/build/rocm.txt requirements/test/rocm.txt tools/install_torchcodec_rocm.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_toolchain_input_0 rust-toolchain-input rust-toolchain build_nixl lmcache_source build_lmcache build_rocshmem build_deepep mori_base ci_base_system build_decord ci_base"
 DEFAULT_CI_BASE_METADATA_VERSION="3"
 # ROCm CI forces REMOTE_VLLM=0, so content identity covers only the selected
 # local-source stages rather than unreachable remote-fetch alternatives.
-DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/build/rocm-constraints.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
+DEFAULT_ROCM_CSRC_CONTENT_FILES=".dockerignore requirements/build/rocm.txt pyproject.toml setup.py CMakeLists.txt cmake csrc vllm/envs.py vllm/__init__.py tools/build_rust.py"
 DEFAULT_ROCM_CSRC_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm build_vllm_dependencies rocm-triton-kernels csrc-build"
-DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt requirements/build/rocm-constraints.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
+DEFAULT_ROCM_RUST_CONTENT_FILES=".dockerignore .git_archival.txt pyproject.toml requirements/build/rust.txt requirements/build/rocm.txt rust/Cargo.lock rust/Cargo.toml rust/proto rust/src rust-toolchain.toml tools/build_rust.py build_rust.sh"
 DEFAULT_ROCM_RUST_DOCKERFILE_STAGES="base fetch_vllm_0 fetch_vllm vllm-version rust_toolchain_input_0 rust-toolchain-input rust_input_0 rust-input rust-toolchain rust-build"
 # Docker's 128-character tag limit minus the longest cache prefix
 # ("csrc-rocm-branch-" and "rust-rocm-branch-", both 17 characters).
@@ -1918,9 +1924,7 @@ write_hcl_string_list_entries() {
     shift
 
     for value in "$@"; do
-        value="${value//\\/\\\\}"
-        value="${value//\"/\\\"}"
-        printf '%s"%s",\n' "${indent}" "${value}"
+        printf '%s"%s",\n' "${indent}" "$(hcl_escape_string "${value}")"
     done
 }
 
@@ -1929,6 +1933,12 @@ hcl_escape_string() {
 
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    # Environment values are data, not HCL expressions or template directives.
+    value="${value//\$\{/\$\$\{}"
+    value="${value//'%{'/'%%{'}"
     printf '%s' "${value}"
 }
 

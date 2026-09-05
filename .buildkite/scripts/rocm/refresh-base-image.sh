@@ -4,12 +4,18 @@
 
 set -euo pipefail
 
+# Build arguments are visible in build logs/provenance, not a secrets channel.
+if [[ "${SCCACHE_ENDPOINT:-}" =~ [[:space:][:cntrl:]@?#] ]]; then
+    echo "SCCACHE_ENDPOINT must not contain userinfo, query, fragment, or whitespace; use the AWS credential provider for authentication" >&2
+    exit 1
+fi
+
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
 DEFAULT_ROCM_BASE_METADATA_VERSION="3"
-DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/build/rocm-constraints.txt"
+DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/build/rocm.txt"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"

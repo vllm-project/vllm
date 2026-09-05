@@ -21,7 +21,8 @@ ROCM_REFRESH_BASE = (
     REPO_ROOT / ".buildkite" / "scripts" / "rocm" / "refresh-base-image.sh"
 )
 ROCM_RELEASE_PIPELINE = REPO_ROOT / ".buildkite" / "release-pipeline.yaml"
-ROCM_BUILD_CONSTRAINTS = REPO_ROOT / "requirements" / "build" / "rocm-constraints.txt"
+ROCM_RELEASE_BUILD = REPO_ROOT / ".buildkite" / "scripts" / "build-rocm-base-wheels.sh"
+ROCM_BUILD_LOCK = REPO_ROOT / "requirements" / "build" / "rocm.txt"
 ROCM_TEST_INPUT = REPO_ROOT / "requirements" / "test" / "rocm.in"
 TORCHCODEC_INSTALLER = REPO_ROOT / "tools" / "install_torchcodec_rocm.sh"
 
@@ -359,10 +360,10 @@ def locked_requirements(path: Path) -> dict[str, Requirement]:
     }
 
 
-def test_rocm_constraints_locks_cover_their_inputs() -> None:
+def test_rocm_locks_cover_their_inputs() -> None:
     requirements = REPO_ROOT / "requirements"
-    build_input = requirements / "build" / "rocm-constraints.in"
-    build_lock = requirements / "build" / "rocm-constraints.txt"
+    build_input = requirements / "build" / "rocm.in"
+    build_lock = requirements / "build" / "rocm.txt"
     test_input = requirements / "test" / "rocm.in"
     test_lock = requirements / "test" / "rocm.txt"
 
@@ -484,11 +485,11 @@ def test_rocm_base_cache_production_content_lists_are_synchronized() -> None:
     expected = [
         "docker/Dockerfile.rocm_base",
         ".dockerignore",
-        "requirements/build/rocm-constraints.txt",
+        "requirements/build/rocm.txt",
     ]
     release_match = re.search(
         r'export ROCM_BASE_CONTENT_FILES="([^"]+)"',
-        ROCM_RELEASE_PIPELINE.read_text(),
+        ROCM_RELEASE_BUILD.read_text(),
     )
     assert release_match is not None
 
@@ -503,10 +504,13 @@ def test_rocm_base_cache_production_content_lists_are_synchronized() -> None:
 
 
 def test_rocm_release_does_not_expose_sccache_download_url_as_build_arg() -> None:
-    release_pipeline = ROCM_RELEASE_PIPELINE.read_text()
+    release_build = ROCM_RELEASE_BUILD.read_text()
 
-    assert "unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL" in release_pipeline
-    assert "--build-arg SCCACHE_DOWNLOAD_URL" not in release_pipeline
+    assert "unset ROCM_BASE_PARENT_DIGEST SCCACHE_DOWNLOAD_URL" in release_build
+    assert "--build-arg SCCACHE_DOWNLOAD_URL" not in release_build
+    assert ".buildkite/scripts/build-rocm-base-wheels.sh" in (
+        ROCM_RELEASE_PIPELINE.read_text()
+    )
 
 
 def test_rocm_native_cache_inputs_use_narrow_build_lock() -> None:
@@ -517,17 +521,17 @@ def test_rocm_native_cache_inputs_use_narrow_build_lock() -> None:
     csrc_files = shell_words_assignment(ROCM_CI_BAKE, "DEFAULT_ROCM_CSRC_CONTENT_FILES")
     rust_files = shell_words_assignment(ROCM_CI_BAKE, "DEFAULT_ROCM_RUST_CONTENT_FILES")
 
-    assert "requirements/build/rocm-constraints.txt" in ci_base_files
+    assert "requirements/build/rocm.txt" in ci_base_files
     assert "requirements/test/rocm.txt" in ci_base_files
     for content_files in (csrc_files, rust_files):
-        assert "requirements/build/rocm-constraints.txt" in content_files
+        assert "requirements/build/rocm.txt" in content_files
         assert "requirements/test/rocm.txt" not in content_files
     for runtime_requirements in (
         "requirements/common.txt",
         "requirements/rocm.txt",
     ):
         assert runtime_requirements not in csrc_files
-    assert "requirements/build/rocm-constraints.txt" in ci_bake
+    assert "requirements/build/rocm.txt" in ci_bake
 
 
 def test_rocm_metadata_changes_trigger_the_relevant_ci_lanes() -> None:
@@ -538,12 +542,14 @@ def test_rocm_metadata_changes_trigger_the_relevant_ci_lanes() -> None:
     amd_pipeline = (REPO_ROOT / ".buildkite" / "test-amd.yaml").read_text()
     rocm_config = (REPO_ROOT / ".buildkite" / "ci_config_rocm.yaml").read_text()
     required_sources = (
+        ".buildkite/scripts/build-rocm-base-wheels.sh",
+        "tests/tools/test_rocm_release_build.py",
         ".buildkite/scripts/rocm/refresh-base-image.sh",
         ".buildkite/scripts/rocm/smoke-test-image.sh",
         "docker/ci-rocm.hcl",
         "docker/docker-bake-rocm.hcl",
-        "requirements/build/rocm-constraints.in",
-        "requirements/build/rocm-constraints.txt",
+        "requirements/build/rocm.in",
+        "requirements/build/rocm.txt",
     )
 
     for source in required_sources:
@@ -687,6 +693,58 @@ dependency_cache_ref_for_target nixl-rocm-ci
     assert trusted_write == trusted
 
 
+def test_rocm_bake_values_are_escaped_as_literal_hcl_strings() -> None:
+    # Build arguments, metadata and cache lists must not evaluate templates or
+    # let quotes/newlines change the generated Bake configuration structure.
+    for value, escaped in (
+        ("gfx90a;gfx942", "gfx90a;gfx942"),
+        ('quote"\\path\n\r\t', 'quote\\"\\\\path\\n\\r\\t'),
+        ("${1 + 1} %{if true}value%{endif}", "$${1 + 1} %%{if true}value%%{endif}"),
+    ):
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; hcl_escape_string "$2"; printf "\\n"; '
+                'write_hcl_string_list_entries "  " "$2"',
+                "bash",
+                str(ROCM_CI_BAKE),
+                value,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert result.stdout == f'{escaped}\n  "{escaped}",\n'
+
+
+def test_rocm_wrappers_reject_secret_endpoints_without_logging_them() -> None:
+    # Source the wrappers to exercise their early guard without Docker or AWS.
+    for helper in (ROCM_CI_BAKE, ROCM_REFRESH_BASE):
+        for endpoint in (
+            "https://user:secret@cache.example",
+            "https://cache.example?token=secret",
+            "https://cache.example#secret",
+            "https://cache.example\nsecret",
+        ):
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"', "bash", str(helper)],
+                env=os.environ | {"SCCACHE_ENDPOINT": endpoint},
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode != 0
+            assert "SCCACHE_ENDPOINT must not contain" in result.stderr
+            assert endpoint not in result.stdout + result.stderr
+
+        for endpoint in ("", "http://localhost:9000", "https://cache.example"):
+            subprocess.run(
+                ["bash", "-c", 'source "$1"', "bash", str(helper)],
+                env=os.environ | {"SCCACHE_ENDPOINT": endpoint},
+                check=True,
+            )
+
+
 def test_rocm_commit_image_without_revision_is_rebuilt() -> None:
     result = subprocess.run(
         [
@@ -816,8 +874,8 @@ def test_rocm_source_builds_use_the_narrow_constraints() -> None:
     rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
 
     assert "source=requirements/test/rocm.txt" not in rocm_base
-    assert "source=requirements/build/rocm-constraints.txt" in rocm_base
-    assert "COPY requirements/build/rocm-constraints.txt" in rocm_ci
+    assert "source=requirements/build/rocm.txt" in rocm_base
+    assert "COPY requirements/build/rocm.txt" in rocm_ci
     build_dependencies = rocm_ci.split(
         "FROM base AS build_vllm_dependencies", maxsplit=1
     )[1].split("FROM base AS rocm-triton-kernels", maxsplit=1)[0]
@@ -883,7 +941,7 @@ def test_rocm_runtime_dependency_guards_are_enforced() -> None:
     assert (
         "pip install --constraint /tmp/rocm-constraints.txt pyyaml /install/*.whl"
     ) in rocm_base_final
-    assert "pyyaml" in locked_requirements(ROCM_BUILD_CONSTRAINTS)
+    assert "pyyaml" in locked_requirements(ROCM_BUILD_LOCK)
 
     assert (
         'test "$(rustc --version | awk \'{print $2}\')" = "${RUST_TOOLCHAIN_VERSION}"'
@@ -895,7 +953,7 @@ def test_rocm_runtime_dependency_guards_are_enforced() -> None:
 def test_rocm_decord_and_numpy_runtime_match_the_source_builds() -> None:
     rocm_ci = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
     numpy_pin = str(
-        locked_requirements(ROCM_BUILD_CONSTRAINTS)["numpy"].specifier
+        locked_requirements(ROCM_BUILD_LOCK)["numpy"].specifier
     ).removeprefix("==")
 
     for expected in (

@@ -241,6 +241,7 @@ steps:
   source_file_dependencies:
   - .dockerignore
   - .buildkite/scripts/cache-rocm-base-wheels.sh
+  - .buildkite/scripts/build-rocm-base-wheels.sh
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
   - .buildkite/scripts/rocm/refresh-base-image.sh
@@ -254,15 +255,16 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - requirements/common.txt
-  - requirements/build/rocm-constraints.in
-  - requirements/build/rocm-constraints.txt
+  - requirements/build/rocm.in
+  - requirements/build/rocm.txt
   - requirements/rocm.txt
   - requirements/test/rocm.in
   - requirements/test/rocm.txt
   - tests/tools/test_docker_build_metadata_args.py
+  - tests/tools/test_rocm_release_build.py
   - tools/install_torchcodec_rocm.sh
   commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py
+  - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_release_build.py
 
 #########################################################################################################################################
 #                                                                                                                                       #

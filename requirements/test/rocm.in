@@ -1,5 +1,5 @@
 -r ../rocm.txt
--r ../build/rocm-constraints.in
+-r ../build/rocm.in
 
 # LMCache runtime dependencies missing from requirements/rocm.txt. PyTorch is
 # supplied by the ROCm base image.

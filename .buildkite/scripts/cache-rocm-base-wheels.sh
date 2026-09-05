@@ -31,7 +31,7 @@ set -euo pipefail
 BUCKET="${S3_BUCKET:-vllm-wheels}"
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 CACHE_PREFIX="rocm/cache"
-DEFAULT_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/build/rocm-constraints.txt"
+DEFAULT_CONTENT_FILES="${DOCKERFILE} .dockerignore requirements/build/rocm.txt"
 CACHE_SCHEMA_VERSION="3"
 MANIFEST_SCHEMA_VERSION="2"
 

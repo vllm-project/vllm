@@ -26,6 +26,7 @@ ARG UBUNTU_CODENAME=jammy
 # Sccache configuration. Release builds use this today; CI can opt in when a
 # shared S3-compatible cache backend is available.
 ARG USE_SCCACHE
+# URL overrides must be public/non-secret: build arguments appear in provenance.
 ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_VERSION=v0.8.1
 ARG SCCACHE_DOWNLOAD_SHA256=e0ee621fb16b6940666cd770b091c62cadafd3e062dd12e3a49d9caaff3b795f
@@ -155,7 +156,7 @@ ARG COMMON_WORKDIR
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/vllm \
     && uv pip install --system \
-        --constraint requirements/build/rocm-constraints.txt \
+        --constraint requirements/build/rocm.txt \
         -r requirements/build/rust.txt \
     && python3 -c \
         "from setuptools_scm import get_version; print(get_version())" \
@@ -189,7 +190,7 @@ FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
 # REMOTE_VLLM=1: fetch only those same files from the requested remote ref.
 FROM scratch AS rust_input_0
 COPY requirements/build/rust.txt /rust-input/vllm/requirements/build/rust.txt
-COPY requirements/build/rocm-constraints.txt /rust-input/vllm/requirements/build/rocm-constraints.txt
+COPY requirements/build/rocm.txt /rust-input/vllm/requirements/build/rocm.txt
 COPY rust/Cargo.lock rust/Cargo.toml /rust-input/vllm/rust/
 COPY rust/proto /rust-input/vllm/rust/proto
 COPY rust/src /rust-input/vllm/rust/src
@@ -206,7 +207,7 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
     && git sparse-checkout init --no-cone \
     && git sparse-checkout set \
         requirements/build/rust.txt \
-        requirements/build/rocm-constraints.txt \
+        requirements/build/rocm.txt \
         rust/Cargo.lock \
         rust/Cargo.toml \
         rust/proto/** \
@@ -272,7 +273,7 @@ ENV RUSTUP_MAX_RETRIES=10
 WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY --from=rust-input /rust-input/vllm/requirements/build/rust.txt requirements/build/rust.txt
-COPY --from=rust-input /rust-input/vllm/requirements/build/rocm-constraints.txt requirements/build/rocm-constraints.txt
+COPY --from=rust-input /rust-input/vllm/requirements/build/rocm.txt requirements/build/rocm.txt
 
 # BuildKit can run this stage in parallel with ROCm native builds. Keep Rust on
 # a separate local sccache daemon while sharing the same remote cache backend.
@@ -280,7 +281,7 @@ ENV SCCACHE_SERVER_PORT=4227
 
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system \
-        --constraint requirements/build/rocm-constraints.txt \
+        --constraint requirements/build/rocm.txt \
         -r requirements/build/rust.txt
 
 COPY --from=rust-input /rust-input/vllm/rust rust
@@ -325,7 +326,7 @@ ENV VLLM_TARGET_DEVICE=rocm
 WORKDIR ${COMMON_WORKDIR}/vllm
 
 COPY --from=fetch_vllm \
-    ${COMMON_WORKDIR}/vllm/requirements/build/rocm-constraints.txt \
+    ${COMMON_WORKDIR}/vllm/requirements/build/rocm.txt \
     /tmp/rocm-build-constraints.txt
 
 # setup.py reads the target requirements while creating the intermediate csrc
@@ -556,7 +557,7 @@ FROM base AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
-COPY requirements/build/rocm-constraints.txt /tmp/rocm-build-constraints.txt
+COPY requirements/build/rocm.txt /tmp/rocm-build-constraints.txt
 
 # Remove NVIDIA-only dependencies and verify that LMCache accepts the NumPy
 # version selected by the shared ROCm build constraints.
@@ -580,7 +581,7 @@ RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
 FROM base AS build_lmcache
 COPY --from=lmcache_source \
     /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
-COPY requirements/build/rocm-constraints.txt /tmp/lmcache-build-constraints.txt
+COPY requirements/build/rocm.txt /tmp/lmcache-build-constraints.txt
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     uv pip install --system \
         --constraint /tmp/lmcache-build-constraints.txt \
@@ -731,7 +732,7 @@ RUN /bin/bash -lc 'set -euo pipefail; \
    *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
  esac'
 
-COPY requirements/build/rocm-constraints.txt /tmp/mori-constraints.txt
+COPY requirements/build/rocm.txt /tmp/mori-constraints.txt
 RUN python3 -m pip install --quiet \
         --constraint /tmp/mori-constraints.txt --ignore-installed blinker \
     && python3 -m pip install --quiet \
@@ -947,7 +948,7 @@ COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 # ROCm PyTorch instead of its isolated torch==2.7.0 build requirement. Bypass
 # uv's wheel cache so a wheel built for an older parent Torch ABI is never reused.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
-COPY requirements/build/rocm-constraints.txt /tmp/rocm-build-constraints.txt
+COPY requirements/build/rocm.txt /tmp/rocm-build-constraints.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps \
         grpcio==1.78.0 grpcio-tools==1.71.2 \

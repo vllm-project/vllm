@@ -25,6 +25,7 @@ ARG PIP_VERSION="26.2.1"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
+# URL overrides must be public/non-secret: build arguments appear in provenance.
 ARG SCCACHE_DOWNLOAD_URL
 ARG SCCACHE_VERSION=v0.8.1
 ARG SCCACHE_DOWNLOAD_SHA256=e0ee621fb16b6940666cd770b091c62cadafd3e062dd12e3a49d9caaff3b795f
@@ -155,7 +156,7 @@ RUN apt-get update -y \
     && python3 --version && python3 -m pip --version \
     && rm -rf /var/lib/apt/lists/*
 
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
         packaging cmake==3.31.10 ninja wheel setuptools pybind11 Cython==3.3.0
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
@@ -288,7 +289,7 @@ RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install
 ###
 FROM base AS build_pytorch_runtime
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install/pytorch,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
         /install/pytorch/*.whl
@@ -297,7 +298,7 @@ RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp
 # shared PyTorch runtime lets the other native wheel builds remain parallel
 # when the Triton source changes.
 FROM build_pytorch_runtime AS build_pytorch_triton_runtime
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=build_triton,src=/app/install/,target=/install/triton,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
         /install/triton/*.whl
@@ -339,7 +340,7 @@ RUN git clone ${PYTORCH_AUDIO_REPO} audio \
     && git checkout --detach ${PYTORCH_AUDIO_BRANCH} \
     && test "$(git rev-parse HEAD)" = "${PYTORCH_AUDIO_BRANCH}" \
     && git submodule update --init --recursive
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     cd audio \
     && pip install --constraint /tmp/rocm-constraints.txt -r requirements.txt
 RUN cd audio \
@@ -375,7 +376,7 @@ FROM build_pytorch_runtime AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     pip install --constraint /tmp/rocm-constraints.txt psutil \
     && git clone ${FA_REPO} flash-attention \
     && cd flash-attention \
@@ -405,7 +406,7 @@ RUN git clone --no-checkout ${AITER_REPO} aiter \
     && git checkout --detach ${AITER_BRANCH} \
     && test "$(git rev-parse HEAD)" = "${AITER_BRANCH}" \
     && git submodule update --init --recursive
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     pip install --constraint /tmp/rocm-constraints.txt \
         pandas psutil pyyaml einops pybind11 ninja flydsl \
         setuptools-scm vcs-versioning
@@ -516,7 +517,7 @@ RUN cd /src/projects/rocprofiler-sdk \
 
 FROM base AS final
 # AITER imports yaml at runtime but omits PyYAML from its wheel metadata.
-RUN --mount=type=bind,source=requirements/build/rocm-constraints.txt,target=/tmp/rocm-constraints.txt,ro \
+RUN --mount=type=bind,source=requirements/build/rocm.txt,target=/tmp/rocm-constraints.txt,ro \
     --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install --constraint /tmp/rocm-constraints.txt pyyaml /install/*.whl \
     && pip check

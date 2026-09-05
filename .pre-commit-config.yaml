@@ -55,12 +55,12 @@ repos:
       ]
       files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
-      alias: pip-compile-rocm-build-constraints
-      name: pip-compile-rocm-build-constraints
+      alias: pip-compile-rocm-build
+      name: pip-compile-rocm-build
       args: [
-        requirements/build/rocm-constraints.in,
+        requirements/build/rocm.in,
         -c, requirements/rocm.txt,
-        -o, requirements/build/rocm-constraints.txt,
+        -o, requirements/build/rocm.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_35,
         --python-version, "3.12",
@@ -122,14 +122,14 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|build/rocm-constraints)\.(in|txt)$
+      files: ^requirements/(common|rocm|build/rocm)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
         requirements/test/rocm.in,
         -c, requirements/rocm.txt,
-        -c, requirements/build/rocm-constraints.txt,
+        -c, requirements/build/rocm.txt,
         -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_35,
@@ -192,7 +192,7 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|build/rocm-constraints|test/rocm)\.(in|txt)$
+      files: ^requirements/(common|rocm|build/rocm|test/rocm)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
