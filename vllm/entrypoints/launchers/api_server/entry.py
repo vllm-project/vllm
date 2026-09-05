@@ -195,6 +195,7 @@ async def run_server_worker(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
     # NB: Await server shutdown only after the backend context is exited
+    # Shutdown failures must propagate to preserve the process exit status.
     try:
         await shutdown_task
     finally:

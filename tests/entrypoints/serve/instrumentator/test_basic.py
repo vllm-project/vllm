@@ -3,7 +3,7 @@
 
 import asyncio
 from http import HTTPStatus
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import openai
 import pytest
@@ -216,11 +216,16 @@ async def test_health_check_engine_dead_error():
     mock_engine_client = AsyncMock()
     mock_engine_client.check_health.side_effect = EngineDeadError()
     mock_app_state.engine_client = mock_engine_client
+    mock_app_state.server = Mock()
     mock_request.app.state = mock_app_state
 
     # Test the health function directly with our mocked request
     # This simulates what would happen if the engine dies
-    response = await health(mock_request)
+    with patch(
+        "vllm.entrypoints.serve.instrumentator.health.terminate_if_errored"
+    ) as terminate:
+        response = await health(mock_request)
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+    terminate.assert_called_once_with(mock_app_state.server, mock_engine_client)
