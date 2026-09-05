@@ -53,6 +53,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import (
+    maybe_remap_kv_scale_name,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -285,8 +288,28 @@ class Qwen3_5Model(Qwen3NextModel):
                 n_shared_experts=1,
                 ckpt_prefix="mlp.shared_expert",
             )
+        # Checkpoints that ship calibrated KV-cache scales name them
+        # `...self_attn.{k,v}_scale`, but the runtime parameters live on the
+        # inner attention layer (`...self_attn.attn.{k,v}_scale`), and
+        # AutoWeightsLoader performs no remapping — without this the scales
+        # are silently dropped and fp8 KV runs at scale 1.0 (#54623).
+        params_dict = dict(self.named_parameters())
+
+        def _remap_kv_scale_names(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if name.endswith((".k_scale", ".v_scale", ".q_scale")):
+                    remapped = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped is None:
+                        continue
+                    name = remapped
+                yield name, weight
+
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(
+            _remap_kv_scale_names(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 class Qwen3_5ForCausalLMBase(
