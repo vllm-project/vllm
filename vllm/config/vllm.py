@@ -2590,11 +2590,6 @@ class VllmConfig:
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
-            # FLy overrides rejections by rewriting the V1 acceptance kernels'
-            # inputs; the V2 sampler fuses acceptance and exposes no equivalent.
-            if speculative_config.rejection_sample_method == "fly":
-                unsupported.append("FLy verification (rejection_sample_method='fly')")
-
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 

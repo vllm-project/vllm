@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
+from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
 
@@ -532,11 +533,15 @@ def _rejection_kernel(
     # [num_logits, num_blocks]
     local_residual_mass_ptr,
     local_residual_mass_stride,
+    # [num_logits]
+    fly_entropy_ptr,
+    fly_entropy_threshold,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
+    FLY_WINDOW_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -548,6 +553,9 @@ def _rejection_kernel(
     is_greedy = temp == 0.0
 
     accepted_length = tl.zeros((), tl.int64)
+    # Freeze the accepted prefix and recovery stats until the window is confirmed.
+    pending_rejection = tl.full((), -1, tl.int64)
+    rejected_argmax = tl.full((), 0, tl.int64)
     target_lse = 0.0
     draft_lse = 0.0
     verifying = True
@@ -558,13 +566,16 @@ def _rejection_kernel(
         is_valid_draft = draft_sampled >= 0
         # Avoid possible OOB ptr access.
         draft_sampled = tl.maximum(0, draft_sampled)
-        if not is_greedy:
+        if not is_greedy and FLY_WINDOW_SIZE == 0:
             # A -1 placeholder ends verification. Greedy is excluded because it
             # stores the target argmax upon first rejection, so it rejects the
             # placeholder via `accepted` instead.
             verifying &= is_valid_draft
 
         if verifying:
+            target_argmax = tl.full((), 0, tl.int64)
+            can_defer = False
+            accepted = False
             pos = tl.load(pos_ptr + logit_idx)
             u = tl_rand32(seed, pos, includes_zero=False)
             if is_greedy:
@@ -586,12 +597,15 @@ def _rejection_kernel(
                 else:
                     accepted = target_argmax == draft_sampled
                 accepted &= is_valid_draft
-                verifying = accepted
-                accepted_length += accepted
-                tl.store(
-                    sampled_ptr + req_idx * sampled_stride + i,
-                    draft_sampled if accepted else target_argmax,
-                )
+                if FLY_WINDOW_SIZE > 0:
+                    target_logit = tl.load(
+                        target_logits_ptr
+                        + logit_idx * target_logits_stride
+                        + draft_sampled,
+                        mask=is_valid_draft,
+                        other=float("-inf"),
+                    ).to(tl.float32)
+                    can_defer = is_valid_draft and target_logit > float("-inf")
             elif USE_BLOCK_VERIFICATION:
                 # Block verification (Sun et al., 2024): https://arxiv.org/abs/2403.10444
                 prefix_joint_ratio = tl.exp(
@@ -627,10 +641,10 @@ def _rejection_kernel(
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             else:
                 # Speculative decoding (Leviathan et al., 2023): https://arxiv.org/abs/2211.17192
-                target_logprob, draft_logprob, target_lse, draft_lse = (
+                target_logprob, draft_logprob, step_target_lse, step_draft_lse = (
                     _compute_global_logprobs_and_logsumexp(
                         draft_sampled,
-                        True,  # mask
+                        is_valid_draft,
                         logit_idx,
                         req_state_idx,
                         i,
@@ -653,6 +667,9 @@ def _rejection_kernel(
                         HAS_DRAFT_LOGITS,
                     )
                 )
+                if FLY_WINDOW_SIZE == 0 or pending_rejection < 0:
+                    target_lse = step_target_lse
+                    draft_lse = step_draft_lse
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     accepted = u < rate
@@ -660,9 +677,47 @@ def _rejection_kernel(
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
                     accepted = target_logprob > tl.log(u) + draft_logprob
-                verifying = accepted
-                accepted_length += accepted
-                tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                if FLY_WINDOW_SIZE > 0:
+                    accepted &= is_valid_draft
+                    can_defer = (
+                        is_valid_draft
+                        and target_logprob > float("-inf")
+                        and draft_logprob > float("-inf")
+                    )
+
+            if not USE_BLOCK_VERIFICATION or is_greedy:
+                if FLY_WINDOW_SIZE > 0:
+                    if pending_rejection >= 0:
+                        # Only native acceptance can confirm a pending window.
+                        verifying = accepted
+                        if accepted and i - pending_rejection == FLY_WINDOW_SIZE:
+                            accepted_length = i + 1
+                            pending_rejection = tl.full((), -1, tl.int64)
+                    elif accepted:
+                        accepted_length = i + 1
+                    else:
+                        rejected_argmax = target_argmax
+                        entropy = tl.load(fly_entropy_ptr + logit_idx)
+                        verifying = (
+                            can_defer
+                            and i + FLY_WINDOW_SIZE < num_draft_tokens
+                            and entropy >= fly_entropy_threshold
+                        )
+                        if verifying:
+                            pending_rejection = i
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+                else:
+                    verifying = accepted
+                    accepted_length += accepted
+                    tl.store(
+                        sampled_ptr + req_idx * sampled_stride + i,
+                        target_argmax if is_greedy and not accepted else draft_sampled,
+                    )
+    if FLY_WINDOW_SIZE > 0 and is_greedy and accepted_length < num_draft_tokens:
+        tl.store(
+            sampled_ptr + req_idx * sampled_stride + accepted_length,
+            rejected_argmax,
+        )
 
     tl.store(rejected_steps_ptr + req_idx, accepted_length)
     if USE_BLOCK_VERIFICATION and not is_greedy and accepted_length < num_draft_tokens:
@@ -947,6 +1002,8 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -962,6 +1019,13 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
+
+    fly_entropy = None
+    if fly_window_size > 0:
+        assert synthetic_conditional_rates is None and not use_block_verification
+        fly_entropy = compute_fly_entropy(
+            target_logits[:, :vocab_size], from_logits=True
+        )
 
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
@@ -1125,11 +1189,14 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        fly_entropy,
+        fly_entropy_threshold,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        FLY_WINDOW_SIZE=fly_window_size,
         num_warps=1,
     )
 
