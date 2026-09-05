@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm._custom_ops import create_fp4_output_tensors
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import LinearBase
@@ -30,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 FP8_DTYPE = current_platform.fp8_dtype()
-FP4_DTYPE = torch.uint8
 
 
 def _silu_and_mul_fp8_static(
@@ -102,15 +102,11 @@ def _silu_and_mul_nvfp4_dynamic(
     out_shape = x.shape[:-1] + (d,)
     num_tokens = x.shape[0]
 
-    # NVFP4 packs 2 values into 1 byte
-    result = torch.empty((num_tokens, d // 2), dtype=FP4_DTYPE, device=x.device)
-
-    # Block scale output shape: swizzled layout for tensor cores
-    # Each group of 16 elements shares one FP8 scale
-    num_k_tiles = (d + 63) // 64
-    block_scale = torch.empty(
-        (num_tokens, num_k_tiles * 4), dtype=FP8_DTYPE, device=x.device
+    # The kernel writes 128-row swizzled scale tiles even for smaller batches.
+    result, block_scale = create_fp4_output_tensors(
+        num_tokens, d, x.device, is_sf_swizzled_layout=True
     )
+    block_scale = block_scale.view(FP8_DTYPE)
 
     input_global_scale = getattr(linear, "input_global_scale", None)
     assert input_global_scale is not None, (
