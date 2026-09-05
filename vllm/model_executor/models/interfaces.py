@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import weakref
+from bisect import bisect_right
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -48,13 +50,17 @@ if TYPE_CHECKING:
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
-    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFunc,
+        MambaStateCopyFuncsByType,
+    )
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
     from vllm.tasks import ScoreType
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -121,7 +127,9 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 # Cache results of `SupportsMultiModal.get_language_model`
-_language_model_by_module = dict[nn.Module, "VllmModel"]()
+_language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @runtime_checkable
@@ -967,6 +975,14 @@ class IsHybrid(Protocol):
         """
         ...
 
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
+
 
 @overload
 def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
@@ -1127,6 +1143,20 @@ class SupportsMambaPrefixCaching(Protocol):
     """
 
     supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
+        """Return copy functions for the model's Mamba states."""
+        ...
+
+    @classmethod
+    def get_mamba_state_copy_funcs(
+        cls,
+        mamba_types: set["MambaAttentionBackendEnum"],
+    ) -> "MambaStateCopyFuncsByType":
+        """Map legacy copy functions to each requested Mamba backend."""
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
 
 
 @overload
@@ -1543,10 +1573,36 @@ class LocalArgmaxMixin:
 
 
 class EagleModelMixin:
+    start_layer: int
     aux_hidden_state_layers: tuple[int, ...] = ()
+    supports_aux_hidden_states_over_pp: ClassVar[bool] = False
+    AUX_HIDDEN_STATE_KEY: ClassVar[str] = "aux_hidden_states_"
+    _aux_slot_base_cached: int = 0
+    _aux_upstream_total_cached: int = 0
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.aux_hidden_state_layers = layers
+        self.aux_hidden_state_layers = tuple(sorted(set(layers)))
+        self._aux_slot_base_cached = 0
+        self._aux_upstream_total_cached = 0
+        self._cache_aux_pp_layout()
+
+    def _cache_aux_pp_layout(self) -> None:
+        from vllm.distributed.parallel_state import (
+            get_pp_group,
+            model_parallel_is_initialized,
+        )
+
+        if not model_parallel_is_initialized():
+            return
+        pp = get_pp_group()
+        if pp.world_size < 2:
+            return
+        if not pp.is_first_rank:
+            self._aux_slot_base_cached = bisect_right(
+                self.aux_hidden_state_layers, self.start_layer
+            )
+        if pp.is_last_rank:
+            self._aux_upstream_total_cached = self._aux_slot_base_cached
 
     def _maybe_add_hidden_state(
         self,
@@ -1559,6 +1615,36 @@ class EagleModelMixin:
             value = hidden_states + residual if residual is not None else hidden_states
             aux_hidden_states.append(value)
         return aux_hidden_states
+
+    def pack_local_aux_hidden_states(
+        self, aux_hidden_states: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if not aux_hidden_states:
+            return {}
+        base = self._aux_slot_base_cached
+        return {
+            f"{self.AUX_HIDDEN_STATE_KEY}{base + i}": t
+            for i, t in enumerate(aux_hidden_states)
+        }
+
+    def collect_remote_aux_hidden_states(
+        self, intermediate_tensors: "IntermediateTensors | None"
+    ) -> list[torch.Tensor]:
+        total = self._aux_upstream_total_cached
+        if total == 0:
+            return []
+
+        assert intermediate_tensors is not None
+        out: list[torch.Tensor] = []
+        for i in range(total):
+            key = f"{self.AUX_HIDDEN_STATE_KEY}{i}"
+            if key not in intermediate_tensors.tensors:
+                raise RuntimeError(
+                    f"Missing {key} from PP intermediate tensors: "
+                    f"{sorted(intermediate_tensors.tensors)}"
+                )
+            out.append(intermediate_tensors[key])
+        return out
 
 
 @runtime_checkable
