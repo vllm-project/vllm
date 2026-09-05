@@ -132,11 +132,17 @@ def can_initialize(
                 f"capability {capability.major}.{capability.minor}"
             )
 
+    if model_arch == "DeepseekV4ForConditionalGeneration":
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            pytest.skip("Deepseek V4 is only supported on CUDA")
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
-        if requires_spawn_multiprocessing():
+        if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
             # inherit the KV-cache patch above, so it OOMs. Run in-process
             # so the patch applies.

@@ -11,7 +11,8 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.generate.base.protocol import validate_cache_salt
+from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.tasks import check_removed_pooling_task
@@ -39,6 +40,17 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
     # --8<-- [start:pooling-common-extra-params]
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    padding: Literal["max_length", "do_not_pad"] | None = Field(
+        default=None,
+        description=(
+            "Whether to pad the prompt, using the same names as the "
+            "Transformers tokenizer. 'max_length' pads to the maximum input "
+            "length, 'do_not_pad' leaves the prompt as is. Models trained "
+            "with a fixed sequence length and no attention mask, such as "
+            "SigLIP, need 'max_length' to match training, otherwise their "
+            "embeddings are not comparable."
+        ),
+    )
     truncation_side: Literal["left", "right"] | None = Field(
         default=None,
         description=(
@@ -71,6 +83,8 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     cache_salt: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=1024,
         description=(
             "If specified, the prefix cache will be salted with the provided "
             "string to prevent an attacker to guess prompts in multi-user "
@@ -81,6 +95,15 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:pooling-common-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     def _build_pooling_tok_params(
         self,
@@ -94,7 +117,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     ) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
         if max_output_tokens_param is None:
-            return TokenizeParams(
+            tok_params = TokenizeParams(
                 max_total_tokens=max_total_tokens,
                 max_output_tokens=max_output_tokens,
                 truncate_prompt_tokens=self.truncate_prompt_tokens,
@@ -103,17 +126,22 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
                 add_special_tokens=add_special_tokens,
                 max_total_tokens_param=max_total_tokens_param,
             )
+        else:
+            tok_params = TokenizeParams(
+                max_total_tokens=max_total_tokens,
+                max_output_tokens=max_output_tokens,
+                truncate_prompt_tokens=self.truncate_prompt_tokens,
+                truncation_side=self.truncation_side,
+                do_lower_case=encoder_config.get("do_lower_case", False),
+                add_special_tokens=add_special_tokens,
+                max_total_tokens_param=max_total_tokens_param,
+                max_output_tokens_param=max_output_tokens_param,
+            )
 
-        return TokenizeParams(
-            max_total_tokens=max_total_tokens,
-            max_output_tokens=max_output_tokens,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            add_special_tokens=add_special_tokens,
-            max_total_tokens_param=max_total_tokens_param,
-            max_output_tokens_param=max_output_tokens_param,
-        )
+        if self.padding is None:
+            return tok_params
+
+        return tok_params.with_kwargs(padding=self.padding)
 
 
 class PoolingTokenizeParamsMixin:

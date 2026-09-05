@@ -22,10 +22,14 @@ from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
+    INCFp8Scheme,
     INCMxfp4Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
     resolve_scheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
+    INCFp8LinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_linear import (
     INCMxfp8LinearScheme,
@@ -77,6 +81,14 @@ MODELS = [
         ),
         id="auto_round:llm_compressor_mxfp8",
     ),
+    pytest.param(
+        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda()),
+            reason="Block-wise AutoRound model only supports CUDA backend for now.",
+        ),
+        id="auto_round:block_wise_fp8_on_cuda",
+    ),
 ]
 
 QWEN3_AUTOROUND_MODELS = [
@@ -104,11 +116,20 @@ QWEN3_AUTOROUND_MODELS = [
         ),
         id="auto_round:mxfp4:qwen3-30b-a3b",
     ),
+    pytest.param(
+        "INCModel/Qwen3-30B-A3B-12L-MXFP8-test",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3-30B-A3B MXFP8 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:mxfp8:qwen3-30b-a3b",
+    ),
 ]
 
 MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
+    "INCModel/Qwen3-30B-A3B-12L-MXFP8-test": {"enforce_eager": True},
     "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
@@ -116,6 +137,10 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     },
     "INC4AI/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
+        "gpu_memory_utilization": 0.8,
+        "max_model_len": 512,
+    },
+    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
@@ -181,6 +206,27 @@ def make_layer_config(**overrides) -> INCLayerConfig:
     return INCLayerConfig(**kwargs)
 
 
+def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
+    kwargs = {
+        "bits": 8,
+        "group_size": [128, 128],
+        "sym": True,
+        "packing_format": "auto_round:fp8",
+        "quant_method": "auto-round",
+        "data_type": "fp",
+        "act_bits": 8,
+        "act_data_type": "fp",
+        "act_group_size": 128,
+        "act_sym": True,
+        "act_dynamic": True,
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "weight_block_size": [128, 128],
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
 def make_qwen3_autoround_config(kind: str) -> INCConfig:
     configs = {
         "qwen3_1p7b_mxfp4": {
@@ -232,6 +278,23 @@ def make_qwen3_autoround_config(kind: str) -> INCConfig:
                 },
             },
         },
+        "qwen3_30b_a3b_mxfp8": {
+            "quant_method": "auto-round",
+            "bits": 8,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "act_bits": 8,
+            "act_group_size": 32,
+            "act_data_type": "mx_fp",
+            "extra_config": {
+                "model.layers.0.mlp.gate": {
+                    "bits": 16,
+                    "data_type": "float",
+                },
+            },
+        },
     }
     try:
         config = configs[kind]
@@ -270,10 +333,97 @@ def test_inc_model_prefix_early_exit() -> None:
             },
         }
     )
+    layer = object.__new__(LinearBase)
 
     # get_quant_method checks model. prefix for unquantized early-exit
-    result = config.get_quant_method(DummyLayer(), "layers.1.mlp.gate_proj")
+    result = config.get_quant_method(layer, "layers.1.mlp.gate_proj")
     assert isinstance(result, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_parallel_lm_head_returns_unquantized() -> (
+    None
+):
+    """ParallelLMHead with bits >= 16 returns UnquantizedLinearMethod via the
+    early-exit path (parallel_lm_head is explicitly handled alongside LinearBase).
+    """
+    config = make_config(extra_config={"lm_head": {"bits": 16}})
+    layer = object.__new__(ParallelLMHead)
+
+    method = config.get_quant_method(layer, "lm_head")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
+    """Regression test: non-Linear/non-MoE layers with bits >= 16 must return
+    None from the early-exit path instead of being misclassified as linear.
+    """
+    config = make_config(extra_config={"layer": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "layer")
+
+    assert method is None
+
+
+@pytest.mark.parametrize(
+    "layer_factory",
+    [
+        pytest.param(
+            lambda: object.__new__(LinearBase),
+            id="LinearBase",
+        ),
+        pytest.param(
+            lambda: object.__new__(ParallelLMHead),
+            id="ParallelLMHead",
+        ),
+    ],
+)
+def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
+    layer_factory,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for both
+    LinearBase and ParallelLMHead layers."""
+    config = make_config(extra_config={"model.layer": {"bits": 16}})
+    layer = layer_factory()
+
+    method = config.get_quant_method(layer, "layer")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
+    monkeypatch,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for
+    RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
+
+    class DummyUnquantizedFusedMoEMethod:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.inc.UnquantizedFusedMoEMethod",
+        DummyUnquantizedFusedMoEMethod,
+    )
+
+    config = make_config(extra_config={"model.moe_layer": {"bits": 16}})
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = None
+
+    method = config.get_quant_method(layer, "moe_layer")
+
+    assert isinstance(method, DummyUnquantizedFusedMoEMethod)
+    assert method.moe_config is None
+
+
+def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
+    """``model.``-prefixed extra_config entries return None for unhandled
+    layer types (non-Linear, non-MoE)."""
+    config = make_config(extra_config={"model.unknown": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "unknown")
+
+    assert method is None
 
 
 def test_inc_config_parser_regex_match() -> None:
@@ -454,6 +604,52 @@ def test_inc_layer_config_mx_fp_helpers() -> None:
     assert layer_config.is_mxfp8 is False
 
 
+def test_inc_config_accepts_block_fp8() -> None:
+    config = INCConfig.from_config(make_block_fp8_raw_config())
+
+    assert config.weight_bits == 8
+    assert config.group_size == (128, 128)
+    assert config.sym is True
+    assert config.data_type == "fp"
+    assert config.packing_format == "auto_round:fp8"
+
+
+def test_inc_config_rejects_invalid_block_fp8_activation_config() -> None:
+    with pytest.raises(AssertionError, match="act_dynamic=True"):
+        INCConfig.from_config(make_block_fp8_raw_config(act_dynamic=False))
+
+
+def test_inc_layer_config_fp8_block_helper() -> None:
+    layer_config = INCLayerConfig(
+        bits=8,
+        group_size=(128, 128),
+        sym=True,
+        packing_format="auto_round:fp8",
+        backend="auto",
+        data_type="fp",
+        quantized=True,
+    )
+
+    assert layer_config.is_fp8_block is True
+    assert layer_config.is_wna16_int is False
+
+
+def test_inc_resolve_scheme_selects_fp8_block() -> None:
+    layer_config = INCLayerConfig(
+        bits=8,
+        group_size=(128, 128),
+        sym=True,
+        packing_format="auto_round:fp8",
+        backend="auto",
+        data_type="fp",
+        quantized=True,
+    )
+
+    scheme = resolve_scheme(layer_config)
+
+    assert isinstance(scheme, INCFp8Scheme)
+
+
 def test_inc_resolve_scheme_selects_wna16() -> None:
     layer_config = INCLayerConfig(
         bits=4,
@@ -604,6 +800,113 @@ def test_qwen3_30b_a3b_mxfp4_autoround_routes_to_mxfp4_moe(
     assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
     assert isinstance(method, DummyMxfp4MoEMethod)
     assert method.moe_config is layer.moe_config
+
+
+def test_qwen3_30b_a3b_mxfp8_autoround_routes_to_mxfp8_moe(
+    monkeypatch,
+) -> None:
+    expected_backend = object()
+    expected_experts_cls = object()
+    captured = {}
+
+    def fake_select_mxfp8_moe_backend(*, config):
+        captured["moe_config"] = config
+        return expected_backend, expected_experts_cls
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp8_moe.select_mxfp8_moe_backend",
+        fake_select_mxfp8_moe_backend,
+    )
+
+    config = make_qwen3_autoround_config("qwen3_30b_a3b_mxfp8")
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = cast(Any, "moe-config")
+
+    linear_method = config.get_quant_method(
+        object.__new__(LinearBase), "model.layers.0.self_attn.q_proj"
+    )
+    moe_method = config.get_quant_method(layer, "model.layers.0.mlp")
+    gate_method = config.get_quant_method(
+        object.__new__(LinearBase), "model.layers.0.mlp.gate"
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe import (
+        INCMxfp8MoEMethod,
+    )
+
+    assert isinstance(linear_method, INCLinearMethod)
+    assert isinstance(linear_method.scheme, INCMxfp8LinearScheme)
+    assert isinstance(moe_method, INCMxfp8MoEMethod)
+    assert moe_method.mxfp8_backend is expected_backend
+    assert moe_method.experts_cls is expected_experts_cls
+    assert captured["moe_config"] == layer.moe_config
+    assert isinstance(gate_method, UnquantizedLinearMethod)
+
+
+def test_inc_mxfp8_moe_method_registers_block_scaled_weights(monkeypatch) -> None:
+    expected_backend = object()
+    expected_experts_cls = object()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp8_moe.select_mxfp8_moe_backend",
+        lambda *, config: (expected_backend, expected_experts_cls),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp8_moe import (
+        INCMxfp8MoEMethod,
+    )
+
+    class DummyMoeConfig:
+        is_act_and_mul = True
+
+    method = INCMxfp8MoEMethod(cast(Any, DummyMoeConfig()))
+    layer = torch.nn.Module()
+    layer.hidden_size = 64
+    layer.intermediate_size_per_partition = 32
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=64,
+        intermediate_size_per_partition=32,
+        params_dtype=torch.bfloat16,
+    )
+
+    assert method.mxfp8_backend is expected_backend
+    assert method.experts_cls is expected_experts_cls
+    assert method.weight_block_size == [1, 32]
+    assert layer.w13_weight.shape == (2, 64, 64)
+    assert layer.w2_weight.shape == (2, 64, 32)
+    assert layer.w13_weight.dtype is torch.float8_e4m3fn
+    assert layer.w2_weight.dtype is torch.float8_e4m3fn
+    assert layer.w13_weight_scale.shape == (2, 64, 2)
+    assert layer.w2_weight_scale.shape == (2, 64, 1)
+    assert layer.w13_weight_scale.dtype is torch.uint8
+    assert layer.w2_weight_scale.dtype is torch.uint8
+    assert layer.w13_weight_scale.quant_method == "block"
+    assert layer.w2_weight_scale.quant_method == "block"
+
+    misaligned_layer = torch.nn.Module()
+    misaligned_layer.hidden_size = 65
+    misaligned_layer.intermediate_size_per_partition = 32
+    with pytest.raises(ValueError, match="hidden_size divisible by 32"):
+        method.create_weights(
+            misaligned_layer,
+            num_experts=2,
+            hidden_size=65,
+            intermediate_size_per_partition=32,
+            params_dtype=torch.bfloat16,
+        )
 
 
 def test_inc_mxfp4_linear_method_registers_and_processes_weights(
@@ -920,6 +1223,89 @@ def test_inc_linear_method_delegates() -> None:
     ]
 
 
+def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class DummyMethod:
+        def __init__(self, quant_config) -> None:
+            captured["quant_config"] = quant_config
+            captured["method"] = self
+            self.calls: list[tuple] = []
+            self.marlin_input_dtype = None
+
+        def create_weights(
+            self,
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        ) -> None:
+            self.calls.append(
+                (
+                    "create_weights",
+                    layer,
+                    input_size_per_partition,
+                    output_partition_sizes,
+                    input_size,
+                    output_size,
+                    params_dtype,
+                    extra_weight_attrs,
+                )
+            )
+
+        def process_weights_after_loading(self, layer) -> None:
+            self.calls.append(("process_weights_after_loading", layer))
+
+        def apply(self, layer, x, bias=None):
+            self.calls.append(("apply", layer, x, bias))
+            return "applied"
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
+        "Fp8LinearMethod",
+        DummyMethod,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
+        "get_marlin_input_dtype",
+        lambda _prefix: "fp8-marlin",
+    )
+
+    scheme = INCFp8LinearScheme(
+        prefix="layers.0.mlp.down_proj",
+        weight_block_size=(128, 128),
+    )
+    layer = torch.nn.Module()
+
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=128,
+        output_partition_sizes=[64, 64],
+        input_size=128,
+        output_size=128,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    scheme.process_weights_after_loading(layer)
+    result = scheme.apply_weights(layer, torch.randn(1, 128), None)
+
+    assert captured["quant_config"].is_checkpoint_fp8_serialized is True
+    assert captured["quant_config"].activation_scheme == "dynamic"
+    assert captured["quant_config"].weight_block_size == [128, 128]
+    assert captured["method"].marlin_input_dtype == "fp8-marlin"
+    assert result == "applied"
+    assert [call[0] for call in captured["method"].calls] == [
+        "create_weights",
+        "process_weights_after_loading",
+        "apply",
+    ]
+
+
 def test_wna16_xpu_prefers_ark_when_available(monkeypatch) -> None:
     class DummyQuantLinear:
         pass
@@ -1151,7 +1537,7 @@ def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
 
     scheme = INCWNA16LinearScheme(make_layer_config())
 
-    assert isinstance(scheme.inner_method, DummyMethod)
+    assert isinstance(scheme.linear_method, DummyMethod)
     assert isinstance(captured["cfg"], AutoGPTQConfig)
     assert captured["cfg"].weight_bits == 4
     assert captured["cfg"].group_size == 128

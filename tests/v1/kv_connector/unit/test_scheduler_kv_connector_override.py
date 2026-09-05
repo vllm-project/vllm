@@ -22,8 +22,13 @@ from vllm.v1.request import Request
 
 
 class DummyConnectorMetadata(KVConnectorMetadata):
-    def __init__(self, block_hashes_by_req: dict[str, list[BlockHash]]):
+    def __init__(
+        self,
+        block_hashes_by_req: dict[str, list[BlockHash]],
+        block_ids_by_req: dict[str, tuple[list[int], ...]],
+    ):
         self.block_hashes_by_req = block_hashes_by_req
+        self.block_ids_by_req = block_ids_by_req
 
 
 class DummyKVConnector(KVConnectorBase_V1):
@@ -47,8 +52,12 @@ class DummyKVConnector(KVConnectorBase_V1):
         assert block_hashes_by_req is not None, (
             "DummyKVConnector expected 'block_hashes_by_req' on scheduler_output"
         )
+        block_state = scheduler_output.kv_connector_block_state
+        assert block_state is not None
+        block_ids_by_req = block_state.block_ids
         return DummyConnectorMetadata(
             block_hashes_by_req=block_hashes_by_req,
+            block_ids_by_req=block_ids_by_req,
         )
 
     def start_load_kv(self, kv_caches, finished_req_ids):
@@ -129,3 +138,9 @@ def test_connector_receives_block_hashes(_load_plugin):
             num_tokens // block_size
         )
         assert meta.block_hashes_by_req[req.request_id] == req.block_hashes
+
+    expected_block_ids = {
+        req.req_id: req.block_ids for req in output.scheduled_new_reqs
+    }
+    assert meta.block_ids_by_req == expected_block_ids
+    assert output.kv_connector_block_state is None
