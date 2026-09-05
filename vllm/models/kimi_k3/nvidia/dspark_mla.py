@@ -28,6 +28,10 @@ from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
+_GROUPED_KV_CACHE_DTYPES = frozenset(
+    {"auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2"}
+)
+
 
 def _duplicate_context_kv_weights(
     weights: Iterable[tuple[str, torch.Tensor]], num_layers: int
@@ -233,6 +237,13 @@ class K3DSparkModel(nn.Module):
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
+        self._context_kv_scales: torch.Tensor | None = None
+        if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
+            attn0.kv_cache_dtype
+        ):
+            self._context_kv_scales = torch.stack(
+                [attn._k_scale.reshape(()) for attn in attentions]
+            )
 
     def _precompute_fused_context_kv(
         self,
@@ -286,16 +297,18 @@ class K3DSparkModel(nn.Module):
             return
 
         cache_layers = [layer.self_attn for layer in self.layers]
+        cache_dtype = cache_layers[0].kv_cache_dtype
         if (
-            not is_quantized_kv_cache(cache_layers[0].kv_cache_dtype)
+            cache_dtype in _GROUPED_KV_CACHE_DTYPES
+            and all(cl.kv_cache_dtype == cache_dtype for cl in cache_layers)
             and self._has_uniform_block_layout(cache_layers)
             and (
                 isinstance(context_slot_mapping, torch.Tensor)
                 or all(s is not None for s in context_slot_mapping)
             )
         ):
-            # Grouped context KV insert only supports unquantized (bf16) KV cache
-            # and assumes that all layers share the same block layout.
+            # Grouped context KV insert assumes that all layers share the same
+            # cache dtype and block layout.
 
             if isinstance(context_slot_mapping, (list, tuple)):
                 per_layer_slot_mappings = [
@@ -321,6 +334,8 @@ class K3DSparkModel(nn.Module):
                 ref_cache.size(1),
                 ref_cache.stride(0),
                 ref_cache.stride(1),
+                self._context_kv_scales,
+                cache_dtype,
             )
             return
 

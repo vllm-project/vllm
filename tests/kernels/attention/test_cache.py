@@ -792,6 +792,91 @@ def test_concat_and_cache_mla(
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
 
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("shared_slot_mapping", [False, True])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e5m2"])
+@torch.inference_mode()
+def test_concat_and_cache_mla_grouped(
+    device: str,
+    shared_slot_mapping: bool,
+    kv_cache_dtype: str,
+) -> None:
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_layers = 5
+    num_tokens = 42
+    num_blocks = 8
+    block_size = 16
+    kv_lora_rank = 512
+    qk_rope_head_dim = 64
+    entry_size = kv_lora_rank + qk_rope_head_dim
+    total_slots = num_blocks * block_size
+
+    kv_c = torch.randn(num_layers, num_tokens, kv_lora_rank, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_layers, num_tokens, qk_rope_head_dim, dtype=torch.bfloat16)
+    kv_caches = torch.zeros(
+        num_layers,
+        num_blocks,
+        block_size,
+        entry_size,
+        dtype=torch.bfloat16 if kv_cache_dtype == "auto" else torch.uint8,
+    )
+    reference = torch.zeros_like(kv_caches)
+    scales = torch.linspace(0.05, 0.25, num_layers, dtype=torch.float32)
+
+    slot_mapping = torch.stack(
+        [torch.randperm(total_slots)[:num_tokens] for _ in range(num_layers)]
+    )
+    slot_mapping[:, -1] = -1
+    if shared_slot_mapping:
+        slot_mapping = slot_mapping[:1].expand(num_layers, -1)
+
+    for layer_idx in range(num_layers):
+        ops.concat_and_cache_mla(
+            kv_c[layer_idx],
+            k_pe[layer_idx],
+            reference[layer_idx],
+            slot_mapping[layer_idx],
+            kv_cache_dtype,
+            scales[layer_idx],
+        )
+
+    cache_ptrs = torch.tensor(
+        [kv_caches[layer_idx].data_ptr() for layer_idx in range(num_layers)],
+        dtype=torch.int64,
+    )
+    ref_cache = kv_caches[0]
+
+    def run_grouped(kv_scales: torch.Tensor | None) -> None:
+        ops.concat_and_cache_mla_grouped(
+            kv_c,
+            k_pe,
+            cache_ptrs,
+            slot_mapping,
+            ref_cache.size(1),
+            ref_cache.stride(0),
+            ref_cache.stride(1),
+            kv_scales,
+            kv_cache_dtype,
+        )
+
+    run_grouped(None if kv_cache_dtype == "auto" else scales)
+
+    torch.testing.assert_close(kv_caches, reference, rtol=0, atol=0)
+
+    if kv_cache_dtype == "fp8" and not shared_slot_mapping:
+        noncontiguous_scales = torch.ones(num_layers, 2)[:, 0]
+        assert not noncontiguous_scales.is_contiguous()
+        for invalid_scales, error in (
+            (scales.cpu(), "same CUDA device"),
+            (noncontiguous_scales, "must be contiguous"),
+        ):
+            with pytest.raises(RuntimeError, match=error):
+                run_grouped(invalid_scales)
+
+
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
 @pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)

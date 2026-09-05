@@ -456,14 +456,14 @@ __global__ void concat_and_cache_mla_kernel(
 // Grouped variant of concat_and_cache_mla: inserts the context K/V for every
 // draft layer in a single launch. Grid is (num_tokens, num_layers); each layer
 // reads its own cache base pointer from kv_cache_ptrs (same pointer-array
-// pattern as copy_blocks_kernel). bf16 only, so it is a raw 16-bit copy with no
-// scaling or quantization; scalar_t is uint16_t for portability.
-template <typename scalar_t>
+// pattern as copy_blocks_kernel).
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_mla_grouped_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_layers, num_tokens,
                                         // kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_layers, num_tokens, pe_dim]
     const int64_t* __restrict__ kv_cache_ptrs,  // [num_layers]
+    const float* __restrict__ kv_scales,        // [num_layers] or nullptr
     const int64_t* __restrict__ slot_mapping,   // [num_layers, num_tokens]
     const int64_t kv_c_layer_stride, const int64_t kv_c_token_stride,
     const int64_t k_pe_layer_stride, const int64_t k_pe_token_stride,
@@ -481,12 +481,16 @@ __global__ void concat_and_cache_mla_grouped_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
-  scalar_t* __restrict__ kv_cache =
-      reinterpret_cast<scalar_t*>(kv_cache_ptrs[layer_idx]);
+  cache_t* __restrict__ kv_cache =
+      reinterpret_cast<cache_t*>(kv_cache_ptrs[layer_idx]);
   const scalar_t* __restrict__ kv_c_layer =
       kv_c + layer_idx * kv_c_layer_stride;
   const scalar_t* __restrict__ k_pe_layer =
       k_pe + layer_idx * k_pe_layer_stride;
+  float scale = 0.0f;
+  if constexpr (kv_dt != Fp8KVCacheDataType::kAuto) {
+    scale = kv_scales[layer_idx];
+  }
 
   auto copy = [&](const scalar_t* __restrict__ src, int64_t src_token_stride,
                   int size, int offset) {
@@ -494,7 +498,12 @@ __global__ void concat_and_cache_mla_grouped_kernel(
       const int64_t src_idx = token_idx * src_token_stride + i;
       const int64_t dst_idx =
           block_idx * block_stride + block_offset * entry_stride + i + offset;
-      kv_cache[dst_idx] = src[src_idx];
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        kv_cache[dst_idx] = src[src_idx];
+      } else {
+        kv_cache[dst_idx] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], scale);
+      }
     }
   };
 
@@ -1001,20 +1010,50 @@ void concat_and_cache_mla_grouped(
     torch::stable::Tensor& k_pe,  // [num_layers, num_tokens, pe_dim]
     torch::stable::Tensor& kv_cache_ptrs,  // [num_layers] int64, on device
     torch::stable::Tensor& slot_mapping,   // [num_layers, num_tokens] int64
-    int64_t block_size, int64_t block_stride, int64_t entry_stride) {
-  int num_layers = kv_c.size(0);
-  int num_tokens = kv_c.size(1);
-  int kv_lora_rank = kv_c.size(2);
-  int pe_dim = k_pe.size(2);
+    int64_t block_size, int64_t block_stride, int64_t entry_stride,
+    std::optional<torch::stable::Tensor> kv_scales,  // [num_layers] or None
+    const std::string& kv_cache_dtype) {
+  const bool use_fp8 = kv_cache_dtype == "fp8" ||
+                       kv_cache_dtype == "fp8_e4m3" ||
+                       kv_cache_dtype == "fp8_e5m2";
+  STD_TORCH_CHECK(
+      use_fp8 || kv_cache_dtype == "auto" || kv_cache_dtype == "bfloat16",
+      "concat_and_cache_mla_grouped only supports BF16 and plain "
+      "FP8 KV cache; got ",
+      kv_cache_dtype);
 
   STD_TORCH_CHECK(
       kv_c.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
           k_pe.scalar_type() == torch::headeronly::ScalarType::BFloat16,
-      "concat_and_cache_mla_grouped only supports a bf16 KV cache; got kv_c=",
+      "concat_and_cache_mla_grouped requires BF16 inputs; got kv_c=",
       kv_c.scalar_type(), ", k_pe=", k_pe.scalar_type());
   STD_TORCH_CHECK(
-      kv_cache_ptrs.scalar_type() == torch::headeronly::ScalarType::Long,
-      "kv_cache_ptrs must be int64");
+      kv_cache_ptrs.scalar_type() == torch::headeronly::ScalarType::Long &&
+          slot_mapping.scalar_type() == torch::headeronly::ScalarType::Long,
+      "cache pointers and slot mapping must be int64");
+
+  const int num_layers = kv_c.size(0);
+  const int num_tokens = kv_c.size(1);
+  const int kv_lora_rank = kv_c.size(2);
+  const int pe_dim = k_pe.size(2);
+  const float* kv_scales_ptr = nullptr;
+  if (use_fp8) {
+    STD_TORCH_CHECK(kv_scales.has_value(),
+                    "FP8 grouped cache insert requires kv_scales");
+    STD_TORCH_CHECK(
+        kv_scales->scalar_type() == torch::headeronly::ScalarType::Float,
+        "kv_scales must be float32");
+    STD_TORCH_CHECK(kv_scales->numel() == num_layers,
+                    "kv_scales must contain one scale per layer");
+    STD_TORCH_CHECK(kv_scales->is_cuda() && kv_scales->get_device_index() ==
+                                                kv_c.get_device_index(),
+                    "kv_scales must be on the same CUDA device as kv_c");
+    STD_TORCH_CHECK(kv_scales->is_contiguous(), "kv_scales must be contiguous");
+    kv_scales_ptr = kv_scales->const_data_ptr<float>();
+  } else {
+    STD_TORCH_CHECK(!kv_scales.has_value(),
+                    "BF16 grouped cache insert does not use kv_scales");
+  }
 
   if (num_tokens == 0 || num_layers == 0) {
     return;
@@ -1030,17 +1069,40 @@ void concat_and_cache_mla_grouped(
       kv_c.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
-  dim3 grid(num_tokens, num_layers);
-  dim3 block(std::min(kv_lora_rank, 512));
-  vllm::concat_and_cache_mla_grouped_kernel<uint16_t>
-      <<<grid, block, 0, stream>>>(
-          reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
-          reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
-          kv_cache_ptrs.const_data_ptr<int64_t>(),
-          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
-          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
-          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
-          block_size);
+  const dim3 grid(num_tokens, num_layers);
+  const dim3 block(std::min(kv_lora_rank, 512));
+
+  if (!use_fp8) {
+    vllm::concat_and_cache_mla_grouped_kernel<uint16_t, uint16_t,
+                                              vllm::Fp8KVCacheDataType::kAuto>
+        <<<grid, block, 0, stream>>>(
+            reinterpret_cast<const uint16_t*>(kv_c.data_ptr()),
+            reinterpret_cast<const uint16_t*>(k_pe.data_ptr()),
+            kv_cache_ptrs.const_data_ptr<int64_t>(), nullptr,
+            slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,
+            kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,
+            slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim,
+            block_size);
+    return;
+  }
+
+#define LAUNCH_GROUPED_FP8(KV_DTYPE)                                           \
+  vllm::concat_and_cache_mla_grouped_kernel<__nv_bfloat16, uint8_t, KV_DTYPE>  \
+      <<<grid, block, 0, stream>>>(                                            \
+          reinterpret_cast<const __nv_bfloat16*>(kv_c.data_ptr()),             \
+          reinterpret_cast<const __nv_bfloat16*>(k_pe.data_ptr()),             \
+          kv_cache_ptrs.const_data_ptr<int64_t>(), kv_scales_ptr,              \
+          slot_mapping.const_data_ptr<int64_t>(), kv_c_layer_stride,           \
+          kv_c_token_stride, k_pe_layer_stride, k_pe_token_stride,             \
+          slot_layer_stride, block_stride, entry_stride, kv_lora_rank, pe_dim, \
+          block_size)
+
+  if (kv_cache_dtype == "fp8_e5m2") {
+    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E5M2);
+  } else {
+    LAUNCH_GROUPED_FP8(vllm::Fp8KVCacheDataType::kFp8E4M3);
+  }
+#undef LAUNCH_GROUPED_FP8
 }
 
 namespace vllm {
