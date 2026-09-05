@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -29,17 +31,122 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
 )
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+    kMxfp4Dynamic,
+)
+from vllm.model_executor.parameter import (
+    GroupQuantScaleParameter,
+    ModelWeightParameter,
+)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
+
 logger = init_logger(__name__)
+
+
+def _encode_mxfp4_weight_scale(loaded_weight: torch.Tensor) -> torch.Tensor:
+    if loaded_weight.dtype == torch.uint8:
+        return loaded_weight
+    if loaded_weight.dtype == torch.float8_e8m0fnu:
+        return loaded_weight.view(torch.uint8)
+    if loaded_weight.is_floating_point():
+        return loaded_weight.to(torch.float8_e8m0fnu).view(torch.uint8)
+    return loaded_weight
+
+
+class Mxfp4LinearMethod(LinearMethodBase):
+    """MXFP4 linear weights with dynamic MXFP4 activations."""
+
+    def __init__(self) -> None:
+        self.group_size = 32
+        self.kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs: Any,
+    ) -> None:
+        del input_size, output_size
+        if input_size_per_partition % self.group_size != 0:
+            raise ValueError(
+                "MXFP4 requires input_size_per_partition "
+                f"({input_size_per_partition}) to be divisible by "
+                f"{self.group_size}."
+            )
+
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.params_dtype = params_dtype
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        def scale_weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            *args: Any,
+            **kwargs: Any,
+        ):
+            return weight_loader(
+                param,
+                _encode_mxfp4_weight_scale(loaded_weight),
+                *args,
+                **kwargs,
+            )
+
+        weight_scale = GroupQuantScaleParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // self.group_size,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=scale_weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.kernel.process_weights_after_loading(layer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -54,8 +161,24 @@ class Mxfp4Config(QuantizationConfig):
         self.ignored_layers = ignored_layers
 
     @classmethod
-    def from_config(cls, config):
-        return cls()
+    def from_config(cls, config: dict[str, Any]):
+        ignored_layers = cls.get_from_keys_or(config, ["ignore"], None)
+        if not ignored_layers:
+            ignored_layers = cls.get_from_keys_or(
+                config, ["modules_to_not_convert"], None
+            )
+        if ignored_layers:
+            ignored_layers = list(
+                dict.fromkeys(
+                    name.removesuffix(".weight").removesuffix(".bias")
+                    for name in ignored_layers
+                )
+            )
+        return cls(ignored_layers)
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.ignored_layers is not None:
+            self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -88,10 +211,8 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            logger.debug_once(
-                "MXFP4 linear layer is not implemented - falling back to "
-                "UnquantizedLinearMethod.",
-            )
+            if self.get_name() == "mxfp4":
+                return Mxfp4LinearMethod()
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
             return self._make_moe_method(layer.moe_config)
@@ -529,13 +650,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     @staticmethod
     def _encode_mxfp4_weight_scale(loaded_weight: torch.Tensor) -> torch.Tensor:
-        if loaded_weight.dtype == torch.uint8:
-            return loaded_weight
-        if loaded_weight.dtype == torch.float8_e8m0fnu:
-            return loaded_weight.view(torch.uint8)
-        if loaded_weight.is_floating_point():
-            return loaded_weight.to(torch.float8_e8m0fnu).view(torch.uint8)
-        return loaded_weight
+        return _encode_mxfp4_weight_scale(loaded_weight)
 
     @staticmethod
     def get_scale_weight_loader(weight_loader):
