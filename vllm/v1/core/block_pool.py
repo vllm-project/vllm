@@ -9,6 +9,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
     KVCacheEvent,
+    extra_keys_to_typed,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -366,7 +367,7 @@ class BlockPool:
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
             medium=MEDIUM_GPU,
             lora_name=request.lora_request.name if request.lora_request else None,
-            extra_keys=extra_keys_list if extra_keys_list else None,
+            extra_keys=extra_keys_to_typed(extra_keys_list, request),
             group_idx=kv_cache_group_id,
         )
 
@@ -537,7 +538,7 @@ class BlockPool:
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
-                    extra_keys=[extra_keys],
+                    extra_keys=extra_keys_to_typed([extra_keys], request),
                     group_idx=kv_cache_group_id,
                 )
             )

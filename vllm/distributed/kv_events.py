@@ -47,6 +47,208 @@ MEDIUM_CPU = "CPU"
 MEDIUM_STORAGE = "STORAGE"
 
 
+class ExtraKey(msgspec.Struct, gc=False, frozen=True, tag=True):
+    """Base class for typed extra keys attached to a ``BlockStored`` event.
+
+    ``extra_keys`` in ``BlockStored`` is the *published* form of the internal
+    block-hash extra keys computed by ``generate_block_hash_extra_keys`` (see
+    ``vllm/v1/core/kv_cache_utils.py``). Publishing a typed, versioned schema
+    (instead of raw tuples of ``Any``) gives external consumers such as the
+    llm-d router a stable contract for:
+
+    - locating which multi-modal inputs a block references (``MultiModalKey``),
+    - filtering by LoRA / ``cache_salt`` / prompt-embeds identity,
+    - and validating prefix-cache routing decisions without re-inferring the
+      internal block-hash representation.
+
+    Instances are ``frozen`` and hash by field value so they can be used in
+    sets / as ``Counter`` keys by ``KVEventAggregator`` after msgpack
+    round-trips (structs travel over ZMQ and may be reconstructed on the
+    consumer side).
+    """
+
+    def __hash__(self) -> int:
+        return hash(self.to_tuple())
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        """Flatten this key to a hashable tuple.
+
+        Mirrors the internal tuple form used by
+        ``generate_block_hash_extra_keys`` so consumers can round-trip between
+        the published schema and the block-hash representation.
+        """
+        raise NotImplementedError
+
+
+class LoRAKey(ExtraKey, frozen=True, tag="lora"):
+    """LoRA identity the block was computed with (``lora_name``)."""
+
+    name: str
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        return (self.name,)
+
+
+class CacheSaltKey(ExtraKey, frozen=True, tag="cache_salt"):
+    """``cache_salt`` applied to the request (present on the first block only)."""
+
+    salt: str
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        return (self.salt,)
+
+
+class PromptEmbedsKey(ExtraKey, frozen=True, tag="prompt_embeds"):
+    """Stable hash of the prompt-embedding slice covered by the block."""
+
+    hash: bytes
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        return (self.hash,)
+
+
+class MultiModalKey(ExtraKey, frozen=True, tag="mm"):
+    """A multi-modal input referenced by the block.
+
+    ``hash`` is the same value as ``MultiModalFeatures.mm_hashes[modality][i]``
+    from the render step (see ``vllm/entrypoints/scale_out/token_in_token_out/
+    protocol.py``), i.e. the identifier used for encoder-output cache lookups
+    (without a LoRA prefix; the prefixed form is ``MultiModalFeatureSpec.
+    identifier``). ``block_offset`` is the offset of the item's tokens relative
+    to the start of this block, matching the second element of the internal
+    ``(identifier, offset)`` tuple.
+    """
+
+    modality: str
+    hash: str
+    block_offset: int
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        return (self.hash, self.block_offset)
+
+
+class LegacyExtraKey(ExtraKey, frozen=True, tag="legacy"):
+    """Fallback wrapper for extra-key shapes we do not yet classify.
+
+    Preserves the original value so no information is lost when an internal
+    extra key does not match the known schema (e.g. future key types added to
+    ``generate_block_hash_extra_keys``). ``value`` is normalised to a hashable
+    form inside ``to_tuple`` so the containing block event remains usable as a
+    ``Counter`` key.
+
+    ``__eq__``/``__hash__`` compare through the normalised view so that
+    msgpack round-trips (which turn nested tuples into lists) do not break
+    equality: ``LegacyExtraKey(("a", "b")) == decode(encode(...))`` holds even
+    though the decoded ``value`` is a list.
+    """
+
+    value: Any
+
+    def __hash__(self) -> int:
+        return hash(self.to_tuple())
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, LegacyExtraKey):
+            return NotImplemented
+        return self.to_tuple() == other.to_tuple()
+
+    def to_tuple(self) -> tuple[Any, ...]:
+        return (_hashable_key(self.value),)
+
+
+def _hashable_key(value: Any) -> Any:
+    """Normalise ``value`` to a hashable form for ``LegacyExtraKey``.
+
+    Raw tuple extra keys are hashable already; lists and dicts are converted to
+    tuples so the containing ``ExtraKey`` remains usable as a ``Counter`` key.
+    """
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable_key(v) for v in value)
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable_key(v)) for k, v in value.items()))
+    return value
+
+
+#: Explicit union over all ``ExtraKey`` subclasses. msgspec only resolves
+#: tagged unions that are spelled out explicitly, so consumers must decode
+#: ``BlockStored.extra_keys`` entries against this union (or against
+#: ``BlockStored`` whose field type uses it) to get typed keys back.
+ExtraKeyUnion = ExtraKey | LoRAKey | CacheSaltKey | PromptEmbedsKey | (
+    MultiModalKey | LegacyExtraKey
+)
+
+
+def extra_keys_to_typed(
+    extra_keys_list: list[tuple[Any, ...] | None] | None,
+    request: Any,
+) -> list[tuple[ExtraKeyUnion, ...] | None] | None:
+    """Convert internal block-hash extra-key tuples to the published schema.
+
+    ``generate_block_hash_extra_keys`` (``vllm/v1/core/kv_cache_utils.py``)
+    produces per-block tuples whose elements are bare values: MM
+    ``(identifier, offset)`` 2-tuples, LoRA names, ``cache_salt``, and
+    prompt-embeds ``bytes``. This helper maps each element to a typed
+    ``ExtraKey`` so external consumers get a stable, versioned schema.
+
+    The MM ``identifier`` is resolved back to its ``modality`` and unprefixed
+    ``mm_hash`` via ``request.mm_features`` (identifier is unique per MM
+    item). Unknown shapes are wrapped in ``LegacyExtraKey`` so no information
+    is lost.
+
+    ``None`` entries pass through unchanged (block has no extra keys).
+    """
+    if extra_keys_list is None:
+        return None
+    if not request.mm_features:
+        id_to_mm: dict[str, tuple[str, str]] = {}
+    else:
+        id_to_mm = {
+            f.identifier: (f.modality, f.mm_hash or f.identifier)
+            for f in request.mm_features
+        }
+
+    lora_name = request.lora_request.name if request.lora_request else None
+    cache_salt = request.cache_salt
+
+    converted: list[tuple[ExtraKeyUnion, ...] | None] = []
+    for block_keys in extra_keys_list:
+        if block_keys is None:
+            converted.append(None)
+            continue
+        typed: list[ExtraKeyUnion] = []
+        for key in block_keys:
+            if isinstance(key, ExtraKey):
+                typed.append(key)
+                continue
+            if (
+                isinstance(key, tuple)
+                and len(key) == 2
+                and isinstance(key[0], str)
+                and isinstance(key[1], int)
+            ):
+                # (mm_identifier, offset) from _gen_mm_extra_hash_keys.
+                identifier, offset = key
+                modality, mm_hash = id_to_mm.get(identifier, ("", identifier))
+                typed.append(
+                    MultiModalKey(
+                        modality=modality,
+                        hash=mm_hash,
+                        block_offset=offset,
+                    )
+                )
+            elif isinstance(key, bytes):
+                # prompt-embeds block hash.
+                typed.append(PromptEmbedsKey(hash=key))
+            elif isinstance(key, str) and lora_name is not None and key == lora_name:
+                typed.append(LoRAKey(name=key))
+            elif isinstance(key, str) and cache_salt is not None and key == cache_salt:
+                typed.append(CacheSaltKey(salt=key))
+            else:
+                typed.append(LegacyExtraKey(value=key))
+        converted.append(tuple(typed))
+    return converted
+
+
 class BlockStored(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     parent_block_hash: ExternalBlockHash | None
@@ -61,12 +263,20 @@ class BlockStored(KVCacheEvent):
     medium: str | None
     lora_name: str | None
 
+    """Schema version of this event. Incremented whenever the semantics of a
+    field (or of ``extra_keys``) change in a way consumers must branch on.
+    Version 1 introduces the typed ``ExtraKey`` schema for ``extra_keys``.
+    """
+    event_version: int = 1
+
     """Extra keys used in block hash computation, one entry per block in
-    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
-    prompt embedding hashes, etc. for that specific block. Exposed for external
+    block_hashes. Each entry contains typed ``ExtraKey`` items: MM
+    identifiers (``MultiModalKey``), LoRA name (``LoRAKey``), cache_salt
+    (``CacheSaltKey``), prompt embedding hashes (``PromptEmbedsKey``), or a
+    ``LegacyExtraKey`` fallback, for that specific block. Exposed for external
     KV cache consumers to reconstruct block hashes.
     """
-    extra_keys: list[tuple[Any, ...] | None] | None = None
+    extra_keys: list[tuple[ExtraKeyUnion, ...] | None] | None = None
 
     """Store events carry cache-spec metadata so consumers can classify and
     filter groups as they are learned. Remove events only need group_idx+hash.
@@ -94,6 +304,7 @@ class BlockStored(KVCacheEvent):
                 self.kv_cache_spec_sliding_window,
                 self.locality,
                 self.ownership,
+                self.event_version,
             )
         )
 

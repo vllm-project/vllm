@@ -136,6 +136,27 @@ As a result, we will have the following components when the KV cache manager is 
 
 ## Operations
 
+When KV cache events are enabled (`--kv-events`), the block pool publishes
+`BlockStored` / `BlockRemoved` events over ZeroMQ so external consumers (e.g.
+a cluster router) can track which blocks live on which replica, independently
+of the token content. See `vllm/distributed/kv_events.py`.
+
+`BlockStored.extra_keys` is a per-block list of typed keys that describe why a
+block's hash is what it is. Each entry is a tuple of `ExtraKey` items:
+
+- `MultiModalKey(modality, hash, block_offset)` – the block references a
+  multi-modal input whose encoder-output cache hash is `hash` (the same value
+  as `MultiModalFeatures.mm_hashes[modality][i]` from the render step),
+  starting `block_offset` tokens into the block.
+- `LoRAKey(name)` – the block was computed under a LoRA adapter.
+- `CacheSaltKey(salt)` – the request's `cache_salt` (first block only).
+- `PromptEmbedsKey(hash)` – prompt-embeddings contributed to the block hash.
+- `LegacyExtraKey(value)` – an unrecognized extra-key shape, preserved as-is.
+
+Events carry `event_version` (currently `1`) so consumers can branch on schema
+changes. To decode `extra_keys`, use the explicit `ExtraKeyUnion` type (msgspec
+only resolves explicitly-spelled unions, not base-class subclass unions).
+
 ### Block Allocation
 
 **New request:** Workflow for the scheduler to schedule a new request with KV cache block allocation:

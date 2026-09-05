@@ -17,13 +17,14 @@ KV cache events are enabled. See the PR description for the full design.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_STORAGE,
     BlockRemoved,
     BlockStored,
+    ExtraKeyUnion,
     KVCacheEvent,
 )
 from vllm.logger import init_logger
@@ -383,7 +384,12 @@ class OffloadingEventsTracker:
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
                 lora_name=meta.lora_name,
                 extra_keys=(
-                    list(meta.extra_keys) if meta.extra_keys is not None else None
+                    cast(
+                        "list[tuple[ExtraKeyUnion, ...] | None] | None",
+                        meta.extra_keys,
+                    )
+                    if meta.extra_keys is not None
+                    else None
                 ),
                 group_idx=meta.group_idx,
                 kv_cache_spec_kind=meta.kv_cache_spec.kv_cache_spec_kind,
