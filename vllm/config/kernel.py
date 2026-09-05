@@ -3,7 +3,7 @@
 import contextlib
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, fields
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, field_validator
 
@@ -119,7 +119,7 @@ class IrOpPriorityConfig:
         return cls(**kwargs)
 
 
-MoEBackend = Literal[
+BuiltinMoEBackend = Literal[
     "auto",
     "triton",
     "batched_triton",
@@ -182,6 +182,12 @@ def validate_flashinfer_moe_ep_model(
             f"model is {list(architectures)}."
         )
 
+
+# Including ``str`` allows registered backend names while retaining the
+# built-in names in generated CLI help.
+MoEBackend = BuiltinMoEBackend | str
+
+BUILTIN_MOE_BACKENDS: tuple[str, ...] = get_args(BuiltinMoEBackend)
 
 LinearBackend = Literal[
     "auto",

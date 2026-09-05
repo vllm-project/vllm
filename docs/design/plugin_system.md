@@ -55,6 +55,51 @@ Every plugin has three parts:
 
 - **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
 
+### FP8 MoE backend plugins
+
+General plugins can register out-of-tree FP8 MoE expert implementations. The
+implementation must subclass `FusedMoEExperts` and consume canonical vLLM FP8
+MoE weights.
+
+Add the plugin entry point to the external backend package's
+`pyproject.toml`. Users do not need to modify vLLM's `pyproject.toml` or a
+configuration file in their home directory:
+
+```toml
+[project.entry-points."vllm.general_plugins"]
+my_moe_backend = "my_moe_backend.plugin:register"
+```
+
+Install the external backend package into the same Python environment as
+vLLM. During startup, vLLM discovers the installed entry point and invokes its
+registration function in each worker process.
+
+The plugin function registers qualified class names so optional kernel
+dependencies are imported only when the backend is considered:
+
+```python
+def register():
+    from vllm.model_executor.layers.fused_moe import (
+        register_fp8_moe_backend,
+    )
+
+    register_fp8_moe_backend(
+        name="my_moe_backend",
+        expert_class_paths="my_moe_backend.experts.MyFp8Experts",
+    )
+```
+
+Select the backend explicitly with `--moe-backend my_moe_backend`. Registered
+backends do not affect automatic selection unless they pass
+`auto_select=True`; automatic registered backends are considered only after
+built-in backends. Explicit selection still calls the implementation's
+`is_supported_config()` method and fails during model initialization when the
+deployment is incompatible.
+
+Registration functions must be re-entrant because plugins are loaded in each
+vLLM process. Repeating an identical registration is supported, while a
+conflicting registration using the same name raises an error.
+
 ## Guidelines for Writing Plugins
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
