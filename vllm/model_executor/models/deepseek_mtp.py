@@ -46,21 +46,31 @@ from .utils import (
 )
 
 
+class DeferredLMHead(nn.Module):
+    def forward(self, *args, **kwargs):
+        raise RuntimeError("deferred MTP head was not replaced by the target lm_head")
+
+
 class SharedHead(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
+        *,
+        defer_lm_head: bool = False,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "head"),
-        )
+        if defer_lm_head:
+            self.head = DeferredLMHead()
+        else:
+            self.head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "head"),
+            )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)

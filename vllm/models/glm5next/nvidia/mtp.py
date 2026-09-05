@@ -42,7 +42,6 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -66,7 +65,9 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             device=current_platform.device_type,
         )
         self.shared_head = SharedHead(
-            config=config, prefix=prefix, quant_config=quant_config
+            config=config,
+            prefix=prefix,
+            defer_lm_head=True,
         )
         # MTP layers sit past the base model's hidden layers; parse the index
         # from the prefix (e.g. "...layers.32") so the decoder builds an MLA

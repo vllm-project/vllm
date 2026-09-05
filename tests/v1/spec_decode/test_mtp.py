@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -22,6 +23,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.load import LoadConfig
+from vllm.model_executor.models.deepseek_mtp import DeferredLMHead, SharedHead
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -29,6 +31,53 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_shared_head_can_defer_lm_head():
+    config = mock.MagicMock(hidden_size=16, rms_norm_eps=1e-5, vocab_size=32)
+
+    with mock.patch(
+        "vllm.model_executor.models.deepseek_mtp.ParallelLMHead"
+    ) as parallel_lm_head:
+        regular = SharedHead(config, "mtp")
+        deferred = SharedHead(config, "mtp", defer_lm_head=True)
+
+    parallel_lm_head.assert_called_once()
+    assert regular.head is parallel_lm_head.return_value
+    assert isinstance(deferred.head, DeferredLMHead)
+    assert not tuple(deferred.head.parameters())
+    with pytest.raises(RuntimeError, match="was not replaced"):
+        deferred.head(torch.zeros(1, 16))
+
+
+def test_glm_mtp_defers_shared_head():
+    from vllm.models.glm5next.nvidia import mtp
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        index_kpool=4,
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_config = config
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+
+    with (
+        mock.patch.object(
+            mtp, "RMSNorm", side_effect=lambda *args, **kwargs: nn.Identity()
+        ),
+        mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(mtp, "SharedHead", return_value=nn.Identity()) as shared_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        mtp.Glm5NextMultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    shared_head.assert_called_once_with(
+        config=config,
+        prefix="model.layers.1",
+        defer_lm_head=True,
+    )
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -70,6 +119,10 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     # Setup mocks
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
+    draft_head = mock.MagicMock()
+    mock_model.model.layers = [
+        mock.MagicMock(shared_head=mock.MagicMock(head=draft_head))
+    ]
     mock_get_model.return_value = mock_model
     # MTP does not have its own embed_tokens or lm_head
     # so it should share them with the target model
@@ -111,6 +164,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     mock_get_model.assert_called_once()
     # MTP shares lm_head with target model
     assert proposer.model.lm_head == target_model.lm_head
+    assert proposer.model.model.layers[0].shared_head.head is target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
