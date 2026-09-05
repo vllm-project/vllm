@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import check_accuracy
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     is_aiter_found,
     is_aiter_found_and_supported,
@@ -18,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -198,6 +202,14 @@ def mxfp4_quant_dequant(x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def fp8_quant_dequant(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    shape = x.shape
+    quantized, s = ops.scaled_fp8_quant(
+        x.to(torch.bfloat16).flatten(0, -2), scale, use_per_token_if_dynamic=False
+    )
+    return per_tensor_dequantize(quantized, s).reshape(shape).float()
+
+
 def reference_moe(
     roouting_logits,
     topk,
@@ -213,6 +225,7 @@ def reference_moe(
     act_type,
     activation: str = "swiglu",
     use_interleaved_layout: bool = False,
+    act_scale=None,
 ):
     """
     Reference MoE implementation for accuracy testing.
@@ -224,6 +237,7 @@ def reference_moe(
             (gate=x[..., ::2], up=x[..., 1::2]) as used by SWIGLUOAI.
             If False, uses chunked layout (gate, up = chunk(x, 2)) as used
             by standard swiglu/silu.
+        act_scale: Static per-tensor scale used by the "fp8" act_type.
     """
     # renormalize routing
     experts = torch.topk(roouting_logits, k=topk, dim=-1, sorted=True)
@@ -232,6 +246,8 @@ def reference_moe(
     t = hidden_states.clone()
     if act_type == "mxfp4":
         t = mxfp4_quant_dequant(t)
+    elif act_type == "fp8":
+        t = fp8_quant_dequant(t, act_scale)
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     mlp1_bias = bias13[expert_indices, ...]
@@ -256,6 +272,8 @@ def reference_moe(
         t = mxfp8_dequantize(t_quantized, t_scale)
     elif act_type == "mxfp4":
         t = mxfp4_quant_dequant(t)
+    elif act_type == "fp8":
+        t = fp8_quant_dequant(t, act_scale)
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     mlp2_bias = bias2[expert_indices, ...]
@@ -1407,6 +1425,7 @@ ROCM_BACKEND_CONFIGS = {
     },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
+        "static_input_scale": True,
         "rtol": 0.5,
         "percent": 0.9,
         "requires_aiter": True,
@@ -1419,6 +1438,31 @@ ROCM_BACKEND_CONFIGS = {
         "percent": 0.8,
         "requires_aiter": True,
         "requires_gfx950": True,
+    },
+    # Emulation dequantizes the MXFP4 weights to bf16 every forward and runs the
+    # plain bf16 Triton MoE, fake-QDQ'ing activations. Both activation schemes it
+    # supports are covered: w_mxfp4_a_mxfp4 and w_mxfp4_a_fp8. Row keys name the
+    # test case, so "backend" names the Mxfp4MoeBackend they share.
+    "EMULATION": {
+        "backend": "EMULATION",
+        "activation": "SWIGLUOAI",
+        "act_type": "mxfp4",
+        "rtol": 0.5,
+        "percent": 0.95,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+        "requires_quark": True,
+    },
+    "EMULATION_A_FP8": {
+        "backend": "EMULATION",
+        "activation": "SWIGLUOAI",
+        "act_type": "fp8",
+        "static_input_scale": True,
+        "rtol": 0.5,
+        "percent": 0.95,
+        "requires_aiter": False,
+        "requires_gfx950": False,
+        "requires_quark": True,
     },
 }
 
@@ -1460,10 +1504,15 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
+    if config.get("requires_quark"):
+        pytest.importorskip("quark", reason="emulation backend requires amd-quark")
 
     import vllm.distributed.parallel_state as ps
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        mxfp4_w4a8_moe_quant_config,
+    )
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
@@ -1483,7 +1532,8 @@ def test_rocm_mxfp4_moe_oracle(
     monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
 
     # Map string to enum
-    backend = Mxfp4MoeBackend[backend_name]
+    backend = Mxfp4MoeBackend[str(config.get("backend", backend_name))]
+    static_input_scale = bool(config.get("static_input_scale", False))
 
     # Get experts class from oracle
     experts_cls_list = backend_to_kernel_cls(backend)
@@ -1534,12 +1584,16 @@ def test_rocm_mxfp4_moe_oracle(
     w13_2d = w13_float.reshape(-1, hidden_size)
     w13_quant_2d, w13_scale_2d = dynamic_mxfp4_quant(w13_2d)
     w13_quant = w13_quant_2d.reshape(num_experts, 2 * intermediate_size, -1)
-    w13_scale = w13_scale_2d.reshape(num_experts, 2 * intermediate_size, -1)
+    # quark's HIP mxfp4 dequant kernel reads the scale buffer as contiguous,
+    # but dynamic_mxfp4_quant returns it column-major.
+    w13_scale = w13_scale_2d.reshape(
+        num_experts, 2 * intermediate_size, -1
+    ).contiguous()
 
     w2_2d = w2_float.reshape(-1, intermediate_size)
     w2_quant_2d, w2_scale_2d = dynamic_mxfp4_quant(w2_2d)
     w2_quant = w2_quant_2d.reshape(num_experts, hidden_size, -1)
-    w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1)
+    w2_scale = w2_scale_2d.reshape(num_experts, hidden_size, -1).contiguous()
 
     # AITER conversion mutates checkpoint-format weights and scales in place.
     # Preserve their original layout for the reference calculation below.
@@ -1553,10 +1607,10 @@ def test_rocm_mxfp4_moe_oracle(
     )
     w2_bias = torch.randn(num_experts, hidden_size, dtype=dtype, device=device)
 
-    # Create static input scales for W4A8 backend (AITER_MXFP4_FP8)
+    # Create static input scales for the W4A8 (fp8 activation) backends
     w13_input_scale: torch.Tensor | None = None
     w2_input_scale: torch.Tensor | None = None
-    if backend_name == "AITER_MXFP4_FP8":
+    if static_input_scale:
         # Static FP8 scales: one scale per expert
         w13_input_scale = torch.ones(num_experts, dtype=torch.float32, device=device)
         w2_input_scale = torch.ones(num_experts, dtype=torch.float32, device=device)
@@ -1589,19 +1643,43 @@ def test_rocm_mxfp4_moe_oracle(
             w2_weight_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
         )
     )
 
-    # Build quant config using oracle
-    quant_config = make_mxfp4_moe_quant_config(
-        mxfp4_backend=backend,
-        w1_scale=w13_scale_conv,
-        w2_scale=w2_scale_conv,
-        w1_bias=w13_bias_conv,
-        w2_bias=w2_bias_conv,
-        a1_scale=w13_input_scale,
-        a2_scale=w2_input_scale,
-    )
+    # Build quant config. `make_mxfp4_moe_quant_config` maps EMULATION to the
+    # a_mxfp4 scheme, so the fp8-activation emulation case builds its config the
+    # way QuarkOCP_MX_MoEMethod.get_fused_moe_quant_config does. Input scales are
+    # read back off the layer because the EMULATION conversion above reduces the
+    # per-expert scales to a per-tensor one.
+    if backend == Mxfp4MoeBackend.EMULATION and static_input_scale:
+        quant_config = mxfp4_w4a8_moe_quant_config(
+            w1_scale=w13_scale_conv,
+            w2_scale=w2_scale_conv,
+            w1_bias=w13_bias_conv,
+            w2_bias=w2_bias_conv,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+            block_shape=None,
+        )
+    else:
+        quant_config = make_mxfp4_moe_quant_config(
+            mxfp4_backend=backend,
+            w1_scale=w13_scale_conv,
+            w2_scale=w2_scale_conv,
+            w1_bias=w13_bias_conv,
+            w2_bias=w2_bias_conv,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
+        )
+
+    if backend == Mxfp4MoeBackend.EMULATION:
+        # Pin the scheme each emulation row covers: a_fp8 QDQs activations with
+        # the static per-tensor scale, a_mxfp4 QDQs them dynamically.
+        assert quant_config.ocp_mx_scheme == (
+            "w_mxfp4_a_fp8" if static_input_scale else "w_mxfp4_a_mxfp4"
+        )
 
     # Select activation based on backend
     activation_name = str(config["activation"])
@@ -1695,6 +1773,7 @@ def test_rocm_mxfp4_moe_oracle(
         act_type=str(config.get("act_type", "bf16")),
         activation=act_name,
         use_interleaved_layout=use_interleaved,
+        act_scale=layer.w13_input_scale,
     )
 
     # Compute and print accuracy statistics
