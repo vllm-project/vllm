@@ -613,6 +613,55 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def evict_token_range_for_request(
+        self, request_id: str, token_start: int, token_end: int
+    ) -> tuple[int, int, int]:
+        """Convenience wrapper: evict the block-aligned span overlapping
+        the token range `[token_start, token_end)` on the first kv-cache
+        group, then free those blocks via the coordinator.
+
+        Uses **inward** block alignment: only whole blocks fully within
+        `[token_start, token_end)` are freed. Block-aligned edges are
+        important so the caller can slice its per-token arrays
+        (`_all_token_ids`, and per-request position arrays if the model
+        tracks them explicitly) by the SAME range that was freed
+        from the block table — otherwise the two go out of sync and the
+        request's prompt grows past the worker's
+        `max_model_len`-sized buffers.
+
+        Returns `(aligned_start, aligned_end, num_blocks_freed)` where
+        `aligned_start` and `aligned_end` describe the token range that
+        was actually evicted (block-aligned, possibly narrower than
+        `[token_start, token_end)`). Callers MUST use this returned
+        range — not the original — when compacting their own per-token
+        arrays in lockstep with the KV cache.
+        """
+        assert len(self.coordinator.single_type_managers) == 1, (
+            "evict_token_range_for_request derives block ids from kv-cache "
+            "group 0 only; fanning them to multiple groups is unsound. "
+            "Callers must ensure a single-group (non-hybrid) config."
+        )
+        if token_end <= token_start:
+            return token_start, token_start, 0
+        first = self.coordinator.single_type_managers[0]
+        block_size = first.block_size
+        block_idx_start = (token_start + block_size - 1) // block_size
+        block_idx_end = token_end // block_size
+        if block_idx_end <= block_idx_start:
+            return token_start, token_start, 0
+        req_blocks = first.req_to_blocks.get(request_id)
+        if not req_blocks:
+            return token_start, token_start, 0
+        aligned_start = block_idx_start * block_size
+        aligned_end = block_idx_end * block_size
+        block_ids = [
+            req_blocks[i].block_id
+            for i in range(block_idx_start, min(block_idx_end, len(req_blocks)))
+            if not req_blocks[i].is_null
+        ]
+        num_freed = self.coordinator.evict_blocks_for_request(request_id, block_ids)
+        return aligned_start, aligned_end, num_freed
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,

@@ -556,6 +556,8 @@ class AsyncLLM(EngineClient):
 
         async def handle_inputs():
             cancelled = False
+            errored = False
+            any_added = False
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params
@@ -572,6 +574,10 @@ class AsyncLLM(EngineClient):
                         **inputs,  # type: ignore[arg-type]
                     )
                     req.external_req_id = request_id
+                    req.first_chunk = not any_added
+                    # Chunk folds mutate block content under unchanged
+                    # prefix-cache hashes; session blocks are never shareable.
+                    req.cache_salt = internal_req_id
                     if req.prompt_embeds is not None:
                         raise VLLMValidationError(
                             "prompt_embeds not supported for streaming inputs"
@@ -580,18 +586,30 @@ class AsyncLLM(EngineClient):
                         self.model_config, input_chunk.prompt
                     )
                     await self._add_request(req, prompt_text, None, 0, queue)
+                    any_added = True
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
             except Exception as error:
                 # Wrap in InputStreamError so generate() can propagate it
                 # without wrapping in EngineGenerateError.
                 queue.put(InputStreamError(error))
+                errored = True
             finally:
-                queue._input_stream_task = None
-                if not cancelled:
-                    # Send empty final request to indicate that inputs have
-                    # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                try:
+                    if not cancelled:
+                        if any_added:
+                            # Send empty final request to indicate that inputs
+                            # have finished. Don't send if cancelled.
+                            await self._add_request(final_req, None, None, 0, queue)
+                        elif not errored:
+                            # Zero-chunk stream: nothing was submitted
+                            # engine-side; just unblock the generate() consumer.
+                            queue.put(STREAM_FINISHED)
+                finally:
+                    # Cleared only after the final send: until then,
+                    # _stop_input_stream must be able to cancel-and-await
+                    # this task so nothing is sent after an abort.
+                    queue._input_stream_task = None
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -614,6 +632,15 @@ class AsyncLLM(EngineClient):
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
             )
+
+    @staticmethod
+    async def _stop_input_stream(q: RequestOutputCollector) -> None:
+        """Cancel and await the input-stream task, so no chunk ADD can be
+        sent after the request is aborted."""
+        if (task := q._input_stream_task) is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            q._input_stream_task = None
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -702,6 +729,7 @@ class AsyncLLM(EngineClient):
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
             if q is not None:
+                await self._stop_input_stream(q)
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
@@ -722,6 +750,7 @@ class AsyncLLM(EngineClient):
         # Error from input stream generator - propagate directly.
         except InputStreamError as e:
             if q is not None:
+                await self._stop_input_stream(q)
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed (input error): %s.", request_id, e)
@@ -730,6 +759,7 @@ class AsyncLLM(EngineClient):
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             if q is not None:
+                await self._stop_input_stream(q)
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 try:

@@ -271,6 +271,38 @@ class EncoderCacheManager:
         for input_id in list(self.get_cached_input_ids(request)):
             self.free_encoder_input(request, input_id)
 
+    def evict_unreferenced(self, mm_hash: str) -> bool:
+        """Physically evict an entry whose reference set is empty.
+
+        Entries in `freeable` are by construction unreferenced. Popping one
+        here appends its mm_hash to `freed`, so the next SchedulerOutput
+        (via `get_freed_mm_hashes`) tells the model runner to drop the GPU
+        tensor. Without this, an unreferenced entry stays GPU-resident until
+        `can_allocate` runs out of `num_free_slots` — which, with the
+        streaming-inflated cache size, can exceed physical GPU headroom.
+
+        Returns True if the entry existed and was evicted.
+        """
+        num_embeds = self.freeable.pop(mm_hash, None)
+        if num_embeds is None:
+            return False
+        del self.cached[mm_hash]
+        self.freed.append(mm_hash)
+        self.num_free_slots += num_embeds
+        return True
+
+    def free_and_evict(self, request: Request) -> None:
+        """`free()` plus immediate physical eviction of zero-ref entries.
+
+        Used when a streaming session (persistent encoder cache) finishes or
+        is aborted: its per-frame entries are content-unique and skipped by
+        the per-step free path, so parking them in `freeable` retains
+        ~one vision embedding per pushed frame of GPU memory across sessions.
+        """
+        for input_id in list(self.get_cached_input_ids(request)):
+            self.free_encoder_input(request, input_id)
+            self.evict_unreferenced(request.mm_features[input_id].identifier)
+
     def get_freed_mm_hashes(self) -> list[str]:
         """Get and clear the list of recently freed encoder cache entries.
 
@@ -293,6 +325,7 @@ class EncoderCacheManager:
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
     mm_max_toks_per_item: Mapping[str, int],
+    mm_max_items_per_prompt: Mapping[str, int] | None = None,
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
@@ -336,6 +369,30 @@ def compute_mm_encoder_budget(
     encoder_cache_size = max(
         scheduler_config.encoder_cache_size, max_tokens_per_mm_item
     )
+
+    # Streaming-aware floor: size the cache to hold all concurrent items at
+    # once plus 30% headroom. Required by streaming sessions with persistent
+    # encoder cache, whose retained frame embeddings must all stay resident
+    # across re-prefill events.
+    if mm_max_items_per_prompt:
+        streaming_floor = sum(
+            mm_max_items_per_prompt.get(m, 0) * tok
+            for m, tok in mm_max_toks_per_item.items()
+        )
+        streaming_floor = (streaming_floor * 13) // 10  # 30% headroom
+        if streaming_floor > encoder_cache_size:
+            logger.info(
+                "Raising encoder_cache_size from %d to %d to accommodate "
+                "the limit_mm_per_prompt working set "
+                "(mm_max_items_per_prompt=%s, mm_max_toks_per_item=%s). "
+                "Required by streaming sessions with persistent encoder "
+                "cache.",
+                encoder_cache_size,
+                streaming_floor,
+                dict(mm_max_items_per_prompt),
+                dict(mm_max_toks_per_item),
+            )
+            encoder_cache_size = streaming_floor
 
     return encoder_compute_budget, encoder_cache_size
 

@@ -51,6 +51,51 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    if getattr(args, "enable_streaming", False):
+        # Streaming KV/encoder eviction is incompatible with the multimodal
+        # processor (receiver) cache: once a frame's KV is evicted, a later
+        # identical frame hashes to a data-less cache hit and crashes the
+        # session.
+        if engine_args.mm_processor_cache_gb:
+            logger.info(
+                "Streaming API enabled: disabling the multimodal processor "
+                "cache (mm_processor_cache_gb=0), which is incompatible with "
+                "streaming KV/encoder eviction."
+            )
+            engine_args.mm_processor_cache_gb = 0
+        # Streaming sessions mutate request state destructively at chunk
+        # boundaries (output folding, KV eviction, re-prefill). The scheduler
+        # rejects retention sessions under async scheduling or PP, but only
+        # at first use — which kills the engine. Fail fast at startup
+        # instead, and default async scheduling off.
+        if engine_args.async_scheduling is None:
+            logger.info(
+                "Streaming API enabled: defaulting to --no-async-scheduling "
+                "(streaming chunk folding/eviction requires synchronous "
+                "scheduling)."
+            )
+            engine_args.async_scheduling = False
+        elif engine_args.async_scheduling:
+            raise ValueError(
+                "--enable-streaming is incompatible with --async-scheduling: "
+                "streaming chunk folding/eviction requires synchronous "
+                "scheduling. Remove --async-scheduling."
+            )
+        if engine_args.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--enable-streaming is incompatible with pipeline "
+                "parallelism (step overlap); use --pipeline-parallel-size 1."
+            )
+        # The streaming session registry is per-API-server process: with
+        # multiple API servers, chunk POSTs 404 nondeterministically.
+        if (getattr(args, "api_server_count", None) or 1) > 1:
+            raise ValueError(
+                "--enable-streaming requires a single API server "
+                "(--api-server-count 1); the session registry is "
+                "per-process."
+            )
+
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
