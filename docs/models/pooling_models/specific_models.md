@@ -36,6 +36,79 @@ vllm serve LiquidAI/LFM2-ColBERT-350M \
     --hf-overrides '{"architectures": ["ColBERTLfm2Model"]}'
 ```
 
+### Query and document embeddings
+
+ColBERT uses **different tokenization** for queries and documents (marker tokens, length
+limits, and query expansion). Use the Pooling API with `task: "token_embed"` and
+`embedding_mode` set to `"query"` or `"document"`.
+
+!!! note
+    `embedding_mode` requires a vLLM build that includes ColBERT asymmetric encoding
+    support (implementation PR: branch
+    [`feat/colbert-embedding-mode`](https://github.com/vllm-project/vllm/compare/main...neerajrapelli:feat/colbert-embedding-mode);
+    merge the implementation before relying on this docs-only guidance in production).
+    It is **not** the same as `input_type` on `/v1/embeddings` (used by some dense
+    embedding models). Manual prefixes such as `[QueryMarker]` in the input string are
+    **not** a substitute — markers are applied by the server when `embedding_mode` is set.
+
+**Query embedding** (`jinaai/jina-colbert-v2`):
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "jinaai/jina-colbert-v2",
+    "input": ["What is machine learning?"],
+    "task": "token_embed",
+    "embedding_mode": "query"
+}'
+```
+
+**Document embedding** (same text, different mode — fewer token vectors):
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "jinaai/jina-colbert-v2",
+    "input": ["What is machine learning?"],
+    "task": "token_embed",
+    "embedding_mode": "document"
+}'
+```
+
+The response `data[0].data` is a list of per-token embedding vectors. For Jina ColBERT v2,
+short queries often produce **many** query vectors (for example on the order of 32 for a
+typical question) because of query expansion; document mode uses document markers and
+length limits instead. Exact counts depend on the text and model config.
+
+**Legacy path** (no asymmetric encoding — do not use for retrieval indexing):
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "jinaai/jina-colbert-v2",
+    "input": ["What is machine learning?"],
+    "task": "token_embed"
+}'
+```
+
+When `embedding_mode` is omitted, vLLM keeps the legacy symmetric `token_embed` path
+(no ColBERT marker or query-expansion preprocessing).
+
+| Approach | Works for ColBERT query/doc? |
+| - | - |
+| `"embedding_mode": "query"` or `"document"` on `/pooling` | Yes |
+| `"input_type": "query"` on `/pooling` | No — `input_type` is for other pooling models |
+| `[QueryMarker]` / `[Q]` in the input text | No — use `embedding_mode` |
+| `/v1/embeddings` | No — use `/pooling` with `task: "token_embed"` |
+
+`embedding_mode` is only accepted on ColBERT / late-interaction architectures; other
+pooling models reject it at parameter validation time.
+
+### Ranking (query and document encoding applied for you)
+
+If you only need relevance scores, you do not need to set `embedding_mode` manually.
+`/rerank` and `/score` apply query vs document encoding automatically (`text_1` / `query`
+as query, `text_2` / `documents` as documents). Marker tokens (for example
+`[QueryMarker]` / `[DocumentMarker]` on `jinaai/jina-colbert-v2`) are inserted by the
+tokenizer; you do not need to add them to the input text.
+
 Then you can use the rerank API:
 
 ```shell
@@ -60,17 +133,18 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 }'
 ```
 
-You can also get the raw token embeddings using the Pooling API with `token_embed` task:
+### Implementation notes (maintainers)
 
-```shell
-curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-    "model": "answerdotai/answerai-colbert-small-v1",
-    "input": "What is machine learning?",
-    "task": "token_embed"
-}'
-```
+ColBERT asymmetry is implemented at **IO/tokenization**, not in model `forward()`.
+Prefix-cache keys use canonical pre-tokenization text plus `embedding_mode` and
+config hashes (not raw post-marker token ids). `colbert_attention_mask` is metadata
+only (`COLBERT_ATTENTION_MASK_ENFORCED_IN_FORWARD = False`). Mixed query/document
+batches may group renderer calls by mode without changing per-request outputs.
+See `tests/models/pooling/test_colbert_embedding_mode.py` for regression coverage.
 
-An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../../examples/pooling/score/colbert_rerank_online.py)
+Chat-template prefix handling for other models (for example `query:` /
+`passage:` on `nvidia/llama-nemotron-embed-vl-1b-v2` via message `role`) is
+documented in their sections below.
 
 ## ColQwen3 Multi-Modal Late Interaction Models
 
