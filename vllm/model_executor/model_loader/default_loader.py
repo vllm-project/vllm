@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     np_cache_weights_iterator,
     pt_weights_iterator,
     safetensors_weights_iterator,
+    st_prefetch_safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
@@ -85,6 +86,7 @@ class DefaultModelLoader(BaseModelLoader):
             "enable_multithread_load",
             "num_threads",
             "enable_weights_track",
+            "st_load_mode",
         }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
@@ -112,6 +114,22 @@ class DefaultModelLoader(BaseModelLoader):
         self.enable_weights_track: bool | None = extra_config.get(
             "enable_weights_track", None
         )
+
+        st_load_mode = extra_config.get("st_load_mode")
+        if st_load_mode not in (None, "prefetch"):
+            raise ValueError(f"st_load_mode must be 'prefetch', got {st_load_mode!r}")
+        if st_load_mode and enable_multithread_load:
+            raise ValueError(
+                "st_load_mode and enable_multithread_load are mutually exclusive"
+            )
+        if st_load_mode and load_config.safetensors_load_strategy not in (
+            None,
+            "lazy",
+        ):
+            raise ValueError(
+                "st_load_mode does not support safetensors_load_strategy="
+                f"{load_config.safetensors_load_strategy!r}"
+            )
 
         # The multi-thread loader ignores safetensors_load_strategy, so reject
         # the combination instead of silently dropping the requested strategy.
@@ -271,6 +289,11 @@ class DefaultModelLoader(BaseModelLoader):
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
+            elif extra_config.get("st_load_mode") == "prefetch":
+                weights_iterator = st_prefetch_safetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
