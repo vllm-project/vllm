@@ -61,6 +61,7 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
 
     mock_pp_group = Mock()
     mock_pp_group.is_last_rank = True
+    mock_pp_group.world_size = 2
 
     with (
         patch("vllm.model_executor.models.qwen3_5_mtp.Qwen3_5MultiTokenPredictor"),
