@@ -270,14 +270,18 @@ class IpcModelLoader(BaseModelLoader):
         self, model_config: ModelConfig
     ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
         from vllm.distributed import (
+            get_pp_group,
             get_tensor_model_parallel_rank,
             get_tensor_model_parallel_world_size,
         )
 
+        pp_group = get_pp_group()
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
             tp_rank=get_tensor_model_parallel_rank(),
+            pp_size=pp_group.world_size,
+            pp_rank=pp_group.rank_in_group,
         )
         return self._request_state(cache_config)
 

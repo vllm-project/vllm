@@ -90,6 +90,7 @@ def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
 IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
     None: lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,
+    "modelopt_fp4": lambda _quant_config: True,
 }
 
 
@@ -307,6 +308,8 @@ class WeightCacheKey:
     model_arch: str
     tp_size: int
     tp_rank: int
+    pp_size: int
+    pp_rank: int
     dtype: str
     quantization: str | None
     quant_config_hash: str
@@ -315,7 +318,12 @@ class WeightCacheKey:
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        pp_size: int = 1,
+        pp_rank: int = 0,
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -337,6 +345,8 @@ class WeightCacheKey:
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            pp_size=pp_size,
+            pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
             quant_config_hash=_hash_quant_config(quant_config),
