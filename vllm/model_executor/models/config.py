@@ -916,6 +916,40 @@ class Qwen4ExpMTPConfig(Qwen4ExpForConditionalGenerationConfig):
         _strip_qwen4_exp_mrope(vllm_config.model_config)
 
 
+class Qwen3_8ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for Qwen3.8 models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config's
+        mamba_ssm_dtype field. Warn if the user explicitly overrides it to a
+        different value. Also strip M-RoPE fields for 1D text positions.
+        """
+        cache_config = vllm_config.cache_config
+        hf_text_config = vllm_config.model_config.hf_text_config
+        mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            if mamba_ssm_dtype is not None:
+                cache_config.mamba_ssm_cache_dtype = mamba_ssm_dtype
+        elif (
+            mamba_ssm_dtype is not None
+            and cache_config.mamba_ssm_cache_dtype != mamba_ssm_dtype
+        ):
+            logger.warning(
+                "Qwen3.8 model specifies mamba_ssm_dtype='%s' in its config, "
+                "but --mamba-ssm-cache-dtype='%s' was passed. "
+                "Using the user-specified value.",
+                mamba_ssm_dtype,
+                cache_config.mamba_ssm_cache_dtype,
+            )
+
+        # Text-only Qwen3.8 models use one-dimensional positions. Remove the
+        # M-RoPE fields inherited from the multimodal configuration.
+        rope_parameters = getattr(hf_text_config, "rope_parameters", None)
+        if rope_parameters is not None and isinstance(rope_parameters, dict):
+            rope_parameters.pop("mrope_section", None)
+            rope_parameters.pop("mrope_interleaved", None)
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
     """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
@@ -1041,6 +1075,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_8ForCausalLM": Qwen3_8ForCausalLMConfig,
+    "Qwen3_8MoeForCausalLM": Qwen3_8ForCausalLMConfig,
     "Qwen4ExpForCausalLM": Qwen4ExpForCausalLMConfig,
     "Qwen4ExpForConditionalGeneration": (Qwen4ExpForConditionalGenerationConfig),
     "Qwen4ExpMTP": Qwen4ExpMTPConfig,
