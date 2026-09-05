@@ -53,11 +53,7 @@ def select_w4a8_moe_backend(
 ) -> tuple[W4A8MoeBackend, type["CutlassExpertsW4A8Fp8"]]:
     backend = W4A8MoeBackend.CUTLASS
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     last_reason: str | None = None
     for kernel_cls in backend_to_kernel_cls(backend):

@@ -93,6 +93,33 @@ class FusedMoEActivationFormat(Enum):
     The batched experts format (num experts, max tokens per expert, hidden dim)
     """
     BatchedExperts = ("batched_experts",)
+    """
+    Like 'Standard' format but potentially padded in the expert (E) dimension.
+    """
+    PaddedStandard = ("padded_standard",)  # E-padded (indexed?)
+
+    def is_superset(self, pf_format: "FusedMoEActivationFormat") -> bool:
+        """Whether this (experts) format is a superset of ``pf_format``, i.e.
+        an experts kernel declaring ``self`` can consume activations produced
+        by a prepare/finalize step in ``pf_format``.
+
+        The relation is directional: ``self`` is the experts format and
+        ``pf_format`` is the prepare/finalize format. ``PaddedStandard`` is a
+        superset of ``Standard`` (a padding-aware kernel treats unpadded input
+        as the zero-padding case), but not vice versa. All other formats are
+        only supersets of themselves.
+        """
+        if self == pf_format:
+            return True
+        return (
+            self == FusedMoEActivationFormat.PaddedStandard
+            and pf_format == FusedMoEActivationFormat.Standard
+        )
+
+    @property
+    def is_batched(self) -> bool:
+        """Whether this is the disjoint ``BatchedExperts`` format."""
+        return self == FusedMoEActivationFormat.BatchedExperts
 
 
 @dataclass
@@ -496,16 +523,15 @@ class FusedMoEExperts(ABC):
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() == FusedMoEActivationFormat.Standard and (
+        is_batched = self.activation_format().is_batched
+        if not is_batched and (
             max_num_tokens is not None or num_dispatchers is not None
         ):
             raise ValueError(
                 "max_num_tokens and num_dispatchers should only be set for "
                 "BatchedExperts activation format."
             )
-        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is None or num_dispatchers is None
-        ):
+        elif is_batched and (max_num_tokens is None or num_dispatchers is None):
             raise ValueError(
                 "max_num_tokens and num_dispatchers must be set for "
                 "BatchedExperts activation format."
@@ -541,8 +567,9 @@ class FusedMoEExperts(ABC):
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
         """
-        A property which is a tuple of the input and output activation formats
-        for the 'apply' method.
+        The activation format this experts kernel consumes. A kernel declaring
+        ``PaddedStandard`` also accepts ``Standard`` input (see
+        ``FusedMoEActivationFormat.is_superset``).
         """
         raise NotImplementedError
 
@@ -591,7 +618,7 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"{moe_config.hidden_dim} hidden dim is not supported"
             )
-        elif activation_format != cls.activation_format():
+        elif not cls.activation_format().is_superset(activation_format):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
@@ -1668,9 +1695,8 @@ class FusedMoEKernel:
         and self.fused_experts here.
         """
         self.prepare_finalize.post_init_setup(self.impl.fused_experts)
-        assert (
+        assert self.fused_experts.activation_format().is_superset(
             self.prepare_finalize.activation_format
-            == self.fused_experts.activation_format()
         )
 
     def output_is_reduced(self) -> bool:

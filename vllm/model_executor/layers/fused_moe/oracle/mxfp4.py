@@ -248,7 +248,7 @@ def backend_to_kernel_cls(
             AiterW4A16ExpertsMonolithic,
         )
 
-        return [AiterW4A16ExpertsMonolithic]
+        return [AiterW4A16ExpertsMonolithic]  # type: ignore
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -537,17 +537,13 @@ def select_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(
             runner_backend, requested_activation_key
         )
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -660,18 +656,14 @@ def select_deepseek_v4_mxfp4_moe_backend(
     Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(runner_backend, None)
-        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        if activation_format.is_batched:
             requested_backends = [
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
@@ -1974,7 +1966,7 @@ def make_mxfp4_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(

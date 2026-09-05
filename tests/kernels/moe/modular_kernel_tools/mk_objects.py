@@ -84,6 +84,7 @@ MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular]
 MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
+padded_standard_format = mk.FusedMoEActivationFormat.PaddedStandard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
 common_float_types: list[torch.dtype | str] = [
     torch.float8_e4m3fn,
@@ -225,7 +226,7 @@ if has_deep_ep_v2() and current_platform.has_device_capability(100):
 
     register_prepare_and_finalize(
         DeepEPV2PrepareAndFinalize,
-        standard_format,
+        padded_standard_format,
         common_float_types,
         blocked_quantization_support=True,
         backend="deepep_v2",
@@ -471,10 +472,7 @@ def make_fused_experts(
     num_dispatchers: int,
     N: int,
 ) -> mk.FusedMoEExpertsModular:
-    if (
-        fused_experts_type.activation_format()
-        == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
+    if fused_experts_type.activation_format().is_batched:
         kwargs = {
             "moe_config": moe,
             "quant_config": quant_config,

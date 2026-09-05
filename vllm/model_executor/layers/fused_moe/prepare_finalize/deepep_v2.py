@@ -149,7 +149,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        return mk.FusedMoEActivationFormat.PaddedStandard
 
     def max_num_tokens_per_rank(self) -> int | None:
         return None

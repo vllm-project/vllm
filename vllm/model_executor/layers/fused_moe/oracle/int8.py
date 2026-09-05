@@ -76,7 +76,7 @@ def backend_to_kernel_cls(
             ZenCPUExpertsInt8,
         )
 
-        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]
+        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]  # type: ignore
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -107,11 +107,7 @@ def select_int8_moe_backend(
 
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     def _make_log_backend(backend: Int8MoeBackend) -> str:
         available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
@@ -299,7 +295,7 @@ def make_int8_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts = experts_cls(
