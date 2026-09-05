@@ -175,18 +175,33 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
+    q_dtype_w: torch.dtype | None, csv_path: str, match_device: bool = False
 ) -> set[tuple[int, int, int]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        if q_dtype_w is not None and "q_dtype_w" in df.columns:
+            df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        if match_device:
+            from aiter.jit.utils.chip_info import get_cu_num
+            from aiter.jit.utils.chip_info import get_gfx_runtime as get_gfx
+
+            if "gfx" in df.columns:
+                df = df[df["gfx"] == get_gfx()]
+            if "cu_num" in df.columns:
+                df = df[df["cu_num"].astype(int) == int(get_cu_num())]
         return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
     except Exception:
         return set()
 
 
-def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+def _check_kernel_tuned(
+    N: int,
+    K: int,
+    q_dtype_w: torch.dtype | None,
+    csv_path: str,
+    match_device: bool = False,
+) -> bool:
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path, match_device)
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -794,10 +809,14 @@ def _rocm_aiter_gemm_a8w8_blockscale_bpreshuffle_impl(
     As: torch.Tensor,
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
+    scale_transposed: bool = False,
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale_bpreshuffle
 
-    # B preshuffled (shuffle_weight (16,16)); As column-major group scale.
+    # B preshuffled (shuffle_weight (16,16))
+    if not scale_transposed:
+        m, g = As.shape
+        As = As.transpose(0, 1).contiguous().view(m, g)
     return gemm_a8w8_blockscale_bpreshuffle(A, B, As, Bs, dtype=output_dtype)
 
 
@@ -807,6 +826,7 @@ def _rocm_aiter_gemm_a8w8_blockscale_bpreshuffle_fake(
     As: torch.Tensor,
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
+    scale_transposed: bool = False,
 ) -> torch.Tensor:
     m = A.shape[0]
     n = B.shape[0]
@@ -948,6 +968,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     weight: torch.Tensor,
     epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused AllReduce + RMSNorm + per-group FP8 quant.
 
@@ -992,7 +1013,10 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         use_1stage=use_1stage,
     )
     assert result is not None
-    return result[0], result[1], result[2]
+    out, res_out, scale = result[0], result[1], result[2]
+    if transpose_scale:
+        scale = scale.transpose(0, 1).contiguous().view(scale.shape)
+    return out, res_out, scale
 
 
 def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
@@ -1001,6 +1025,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
     weight: torch.Tensor,
     epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hidden_dim = input_.shape[-1]
     num_groups = hidden_dim // group_size
@@ -1152,6 +1177,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
@@ -1165,6 +1191,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=residual,
+        transpose_scale=transpose_scale,
     )
     return (
         x_quant,
@@ -1179,6 +1206,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -1194,6 +1222,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
@@ -1207,6 +1236,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=None,
+        transpose_scale=transpose_scale,
     )
     return (x_quant, x_quant_scales)
 
@@ -1216,6 +1246,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -1304,20 +1335,25 @@ def _rocm_aiter_group_fp8_quant_fake(
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
-    return act_mul_and_fp8_group_quant(
+    out, scale = act_mul_and_fp8_group_quant(
         x,
         activation="silu",
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
     )
+    if transpose_scale:
+        scale = scale.transpose(0, 1).contiguous().view(scale.shape)
+    return out, scale
 
 
 def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     assert N % 2 == 0
@@ -2531,9 +2567,10 @@ class rocm_aiter_ops:
         As: torch.Tensor,
         Bs: torch.Tensor,
         output_dtype: torch.dtype = torch.float16,
+        scale_transposed: bool = False,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_bpreshuffle(
-            A, B, As, Bs, output_dtype
+            A, B, As, Bs, output_dtype, scale_transposed
         )
 
     @staticmethod
@@ -3104,6 +3141,18 @@ class rocm_aiter_ops:
         ]
 
     @staticmethod
+    def is_bpreshuffle_blockscale_gemm_tuned(n: int, k: int) -> bool:
+        """Whether AITER's merged a8w8_blockscale_bpreshuffle tuned table has
+        rows for this (N, K) on the current GPU. Mirrors is_triton_gemm_w8a8_tuned:
+        untuned shapes would fall to the C++ default-heuristic instance, which can
+        lose to the Triton path at small M, so the b-preshuffle backend is only
+        selected for covered shapes."""
+        from aiter import AITER_CONFIGS
+
+        csv_path = AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        return _check_kernel_tuned(n, k, None, csv_path, match_device=True)
+
+    @staticmethod
     def is_shuffled_per_token_w8a8_gemm_tuned(
         N: int, K: int, q_dtype_w: torch.dtype
     ) -> bool:
@@ -3128,6 +3177,22 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_weight
 
         return shuffle_weight(tensor, layout=layout)
+
+    @staticmethod
+    def unshuffle_weight(
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+    ) -> torch.Tensor:
+        # May need the row-major weight back after a kernel preshuffled it in-place
+        assert tensor.ndim == 2, "unshuffle_weight expects a 2-D [N, K] weight"
+        n, k = tensor.shape
+        in_lane, ik = layout
+        bk = ik * 2
+        k_lane = 16 // tensor.element_size()
+        assert n % in_lane == 0 and k % bk == 0, f"cannot unshuffle shape {tuple(tensor.shape)}"
+        # shuffle_weight: view(N//BN, BN, K//BK, BK//KL, KL).permute(0, 2, 3, 1, 4)
+        x = tensor.contiguous().view(n // in_lane, k // bk, bk // k_lane, in_lane, k_lane)
+        x = x.permute(0, 3, 1, 2, 4).contiguous()
+        return x.view(n, k)
 
     @staticmethod
     def shuffle_weight_a16w4(

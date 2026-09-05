@@ -521,6 +521,14 @@ def get_and_maybe_dequant_weights(
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
+    # A ROCm AITER b-preshuffle blockscale kernel may have permuted the weight;
+    # need to unshuffle before dequantizing
+    kernel = getattr(getattr(layer, "quant_method", None), "fp8_linear", None)
+    if getattr(kernel, "bpre_shuffled", False):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        weight = rocm_aiter_ops.unshuffle_weight(weight)
+
     # Unquantized layer: just return base weights
     if layer.quant_method is None or isinstance(
         layer.quant_method, UnquantizedLinearMethod

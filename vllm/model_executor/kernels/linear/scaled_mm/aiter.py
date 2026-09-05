@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -384,6 +386,18 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k) or _on_gfx1250
         )
 
+        bpre_requested = (
+            not current_platform.is_fp8_fnuz()
+            and not _on_gfx1250
+            and os.environ.get("VLLM_ROCM_USE_AITER_BPRESHUFFLE_BLOCKSCALE", "0")
+            == "1"
+        )
+        self.use_bpreshuffle = (
+            bpre_requested and rocm_aiter_ops.is_bpreshuffle_blockscale_gemm_tuned(n, k)
+        )
+        # Set per-layer in process_weights_after_loading
+        self.bpre_shuffled = False
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
@@ -394,6 +408,20 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             ws, attr = params.weight_scale, params.WEIGHT_SCALE
         if ws is not None and ws.dtype == torch.float8_e8m0fnu:
             replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        if self.use_bpreshuffle:
+            w = params.weight
+            replace_parameter(
+                layer,
+                FP8BlockParams.WEIGHT,
+                torch.nn.Parameter(
+                    rocm_aiter_ops.shuffle_weight(w.data.contiguous()),
+                    requires_grad=False,
+                ),
+            )
+            self.bpre_shuffled = True
+            # Ensure scaler producer ops emit the column-major layout
+            self.quant_fp8.transpose_scale = True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -449,6 +477,18 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+        if self.bpre_shuffled:
+            # transpose_scale: the producer already emitted As in the kernel's
+            # column-major layout (the dtype conversion above preserves element
+            # order); otherwise the op impl transposes.
+            return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                A,
+                B,
+                As,
+                Bs,
+                output_dtype=out_dtype,
+                scale_transposed=self.quant_fp8.transpose_scale,
+            )
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:

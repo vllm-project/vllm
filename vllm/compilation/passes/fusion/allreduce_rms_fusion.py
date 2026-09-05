@@ -1317,11 +1317,13 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
         dtype: torch.dtype,
         device: str | None,
         group_size: int = 128,
+        transpose_scale: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.dtype = dtype
         self.group_size = group_size
+        self.transpose_scale = transpose_scale
         self.FUSED_AR_RMS_QUANT_OP = (
             rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_op()
         )
@@ -1333,6 +1335,7 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                 symmetric=True,
             ),
             match_rocm_aiter=True,
+            transpose_scale=transpose_scale,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -1364,6 +1367,7 @@ class AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
                 weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 group_size=self.group_size,
+                transpose_scale=self.transpose_scale,
             )
             # quant_out, scale_out (residual is unused on the no-add path,
             # mirroring how AiterAllreduceFusedRMSNormPattern drops the
@@ -1389,11 +1393,13 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
         dtype: torch.dtype,
         device: str | None,
         group_size: int = 128,
+        transpose_scale: bool = False,
     ) -> None:
         super().__init__(dtype, device)
         self.epsilon = epsilon
         self.dtype = dtype
         self.group_size = group_size
+        self.transpose_scale = transpose_scale
         self.FUSED_AR_RMS_QUANT_OP = (
             rocm_aiter_ops.get_fused_allreduce_rmsnorm_quant_per_group_op()
         )
@@ -1405,6 +1411,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
                 symmetric=True,
             ),
             match_rocm_aiter=True,
+            transpose_scale=transpose_scale,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -1444,6 +1451,7 @@ class AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
                 weight=weight.to(input.dtype),
                 epsilon=self.epsilon,
                 group_size=self.group_size,
+                transpose_scale=self.transpose_scale,
             )
             # quant_out, scale_out, residual_out
             return result[0], result[2], result[1]
@@ -1654,6 +1662,24 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                         epsilon,
                         self.model_dtype,
                         self.device,
+                    )
+                )
+                # Transposed-scale variants for layers feeding the CK
+                # b-preshuffle blockscale GEMM (quant with transpose_scale=True).
+                self.register(
+                    AiterAllreduceFusedRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        transpose_scale=True,
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedAddRMSNormGroupQuantFP8Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        transpose_scale=True,
                     )
                 )
 
