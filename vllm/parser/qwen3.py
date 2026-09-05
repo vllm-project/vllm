@@ -54,8 +54,10 @@ PARAM_END = "</parameter>"
 # (the closing tag's) into a key; the partial converter then streamed that key
 # while the final conversion did not produce it, the prefix invariant broke, and
 # the client was left holding an unterminated JSON object
-# (vllm-project/vllm#55495).
-_PARAM_NAME = r"([^>\s<]*)"
+# (vllm-project/vllm#55495). The name is also required to be non-empty, so
+# ``<parameter=>value</parameter>`` is dropped rather than emitted as ``{"": ...}``;
+# both regexes share the group so the partial and the final conversion agree.
+_PARAM_NAME = r"([^>\s<]+)"
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*" + _PARAM_NAME + r">"
     r"(.*?)"
@@ -63,7 +65,7 @@ _PARAM_RE = re.compile(
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
-    r"<\s*parameter\s*=\s*([^>\s<]+)>(.*)$",
+    r"<\s*parameter\s*=\s*" + _PARAM_NAME + r">(.*)$",
     re.DOTALL,
 )
 

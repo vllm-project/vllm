@@ -1182,6 +1182,7 @@ class TestMalformedParameterElements:
 
     Measured on vLLM 0.28.0 with Qwen3.5 (vllm-project/vllm#55495): elements
     such as ``<parameter=\n...\n</parameter>`` (name missing),
+    ``<parameter=>...</parameter>`` (name empty),
     ``<parameter=ids: [...]\n</parameter>`` (``>`` missing) and
     ``<parameter=note=\n</parameter>`` (empty value, stray ``=``) made the
     partial converter emit everything up to the closing tag's ``>`` as a key.
@@ -1213,6 +1214,13 @@ class TestMalformedParameterElements:
             "<parameter=agent>handyman-01</parameter>\n"
             "<parameter=id>hm01-cla-callee-pin-bump-20260905</parameter>\n"
             "<parameter=note=\n</parameter>\n"
+            "</function>\n"
+        ),
+        # name empty but the element otherwise well formed
+        (
+            "<function=exec_command>\n"
+            "<parameter=cmd>ls</parameter>\n"
+            "<parameter=>stray value</parameter>\n"
             "</function>\n"
         ),
     ]
@@ -1250,6 +1258,15 @@ class TestMalformedParameterElements:
         final = json.loads(result.tool_calls[0].function.arguments)
 
         assert streamed == final
+
+    def test_empty_parameter_name_is_dropped(self, parser, mock_request):
+        body = self.MALFORMED_BODIES[3]
+
+        result = parser.extract_tool_calls(
+            "<tool_call>\n" + body + "</tool_call>", mock_request
+        )
+
+        assert json.loads(result.tool_calls[0].function.arguments) == {"cmd": "ls"}
 
     def test_well_formed_parameters_still_parse(self, parser, mock_request):
         body = (

@@ -1008,12 +1008,15 @@ class ParserEngine(Parser):
                 # The streamed prefix cannot be retracted, so the client is
                 # left with whatever was already sent — which is not valid
                 # JSON when this happens. Say so instead of failing silently.
+                # Lengths only: the arguments are user data and may hold
+                # secrets, so they must not reach the log.
                 logger.warning(
                     "arg converter: final arguments do not extend the "
                     "streamed prefix; the client keeps a truncated string "
-                    "(streamed=%r final=%r)",
-                    prev[:120],
-                    final_json[:120],
+                    "(tool=%s streamed=%d chars, final=%d chars)",
+                    slot.name,
+                    len(prev),
+                    len(final_json),
                 )
                 return None
             diff = final_json[len(prev) :]
