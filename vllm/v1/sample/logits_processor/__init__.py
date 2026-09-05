@@ -27,6 +27,7 @@ from vllm.v1.sample.logits_processor.interface import (
     MoveDirectionality,
 )
 from vllm.v1.sample.logits_processor.state import BatchUpdateBuilder, LogitsProcessors
+from vllm.v1.sample.logits_processor.whisper import WhisperTimestampLogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -50,6 +51,7 @@ LOGITSPROCS_GROUP = "vllm.logits_processors"
 BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
+    WhisperTimestampLogitsProcessor,
     MinPLogitsProcessor,
 ]
 
@@ -352,6 +354,7 @@ __all__ = [
     "LogitBiasLogitsProcessor",
     "MinPLogitsProcessor",
     "MinTokensLogitsProcessor",
+    "WhisperTimestampLogitsProcessor",
     "BatchUpdate",
     "BatchUpdateBuilder",
     "MoveDirectionality",

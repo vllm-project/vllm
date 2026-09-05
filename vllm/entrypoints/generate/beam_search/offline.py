@@ -121,6 +121,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             temperature=temperature,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
+            extra_args=params.extra_args,
         )
         instances: list[BeamSearchInstance] = []
 
