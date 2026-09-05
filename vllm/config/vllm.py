@@ -615,10 +615,13 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
-        if speculative_config.use_dflash():
+        if speculative_config.use_dflash() or speculative_config.method == "orthrus":
             # DFlash requires an extra lookahead slot since it uses in-fill-style
             # decoding instead of standard next-token sampling, so it has a query
             # for the last sampled token plus queries for each draft token.
+            # Orthrus' diffusion block is built the same way (block position 0
+            # holds the last sampled token, followed by num_speculative_tokens
+            # mask positions), so it needs the same margin.
             return self.num_speculative_tokens + 1
         if speculative_config.use_eagle() or speculative_config.uses_draft_model():
             # DSpark (covered by use_eagle) drafts a block of num_speculative_tokens

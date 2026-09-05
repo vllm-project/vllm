@@ -209,6 +209,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.orthrus import OrthrusProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -642,6 +643,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | OrthrusProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -681,6 +683,11 @@ class GPUModelRunner(
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "orthrus":
+                # WIP: diffusion-mode drafting is implemented but not yet
+                # validated end-to-end on GPU. See
+                # vllm/v1/spec_decode/orthrus.py for current status.
+                self.drafter = OrthrusProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -4737,6 +4744,7 @@ class GPUModelRunner(
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
+                or spec_config.method == "orthrus"
             )
             use_gpu_toks = (
                 drafter_runs_model_forward
@@ -4751,7 +4759,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | OrthrusProposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -5250,10 +5259,15 @@ class GPUModelRunner(
             spec_config.use_eagle()
             or spec_config.use_dflash()
             or spec_config.uses_draft_model()
+            or spec_config.method == "orthrus"
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | OrthrusProposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -6263,6 +6277,7 @@ class GPUModelRunner(
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
+                or self.speculative_config.method == "orthrus"
             ):
                 assert isinstance(
                     self.drafter,
@@ -6270,7 +6285,8 @@ class GPUModelRunner(
                     | DFlashProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
-                    | Gemma4Proposer,
+                    | Gemma4Proposer
+                    | OrthrusProposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -7242,10 +7258,15 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
+            or self.speculative_config.method == "orthrus"
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer
+                | OrthrusProposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -7297,6 +7318,7 @@ class GPUModelRunner(
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
+            or self.speculative_config.method == "orthrus"
         ):
             assert isinstance(
                 self.drafter,
@@ -7304,7 +7326,8 @@ class GPUModelRunner(
                 | DFlashProposer
                 | DraftModelProposer
                 | ExtractHiddenStatesProposer
-                | Gemma4Proposer,
+                | Gemma4Proposer
+                | OrthrusProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
