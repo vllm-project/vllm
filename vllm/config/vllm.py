@@ -1654,6 +1654,22 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        if self.parallel_config.data_parallel_placement == "pipeline-stage-first":
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "Pipeline-stage-first data parallel placement requires "
+                    "Model Runner V2."
+                )
+            if self.model_config is None or not self.model_config.is_moe:
+                raise ValueError(
+                    "Pipeline-stage-first data parallel placement requires a MoE model."
+                )
+            if not self.parallel_config.enable_expert_parallel:
+                raise ValueError(
+                    "Pipeline-stage-first data parallel placement requires "
+                    "expert parallelism."
+                )
+
         self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()

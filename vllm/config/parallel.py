@@ -36,6 +36,7 @@ _NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+DataParallelPlacement = Literal["replica-first", "pipeline-stage-first"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
@@ -133,6 +134,9 @@ class ParallelConfig:
     """Number of local data parallel groups. A value of 0 is a sentinel used by
     the engine-args layer to signal that data parallelism was specified
     externally (see `ParallelConfig.__post_init__`)."""
+    data_parallel_placement: DataParallelPlacement = "replica-first"
+    """Physical placement of data-parallel replicas across nodes.
+    "pipeline-stage-first" co-locates the same pipeline stage across replicas."""
     data_parallel_rank: int = Field(default=0, ge=0)
     """Rank of the data parallel group. The runtime check at
     ``__post_init__`` further bounds this by ``data_parallel_size``."""
@@ -499,6 +503,43 @@ class ParallelConfig:
                 f"must be <= data_parallel_size ({self.data_parallel_size})"
             )
 
+        if self.data_parallel_placement == "pipeline-stage-first":
+            if self.data_parallel_size <= 1:
+                raise ValueError(
+                    "Pipeline-stage-first placement requires data_parallel_size > 1."
+                )
+            if self.pipeline_parallel_size != self.nnodes:
+                raise ValueError(
+                    "Pipeline-stage-first placement requires "
+                    "pipeline_parallel_size == nnodes, "
+                    f"but got PP={self.pipeline_parallel_size} and "
+                    f"nnodes={self.nnodes}."
+                )
+            if self.prefill_context_parallel_size != 1:
+                raise ValueError("Pipeline-stage-first placement does not support PCP.")
+            if self.data_parallel_size_local != self.data_parallel_size:
+                raise ValueError(
+                    "Pipeline-stage-first placement requires every node to host "
+                    "all DP ranks."
+                )
+            if self.data_parallel_backend != "mp":
+                raise ValueError(
+                    "Pipeline-stage-first placement requires the MP DP backend."
+                )
+            if self.distributed_executor_backend not in (None, "mp"):
+                raise ValueError(
+                    "Pipeline-stage-first placement requires the MP executor backend."
+                )
+            if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "Pipeline-stage-first placement supports internal DP load "
+                    "balancing only."
+                )
+            if self.enable_elastic_ep:
+                raise ValueError(
+                    "Pipeline-stage-first placement does not support elastic EP."
+                )
+
         if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
@@ -819,6 +860,7 @@ class ParallelConfig:
             "data_parallel_rank",
             "data_parallel_rank_local",
             "data_parallel_size_local",
+            "data_parallel_placement",
             "data_parallel_index",
             "data_parallel_backend",
             "data_parallel_external_lb",

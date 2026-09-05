@@ -907,6 +907,23 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+def test_data_parallel_placement_defaults_to_replica_first():
+    assert ParallelConfig().data_parallel_placement == "replica-first"
+
+
+def test_pipeline_stage_first_data_parallel_placement():
+    parallel_config = ParallelConfig(
+        pipeline_parallel_size=2,
+        data_parallel_size=2,
+        data_parallel_size_local=2,
+        data_parallel_placement="pipeline-stage-first",
+        distributed_executor_backend="mp",
+        nnodes=2,
+    )
+
+    assert parallel_config.data_parallel_placement == "pipeline-stage-first"
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
