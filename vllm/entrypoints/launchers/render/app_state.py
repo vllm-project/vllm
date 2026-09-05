@@ -47,6 +47,16 @@ async def init_render_app_state(
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
 
+    # The config-resolved reasoning parser carries both the CLI flag (merged
+    # in the entrypoint via `create_structured_outputs_config`) and any
+    # model-specific default applied by `verify_and_update_config`
+    # (e.g. "openai_gptoss" for gpt_oss), matching the main API server.
+    # Keep `args.reasoning_parser` as the first source so callers that build
+    # a VllmConfig without that merge still honor an explicit flag.
+    reasoning_parser = (
+        args.reasoning_parser or vllm_config.structured_outputs_config.reasoning_parser
+    )
+
     state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,
         renderer=renderer,
@@ -57,7 +67,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -73,7 +83,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
