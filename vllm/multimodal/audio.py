@@ -3,6 +3,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -25,6 +26,11 @@ try:
     import soxr as soxr
 except ImportError:
     soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
+
+try:
+    import torchaudio
+except ImportError:
+    torchaudio = PlaceholderModule("torchaudio")  # type: ignore[assignment]
 
 
 # ============================================================
@@ -274,14 +280,68 @@ def resample_audio_soxr(
     return soxr.resample(audio, orig_sr_int, target_sr_int)
 
 
+@lru_cache(maxsize=32)
+def _get_torchaudio_resampler(
+    orig_sr: int, target_sr: int
+) -> "torchaudio.transforms.Resample":
+    # `torchaudio.transforms.Resample` precomputes its kernel for a fixed
+    # (orig_sr, target_sr) pair; cache instances so repeated requests at a
+    # common input rate skip the kernel rebuild.
+    return torchaudio.transforms.Resample(orig_sr, target_sr)
+
+
+def resample_audio_torchaudio(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    """Resample audio using torchaudio's bandlimited sinc interpolation.
+
+    Unlike the PyAV resampler, this handles any input length without padding
+    and applies the kernel over the trailing axis, so 2D ``(channels,
+    samples)`` input needs no per-channel loop.
+
+    Args:
+        audio: Input audio. Can be:
+            - 1D array ``(samples,)``: mono audio
+            - 2D array ``(channels, samples)``: stereo audio
+        orig_sr: Original sample rate in Hz.
+        target_sr: Target sample rate in Hz.
+
+    Returns:
+        Resampled audio with the same shape as the input (1D → 1D, 2D → 2D).
+    """
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    # The kernel is float32; cast the input to match (same coercion as the
+    # PyAV path).
+    tensor = torch.as_tensor(audio, dtype=torch.float32)
+    resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
+    return resampler(tensor).numpy()
+
+
 class AudioResampler:
     """Resample audio data to a target sample rate."""
+
+    _METHODS = ("pyav", "scipy", "soxr", "torchaudio")
 
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "torchaudio",
     ):
+        # Eager validation so a bad method fails at construction rather than
+        # on the first audio request.
+        if method not in self._METHODS:
+            raise ValueError(
+                f"Invalid resampling method: {method!r}. "
+                f"Supported methods: {list(self._METHODS)}."
+            )
         self.target_sr = target_sr
         self.method = method
 
@@ -310,10 +370,14 @@ class AudioResampler:
             )
         elif self.method == "soxr":
             return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
+        elif self.method == "torchaudio":
+            return resample_audio_torchaudio(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav', 'scipy', and 'soxr'."
+                f"Supported methods are {list(self._METHODS)}."
             )
 
 
