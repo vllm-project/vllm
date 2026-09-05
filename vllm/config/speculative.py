@@ -378,7 +378,7 @@ class SpeculativeConfig:
     enforce_eager: bool | None = None
     """Override the default enforce_eager from model_config"""
     # General speculative decoding control
-    num_speculative_tokens: int = Field(default=None, gt=0)  # type: ignore[assignment]
+    num_speculative_tokens: int | None = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
@@ -1080,6 +1080,7 @@ class SpeculativeConfig:
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
     def __post_init__(self):
+        """Initialize and validate the speculative configuration."""
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -1105,7 +1106,9 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.model is None and self.num_speculative_tokens is not None:
+        if self.model is None and (
+            self.num_speculative_tokens is not None or self.method in ("mtp", "dspark")
+        ):
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1145,7 +1148,7 @@ class SpeculativeConfig:
                         "method='custom_class' requires 'model' to contain the "
                         "custom proposer module path (e.g., 'my_module.MyProposer')."
                     )
-            else:
+            elif self.num_speculative_tokens is not None:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
@@ -1322,16 +1325,6 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        not in ("step3p5_mtp", "inkling_mtp")
-                    ):
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
                 elif self.method == "draft_model":
                     pass
                 else:
@@ -1407,11 +1400,25 @@ class SpeculativeConfig:
                         and getattr(hf, "target_layer_ids", None) is not None
                     ):
                         hf.dspark_target_layer_ids = hf.target_layer_ids
+                    block_size = getattr(hf, "block_size", None)
+                    if block_size is None:
+                        block_size = getattr(hf, "dspark_block_size", None)
                     if (
                         getattr(hf, "n_predict", None) is None
-                        and getattr(hf, "block_size", None) is not None
+                        and block_size is not None
                     ):
-                        hf.n_predict = hf.block_size
+                        hf.n_predict = block_size
+
+                if self.method == "dspark":
+                    hf = self.draft_model_config.hf_config
+                    if getattr(hf, "n_predict", None) is None:
+                        block_size = _get_qwen3_dspark_value(hf, "block_size")
+                        if block_size is None:
+                            block_size = _get_qwen3_dspark_value(
+                                hf, "dspark_block_size"
+                            )
+                        if block_size is not None:
+                            hf.n_predict = block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
@@ -1444,6 +1451,18 @@ class SpeculativeConfig:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
+                    )
+
+                if (
+                    self.method == "mtp"
+                    and self.num_speculative_tokens > 1
+                    and getattr(self.draft_model_config.hf_config, "model_type", None)
+                    not in ("step3p5_mtp", "inkling_mtp")
+                ):
+                    logger.warning(
+                        "Enabling num_speculative_tokens > 1 will run "
+                        "multiple times of forward on same MTP layer"
+                        ",which may result in lower acceptance rate"
                     )
 
                 if self.dspark_draft_topk is not None and self.method != "dspark":
