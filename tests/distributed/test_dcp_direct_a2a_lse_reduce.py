@@ -12,7 +12,7 @@ import torch.distributed as dist
 
 import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -100,7 +100,7 @@ def _assert_q_gather_matches_reference(
 
 
 def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
-    port = str(get_open_port())
+    distributed_init_method = get_file_store_init_method()
     processes: list[mp.Process] = []
     for rank in range(world_size):
         env = {
@@ -108,8 +108,7 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
             "LOCAL_RANK": str(rank),
             "WORLD_SIZE": str(world_size),
             "LOCAL_WORLD_SIZE": str(world_size),
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": port,
+            "DISTRIBUTED_INIT_METHOD": distributed_init_method,
             **extra_env,
         }
         process = mp.Process(target=fn, args=(env,))
@@ -572,9 +571,15 @@ def test_sparse_mla_workspace_preserves_non_dcp_size():
 def _distributed_direct_q_gather_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(
+        backend="nccl",
+        init_method=env["DISTRIBUTED_INIT_METHOD"],
+        rank=local_rank,
+        world_size=world_size,
+    )
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -739,9 +744,15 @@ def test_distributed_direct_q_gather_cuda_graph_replay(world_size: int):
 def _distributed_direct_kv_gather_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(
+        backend="nccl",
+        init_method=env["DISTRIBUTED_INIT_METHOD"],
+        rank=local_rank,
+        world_size=world_size,
+    )
     try:
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -815,9 +826,15 @@ def test_distributed_direct_kv_gather_matches_reference(world_size: int):
 def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(
+        backend="nccl",
+        init_method=env["DISTRIBUTED_INIT_METHOD"],
+        rank=local_rank,
+        world_size=world_size,
+    )
     try:
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
