@@ -27,7 +27,7 @@
 # cache mounts (ccache, cargo registry) aren't exported by `--cache-to
 # type=registry`, so they don't survive a build landing on a different/fresh
 # builder. sccache's cache lives in S3 instead, so it does.
-FROM ubuntu:22.04 AS base
+FROM ubuntu:25.04 AS base
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -66,9 +66,15 @@ ENV MAX_JOBS=${max_jobs}
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends sudo ccache wget zlib1g-dev \
-    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
-    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
+    software-properties-common libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
+        { echo "Attempt $i failed, retrying toolchain PPA..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends gcc-15 g++-15 \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 10 --slave /usr/bin/g++ g++ /usr/bin/g++-15 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ARG TARGETARCH
@@ -83,7 +89,7 @@ ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # Compiler and linker environment
-ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
+ENV CC=/usr/bin/gcc-15 CXX=/usr/bin/g++-15
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -159,7 +165,7 @@ RUN apt-get update -y \
 WORKDIR /workspace
 
 COPY requirements/build/rust.txt requirements/build/rust.txt
-RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements/build/rust.txt
 
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
@@ -230,6 +236,7 @@ ENV VLLM_CPU_X86=${VLLM_CPU_X86}
 # Support for cross-compilation with ARM BF16 ISA: docker build --build-arg VLLM_CPU_ARM_BF16="true" ...
 ARG VLLM_CPU_ARM_BF16=0
 ENV VLLM_CPU_ARM_BF16=${VLLM_CPU_ARM_BF16}
+ARG ENABLE_AMX_FP8=1
 
 WORKDIR /vllm-workspace
 
@@ -297,6 +304,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         fi; \
         sccache --show-stats; \
     fi && \
+    CMAKE_ARGS="-DENABLE_AMX_FP8=${ENABLE_AMX_FP8}" \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
