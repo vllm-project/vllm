@@ -322,6 +322,29 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "expected_cudagraph_mode"),
+    [
+        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL),
+    ],
+)
+def test_empty_splitting_ops_disable_piecewise_cudagraphs(
+    cudagraph_mode: CUDAGraphMode,
+    expected_cudagraph_mode: CUDAGraphMode,
+):
+    config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=cudagraph_mode,
+        splitting_ops=[],
+    )
+
+    config.set_splitting_ops_for_v1(all2all_backend="")
+
+    assert config.splitting_ops == []
+    assert config.cudagraph_mode == expected_cudagraph_mode
+
+
 def test_moe_splitting_ops_deepep_ht_inductor_partition():
     # Inductor partition case: user-provided splitting_ops should be
     # preserved and MoE ops should be appended for DeepEP HT with dp>1.
