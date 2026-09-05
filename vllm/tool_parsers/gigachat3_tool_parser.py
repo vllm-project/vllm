@@ -142,7 +142,7 @@ class GigaChat3ToolParser(ToolParser):
                     content = delta_text
             if m_func:
                 self.tool_started = True
-            if content:
+            if content and not m_func:
                 return DeltaMessage(content=content)
         if not m_func:
             return None
@@ -166,19 +166,30 @@ class GigaChat3ToolParser(ToolParser):
             self.prev_tool_call_arr.append({})
         if not self.tool_name_sent:
             if not func_name:
+                if content:
+                    return DeltaMessage(content=content)
                 return None
             self.tool_name_sent = True
             self.tool_id = make_tool_call_id()
             self.prev_tool_call_arr[0]["name"] = func_name
+            delta_function_call = DeltaFunctionCall(name=func_name)
+            if cur_args is not None:
+                self.prev_tool_call_arr[0]["arguments_str"] = cur_args
+                try:
+                    args_dict = json.loads(cur_args, strict=False)
+                    self.prev_tool_call_arr[0]["arguments"] = args_dict
+                except json.JSONDecodeError:
+                    self.prev_tool_call_arr[0]["arguments"] = {}
+                self.streamed_args_for_tool.append(cur_args)
+                delta_function_call.arguments = cur_args
             return DeltaMessage(
+                content=content,
                 tool_calls=[
                     DeltaToolCall(
                         index=0,
                         id=self.tool_id,
                         type="function",
-                        function=DeltaFunctionCall(
-                            name=func_name,
-                        ).model_dump(exclude_none=True),
+                        function=delta_function_call.model_dump(exclude_none=True),
                     )
                 ],
             )

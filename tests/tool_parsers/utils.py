@@ -14,6 +14,14 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 
 
+class DummyTokenizer:
+    def get_vocab(self) -> dict[str, int]:
+        return {}
+
+    def tokenize(self, text: str) -> list[str]:
+        return []
+
+
 class StreamingToolReconstructor:
     def __init__(self, assert_one_tool_per_delta: bool = True):
         self.tool_calls: list[ToolCall] = []
