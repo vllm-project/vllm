@@ -9,6 +9,7 @@ import itertools
 
 import pytest
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from tests.kernels.utils import opcheck
 from tests.quantization.utils import is_quant_method_supported
@@ -311,6 +312,114 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, is_a_8bit, nk_factors):
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(marlin_q_w_1, marlin_q_w_2)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("repack_type", ["gptq", "awq"])
+@pytest.mark.parametrize(
+    ("size_k", "is_a_8bit", "should_reject"),
+    [
+        (16, True, True),
+        (48, True, True),
+        # The A16 contract is unchanged, so the 16-element boundary stays legal.
+        (16, False, False),
+    ],
+)
+def test_marlin_repack_k_alignment(repack_type, size_k, is_a_8bit, should_reject):
+    size_n, num_bits = 64, 4
+    pack_factor = 32 // num_bits
+    q_weight_unpacked = torch.randint(
+        0,
+        1 << num_bits,
+        (size_k, size_n),
+        dtype=torch.int,
+        device="cuda",
+    )
+    if repack_type == "gptq":
+        q_weight = gptq_pack(q_weight_unpacked, num_bits, size_k, size_n)
+        perm = torch.empty(0, dtype=torch.int, device="cuda")
+
+        def repack():
+            return ops.gptq_marlin_repack(
+                q_weight, perm, size_k, size_n, num_bits, is_a_8bit
+            )
+
+    else:
+        q_weight = awq_pack(q_weight_unpacked, num_bits, size_k, size_n)
+
+        def repack():
+            return ops.awq_marlin_repack(q_weight, size_k, size_n, num_bits, is_a_8bit)
+
+    if should_reject:
+        error_match = rf"size_k = {size_k}.*tile_k_size = 32"
+        with pytest.raises(RuntimeError, match=error_match):
+            repack()
+        with pytest.raises(AssertionError, match=error_match):
+            marlin_weights(
+                q_weight_unpacked,
+                size_k,
+                size_n,
+                num_bits,
+                get_weight_perm(num_bits, is_a_8bit),
+                is_a_8bit,
+            )
+        return
+
+    assert repack().shape == (size_k // 16, size_n * 16 // pack_factor)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("repack_type", ["gptq", "awq"])
+def test_marlin_repack_fake_rejects_misaligned_8bit_k(repack_type):
+    with FakeTensorMode():
+        if repack_type == "gptq":
+            q_weight = torch.empty((2, 64), dtype=torch.int, device="cuda")
+            perm = torch.empty(0, dtype=torch.int, device="cuda")
+
+            def repack():
+                return torch.ops._C.gptq_marlin_repack(q_weight, perm, 16, 64, 4, True)
+
+        else:
+            q_weight = torch.empty((16, 8), dtype=torch.int, device="cuda")
+
+            def repack():
+                return torch.ops._C.awq_marlin_repack(q_weight, 16, 64, 4, True)
+
+        with pytest.raises(RuntimeError, match="size_k = 16.*tile_k_size = 32"):
+            repack()
+
+
+# No GPU gate: the wrapper asserts before touching the device.
+@pytest.mark.parametrize("repack_type", ["gptq", "awq"])
+def test_marlin_moe_repack_rejects_misaligned_8bit_k(repack_type):
+    size_k, size_n, num_bits = 16, 64, 4
+    pack_factor = 32 // num_bits
+    perm = torch.empty((1, 0), dtype=torch.int)
+
+    if repack_type == "gptq":
+        q_weight = torch.empty((1, size_k // pack_factor, size_n), dtype=torch.int)
+
+        def repack():
+            ops.gptq_marlin_moe_repack(
+                q_weight, perm, size_k, size_n, num_bits, is_a_8bit=True
+            )
+
+    else:
+        q_weight = torch.empty((1, size_k, size_n // pack_factor), dtype=torch.int)
+
+        def repack():
+            ops.awq_marlin_moe_repack(
+                q_weight, perm, size_k, size_n, num_bits, is_a_8bit=True
+            )
+
+    with pytest.raises(AssertionError, match="size_k = 16.*tile_k_size = 32"):
+        repack()
 
 
 def marlin_generate_valid_test_cases():
