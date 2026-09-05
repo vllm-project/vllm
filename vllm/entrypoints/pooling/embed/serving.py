@@ -44,6 +44,7 @@ class ServingEmbedding(PoolingServing):
     """Embedding API supporting both OpenAI and Cohere formats."""
 
     request_id_prefix = "embd"
+    operation_name = "embeddings"
     io_processor: EmbedIOProcessor
 
     def __init__(self, *args, **kwargs):

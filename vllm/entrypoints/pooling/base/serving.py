@@ -36,6 +36,10 @@ from .io_processor import PoolingIOProcessor
 
 class PoolingBaseServing(ABC, BaseServing):
     request_id_prefix: ClassVar[str]
+    # OTel GenAI semantic convention operation name for this endpoint, e.g.
+    # "embeddings". Left as None for pooling endpoints without a well-known
+    # OTel operation name (classify, score, pooling).
+    operation_name: ClassVar[str | None] = None
 
     def __init__(
         self,
@@ -175,6 +179,7 @@ class PoolingBaseServing(ABC, BaseServing):
                 lora_request=engine_input["lora_requests"],
                 priority=engine_input["priorities"],
                 trace_headers=trace_headers,
+                operation_name=self.operation_name,
             )
 
             generators.append(generator)
