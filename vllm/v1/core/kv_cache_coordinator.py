@@ -83,6 +83,7 @@ class KVCacheCoordinator(ABC):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        verify_hash_content: bool = False,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
@@ -101,6 +102,7 @@ class KVCacheCoordinator(ABC):
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
+            verify_content_on_hit=verify_hash_content,
             metrics_collector=metrics_collector,
         )
 
@@ -441,6 +443,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        verify_hash_content: bool = False,
     ):
         super().__init__(
             kv_cache_config,
@@ -455,6 +458,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            verify_hash_content=verify_hash_content,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -493,6 +497,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        verify_hash_content: bool = False,
     ):
         super().__init__(
             kv_cache_config,
@@ -507,6 +512,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            verify_hash_content=verify_hash_content,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.dcp_world_size = self.single_type_managers[0].dcp_world_size
@@ -578,6 +584,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        verify_hash_content: bool = False,
     ):
         super().__init__(
             kv_cache_config,
@@ -592,6 +599,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            verify_hash_content=verify_hash_content,
         )
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where
@@ -958,6 +966,7 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_prefill_lookahead: int = 0,
+    verify_hash_content: bool = False,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -972,6 +981,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            verify_hash_content=verify_hash_content,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -987,6 +997,7 @@ def get_kv_cache_coordinator(
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            verify_hash_content=verify_hash_content,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -1000,5 +1011,6 @@ def get_kv_cache_coordinator(
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
+        verify_hash_content=verify_hash_content,
         num_prefill_lookahead=num_prefill_lookahead,
     )

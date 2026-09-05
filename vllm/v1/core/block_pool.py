@@ -29,6 +29,10 @@ from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
+# Compact fingerprint for verifying block token content on hash collision.
+# Stored per cached block when using non-cryptographic hash algorithms.
+BlockContentFingerprint = tuple[int, ...]
+
 
 class BlockHashToBlockMap:
     """
@@ -156,6 +160,9 @@ class BlockPool:
             where different KV cache groups have different block sizes, the
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
+        verify_content_on_hit: Whether to verify block content on cache
+            insertion to detect hash collisions. Enabled automatically when
+            using non-cryptographic hash algorithms (xxhash/xxhash_cbor).
         metrics_collector: Optional metrics collector for tracking block residency.
     """
 
@@ -165,6 +172,7 @@ class BlockPool:
         enable_caching: bool,
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
+        verify_content_on_hit: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -192,6 +200,11 @@ class BlockPool:
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
+
+        self.verify_content_on_hit = verify_content_on_hit
+        self._block_fingerprints: dict[
+            BlockHashWithGroupId, BlockContentFingerprint
+        ] = {}
 
         self.metrics_collector = metrics_collector
 
@@ -290,10 +303,18 @@ class BlockPool:
                 )
                 removed_hashes = self._remove_cached_block_hashes(blk)
                 self._emit_block_removed_events(removed_hashes)
+
+            content_fp: BlockContentFingerprint | None = None
+            if self.verify_content_on_hit:
+                blk_start = (num_cached_blocks + i) * block_size
+                blk_end = blk_start + block_size
+                content_fp = tuple(request.all_token_ids[blk_start:blk_end])
+
             self._insert_block_hash(
                 block_hash_with_group_id,
                 blk,
                 num_tokens=num_hash_tokens,
+                content_fingerprint=content_fp,
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -506,10 +527,18 @@ class BlockPool:
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
+
+        content_fp: BlockContentFingerprint | None = None
+        if self.verify_content_on_hit:
+            blk_start = (num_hash_blocks - 1) * self.hash_block_size
+            blk_end = num_tokens
+            content_fp = tuple(request.all_token_ids[blk_start:blk_end])
+
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
+            content_fingerprint=content_fp,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
@@ -588,6 +617,7 @@ class BlockPool:
                 is not None
             ):
                 removed_hashes.append(block_hash)
+                self._block_fingerprints.pop(block_hash, None)
         block.reset_hash()
         return removed_hashes
 
@@ -611,6 +641,7 @@ class BlockPool:
         block_hash_with_group_id: BlockHashWithGroupId,
         block: KVCacheBlock,
         num_tokens: int | None,
+        content_fingerprint: BlockContentFingerprint | None = None,
     ) -> None:
         if block.block_hash == block_hash_with_group_id:
             return
@@ -620,6 +651,21 @@ class BlockPool:
         ):
             return
 
+        if (
+            self.verify_content_on_hit
+            and content_fingerprint is not None
+            and block_hash_with_group_id in self._block_fingerprints
+        ):
+            existing_fp = self._block_fingerprints[block_hash_with_group_id]
+            if existing_fp != content_fingerprint:
+                logger.warning(
+                    "Hash collision detected in prefix cache: two blocks "
+                    "with different token content produced the same hash. "
+                    "Skipping insertion of the colliding block. Consider "
+                    "switching to --prefix-caching-hash-algo sha256."
+                )
+                return
+
         if block.block_hash is None:
             block.set_block_hash(block_hash_with_group_id, num_tokens=num_tokens)
         else:
@@ -627,6 +673,9 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+
+        if self.verify_content_on_hit and content_fingerprint is not None:
+            self._block_fingerprints[block_hash_with_group_id] = content_fingerprint
 
     def move_block_hashes(
         self,
@@ -788,6 +837,7 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        self._block_fingerprints.clear()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
