@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     flatten_input_text_content,
     get_system_or_developer_message,
     is_function_recipient,
+    text_from_content_part,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -59,8 +60,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
 
     raw_content = chat_msg.get("content", "")
     if isinstance(raw_content, list):
-        # TODO: Support refusal and non-text content types.
-        contents = [TextContent(text=c.get("text", "")) for c in raw_content]
+        contents = [TextContent(text=text_from_content_part(c)) for c in raw_content]
     elif isinstance(raw_content, str):
         contents = [TextContent(text=raw_content)]
     else:
@@ -134,8 +134,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
-        # TODO: Support refusal.
-        contents = [TextContent(text=c.get("text", "")) for c in content]
+        contents = [TextContent(text=text_from_content_part(c)) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
 

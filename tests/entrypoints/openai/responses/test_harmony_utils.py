@@ -92,6 +92,41 @@ class TestResponsePreviousInputToHarmony:
         assert messages[0].author.name == "functions.empty_tool"
         assert messages[0].content[0].text == ""
 
+    def test_harmony_format_refusal_content(self):
+        """Harmony-format messages must keep OpenAI refusal content parts."""
+        chat_msg = {
+            "author": {"role": "assistant"},
+            "channel": "final",
+            "content": [
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.ASSISTANT
+        assert messages[0].channel == "final"
+        assert len(messages[0].content) == 1
+        assert messages[0].content[0].text == "I can't help with that"
+
+    def test_harmony_format_mixed_text_and_refusal_content(self):
+        chat_msg = {
+            "author": {"role": "assistant"},
+            "channel": "final",
+            "content": [
+                {"type": "text", "text": "Sorry, "},
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = response_previous_input_to_harmony(chat_msg)
+
+        assert len(messages) == 1
+        assert len(messages[0].content) == 2
+        assert messages[0].content[0].text == "Sorry, "
+        assert messages[0].content[1].text == "I can't help with that"
+
 
 class TestHarmonyToResponseOutput:
     """Tests for harmony_to_response_output function."""
