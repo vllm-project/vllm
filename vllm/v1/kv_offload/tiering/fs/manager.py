@@ -19,7 +19,7 @@ import functools
 import json
 import os
 import threading
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -215,7 +215,8 @@ class FileSystemTierManager(SecondaryTierManager):
         self._entries: OrderedDict[str, int] = OrderedDict()
         self._cache_bytes = 0
         self._reserved_bytes = 0
-        self._protected_paths: set[str] = set()
+        self._protected_paths: Counter[str] = Counter()
+        self._writing_paths: set[str] = set()
 
         # Write config file
         config_path = self.file_mapper.get_config_file_path()
@@ -230,6 +231,8 @@ class FileSystemTierManager(SecondaryTierManager):
             self._scan_cache()
             with self._capacity_lock:
                 self._evict_locked(max(self._cache_bytes - max_bytes, 0), set())
+            if self._cache_bytes > max_bytes:
+                raise OSError("Cannot reduce existing filesystem cache to max_bytes")
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
@@ -273,7 +276,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     path = os.path.join(dirpath, filename)
                     try:
                         stat = os.stat(path)
-                    except OSError:
+                    except FileNotFoundError:
                         continue
                     entries.append((stat.st_mtime_ns, path, stat.st_size))
         entries.sort()
@@ -304,6 +307,8 @@ class FileSystemTierManager(SecondaryTierManager):
                 continue
             candidates.append((path, size))
             available += size
+            if available >= bytes_to_free:
+                break
         if available < bytes_to_free:
             return [], 0
         for path, size in candidates:
@@ -317,7 +322,6 @@ class FileSystemTierManager(SecondaryTierManager):
                 continue
             self._entries.pop(path, None)
             self._cache_bytes -= size
-            bytes_to_free -= size
             freed += size
             key = self._path_key(path)
             if key is not None:
@@ -336,8 +340,13 @@ class FileSystemTierManager(SecondaryTierManager):
             return
         unique = dict(zip(paths, offsets))
         with self._capacity_lock:
+            if self._writing_paths.intersection(unique):
+                self._skipped_store_jobs.add(job_id)
+                return
             missing = []
             for path, offset in unique.items():
+                if path in self._entries and not os.path.exists(path):
+                    self._cache_bytes -= self._entries.pop(path)
                 if path in self._entries:
                     self._entries.move_to_end(path)
                 elif os.path.exists(path):
@@ -367,6 +376,8 @@ class FileSystemTierManager(SecondaryTierManager):
                     0,
                 )
                 evicted, freed = self._evict_locked(required, set(unique))
+                if evicted:
+                    self._evicted_store_keys[job_id] = evicted
                 required -= freed
                 if required > 0:
                     self._skipped_store_jobs.add(job_id)
@@ -377,15 +388,13 @@ class FileSystemTierManager(SecondaryTierManager):
                         self.max_bytes,
                     )
                     return
-                if evicted:
-                    self._evicted_store_keys[job_id] = evicted
             if not missing:
                 return
             store_paths = [path for path, _ in missing]
             self._reserved_bytes += needed
             self._protected_paths.update(store_paths)
+            self._writing_paths.update(store_paths)
 
-        success = False
         try:
             batch_store_block(
                 store_paths,
@@ -394,20 +403,27 @@ class FileSystemTierManager(SecondaryTierManager):
                 self._block_size,
                 self._use_o_direct,
             )
-            success = True
         finally:
             with self._capacity_lock:
                 self._reserved_bytes -= needed
-                self._protected_paths.difference_update(store_paths)
-                if success:
-                    for path in store_paths:
-                        try:
-                            size = os.path.getsize(path)
-                        except OSError:
-                            continue
-                        self._cache_bytes += size - self._entries.get(path, 0)
+                self._unprotect(store_paths)
+                self._writing_paths.difference_update(store_paths)
+                for path in store_paths:
+                    try:
+                        size = os.path.getsize(path)
+                    except FileNotFoundError:
+                        size = 0
+                    except OSError:
+                        size = self._block_size
+                    self._cache_bytes += size - self._entries.pop(path, 0)
+                    if size:
                         self._entries[path] = size
-                        self._entries.move_to_end(path)
+
+    def _unprotect(self, paths: Iterable[str]) -> None:
+        for path in paths:
+            self._protected_paths[path] -= 1
+            if self._protected_paths[path] == 0:
+                del self._protected_paths[path]
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
@@ -472,9 +488,7 @@ class FileSystemTierManager(SecondaryTierManager):
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
             with self._capacity_lock:
-                self._protected_paths.difference_update(
-                    self._load_paths.pop(job_id, ())
-                )
+                self._unprotect(self._load_paths.pop(job_id, ()))
                 skipped = job_id in self._skipped_store_jobs
                 self._skipped_store_jobs.discard(job_id)
                 evicted = self._evicted_store_keys.pop(job_id, ())
@@ -542,11 +556,10 @@ class FileSystemTierManager(SecondaryTierManager):
     def get_stats(self) -> OffloadingConnectorStats | None:
         if self.max_bytes is None:
             return None
-        with self._capacity_lock:
-            stats = OffloadingConnectorStats()
-            stats.set_gauge(self.CACHE_BYTES, self._cache_bytes)
-            stats.set_gauge(self.CACHE_ENTRIES, len(self._entries))
-            return stats
+        stats = OffloadingConnectorStats()
+        stats.set_gauge(self.CACHE_BYTES, self._cache_bytes)
+        stats.set_gauge(self.CACHE_ENTRIES, len(self._entries))
+        return stats
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:

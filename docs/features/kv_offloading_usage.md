@@ -140,6 +140,13 @@ If a batch cannot fit safely, its cache write is skipped without failing the
 request. Existing block files are counted once when the tier starts. Omitting
 `max_bytes` preserves the historical unbounded behavior.
 
+The limit applies to this tier's mapped `<model>_<digest>_r<rank>` directory,
+not to the whole `root_dir` or all engines combined. Bounded mode requires
+exclusive ownership of that directory; concurrent engines sharing it are not
+supported. Accounting covers persisted block bytes, excluding temporary files,
+configuration and filesystem overhead. Restart recency is seeded from file
+modification times; runtime LRU history is not persisted.
+
 #### On-Disk Layout
 
 Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.

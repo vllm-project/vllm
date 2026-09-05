@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -245,19 +245,46 @@ def make_bounded_tier(tmp_path, max_blocks=2):
     return tier, tensor
 
 
-def test_bounded_tier_evicts_least_recently_used(tmp_path):
+@pytest.mark.parametrize("replacement_count", [1, 2])
+def test_bounded_tier_evicts_least_recently_used(tmp_path, replacement_count):
     tier, _ = make_bounded_tier(tmp_path)
     try:
         tier.submit_store(make_job(1, [key(1), key(2)]))
         assert all(result.success for result in drain(tier))
         tier.touch([key(1)], _CTX)
-        tier.submit_store(make_job(2, [key(3)], [2]))
+        tier.submit_store(make_job(2, [key(3 + i) for i in range(replacement_count)]))
         assert all(result.success for result in drain(tier))
 
-        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1))) == (
+            replacement_count == 1
+        )
         assert not os.path.exists(tier.file_mapper.get_file_name(key(2)))
         assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
         assert tier._cache_bytes <= tier.max_bytes
+    finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_counts_partial_store_failure(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as manager_module
+
+    tier, _ = make_bounded_tier(tmp_path)
+    original = manager_module.batch_store_block
+
+    def partial_store(paths, view, offsets, *args):
+        original(paths[:1], view, offsets[:1], *args)
+        raise OSError("injected failure after first block")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(manager_module, "batch_store_block", partial_store)
+            tier.submit_store(make_job(1, [key(1), key(2)]))
+            assert not drain(tier)[0].success
+        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier._block_size
+        tier.submit_store(make_job(2, [key(3), key(4)]))
+        assert drain(tier)[0].success
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert tier.get_stats().reduce()[tier.CACHE_BYTES] == tier.max_bytes
     finally:
         tier.shutdown()
 
@@ -340,12 +367,52 @@ def test_bounded_tier_stats_do_not_scan_filesystem(tmp_path, monkeypatch):
         assert all(result.success for result in drain(tier))
         monkeypatch.setattr(os, "walk", MagicMock(side_effect=AssertionError))
 
-        stats = tier.get_stats()
+        with tier._capacity_lock:
+            stats = tier.get_stats()
         assert stats is not None
         reduced = stats.reduce()
         assert reduced[tier.CACHE_BYTES] == tier._block_size
         assert reduced[tier.CACHE_ENTRIES] == 1
     finally:
+        tier.shutdown()
+
+
+def test_bounded_tier_keeps_protection_until_last_reader(tmp_path, monkeypatch):
+    import vllm.v1.kv_offload.tiering.fs.manager as module
+
+    tier, _ = make_bounded_tier(tmp_path, max_blocks=1)
+    gate = threading.Event()
+    started = threading.Event()
+    original = module.batch_load_block
+
+    def load(paths, view, offsets, *args):
+        if offsets[0] == 2 * tier._block_size:
+            started.set()
+            assert gate.wait(10)
+        return original(paths, view, offsets, *args)
+
+    try:
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert drain(tier)[0].success
+        monkeypatch.setattr(module, "batch_load_block", load)
+        tier.submit_load(make_job(2, [key(1)], [2], is_promotion=True))
+        assert started.wait(5)
+        tier.submit_load(make_job(3, [key(1)], [3], is_promotion=True))
+        results: dict[int, JobResult] = {}
+        deadline = time.monotonic() + 5
+        while 3 not in results and time.monotonic() < deadline:
+            results.update((r.job_id, r) for r in tier.get_finished_jobs())
+            time.sleep(0.01)
+        assert results[3].success
+        tier.submit_store(make_job(4, [key(2)], [1]))
+        while 4 not in results and time.monotonic() < deadline:
+            results.update((r.job_id, r) for r in tier.get_finished_jobs())
+            time.sleep(0.01)
+        assert not results[4].success
+        assert os.path.exists(tier.file_mapper.get_file_name(key(1)))
+    finally:
+        gate.set()
+        drain(tier)
         tier.shutdown()
 
 
