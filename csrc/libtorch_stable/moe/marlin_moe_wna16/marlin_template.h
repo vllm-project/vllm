@@ -77,7 +77,8 @@ __global__ void Marlin(
     int prob_k,             // reduction dimension k
     int* locks,             // extra global storage for barrier synchronization
     bool use_atomic_add,    // whether to use atomic add to reduce
-    bool use_fp32_reduce    // whether to use fp32 global reduce
+    bool use_fp32_reduce,   // whether to use fp32 global reduce
+    bool use_full_k         // whether to use full-K reduction per block
 ) {}
 
 }  // namespace MARLIN_NAMESPACE_NAME
@@ -278,8 +279,9 @@ __global__ void Marlin(
     int prob_k,             // reduction dimension k
     int* locks,             // extra global storage for barrier synchronization
     bool has_bias,
-    bool use_atomic_add,  // whether to use atomic add to reduce
-    bool use_fp32_reduce  // whether to use fp32 global reduce
+    bool use_atomic_add,   // whether to use atomic add to reduce
+    bool use_fp32_reduce,  // whether to use fp32 global reduce
+    bool use_full_k        // whether to use full-K reduction per block
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -399,11 +401,12 @@ __global__ void Marlin(
   // see https://github.com/vllm-project/vllm/pull/24722 for more details
   if (global_mn_tiles > gridDim.x) {
     part2_mn_tiles = global_mn_tiles % gridDim.x;
-    if (part2_mn_tiles * 3 <= gridDim.x) part2_mn_tiles += gridDim.x;
+    if (!use_full_k && part2_mn_tiles * 3 <= gridDim.x)
+      part2_mn_tiles += gridDim.x;
     part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
   }
-
-  int iters = div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
+  int iters =
+      use_full_k ? k_tiles : div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
