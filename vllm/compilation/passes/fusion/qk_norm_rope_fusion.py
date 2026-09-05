@@ -28,7 +28,7 @@ FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
 # Head dimensions supported by csrc/fused_qknorm_rope_kernel.cu's
 # launchFusedQKNormRope and launchFusedQKNormRopeNTokenHeads dispatchers.
 # Keep in sync with the switch statements in that file.
-SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256, 512)
 
 P = ParamSpec("P")
 
