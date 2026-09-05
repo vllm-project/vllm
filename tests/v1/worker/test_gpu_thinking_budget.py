@@ -36,6 +36,16 @@ class MockMultiTokenEndReasoningConfig:
     natural_reasoning_end_token_ids = [END_A, END_B]
 
 
+class MockExtendedEndReasoningConfig:
+    """Forced end that continues past the natural end, as channel-framed models
+    need: closing the reasoning message does not commit the model to answering,
+    so the forced sequence also opens the next channel."""
+
+    reasoning_start_token_ids = [START]
+    reasoning_end_token_ids = [END, END_A, END_B]
+    natural_reasoning_end_token_ids = [END]
+
+
 class MockDistinctEndReasoningConfig:
     reasoning_start_token_ids = [START]
     reasoning_end_token_ids = [END_A, END_B]
@@ -284,6 +294,85 @@ def test_v2_thinking_budget_clamps_oversized_budget():
     out = _apply(state, logits, input_ids=[12], local_pos=[0])
 
     assert torch.all(out == 0)
+
+
+def _commit(req_states: RequestState, tokens: list[int], token: int) -> None:
+    req_states.all_token_ids.stage_write(3, len(tokens), [token])
+    req_states.total_len.stage_write_elem(3, len(tokens) + 1)
+    req_states.apply_staged_writes()
+    tokens.append(token)
+
+
+def test_v2_thinking_budget_continues_forced_end_after_natural_end():
+    """A forced end whose first tokens are the natural end must still be
+    completed: closing the reasoning section is not what commits the model."""
+    tokens = [1, START, 10, 11, 12]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockExtendedEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    for expected_id in (END, END_A, END_B):
+        logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+        out = _apply(state, logits, input_ids=[tokens[-1]], local_pos=[0])
+        assert out[0, expected_id] == pytest.approx(1.0e9), tokens
+        _commit(req_states, tokens, expected_id)
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[tokens[-1]], local_pos=[0])
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_continues_forced_end_across_draft_tokens():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockExtendedEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((3, VOCAB_SIZE), device=DEVICE)
+    out = _apply(
+        state,
+        logits,
+        input_ids=[12, END, END_A],
+        local_pos=[0, 1, 2],
+    )
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert out[1, END_A] == pytest.approx(1.0e9)
+    assert out[2, END_B] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_forces_completed_end_only_once():
+    """The end marker that closes a later message is not another budget
+    overrun, even when the whole history arrives as one prompt."""
+    req_states = _make_req_states(
+        [1, START, 10, 11, 12, END, END_A, END_B, 20, 21, END],
+        prompt_len=11,
+    )
+    state = ThinkingBudgetState(req_states, MockExtendedEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[END], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_thinking_budget_forces_end_of_section_after_completed_end():
+    """A section opened after a completed forced end gets its own budget."""
+    req_states = _make_req_states(
+        [1, START, 10, 11, 12, END, END_A, END_B, 20, START, 30, 31, 32],
+        prompt_len=13,
+    )
+    state = ThinkingBudgetState(req_states, MockExtendedEndReasoningConfig())
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[32], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
 
 
 def test_v2_thinking_budget_continues_end_prefix_from_prompt():

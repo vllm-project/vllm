@@ -49,6 +49,15 @@ class ThinkingBudgetState:
         if not self.enabled:
             return
 
+        # A forced end that merely extends the natural one closes the reasoning
+        # section with its first tokens, so the section-open guard below stops
+        # matching before the rest of the sequence is emitted. Such a sequence
+        # needs the continuation path.
+        self.continue_after_natural_end = (
+            len(end_ids) > len(natural_end_ids)
+            and end_ids[: len(natural_end_ids)] == natural_end_ids
+        )
+
         self.thinking_token_budget = UvaBackedTensor(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -64,6 +73,11 @@ class ThinkingBudgetState:
         )
         self.cached_scan_pos = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        # Position of the natural end whose forced continuation is already
+        # committed, so a later stray end marker cannot force a second one.
+        self.cached_done_anchor = torch.full(
+            (self.max_num_reqs,), -1, dtype=torch.int32, device=self.device
         )
         self._reset_reqs: list[int] = []
         self._budget_dirty = False
@@ -102,6 +116,7 @@ class ThinkingBudgetState:
             self.cached_last_start.index_fill_(0, idx, -1)
             self.cached_last_end.index_fill_(0, idx, -1)
             self.cached_scan_pos.index_fill_(0, idx, 0)
+            self.cached_done_anchor.index_fill_(0, idx, -1)
             self._reset_reqs.clear()
         if self._budget_dirty:
             self.thinking_token_budget.copy_to_uva()
@@ -131,9 +146,11 @@ class ThinkingBudgetState:
             self.cached_last_start,
             self.cached_last_end,
             self.cached_scan_pos,
+            self.cached_done_anchor,
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
+            self.continue_after_natural_end,
         )
 
 
@@ -157,6 +174,27 @@ def _load_effective_token(
 
 
 @triton.jit
+def _forced_end_committed(
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    req_state_idx,
+    total_len,
+    reasoning_end_token_ids_ptr,
+    anchor,
+    END_LEN: tl.constexpr,
+):
+    committed = (anchor >= 0) & (anchor + END_LEN <= total_len)
+    for j in tl.static_range(0, END_LEN):
+        pos = anchor + j
+        if pos < 0 or pos >= total_len:
+            pos = 0
+        expected = tl.load(reasoning_end_token_ids_ptr + j)
+        actual = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos)
+        committed = committed & (actual == expected)
+    return committed
+
+
+@triton.jit
 def _update_committed_marker_cache_kernel(
     req_ids_ptr,
     thinking_token_budget_ptr,
@@ -166,12 +204,16 @@ def _update_committed_marker_cache_kernel(
     cached_last_start_ptr,
     cached_last_end_ptr,
     cached_scan_pos_ptr,
+    cached_done_anchor_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
+    END_LEN: tl.constexpr,
     MAX_LEN: tl.constexpr,
     BLOCK: tl.constexpr,
+    CONTINUE_AFTER_NATURAL_END: tl.constexpr,
 ):
     req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
     budget = tl.load(thinking_token_budget_ptr + req_state_idx)
@@ -182,11 +224,15 @@ def _update_committed_marker_cache_kernel(
     scan_pos = tl.load(cached_scan_pos_ptr + req_state_idx)
     last_start = tl.load(cached_last_start_ptr + req_state_idx)
     last_end = tl.load(cached_last_end_ptr + req_state_idx)
+    done_anchor = -1
+    if CONTINUE_AFTER_NATURAL_END:
+        done_anchor = tl.load(cached_done_anchor_ptr + req_state_idx)
 
     if scan_pos > total_len:
         scan_pos = 0
         last_start = -1
         last_end = -1
+        done_anchor = -1
 
     if scan_pos == 0 and last_start < 0 and last_end < 0:
         # Cold scan: walk backward in vectorized blocks, stopping at the first
@@ -219,6 +265,22 @@ def _update_committed_marker_cache_kernel(
                 )
                 end_match = end_match & (actual == expected)
 
+            if CONTINUE_AFTER_NATURAL_END:
+                # A completed forced sequence also has to be recovered here, or
+                # a request recomputed from a prompt that already contains one
+                # would force a second copy of it.
+                row_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
+                forced_match = (offs < block_hi) & (offs + END_LEN <= total_len)
+                for j in tl.static_range(0, END_LEN):
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = tl.load(
+                        row_ptr + offs + j,
+                        mask=offs + j < total_len,
+                        other=-1,
+                    )
+                    forced_match = forced_match & (actual == expected)
+                done_anchor = tl.max(tl.where(forced_match, offs, -1), axis=0)
+
             last_start = tl.max(tl.where(start_match, offs, -1), axis=0)
             last_end = tl.max(tl.where(end_match, offs, -1), axis=0)
             block_hi = block_lo
@@ -248,6 +310,38 @@ def _update_committed_marker_cache_kernel(
 
     tl.store(cached_last_start_ptr + req_state_idx, last_start)
     tl.store(cached_last_end_ptr + req_state_idx, last_end)
+
+    if CONTINUE_AFTER_NATURAL_END:
+        if done_anchor >= 0:
+            # Rejected draft tokens can drop a sequence that was complete; let
+            # the continuation be forced again from wherever it now stands.
+            still_committed = _forced_end_committed(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                req_state_idx,
+                total_len,
+                reasoning_end_token_ids_ptr,
+                done_anchor,
+                END_LEN,
+            )
+            if still_committed == 0:
+                done_anchor = -1
+        section_closed = last_start >= 0 and last_end >= last_start
+        overran_budget = last_end - (last_start + START_LEN) >= budget
+        if section_closed and overran_budget and last_start > done_anchor:
+            just_committed = _forced_end_committed(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                req_state_idx,
+                total_len,
+                reasoning_end_token_ids_ptr,
+                last_end,
+                END_LEN,
+            )
+            if just_committed:
+                done_anchor = last_end
+        tl.store(cached_done_anchor_ptr + req_state_idx, done_anchor)
+
     new_scan_pos = total_len - (MAX_LEN - 1)
     if new_scan_pos < 0:
         new_scan_pos = 0
@@ -267,12 +361,14 @@ def _thinking_budget_kernel(
     expanded_local_pos_ptr,
     cached_last_start_ptr,
     cached_last_end_ptr,
+    cached_done_anchor_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
+    CONTINUE_AFTER_NATURAL_END: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -328,6 +424,39 @@ def _thinking_budget_kernel(
         if end_match:
             last_end = i
 
+    if CONTINUE_AFTER_NATURAL_END:
+        # The natural end that closed the section is the first part of the
+        # forced sequence, so the section is closed while the rest of the
+        # sequence still has to be emitted. Resume it from the natural end,
+        # which is where the model is being steered from, rather than from the
+        # tail: on the answer channel the tail matches nothing.
+        done_anchor = tl.load(cached_done_anchor_ptr + req_state_idx)
+        section_closed = last_start >= 0 and last_end >= last_start
+        overran_budget = last_end - (last_start + START_LEN) >= budget
+        if section_closed and overran_budget and last_start > done_anchor:
+            forced_len = 0
+            for j in tl.static_range(0, END_LEN):
+                pos = last_end + j
+                if pos < effective_len and forced_len == j:
+                    expected = tl.load(reasoning_end_token_ids_ptr + j)
+                    actual = _load_effective_token(
+                        all_token_ids_ptr,
+                        all_token_ids_stride,
+                        input_ids_ptr,
+                        cur_req_first_pos,
+                        req_state_idx,
+                        total_len,
+                        pos,
+                    )
+                    if actual == expected:
+                        forced_len = j + 1
+            if forced_len > 0 and forced_len < END_LEN:
+                force_token_id = tl.load(reasoning_end_token_ids_ptr + forced_len)
+                tl.store(
+                    logits_ptr + token_idx * logits_stride + force_token_id,
+                    1.0e9,
+                )
+
     if last_start < 0 or last_start <= last_end:
         return
 
@@ -381,9 +510,11 @@ def apply_thinking_budget(
     cached_last_start: torch.Tensor,
     cached_last_end: torch.Tensor,
     cached_scan_pos: torch.Tensor,
+    cached_done_anchor: torch.Tensor,
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    continue_after_natural_end: bool,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
@@ -399,12 +530,16 @@ def apply_thinking_budget(
         cached_last_start,
         cached_last_end,
         cached_scan_pos,
+        cached_done_anchor,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
+        reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
+        END_LEN=end_len,
         MAX_LEN=max(start_len, natural_end_len),
         BLOCK=_COLD_SCAN_BLOCK,
+        CONTINUE_AFTER_NATURAL_END=continue_after_natural_end,
     )
 
     _thinking_budget_kernel[(num_tokens,)](
@@ -419,10 +554,12 @@ def apply_thinking_budget(
         expanded_local_pos,
         cached_last_start,
         cached_last_end,
+        cached_done_anchor,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,
+        CONTINUE_AFTER_NATURAL_END=continue_after_natural_end,
     )
