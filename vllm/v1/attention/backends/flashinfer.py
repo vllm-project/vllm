@@ -152,9 +152,8 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
     split = -(-head_size // 256)  # ceil(head_size / 256)
     if head_size % split != 0 or (head_size // split) % 16 != 0:
         raise ValueError(
-            "The VO split needs head_size divisible into <=256-wide chunks"
-            f"{' of whole 16-element scale blocks' if is_fa2_nvfp4 else ''}; "
-            f"got head_size={head_size}."
+            "The VO split needs head_size divisible into <=256-wide chunks "
+            f"of whole 16-element scale blocks; got head_size={head_size}."
         )
     return split
 
@@ -1143,6 +1142,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 None,
             )
             if bidi_mode == "vision" and self.window_left < 0:
+                # Full (non-windowed) vision attention already covers the
+                # whole image span without custom masks; fall back to the
+                # ordinary causal/full-attention routing below instead of
+                # rejecting DCP/sinks for a mm-prefix mode we're not using.
                 self.mm_prefix_enabled = False
             # Re-check the flag: the line above turns mm-prefix off for this
             # layer group, and the rejections below only apply while it is on.
@@ -1407,6 +1410,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "FlashInfer non-causal attention with NVFP4 KV cache requires "
                     "the FA2 paged reader (consumer Blackwell sm120/sm121); "
                     "trtllm-gen is causal-only."
+                )
+            if self.is_kvcache_nvfp4 and self.window_left >= 0:
+                # The non-causal FA2-NVFP4 path (DFlash-family drafter verify)
+                # has only been validated for full attention; a sliding
+                # window changes which KV positions the wrapper's masking
+                # needs to cover and hasn't been exercised here. Fail loud
+                # instead of silently running verify over the wrong span.
+                raise NotImplementedError(
+                    "FlashInfer non-causal attention with NVFP4 KV cache does "
+                    "not support sliding window attention yet."
                 )
             if self._noncausal_prefill_wrapper is None:
                 if self.has_sinks and current_platform.is_device_capability_family(120):
