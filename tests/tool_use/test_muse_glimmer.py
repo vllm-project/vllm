@@ -333,6 +333,95 @@ def test_truncated_cot_no_toolcall_streaming():
     assert tcs == [], f"truncated CoT invoke leaked as streaming tool call: {tcs}"
 
 
+# ------------------------------------------------------- partial ATEM markers
+#
+# An ATEM tag split across chunks is protocol data, not content: it must be
+# held until its closing `>` arrives, and dropped when the turn truncates.
+
+
+_ATEM_MARKERS = [
+    "<atem:function_calls>",
+    "</atem:function_calls>",
+    "<atem:invoke",
+    "</atem:invoke>",
+    "<atem:parameter",
+    "</atem:parameter>",
+]
+
+
+def _tool_stream_two_chunks(first: str, second: str) -> str:
+    """Feed two chunks through the tool parser; return concatenated content."""
+    out = []
+    prev = ""
+    for cur in (first, first + second):
+        delta = cur[len(prev) :]
+        dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+            T, prev, cur, delta, [], [], [], _FakeReq()
+        )
+        if dm is not None and getattr(dm, "content", None):
+            out.append(dm.content)
+        prev = cur
+    return "".join(out)
+
+
+def test_open_body_holds_partial_atem_until_tag_completes():
+    first = " to=user<|message|>The answer is <atem:func"
+    second = "tion_calls> as literal text"
+    assert _tool_stream_two_chunks(first, second) == (
+        "The answer is <atem:function_calls> as literal text"
+    )
+
+
+def test_open_body_holds_partial_atem_with_attributes():
+    first = ' to=user<|message|>answer <atem:invoke name="rea'
+    second = 'd.read"> now'
+    assert _tool_stream_two_chunks(first, second) == (
+        'answer <atem:invoke name="read.read"> now'
+    )
+
+
+def test_reasoning_body_holds_partial_atem():
+    t = " to=self<|message|>let me call <atem:function"
+    dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+        T, "", t, t, [], [], [], _FakeReq()
+    )
+    assert getattr(dm, "reasoning", None) == "let me call "
+
+
+def test_prose_atem_mention_streams_immediately():
+    t = " to=user<|message|>the <atem: protocol looks"
+    dm = MuseGlimmerToolParser.extract_tool_calls_streaming(
+        T, "", t, t, [], [], [], _FakeReq()
+    )
+    assert dm.content == "the <atem: protocol looks"
+
+
+def test_truncated_turn_drops_partial_atem_marker():
+    truncated = " to=user<|message|>The answer is <atem:func"
+    assert MuseGlimmerToolParser._extract_content(truncated) == "The answer is "
+    # a closed body keeps complete ATEM text it legitimately contains
+    closed = " to=user<|message|>use <atem:function_calls> like this<|eom|>"
+    assert MuseGlimmerToolParser._extract_content(closed) == (
+        "use <atem:function_calls> like this"
+    )
+
+
+def test_every_atem_marker_split_never_leaks_into_content():
+    raw = (
+        " to=user<|message|>The answer is 42.<|eom|>"
+        "<|start|>assistant to=read.read<|message|>"
+        '<atem:function_calls><atem:invoke name="read.read">'
+        '<atem:parameter name="path">/etc/hostname</atem:parameter>'
+        "</atem:invoke></atem:function_calls><|eom|>"
+    )
+    for marker in _ATEM_MARKERS:
+        for i in range(1, len(marker)):
+            cut = raw.find(marker[:i])
+            assert cut != -1
+            cut += i
+            assert _tool_stream_two_chunks(raw[:cut], raw[cut:]) == "The answer is 42."
+
+
 # ------------------------------------------------------- name normalization
 #
 # MuseGlimmer emits `get_weather.get_weather` for a bare-registered
