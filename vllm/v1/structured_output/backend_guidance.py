@@ -5,6 +5,7 @@ import copy
 import json
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -32,6 +33,21 @@ else:
     llguidance_torch = LazyLoader("llguidance.torch", globals(), "llguidance.torch")
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=256)
+def _cached_serialize_guidance_grammar(
+    request_type: StructuredOutputOptions,
+    grammar_spec: str,
+    disable_any_whitespace: bool,
+    disable_additional_properties: bool,
+) -> str:
+    return serialize_guidance_grammar(
+        request_type,
+        grammar_spec,
+        disable_any_whitespace,
+        disable_additional_properties,
+    )
 
 
 def _walk_json_for_additional_properties(data: object):
@@ -112,7 +128,7 @@ class GuidanceBackend(StructuredOutputBackend):
         grammar_spec: str,
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
-        self.serialized_grammar = serialize_guidance_grammar(
+        self.serialized_grammar = _cached_serialize_guidance_grammar(
             request_type,
             grammar_spec,
             self.disable_any_whitespace,
