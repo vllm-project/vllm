@@ -15,6 +15,7 @@ from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
@@ -813,12 +814,15 @@ def get_request_block_hasher(
             return []
 
         curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
+        mm_features = request.mm_features
+        if start_token_idx > 0 and mm_features:
+            last_mm_pos = mm_features[-1].mm_position
+            if last_mm_pos.offset + last_mm_pos.length > start_token_idx:
+                curr_mm_idx, _ = get_mm_features_in_window(
+                    mm_features,
+                    start_token_idx,
+                    start_token_idx + hash_block_size,
+                )
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
