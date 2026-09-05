@@ -23,20 +23,18 @@ namespace batched_moe_align_block_size {
 // Note num_threads needs to be 1024 for BlockScan Reduction in the kernel.
 static constexpr int32_t num_threads = 1024;
 static constexpr int32_t num_blocks = 1;
+template <bool cooperative_writes>
 __global__ void batched_moe_align_block_size_kernel(
     int32_t const num_batches, int32_t const max_tokens_per_batch,
     int32_t const block_size, int32_t const* __restrict__ batch_num_tokens,
     int32_t* __restrict__ sorted_ids, int32_t* __restrict__ block_ids,
     int32_t* __restrict__ num_tokens_post_pad) {
-  // TODO(varun): This is a naive implementation. Could be optimized.
-
-  size_t const batch_id = threadIdx.x;
   size_t const stride = blockDim.x * gridDim.x;
   int32_t const num_blocks_per_batch =
       CEILDIV(max_tokens_per_batch, block_size);
-  int32_t const sorted_ids_size =
-      num_blocks_per_batch * num_batches * block_size;
-  int32_t const block_ids_size = sorted_ids_size / block_size;
+  size_t const sorted_ids_size =
+      static_cast<size_t>(num_blocks_per_batch) * num_batches * block_size;
+  size_t const block_ids_size = sorted_ids_size / block_size;
   int32_t const SENTINEL =
       num_batches * max_tokens_per_batch;  // To denote invalid entries.
   // Initialize sorted_ids
@@ -49,8 +47,8 @@ __global__ void batched_moe_align_block_size_kernel(
   }
 
   int32_t b_num_tokens = 0;
-  if (batch_id < num_batches) {
-    b_num_tokens = batch_num_tokens[batch_id];
+  if (threadIdx.x < num_batches) {
+    b_num_tokens = batch_num_tokens[threadIdx.x];
   }
   int32_t const ceil_b_num_tokens =
       CEILDIV(b_num_tokens, block_size) * block_size;
@@ -62,20 +60,56 @@ __global__ void batched_moe_align_block_size_kernel(
   BlockScan(temp_storage).ExclusiveSum(ceil_b_num_tokens, cumsum_val);
   __syncthreads();
 
-  bool const is_last_batch = batch_id == (num_batches - 1);
-  if (is_last_batch) {
+  if (threadIdx.x == num_batches - 1) {
     *num_tokens_post_pad = cumsum_val + ceil_b_num_tokens;
   }
 
-  if (batch_id < num_batches) {
-    int32_t const batch_offset = batch_id * max_tokens_per_batch;
+  if constexpr (cooperative_writes) {
+    __shared__ int32_t batch_cumsum[num_threads];
+    __shared__ int32_t valid_tokens[num_threads];
+    __shared__ int32_t batch_num_blocks[num_threads];
+    if (threadIdx.x < num_batches) {
+      batch_cumsum[threadIdx.x] = cumsum_val;
+      valid_tokens[threadIdx.x] = b_num_tokens;
+      batch_num_blocks[threadIdx.x] = ceil_b_num_tokens / block_size;
+    }
+    __syncthreads();
+
+    int32_t const max_num_groups = blockDim.x / WARP_SIZE;
+    int32_t num_groups = 1;
+    while (num_groups < num_batches && num_groups < max_num_groups) {
+      num_groups *= 2;
+    }
+    int32_t const threads_per_batch = blockDim.x / num_groups;
+    int32_t const group_id = threadIdx.x / threads_per_batch;
+    int32_t const group_offset = threadIdx.x % threads_per_batch;
+
+    // Assign at least one warp to each batch when possible.
+    for (int32_t batch_id = group_id; batch_id < num_batches;
+         batch_id += num_groups) {
+      size_t const batch_offset =
+          static_cast<size_t>(batch_id) * max_tokens_per_batch;
+      size_t const cumsum = batch_cumsum[batch_id];
+      for (size_t i = group_offset; i < valid_tokens[batch_id];
+           i += threads_per_batch) {
+        sorted_ids[cumsum + i] = static_cast<int32_t>(batch_offset + i);
+      }
+
+      size_t const block_start = cumsum / block_size;
+      for (size_t i = group_offset; i < batch_num_blocks[batch_id];
+           i += threads_per_batch) {
+        block_ids[block_start + i] = batch_id;
+      }
+    }
+  } else if (threadIdx.x < num_batches) {
+    size_t const batch_id = threadIdx.x;
+    size_t const batch_offset = batch_id * max_tokens_per_batch;
     for (size_t i = 0; i < b_num_tokens; ++i) {
-      sorted_ids[cumsum_val + i] = batch_offset + i;
+      sorted_ids[cumsum_val + i] = static_cast<int32_t>(batch_offset + i);
     }
 
-    int32_t const block_start = cumsum_val / block_size;
-    int32_t const num_blocks = ceil_b_num_tokens / block_size;
-    for (size_t i = 0; i < num_blocks; ++i) {
+    size_t const block_start = cumsum_val / block_size;
+    for (size_t i = 0; i < ceil_b_num_tokens / block_size; ++i) {
       block_ids[block_start + i] = batch_id;
     }
   }
@@ -747,8 +781,16 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
   STD_TORCH_CHECK(num_tokens_post_pad.size(0) == 1);
   STD_TORCH_CHECK(B <= batched_kernel::num_threads);
 
-  batched_kernel::batched_moe_align_block_size_kernel<<<
-      batched_kernel::num_blocks, batched_kernel::num_threads, 0, stream>>>(
+  // Avoid coordination overhead for small capacities or many batches.
+  int64_t const cooperative_threshold = std::max<int64_t>(256, 8 * B);
+  bool const use_cooperative_writes =
+      max_tokens_per_batch >= cooperative_threshold;
+  auto kernel =
+      use_cooperative_writes
+          ? batched_kernel::batched_moe_align_block_size_kernel<true>
+          : batched_kernel::batched_moe_align_block_size_kernel<false>;
+  kernel<<<batched_kernel::num_blocks, batched_kernel::num_threads, 0,
+           stream>>>(
       B, max_tokens_per_batch, block_size,
       reinterpret_cast<const int32_t*>(batch_num_tokens.const_data_ptr()),
       reinterpret_cast<int32_t*>(sorted_ids.mutable_data_ptr()),
