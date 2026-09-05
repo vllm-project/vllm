@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
@@ -145,9 +146,7 @@ def pack_bf16_weight(
 
     for block_start in range(0, block_count, chunk_blocks):
         block_end = min(block_start + chunk_blocks, block_count)
-        bits = _block_bits(
-            weight, block_start * _PACK_BLOCK, block_end * _PACK_BLOCK
-        )
+        bits = _block_bits(weight, block_start * _PACK_BLOCK, block_end * _PACK_BLOCK)
         exponents = (bits.to(torch.int32) >> 7) & 0xFF
         minimum = exponents.amin(dim=1)
         maximum = exponents.amax(dim=1)
@@ -189,9 +188,7 @@ def pack_bf16_weight(
         )
         return None
 
-    sign_mantissa = torch.empty(
-        padded_numel, dtype=torch.uint8, device=weight.device
-    )
+    sign_mantissa = torch.empty(padded_numel, dtype=torch.uint8, device=weight.device)
     exponent_nibbles = torch.empty(
         padded_numel // 2, dtype=torch.uint8, device=weight.device
     )
@@ -205,9 +202,7 @@ def pack_bf16_weight(
     next_fallback = 0
     for block_start in range(0, block_count, chunk_blocks):
         block_end = min(block_start + chunk_blocks, block_count)
-        bits = _block_bits(
-            weight, block_start * _PACK_BLOCK, block_end * _PACK_BLOCK
-        )
+        bits = _block_bits(weight, block_start * _PACK_BLOCK, block_end * _PACK_BLOCK)
         flat_bits = bits.reshape(-1).to(torch.int32)
         flat_start = block_start * _PACK_BLOCK
         flat_end = block_end * _PACK_BLOCK
@@ -220,9 +215,7 @@ def pack_bf16_weight(
             _PACK_BLOCK
         )
         deltas = exponents - repeated_base.to(torch.int32)
-        local_packable = packable[block_start:block_end].repeat_interleave(
-            _PACK_BLOCK
-        )
+        local_packable = packable[block_start:block_end].repeat_interleave(_PACK_BLOCK)
         deltas = torch.where(local_packable, deltas, 0).reshape(-1, 2)
         exponent_nibbles[flat_start // 2 : flat_end // 2] = (
             deltas[:, 0] | (deltas[:, 1] << 4)
@@ -278,30 +271,31 @@ def _lossless_packed_bf16_lm_head_kernel(
     block_id = linear // PACK_BLOCK
     in_block = linear % PACK_BLOCK
 
-    sign_mantissa = tl.load(
-        sign_mantissa_ptr + linear, mask=valid, other=0
-    ).to(tl.int32)
-    exponent_pair = tl.load(
-        exponent_nibbles_ptr + linear // 2, mask=valid, other=0
-    ).to(tl.int32)
-    exponent_delta = (exponent_pair >> ((linear & 1) * 4)) & 0xF
-    base_exponent = tl.load(
-        base_exponent_ptr + block_id, mask=valid, other=0
-    ).to(tl.int32)
-    fallback_slot = tl.load(
-        fallback_slot_ptr + block_id, mask=valid, other=-1
+    sign_mantissa = tl.load(sign_mantissa_ptr + linear, mask=valid, other=0).to(
+        tl.int32
     )
+    exponent_pair = tl.load(exponent_nibbles_ptr + linear // 2, mask=valid, other=0).to(
+        tl.int32
+    )
+    exponent_delta = (exponent_pair >> ((linear & 1) * 4)) & 0xF
+    base_exponent = tl.load(base_exponent_ptr + block_id, mask=valid, other=0).to(
+        tl.int32
+    )
+    fallback_slot = tl.load(fallback_slot_ptr + block_id, mask=valid, other=-1)
 
     packed_bits = (
         ((sign_mantissa & 0x80) << 8)
         | ((base_exponent + exponent_delta) << 7)
         | (sign_mantissa & 0x7F)
     )
-    fallback_bits = tl.load(
-        fallback_bits_ptr + fallback_slot * PACK_BLOCK + in_block,
-        mask=valid & (fallback_slot >= 0),
-        other=0,
-    ).to(tl.int32) & 0xFFFF
+    fallback_bits = (
+        tl.load(
+            fallback_bits_ptr + fallback_slot * PACK_BLOCK + in_block,
+            mask=valid & (fallback_slot >= 0),
+            other=0,
+        ).to(tl.int32)
+        & 0xFFFF
+    )
     fp32_bits = tl.where(fallback_slot >= 0, fallback_bits, packed_bits) << 16
     weight = tl.inline_asm_elementwise(
         "mov.b32 $0, $1;",
@@ -491,6 +485,8 @@ def _try_apply_packed_weight(
     x: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> torch.Tensor | None:
+    if envs.VLLM_BATCH_INVARIANT:
+        return None
     meta = getattr(layer, "_vllm_lossless_lm_head_meta", None)
     if meta is None or bias is not None:
         return None
@@ -516,6 +512,11 @@ class LosslessPackedLMHeadMethod(QuantizeMethodBase):
 
     def __init__(self, fallback: QuantizeMethodBase) -> None:
         self.fallback = fallback
+
+    def __getattr__(self, name: str) -> Any:
+        """Preserve the complete interface of the decorated method."""
+        fallback = object.__getattribute__(self, "fallback")
+        return getattr(fallback, name)
 
     def create_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
