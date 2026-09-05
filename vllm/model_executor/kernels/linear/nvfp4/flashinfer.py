@@ -5,6 +5,7 @@ import torch
 
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
     QuantizedActivation,
     as_quantized_activation,
 )
@@ -181,6 +182,9 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
         return kNvfp4Dynamic
+
+    def input_quant_scales(self, layer: torch.nn.Module) -> InputQuantScales:
+        return InputQuantScales(global_scale_inv=layer.input_global_scale_inv)
 
     @classmethod
     def is_supported(

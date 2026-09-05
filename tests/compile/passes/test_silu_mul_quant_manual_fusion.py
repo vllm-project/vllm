@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fusion.fused_act_quant import (
     maybe_fused_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
     QuantizedActivation,
     expose_input_quant_key,
 )
@@ -62,6 +63,11 @@ class MockLinearForFusion(torch.nn.Module):
             self.input_global_scale = input_global_scale
         if input_global_scale_inv is not None:
             self.input_global_scale_inv = input_global_scale_inv
+
+        self._input_quant_scales = lambda layer: InputQuantScales(
+            static_scale=getattr(layer, "input_scale", None),
+            global_scale_inv=getattr(layer, "input_global_scale_inv", None),
+        )
 
 
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
@@ -214,10 +220,14 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+<<<<<<< HEAD
 # Cover M < 128 (padded swizzled SF tiles) and hidden_size that makes the
 # kernel launch grid.y > 1 (num_packed_cols = hidden_size / 16 > 512).
 @pytest.mark.parametrize("num_tokens", [1, 127, 128])
 @pytest.mark.parametrize("hidden_size", [256, 14336])
+=======
+@pytest.mark.parametrize("global_scale_value", [0.01, 2.0])
+>>>>>>> 1941015b2c ([Quantization] Expose input quantization scales through linear kernel contract)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
@@ -225,9 +235,13 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
+<<<<<<< HEAD
 def test_manual_fusion_nvfp4_dynamic(
     dtype: torch.dtype, num_tokens: int, hidden_size: int
 ):
+=======
+def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype, global_scale_value: float):
+>>>>>>> 1941015b2c ([Quantization] Expose input quantization scales through linear kernel contract)
     """Test kNvfp4Dynamic fusion path.
 
     Compares fused (silu_and_mul_nvfp4_quant) vs unfused (silu_and_mul)
@@ -243,11 +257,17 @@ def test_manual_fusion_nvfp4_dynamic(
 
     # NVFP4 requires hidden_size divisible by 16 (block size) and by 2 (packing).
     x = torch.rand(num_tokens, hidden_size * 2)
+<<<<<<< HEAD
     # Non-1.0 global scale so the test is sensitive to the scale direction:
     # the fused producer must quantize with input_global_scale_inv (the GEMM's
     # alpha divides by input_global_scale), matching the unfused path.
     input_global_scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
     input_global_scale_inv = 1.0 / input_global_scale
+=======
+    input_global_scale = torch.tensor(
+        [global_scale_value], dtype=torch.float32, device="cuda"
+    )
+>>>>>>> 1941015b2c ([Quantization] Expose input quantization scales through linear kernel contract)
 
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["none"]),
@@ -295,7 +315,11 @@ def test_manual_fusion_nvfp4_dynamic(
         dequant_result = dequantize_nvfp4_to_dtype(
             tensor_fp4=result_fused.data,
             tensor_sf=result_fused.scale,
+<<<<<<< HEAD
             global_scale=input_global_scale_inv,
+=======
+            global_scale=mock_linear_with_key.input_global_scale_inv,
+>>>>>>> 1941015b2c ([Quantization] Expose input quantization scales through linear kernel contract)
             dtype=dtype,
             device="cuda",
             block_size=16,

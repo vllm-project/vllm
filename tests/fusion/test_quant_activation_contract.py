@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
+    get_input_quant_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
@@ -133,3 +134,50 @@ def test_as_quantized_activation_validates_key():
         as_quantized_activation(qa, None)
     assert as_quantized_activation(torch.zeros(2, 4), kFp8StaticTensorSym) is None
     assert as_quantized_activation(qa, kFp8StaticTensorSym) is qa
+
+
+@pytest.mark.parametrize("kernel_cls", sorted(SUPPORTING, key=lambda cls: cls.__name__))
+@pytest.mark.parametrize("compiled", [False, True])
+def test_input_quant_scales_follow_parameter_replacement(kernel_cls, compiled):
+    """Resolve consumer scales after loading and replacement, even in a full graph."""
+    kernel = _probe(kernel_cls)
+    nvfp4 = issubclass(kernel_cls, NvFp4LinearKernel)
+    if not nvfp4:
+        kernel.layer_param_names = (
+            "weight",
+            "weight_scale",
+            "activation_scale",
+            "input_scale_ub",
+        )
+
+    layer = torch.nn.Module()
+    # The bridge runs before post-load processing creates the runtime scales.
+    expose_input_quant_key(layer, kernel)
+    scale_name = "input_global_scale_inv" if nvfp4 else "activation_scale"
+    layer.register_parameter(
+        scale_name, torch.nn.Parameter(torch.tensor(4.0), requires_grad=False)
+    )
+
+    def quantize(x):
+        scales = get_input_quant_scales(layer)
+        if nvfp4:
+            return x * scales.global_scale_inv
+        return x / scales.static_scale
+
+    if compiled:
+        quantize = torch.compile(quantize, backend="eager", fullgraph=True)
+
+    x = torch.tensor([2.0])
+    for scale_value in (4.0, 8.0):
+        scale = torch.nn.Parameter(torch.tensor(scale_value), requires_grad=False)
+        setattr(layer, scale_name, scale)
+        scales = get_input_quant_scales(layer)
+        if nvfp4:
+            assert scales.global_scale_inv is scale
+            assert scales.static_scale is None
+            expected = x * scale_value
+        else:
+            assert scales.static_scale is scale
+            assert scales.global_scale_inv is None
+            expected = x / scale_value
+        torch.testing.assert_close(quantize(x), expected)
