@@ -26,6 +26,43 @@ logger = init_logger(__name__)
 
 KiB = 1024
 MiB = 1024 * 1024
+
+# Opt-in ceiling via VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB. Applied for
+# same-node all-reduce groups of 2/4/6/8 ranks (custom all-reduce's
+# kernel-supported sizes). Caps allocations if the env is set too high.
+CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT = 256
+# World sizes eligible for the override: custom all-reduce's kernel-supported
+# same-node group sizes (odd counts and >8, e.g. 16, cannot dispatch it).
+CUSTOM_ALLREDUCE_OVERRIDE_WORLD_SIZES = (2, 4, 6, 8)
+
+
+def resolve_custom_allreduce_max_size(
+    default_max_size: int,
+    world_size: int,
+    same_node: bool,
+    override_mb: int | None,
+) -> tuple[int, bool]:
+    """Return ``(max_size_bytes, applied)``.
+
+    The override applies to same-node all-reduce groups of 2/4/6/8 ranks —
+    custom all-reduce's kernel-supported sizes (``should_custom_ar`` never
+    dispatches above 8 ranks). Note that at world sizes above two the
+    constructor keeps custom all-reduce enabled only with full one-hop
+    NVLink connectivity; on PCIe-only groups it disables custom all-reduce
+    entirely, so the override has no effect there. The CUSTOM-vs-NCCL
+    crossover was only measured on same-node TP=2 PCIe; at other world
+    sizes this is an operator-measured override, not a claimed win.
+    """
+    if override_mb is None:
+        return default_max_size, False
+    if override_mb < 1 or override_mb > CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT:
+        raise ValueError(
+            "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB must be between 1 and "
+            f"{CUSTOM_ALLREDUCE_MAX_SIZE_MB_LIMIT}, got {override_mb}."
+        )
+    if not same_node or world_size not in CUSTOM_ALLREDUCE_OVERRIDE_WORLD_SIZES:
+        return default_max_size, False
+    return override_mb * MiB, True
 # Max size for each world size in case symmetric memory is available
 # For different SM architectures
 CUSTOM_ALL_REDUCE_MAX_SIZES = {
