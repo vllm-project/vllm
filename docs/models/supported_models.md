@@ -72,19 +72,26 @@ This means that, with the Transformers modeling backend for vLLM, new models can
 
 This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers modeling backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
 
-To make your model compatible with the Transformers modeling backend, it needs:
+To make your model compatible with the Transformers modeling backend:
 
-1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
-    - If your model is encoder-only:
-        1. Add `is_causal = False` to `MyAttention`.
-    - If your model is mixture-of-experts (MoE):
-        1. Your sparse MoE block must have an attribute called `experts`.
-        2. The class of `experts` (`MyExperts`) must either:
-            - Inherit from `nn.ModuleList` (naive).
-            - Or contain all 3D `nn.Parameters` (packed).
-        3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
-2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
-3. `MyModel` must contain `_supports_attention_backend = True`.
+1. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
+    - It must make exactly one such call. vLLM attaches one `Attention` layer per `MyAttention` module.
+    - `MyAttention` must contain a unique `layer_idx`. vLLM keys its KV cache using this index.
+    - Pass `scaling=` to the interface if your scale is not `head_size**-0.5`. vLLM reads it from the call to the attention interface.
+2. If your model is encoder-only:
+    1. Add `is_causal = False` to `MyAttention`.
+3. If your model is mixture-of-experts (MoE):
+    1. Your sparse MoE block must have an attribute called `experts`.
+    2. The class of `experts` (`MyExperts`) must either:
+        - Inherit from `nn.ModuleList` (naive).
+        - Or contain all 3D `nn.Parameters` (packed).
+    3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+
+!!! note
+    `MyModel` no longer needs `_supports_attention_backend = True`, and `kwargs` no
+    longer need to be passed down through every module from `MyModel` to
+    `MyAttention`. vLLM reaches its attention layer through `MyAttention` itself, so
+    all it asks is that `MyAttention` dispatches through the interface.
 
 <details class="code">
 <summary>modeling_my_model.py</summary>
@@ -97,14 +104,24 @@ from torch import nn
 class MyAttention(nn.Module):
     is_causal = False  # Only do this for encoder-only models
 
+    def __init__(self, config, layer_idx):
+        ...
+        self.config = config
+        self.layer_idx = layer_idx
+        self.scaling = self.head_dim**-0.5
+        ...
+
     def forward(self, hidden_states, **kwargs):
         ...
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
             key_states,
             value_states,
+            scaling=self.scaling,
             **kwargs,
         )
         ...
@@ -127,7 +144,7 @@ class MySparseMoEBlock(nn.Module):
         ...
 
 class MyModel(PreTrainedModel):
-    _supports_attention_backend = True
+    ...
 ```
 
 </details>
@@ -135,7 +152,7 @@ class MyModel(PreTrainedModel):
 Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
-2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
+2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `_can_set_attn_implementation()`.
 3. `MyModel` is loaded into one of the Transformers modeling backend classes in [vllm/model_executor/models/transformers](../../vllm/model_executor/models/transformers) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
@@ -694,7 +711,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
-| `FunASRForConditionalGeneration` | FunASR | `allendou/Fun-ASR-Nano-2512-vllm`, etc. | | |
+| `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
