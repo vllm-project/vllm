@@ -207,6 +207,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_DSV4_FUSED_ACT_QUANT: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
@@ -1598,6 +1599,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
+    ),
+    # Fuse DeepSeek-V4's clamped SwiGLU, FP8 block quantization, and EP expert
+    # filtering. This switch is primarily useful for matched A/B benchmarks.
+    "VLLM_USE_DSV4_FUSED_ACT_QUANT": lambda: bool(
+        int(os.getenv("VLLM_USE_DSV4_FUSED_ACT_QUANT", "1"))
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that

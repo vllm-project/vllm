@@ -239,12 +239,14 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
                               std::optional<torch::stable::Tensor> residual,
                               int64_t group_size, bool is_scale_transposed);
 
-void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
-                                  torch::stable::Tensor const& input,
-                                  torch::stable::Tensor& scales,
-                                  int64_t group_size,
-                                  std::optional<torch::stable::Tensor> scale_ub,
-                                  bool is_scale_transposed);
+void silu_and_mul_per_block_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor& scales, int64_t group_size,
+    std::optional<torch::stable::Tensor> scale_ub, bool is_scale_transposed,
+    std::optional<double> clamp_limit,
+    std::optional<torch::stable::Tensor> expert_ids,
+    std::optional<torch::stable::Tensor> expert_map, int64_t expert_step,
+    bool use_ue8m0);
 
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,
