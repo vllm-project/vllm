@@ -32,7 +32,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -66,6 +66,16 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
     @classmethod
     def is_sparse(cls) -> bool:
         return True
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The sparse top-k walk reads per-layer [B, N, C] rows, which
+        # block-outermost layouts do not provide.
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.LHBNC,
+        )
 
 
 class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):

@@ -42,7 +42,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -132,6 +132,16 @@ class FlashMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLASparseImpl"]:
         return FlashMLASparseImpl
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The sparse top-k walk reads per-layer [B, N, C] rows, which
+        # block-outermost layouts do not provide.
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.LHBNC,
+        )
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
