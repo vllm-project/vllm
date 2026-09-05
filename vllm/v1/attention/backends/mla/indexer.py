@@ -282,6 +282,15 @@ class KpoolTailBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # ROCm runs adaptive verification through the per-token flattened
+        # indexer path, which derives row ownership from device decode lengths.
+        return (
+            _rocm_supports_flattened_device_query_lens()
+            or super().supports_device_cpu_query_lens_mismatch()
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
@@ -668,6 +677,10 @@ def _supports_flattened_device_query_lens() -> bool:
     )
 
 
+def _rocm_supports_flattened_device_query_lens() -> bool:
+    return current_platform.is_rocm()
+
+
 def _supports_native_decode(next_n: int) -> bool:
     """Whether decode can pass `next_n` Q rows per request to the kernel
     instead of flattening to one single-token row per query, which re-reads
@@ -688,7 +701,10 @@ def _use_flattening(vllm_config: VllmConfig) -> bool:
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
-        and _supports_flattened_device_query_lens()
+        and (
+            _supports_flattened_device_query_lens()
+            or _rocm_supports_flattened_device_query_lens()
+        )
     )
 
 
