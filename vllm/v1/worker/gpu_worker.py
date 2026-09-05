@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     checkpoint_prepare_distributed_state,
     checkpoint_restore_distributed_state,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     resume_device_comms,
@@ -796,6 +797,16 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            # DeepEP-v2 dispatch is collective across the EP group. DP engines
+            # initialize their KV caches independently, so faster ranks can
+            # otherwise enter graph capture while slower ranks are still in KV
+            # registration. Synchronize after all local warmup is complete to
+            # keep the dispatch calls made during capture in lockstep.
+            if (
+                self.parallel_config.all2all_backend == "deepep_v2"
+                and self.parallel_config.data_parallel_size > 1
+            ):
+                get_ep_group().barrier()
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
