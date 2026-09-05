@@ -27,6 +27,46 @@ from vllm.transformers_utils.configs.glm5_next import (
 )
 
 
+@pytest.mark.parametrize(
+    ("mrope_section", "expected_num_dims"),
+    [
+        ([16, 24, 24], 3),
+        ([16, 16, 16, 16], 4),
+    ],
+)
+def test_model_config_mrope_num_dims(mrope_section, expected_num_dims):
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(
+                rope_parameters={"mrope_section": mrope_section}
+            ),
+        ),
+    )
+
+    assert ModelConfig.mrope_num_dims.fget(model_config) == expected_num_dims
+
+
+def test_model_config_mrope_num_dims_from_thinker_config():
+    thinker_text_config = SimpleNamespace(
+        rope_parameters={"mrope_section": [16, 16, 16, 16]}
+    )
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            hf_config=SimpleNamespace(
+                get_text_config=lambda: SimpleNamespace(),
+                thinker_config=SimpleNamespace(text_config=thinker_text_config),
+            ),
+            hf_text_config=SimpleNamespace(),
+            uses_mrope=True,
+        ),
+    )
+
+    assert ModelConfig.mrope_num_dims.fget(model_config) == 4
+
+
 def test_glm5_next_accepts_deepseek_sparse_attention_layers():
     layer_types = ["linear_attention", "deepseek_sparse_attention"]
 

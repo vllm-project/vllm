@@ -14,7 +14,8 @@ from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 class RopeState:
     """Unified state for multi-dimensional RoPE variants (M-RoPE, XD-RoPE).
 
-    M-RoPE: 3 dims, uses position delta for decode.
+    M-RoPE: dimensions are defined by the model config, uses position delta
+    for decode.
     XD-RoPE: 3 or 4 dims, delta is 0 (decode uses orig_pos for all dims).
 
     NOTE: `positions` is implemented with one additional dummy position on
@@ -22,9 +23,8 @@ class RopeState:
     See detailed explanation in
     https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-    NOTE: When M-RoPE is enabled, position ids are 3D regardless of the
-    modality of inputs. For text-only inputs, each dimension has identical
-    position IDs, making M-RoPE functionally equivalent to 1D-RoPE.
+    NOTE: For text-only inputs, each dimension has identical position IDs,
+    making M-RoPE functionally equivalent to 1D-RoPE.
     See page 5 of https://arxiv.org/abs/2409.12191
     """
 
@@ -143,7 +143,7 @@ def get_rope_state(
     if model_config.uses_mrope:
         assert isinstance(model, SupportsMRoPE)
         return RopeState(
-            num_dims=3,
+            num_dims=model_config.mrope_num_dims,
             has_delta=True,
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
