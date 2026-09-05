@@ -1326,6 +1326,46 @@ class OffloadingConnectorScheduler:
 
         return store_jobs
 
+    def _reachable_store_block_mask(
+        self,
+        group_config: GroupOffloadConfig,
+        start_chunk_idx: int,
+        end_chunk_idx: int,
+        final_segment_end_chunk_idx: int | None,
+        reachable_boundaries: tuple[int, ...],
+    ) -> list[bool] | None:
+        """Build the block mask for a range of candidate offload chunks."""
+        blocks_per_chunk = self.config.blocks_per_chunk
+        return group_config.manager_cls.reachable_block_mask(
+            start_block=start_chunk_idx * blocks_per_chunk,
+            end_block=end_chunk_idx * blocks_per_chunk,
+            alignment_tokens=self.config.alignment_tokens,
+            kv_cache_spec=group_config.kv_cache_spec,
+            use_eagle=group_config.is_eagle_group,
+            retention_interval=self.config.retention_interval,
+            reachable_boundaries=reachable_boundaries,
+            dcp_world_size=self.config.dcp_world_size,
+            final_segment_end_block=(
+                final_segment_end_chunk_idx * blocks_per_chunk
+                if final_segment_end_chunk_idx is not None
+                else None
+            ),
+        )
+
+    def _final_swa_alignment_blocks(
+        self, group_config: GroupOffloadConfig
+    ) -> int | None:
+        """Return representable final-tail alignment for a non-EAGLE SWA group."""
+        alignment_tokens = self.config.alignment_tokens
+        if (
+            alignment_tokens is None
+            or group_config.is_eagle_group
+            or not isinstance(group_config.kv_cache_spec, SlidingWindowSpec)
+            or alignment_tokens % group_config.tokens_per_block != 0
+        ):
+            return None
+        return alignment_tokens // group_config.tokens_per_block
+
     def _build_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
@@ -1352,10 +1392,14 @@ class OffloadingConnectorScheduler:
             num_offloadable_tokens = self._calc_num_offloadable_tokens(
                 req_status, num_tokens_after_batch
             )
+            prompt_offloadable_tokens = self._calc_num_offloadable_tokens(
+                req_status, req.num_prompt_tokens
+            )
 
             # Filter out chunks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
+            group_store_ranges: list[tuple[int, int]] = []
 
             reachable_boundaries: tuple[int, ...] = ()
             if self.config.retention_interval is not None:
@@ -1370,10 +1414,47 @@ class OffloadingConnectorScheduler:
                     group_config, group_state, num_offloadable_tokens
                 )
 
+                start_chunk_idx = group_state.next_stored_chunk_idx
+                prompt_horizon_chunks = (
+                    prompt_offloadable_tokens // group_config.tokens_per_chunk
+                )
+                final_swa_alignment_blocks = self._final_swa_alignment_blocks(
+                    group_config
+                )
+                reconsider_final_swa_tail = (
+                    req.is_finished()
+                    and num_chunks != prompt_horizon_chunks
+                    and self.config.retention_interval is None
+                    and final_swa_alignment_blocks is not None
+                )
+                if (
+                    self.config.retention_interval is not None
+                    or group_config.is_eagle_group
+                ):
+                    store_horizon_chunks = None
+                elif req.is_finished():
+                    store_horizon_chunks = num_chunks
+                elif num_chunks <= prompt_horizon_chunks:
+                    store_horizon_chunks = prompt_horizon_chunks
+                else:
+                    # An active decode frontier is not a final request
+                    # boundary. Only fixed alignment tails are reachable.
+                    store_horizon_chunks = None
+                if reconsider_final_swa_tail:
+                    assert final_swa_alignment_blocks is not None
+                    horizon_blocks = num_chunks * blocks_per_chunk
+                    partial_segment_start_block = (
+                        horizon_blocks - horizon_blocks % final_swa_alignment_blocks
+                    )
+                    partial_segment_start_chunk = (
+                        partial_segment_start_block // blocks_per_chunk
+                    )
+                    start_chunk_idx = min(start_chunk_idx, partial_segment_start_chunk)
+                group_store_ranges.append((start_chunk_idx, num_chunks))
+
                 if group_config.requires_cow_source:
                     continue
 
-                start_chunk_idx = group_state.next_stored_chunk_idx
                 if num_chunks <= start_chunk_idx:
                     continue
                 offload_keys = group_state.offload_keys[start_chunk_idx:num_chunks]
@@ -1393,21 +1474,43 @@ class OffloadingConnectorScheduler:
                 # (SWA/Mamba sparsity + retention interval).
                 # reachable_block_mask operates in KV-block coordinates,
                 # so convert chunk indices to block indices.
-                block_mask = group_config.manager_cls.reachable_block_mask(
-                    start_block=start_chunk_idx * blocks_per_chunk,
-                    end_block=num_chunks * blocks_per_chunk,
-                    alignment_tokens=self.config.alignment_tokens,
-                    kv_cache_spec=group_config.kv_cache_spec,
-                    use_eagle=group_config.is_eagle_group,
-                    retention_interval=self.config.retention_interval,
+                block_mask = self._reachable_store_block_mask(
+                    group_config=group_config,
+                    start_chunk_idx=start_chunk_idx,
+                    end_chunk_idx=num_chunks,
+                    final_segment_end_chunk_idx=store_horizon_chunks,
                     reachable_boundaries=reachable_boundaries,
-                    dcp_world_size=self.config.dcp_world_size,
                 )
+
+                prompt_horizon_block_mask: list[bool] | None = None
+                if reconsider_final_swa_tail:
+                    prompt_horizon_block_mask = self._reachable_store_block_mask(
+                        group_config=group_config,
+                        start_chunk_idx=start_chunk_idx,
+                        end_chunk_idx=num_chunks,
+                        final_segment_end_chunk_idx=prompt_horizon_chunks,
+                        reachable_boundaries=reachable_boundaries,
+                    )
 
                 for key_idx, (offload_key, block_id) in enumerate(
                     zip(offload_keys, offload_block_ids)
                 ):
                     if block_id == 0:
+                        continue
+                    abs_chunk_idx = start_chunk_idx + key_idx
+                    if (
+                        reconsider_final_swa_tail
+                        and abs_chunk_idx < group_state.next_stored_chunk_idx
+                        and (
+                            prompt_horizon_block_mask is None
+                            or any(
+                                prompt_horizon_block_mask[
+                                    key_idx * blocks_per_chunk + block_idx
+                                ]
+                                for block_idx in range(blocks_per_chunk)
+                            )
+                        )
+                    ):
                         continue
                     # A chunk is reachable if any of its constituent
                     # blocks is reachable.
@@ -1445,16 +1548,15 @@ class OffloadingConnectorScheduler:
             src_block_ids: list[int] = []
             fenced_block_ids: list[int] = []
             deferred_fence_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_config, group_state, store_range in zip(
+                self.config.kv_group_configs,
+                req_status.group_states,
+                group_store_ranges,
             ):
                 is_sliding_window = (
                     group_config.sliding_window_size_in_chunks is not None
                 )
-                num_chunks = req_status.storable_chunks(
-                    group_config, group_state, num_offloadable_tokens
-                )
-                start_chunk_idx = group_state.next_stored_chunk_idx
+                start_chunk_idx, num_chunks = store_range
                 block_ids = group_state.block_ids
                 num_group_blocks = 0
                 start_gpu_block_idx: int | None = None
