@@ -3992,6 +3992,23 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    def _is_all_decoding(self, num_reqs: int) -> bool:
+        """Whether every scheduled request has finished its prompt.
+
+        A request is decoding once ``num_computed_tokens >= num_prompt_tokens``
+        (it has computed all prompt tokens). This is the same predicate the
+        dispatch side uses to keep shape-aliased prefills out of uniform-decode
+        batches (vllm-project/vllm#53051); it is factored out so the replay-side
+        guard in ``execute_model`` can reuse it for the FULL cudagraph check.
+        """
+        input_batch = self.input_batch
+        return bool(
+            (
+                input_batch.num_computed_tokens_cpu[:num_reqs]
+                >= input_batch.num_prompt_tokens[:num_reqs]
+            ).all()
+        )
+
     def _allow_microbatching(
         self, num_reqs: int, num_scheduled_tokens_np: np.ndarray
     ) -> bool:
@@ -4423,6 +4440,27 @@ class GPUModelRunner(
                 if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+            if pad_attn:
+                # Defense in depth for vllm-project/vllm#53051: a FULL decode
+                # cudagraph replay must never contain a prefill. Backends with
+                # persistent capture-time buffers (e.g. GDN) only refresh them
+                # in their num_prefills == 0 metadata branch, so a prefill that
+                # reaches a FULL replay would reuse stale indices and the
+                # null-block guards would silently drop the state writes. The
+                # dispatch-side fix rejects shape-aliased prefills; assert it
+                # still holds here so any regression fails loudly instead of
+                # corrupting output. This path is real forwards only (capture
+                # and warmup run through _dummy_run), so legitimate PIECEWISE
+                # prefill batches never reach this check.
+                assert self._is_all_decoding(num_reqs), (
+                    "A FULL cudagraph replay was dispatched for a batch that "
+                    "still contains prefill(s) "
+                    "(vllm-project/vllm#53051). This would silently reuse "
+                    "stale capture-time GDN state indices and drop prefill "
+                    "state writes. See the dispatch-side fix in "
+                    "_is_uniform_decode."
+                )
 
             if self.cache_config.mamba_cache_mode == "align":
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)

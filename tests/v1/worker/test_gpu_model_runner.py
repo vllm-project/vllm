@@ -1823,3 +1823,33 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def _all_decoding_runner(
+    num_computed_tokens: list[int], num_prompt_tokens: list[int]
+) -> SimpleNamespace:
+    """Minimal stand-in for the ``self`` used by _is_all_decoding."""
+    return SimpleNamespace(
+        input_batch=SimpleNamespace(
+            num_computed_tokens_cpu=np.array(num_computed_tokens),
+            num_prompt_tokens=np.array(num_prompt_tokens),
+        )
+    )
+
+
+def test_is_all_decoding():
+    # All requests past their prompt: genuinely decoding.
+    decode = _all_decoding_runner([10, 12, 8], [8, 8, 8])
+    assert GPUModelRunner._is_all_decoding(decode, 3)
+    # computed == prompt is the boundary of "finished the prompt"; the next
+    # scheduled token is a generated one, so the request is decoding.
+    edge = _all_decoding_runner([8, 8], [8, 8])
+    assert GPUModelRunner._is_all_decoding(edge, 2)
+    # A fresh request that has computed no prompt token is a prefill.
+    prefill = _all_decoding_runner([0, 8], [8, 8])
+    assert not GPUModelRunner._is_all_decoding(prefill, 2)
+    # A shape-aliased prefill (computed < prompt) must not count as decoding;
+    # this is the case that previously slipped into a FULL decode replay
+    # (vllm-project/vllm#53051).
+    aliased = _all_decoding_runner([2, 2], [4, 4])
+    assert not GPUModelRunner._is_all_decoding(aliased, 2)
