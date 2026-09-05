@@ -376,9 +376,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   // Reserving 64/160 KB of LDS to have 1 WG / CU
   // Goal is to bring the activation matrix A to the LDS
-  // and use it across the lifetime of the work group
-  // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
+  // and use it across the lifetime of the work group.
+  // The caller dispatches to this kernel only when the
+  // activation fits in LDS (see WVSPLITK_CFG).
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -389,7 +389,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Each wave will fetch 64*8=> 512 elements
   // - Each WG will fetch 512 * 16 => 8K elements
   // - Then the WG will move to another 8 K elements
-  // TODO: Logic below will only work when K is multiple of 8
+  // K is a multiple of 8, enforced by the call-site TORCH_CHECK
   //----------------------------------------------------
   for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
        k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
@@ -847,9 +847,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   // Reserving 64/160 KB of LDS to have 1 WG / CU
   // Goal is to bring the activation matrix A to the LDS
-  // and use it across the lifetime of the work group
-  // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not going to work!
+  // and use it across the lifetime of the work group.
+  // The caller dispatches to this kernel only when the
+  // activation fits in LDS (see WVSPLITK_CFG).
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -888,7 +888,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Each wave will fetch 64*8=> 512 elements
   // - Each WG will fetch 512 * 16 => 8K elements
   // - Then the WG will move to another 8 K elements
-  // TODO: Logic below will only work when K is multiple of 8
+  // K is a multiple of 8, enforced by the call-site TORCH_CHECK
   //----------------------------------------------------
   #define PCML
   #ifndef PCML
@@ -962,7 +962,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // fashion. This provides lot of food for compiler
     // scheduling.
     //
-    // TODO: Logic below will only work when K is multiple of 8
+    // K is a multiple of 8, enforced by the call-site TORCH_CHECK
     //----------------------------------------------------
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
