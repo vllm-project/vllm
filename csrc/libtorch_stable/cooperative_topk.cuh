@@ -598,6 +598,11 @@ constexpr size_t kSmemSize2 = kSmemSize4;
 constexpr size_t kSmemSize8 =
     sizeof(SmemFused<kFusedStagesCS8>) + sizeof(int32_t) * 2048 + 128;
 
+static_assert(sizeof(hist4096::Histogram4096Smem<kMaxTopK, 12>) <= kSmemSize4,
+              "cooperative smem must cover histogram_4096_topk");
+static_assert(sizeof(hist4096::Histogram4096Smem<kMaxTopK, 12>) <= kSmemSize8,
+              "cooperative smem must cover histogram_4096_topk");
+
 }  // namespace cooperative
 
 }  // namespace vllm
