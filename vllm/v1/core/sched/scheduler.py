@@ -2067,6 +2067,21 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    if status_before_stop == RequestStatus.RUNNING:
+                        # Register finalized output tokens before releasing
+                        # their blocks. A terminal request has no later
+                        # allocation pass to do so.
+                        finalized_num_computed_tokens = min(
+                            max(
+                                0,
+                                request.num_computed_tokens
+                                - request.num_in_flight_tokens,
+                            ),
+                            request.num_tokens,
+                        )
+                        self.kv_cache_manager.cache_blocks(
+                            request, finalized_num_computed_tokens
+                        )
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:

@@ -1540,6 +1540,87 @@ def test_schedule_spec_decoding_stats(
         assert "per_step_accepted" not in payload  # summary level
 
 
+@pytest.mark.parametrize(
+    (
+        "async_scheduling",
+        "prompt_tokens",
+        "num_reprefillable_tokens",
+        "expected_cached_tokens",
+        "run_spec_verify",
+    ),
+    [
+        (False, 44, 0, 48, True),
+        (False, 30, 2, 16, True),
+        (False, 28, 2, 0, True),
+        (True, 30, 2, 16, True),
+        (False, 47, 0, 32, False),
+    ],
+    ids=[
+        "ordinary-spec",
+        "mtp-publish",
+        "mtp-fence",
+        "async-mtp-publish",
+        "sampled-output-fence",
+    ],
+)
+def test_finished_spec_decode_registers_accepted_tokens(
+    async_scheduling: bool,
+    prompt_tokens: int,
+    num_reprefillable_tokens: int,
+    expected_cached_tokens: int,
+    run_spec_verify: bool,
+):
+    """Terminal registration publishes all and only executed KV."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=16,
+        num_speculative_tokens=3,
+        speculative_method="ngram_gpu" if async_scheduling else None,
+        async_scheduling=async_scheduling,
+    )
+    if num_reprefillable_tokens:
+        # Mirror the cache-registration and lookup geometry of K=3
+        # multi-module MTP without requiring model weights or a GPU.
+        scheduler.use_eagle = True
+        scheduler.use_eagle_block_drop = True
+        scheduler.num_prefill_lookahead = num_reprefillable_tokens + 1
+        coordinator = scheduler.kv_cache_manager.coordinator
+        coordinator.num_reprefillable_tokens = num_reprefillable_tokens
+        coordinator.eagle_group_ids = {0}
+        coordinator.single_type_managers[0].use_eagle = True
+
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=prompt_tokens,
+        max_tokens=4 if run_spec_verify else 1,
+        block_size=16,
+        same_prompt=True,
+    )
+    scheduler.add_request(request)
+
+    # Prefill samples one token. Most cases then accept all three drafts on a
+    # terminal verify; the verifier's bonus token is trimmed at max_tokens=4.
+    _model_output(scheduler, scheduler.schedule(), [[0]])
+    if run_spec_verify:
+        scheduler.update_draft_token_ids(
+            DraftTokenIds([request.request_id], [[0, 0, 0]])
+        )
+        _model_output(scheduler, scheduler.schedule(), [[0, 0, 0, 0]])
+
+    # One extra token keeps the lookup's required uncomputed tail outside the
+    # finalized boundary whose reuse this test measures.
+    (continuation,) = create_requests(
+        num_requests=1,
+        num_tokens=prompt_tokens + 5,
+        block_size=16,
+        same_prompt=True,
+    )
+    _, num_cached_tokens, _ = scheduler.kv_cache_manager.get_computed_blocks(
+        continuation
+    )
+    assert num_cached_tokens == expected_cached_tokens
+
+
 def _run_spec_verify_steps(scheduler, rounds, num_invalid_per_round=None):
     """Drive prefill + one draft/verify step per round for a single request.
 
