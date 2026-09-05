@@ -416,6 +416,27 @@ class TestImplicitReasoningEnd:
         args = json.loads(tool_calls[0].arguments)
         assert args == {"location": "NYC"}
 
+    def test_reasoning_end_token_ids_drop_multi_token_tool_opener(
+        self, thinking_parser
+    ):
+        # Like the real DeepSeek-V4 tokenizer, the mock vocab has no single
+        # token for the DSML tool opener, so only </think> is tracked on the
+        # token-ID fast path; the implicit tool-call exit still goes through
+        # the text lexer.
+        assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
+        assert thinking_parser.find_reasoning_end_offset([7, _THINK_END_ID, 8]) == 1
+        assert thinking_parser.find_reasoning_end_offset([7, 8]) is None
+
+    def test_reasoning_end_token_ids_include_single_token_tool_opener(self):
+        parser = DeepSeekV4Parser(
+            make_mock_tokenizer(dict(_DSV4_FULL_VOCAB)),
+            chat_template_kwargs={"thinking": True},
+        )
+        think_end = _DSV4_FULL_VOCAB[DSML_THINK_END]
+        tool_start = _DSV4_FULL_VOCAB[DSML_TOOL_START]
+        assert parser.reasoning_end_token_ids == {think_end, tool_start}
+        assert parser.find_reasoning_end_offset([7, tool_start, 8]) == 1
+
     def test_streaming_reasoning_implicit_end(self, thinking_parser):
         chunks = [
             "Let me look up the weather.\n\n",

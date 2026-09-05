@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -291,40 +292,43 @@ class StructuredOutputManager:
                 apply_bitmask = self.should_fill_bitmask(request)
 
                 reasoner = None if apply_bitmask else self._get_reasoner(request)
-                detect_reasoning_end = reasoner is not None
-                simulated_buf: list[int] | None = None
-                history_len = 0
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                # Locate the reasoning-end marker in the draft window once.
+                # Rejected-draft padding (-1) is trailing, so the window is
+                # cut there and the reasoner never sees a placeholder.
+                window_start = len(request.all_token_ids)
+                reasoning_end_index: int | None = None
+                if reasoner is not None and req_tokens:
+                    window = req_tokens
+                    if -1 in window:
+                        window = window[: window.index(-1)]
+                    reasoning_end_index = self._find_reasoning_end_index(
+                        reasoner,
+                        request.all_token_ids,
+                        window_start,
+                        window,
+                        delta_appended=False,
+                    )
                 for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     advance_grammar = apply_bitmask
                     if token == -1:
                         apply_bitmask = False
                         advance_grammar = False
-                    elif (
-                        detect_reasoning_end
-                        and reasoner is not None
-                        and not apply_bitmask
-                    ):
-                        if simulated_buf is None:
-                            history = list(request.all_token_ids)
-                            history_len = len(history)
-                            simulated_buf = history + list(req_tokens)
-                        simulated = simulated_buf[: history_len + i + 1]
-                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
-                            # Reasoning ended mid-window. Constrain the rest
-                            # of the window via bitmask. Skip grammar advance
-                            # through the marker (it is reasoning content);
-                            # try to advance through subsequent drafts so the
-                            # next bitmask row reflects the post-advance state,
-                            # but tolerate rejection since those drafts predate
-                            # the bitmask and are not guaranteed valid.
-                            apply_bitmask = True
-                            advance_grammar = False
-                            post_reasoning_end_in_window = True
+                    elif not apply_bitmask and window_start + i == reasoning_end_index:
+                        # Reasoning ended mid-window. Constrain the rest
+                        # of the window via bitmask. Skip grammar advance
+                        # through the marker (it is reasoning content);
+                        # try to advance through subsequent drafts so the
+                        # next bitmask row reflects the post-advance state,
+                        # but tolerate rejection since those drafts predate
+                        # the bitmask and are not guaranteed valid.
+                        apply_bitmask = True
+                        advance_grammar = False
+                        post_reasoning_end_in_window = True
                     if advance_grammar and not grammar.is_terminated():
                         if post_reasoning_end_in_window:
                             accepted = bool(grammar.validate_tokens([token]))
@@ -431,21 +435,24 @@ class StructuredOutputManager:
             # The tokens were already appended this step, so the step window
             # starts exactly len(new_token_ids) from the end.
             start = len(all_token_ids) - len(new_token_ids)
-            delta_ids: Iterable[int] = new_token_ids
+            delta_ids: Sequence[int] = new_token_ids
         else:
+            # Draft-validation callers arrive here after update_from_output
+            # has already persisted any boundary found this step, so this
+            # window only needs to cover tokens not examined yet.
             delta_from = request.num_computed_tokens - request.num_output_placeholders
             start = (
                 delta_from
                 if delta_from >= 0
                 else max(len(all_token_ids) + delta_from, 0)
             )
-            delta_ids = itertools.islice(all_token_ids, start, None)
-        if reasoner.is_reasoning_end_streaming(all_token_ids, delta_ids):
+            delta_ids = all_token_ids[start:]
+        end_index = self._find_reasoning_end_index(
+            reasoner, all_token_ids, start, delta_ids, delta_appended=True
+        )
+        if end_index is not None:
             structured_req.reasoning_ended = True
-
             # Record the boundary so the scheduler can exclude reasoning tokens.
-            end_index = self._find_reasoning_end_index(reasoner, all_token_ids, start)
-
             structured_req.reasoning_end_token_index = end_index
             return True
 
@@ -453,24 +460,46 @@ class StructuredOutputManager:
 
     @staticmethod
     def _find_reasoning_end_index(
-        reasoner: "ReasoningParser", all_token_ids: Sequence[int], start: int
-    ) -> int:
-        """Locates the last reasoning token within ``all_token_ids[start:]``.
+        reasoner: "ReasoningParser",
+        all_token_ids: Sequence[int],
+        start: int,
+        delta_ids: Sequence[int],
+        *,
+        delta_appended: bool,
+    ) -> int | None:
+        """Locates the token that ends reasoning within ``delta_ids``.
+
+        ``delta_ids`` occupy positions ``start..``; ``delta_appended`` says
+        whether they are already in ``all_token_ids`` (accepted tokens) or
+        not (speculative drafts).
+
+        Legacy parsers are probed one token at a time. Accepted tokens get a
+        whole-delta check as well, and a marker seen only that way reports
+        the final token. Drafts skip it: some predicates are order-sensitive
+        over a multi-token window and would miss the marker.
 
         Returns:
-            The absolute index of the token at which
-            ``is_reasoning_end_streaming`` first fires. Falls back to the
-            final index when no single token triggers the detection (e.g.
-            a multi-token marker only recognized on the full delta), which
-            conservatively treats the whole step as reasoning content.
+            Absolute index of the last reasoning token, or ``None``.
         """
+        if (
+            isinstance(reasoner, ParserEngineReasoningAdapter)
+            and reasoner.reasoning_end_token_ids
+        ):
+            offset = reasoner.find_reasoning_end_offset(delta_ids)
+            return None if offset is None else start + offset
+
+        if delta_appended and not reasoner.is_reasoning_end_streaming(
+            all_token_ids, delta_ids
+        ):
+            return None
         prefix = list(itertools.islice(all_token_ids, start))
-        for idx in range(start, len(all_token_ids)):
-            token = all_token_ids[idx]
+        for offset, token in enumerate(delta_ids):
             prefix.append(token)
             if reasoner.is_reasoning_end_streaming(prefix, [token]):
-                return idx
-        return len(all_token_ids) - 1
+                return start + offset
+        if delta_appended:
+            return len(all_token_ids) - 1
+        return None
 
     def trim_reasoning_for_advance(
         self, request: "Request", new_token_ids: list[int]
