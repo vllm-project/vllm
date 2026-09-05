@@ -54,6 +54,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KpoolTailSpec,
@@ -172,6 +173,41 @@ def test_kv_cache_config_selects_only_transferable_groups():
         first_blocks,
         third_blocks,
     )
+
+
+def test_kv_cache_config_selects_prefix_cacheable_transfer_groups():
+    """Prefix stores exclude scratch state without changing transfer groups."""
+    full_group = KVCacheGroupSpec(["full"], new_kv_cache_spec())
+    qsa_group = KVCacheGroupSpec(
+        ["qsa"],
+        CircularBufferSpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.float16,
+        ),
+    )
+    disabled_group = KVCacheGroupSpec(
+        ["disabled"], new_kv_cache_spec(), enable_kv_transfer=False
+    )
+    config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[full_group, qsa_group, disabled_group],
+    )
+    block_ids = ([1], [2], [3])
+
+    assert config.transfer_group_ids == (0, 1)
+    assert config.select_transfer_block_ids(block_ids) == ([1], [2])
+    assert config.prefix_cacheable_transfer_group_ids == (0,)
+    assert config.prefix_cacheable_transfer_groups == (full_group,)
+    assert config.select_block_ids(
+        block_ids, config.prefix_cacheable_transfer_group_ids
+    ) == ([1],)
+
+    with pytest.raises(ValueError, match="Expected 3 KV cache groups, got 1"):
+        config.select_block_ids(([1],), config.prefix_cacheable_transfer_group_ids)
 
 
 def new_sliding_window_spec(

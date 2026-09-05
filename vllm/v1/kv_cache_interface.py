@@ -1273,6 +1273,23 @@ class KVCacheConfig:
         )
 
     @cached_property
+    def prefix_cacheable_transfer_group_ids(self) -> tuple[int, ...]:
+        """IDs of transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            group_id
+            for group_id in self.transfer_group_ids
+            if self.kv_cache_groups[group_id].kv_cache_spec.prefix_cacheable
+        )
+
+    @cached_property
+    def prefix_cacheable_transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Transferable groups eligible for hash-addressed stores."""
+        return tuple(
+            self.kv_cache_groups[group_id]
+            for group_id in self.prefix_cacheable_transfer_group_ids
+        )
+
+    @cached_property
     def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
         """Cache groups that participate in external KV transfer."""
         return tuple(
@@ -1288,16 +1305,24 @@ class KVCacheConfig:
             for layer_name in group.layer_names
         }
 
-    def select_transfer_block_ids(
-        self, block_ids: Sequence[list[int]]
+    def select_block_ids(
+        self,
+        block_ids: Sequence[list[int]],
+        group_ids: Sequence[int],
     ) -> tuple[list[int], ...]:
-        """Select block IDs for externally transferable cache groups."""
+        """Select block IDs for the requested KV cache groups."""
         if len(block_ids) != len(self.kv_cache_groups):
             raise ValueError(
                 f"Expected {len(self.kv_cache_groups)} KV cache groups, "
                 f"got {len(block_ids)}."
             )
-        return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
+        return tuple(block_ids[group_id] for group_id in group_ids)
+
+    def select_transfer_block_ids(
+        self, block_ids: Sequence[list[int]]
+    ) -> tuple[list[int], ...]:
+        """Select block IDs for externally transferable cache groups."""
+        return self.select_block_ids(block_ids, self.transfer_group_ids)
 
     @property
     def has_mamba_layers(self) -> bool:
