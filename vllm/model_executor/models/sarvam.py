@@ -449,6 +449,8 @@ class SarvamMLABlock(nn.Module):
 
 
 class SarvamMLAModel(nn.Module, EagleModelMixin):
+    """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
@@ -515,6 +517,16 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Run this stage and optionally return its auxiliary hidden states.
+
+        Auxiliary captures are local to this stage, matching Qwen3 MoE.
+        Pipeline transport carries only hidden states and residual; EAGLE3
+        capture across pipeline stages is not supported by this model.
+
+        Returns:
+            Intermediate tensors on non-final stages. On the final stage,
+            normalized hidden states, paired with auxiliary states if captured.
+        """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -680,6 +692,7 @@ class SarvamMLAForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Return backbone outputs, including auxiliary states when captured."""
         return self.model(
             input_ids=input_ids,
             positions=positions,
