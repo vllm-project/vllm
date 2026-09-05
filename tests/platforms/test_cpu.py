@@ -150,3 +150,42 @@ def test_cpu_accelerated_gdn_dtype_policy(
 
     CpuPlatform.check_and_update_config(config)
     assert cache_config.mamba_ssm_cache_dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        pytest.param(None, True, id="no-model-config"),
+        pytest.param(
+            SimpleNamespace(hf_text_config=SimpleNamespace(hidden_act="silu")),
+            False,
+            id="silu",
+        ),
+        pytest.param(
+            SimpleNamespace(hf_text_config=SimpleNamespace(hidden_act="gelu")),
+            True,
+            id="gelu",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                hf_text_config=SimpleNamespace(hidden_activation="gelu_pytorch_tanh")
+            ),
+            True,
+            id="gelu-tanh-via-hidden-activation",
+        ),
+        pytest.param(
+            SimpleNamespace(
+                hf_text_config=SimpleNamespace(activation_function="gelu_new")
+            ),
+            True,
+            id="gelu-new-via-activation-function",
+        ),
+        pytest.param(
+            SimpleNamespace(hf_text_config=SimpleNamespace()),
+            True,
+            id="unknown-activation-defaults-on",
+        ),
+    ],
+)
+def test_uses_gelu_activation(model_config, expected) -> None:
+    assert CpuPlatform._uses_gelu_activation(model_config) is expected
