@@ -208,7 +208,12 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         )
 
         # Activation quantization/dequantization is deferred to
-        # `moe_kernel_quantize_input` in TritonExperts.apply.
+        # `moe_kernel_quantize_input` in TritonExperts.apply. `a1q_scale` must
+        # stay None because we declare `expects_unquantized_inputs`; the first
+        # GEMM picks up its static scale from `self.a1_scale`. There is no such
+        # fallback for the second GEMM, so forward `a2_scale` explicitly --
+        # dropping it would silently fake-quantize with a dynamic per-tensor
+        # amax instead of the checkpoint scale the native kernel applies.
         super().apply(
             output=output,
             hidden_states=hidden_states,
@@ -220,7 +225,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=None,
-            a2_scale=None,
+            a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,

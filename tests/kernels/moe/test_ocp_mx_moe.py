@@ -2011,3 +2011,61 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
     )
+
+
+def test_ocp_mx_emulation_forwards_a2_scale(monkeypatch: pytest.MonkeyPatch):
+    """
+    Emulation must hand the checkpoint's second-GEMM activation scale to
+    TritonExperts.apply.
+
+    `a1q_scale` stays None on purpose -- the class declares
+    `expects_unquantized_inputs`, so TritonExperts asserts it is None and
+    re-quantizes from `self.a1_scale`. The second GEMM has no such
+    `self.a2_scale` fallback: it quantizes from the `a2_scale` argument, so
+    passing None there makes an `*_a_fp8` scheme fake-quantize against a
+    dynamic per-tensor amax instead of the static scale the native kernel
+    uses.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    captured: dict = {}
+
+    def fake_apply(self, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(TritonExperts, "apply", fake_apply)
+
+    experts = object.__new__(OCP_MXQuantizationEmulationTritonExperts)
+    monkeypatch.setattr(
+        type(experts),
+        "_dequantize_weights",
+        lambda self, w, scale, dtype: w.to(dtype),
+    )
+    experts.w1_scale_val = None
+    experts.w2_scale_val = None
+
+    a2_scale = torch.tensor([0.125])
+    experts.apply(
+        output=torch.empty(1, 4, dtype=torch.bfloat16),
+        hidden_states=torch.empty(1, 4, dtype=torch.bfloat16),
+        w1=torch.zeros(2, 8, 4, dtype=torch.uint8),
+        w2=torch.zeros(2, 4, 4, dtype=torch.uint8),
+        topk_weights=torch.ones(1, 1),
+        topk_ids=torch.zeros(1, 1, dtype=torch.int32),
+        activation=MoEActivation.SILU,
+        global_num_experts=2,
+        expert_map=None,
+        a1q_scale=None,
+        a2_scale=a2_scale,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    assert captured["a2_scale"] is a2_scale
+    assert captured["a1q_scale"] is None
