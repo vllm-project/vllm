@@ -90,6 +90,33 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_pp_defer_sampled_token_recv_requires_integer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "later")
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        environment_variables["VLLM_PP_DEFER_SAMPLED_TOKEN_RECV"]()
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", False), ("1", True)])
+def test_pp_defer_sampled_token_recv_stats(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS", value)
+
+    assert environment_variables["VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS"]() is expected
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", False), ("1", True)])
+def test_pp_post_model_sampled_token_recv(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV", value)
+
+    assert environment_variables["VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV"]() is expected
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

@@ -48,6 +48,9 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_PP_DEFER_SAMPLED_TOKEN_RECV: int = 0
+    VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV: bool = False
+    VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -545,6 +548,17 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+def get_pp_defer_sampled_token_recv() -> int:
+    """Parse the experimental PP sampled-token receive delay."""
+    value = os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
+    try:
+        return int(value)
+    except ValueError as err:
+        raise ValueError(
+            f"VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must be an integer; got {value!r}"
+        ) from err
+
+
 def get_env_or_set_default(
     env_name: str,
     default_factory: Callable[[], str],
@@ -872,6 +886,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+    # Experimental Model Runner V2 pipeline-parallel optimization. Delay
+    # non-last-rank sampled-token receives by this many scheduler steps.
+    # The default of 0 preserves immediate receive posting.
+    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV": get_pp_defer_sampled_token_recv,
+    # Post a selected deferred sampled-token receive after the current model
+    # forward, preventing its NCCL kernel from overlapping that model work.
+    "VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV": lambda: bool(
+        int(os.getenv("VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV", "0"))
+    ),
+    # Collect CUDA-event timing for deferred sampled-token receive waits.
+    # Disabled by default so performance comparisons measure receive placement
+    # rather than event-query/timing overhead.
+    "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS": lambda: bool(
+        int(os.getenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV_STATS", "0"))
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (

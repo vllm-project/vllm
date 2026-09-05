@@ -55,6 +55,91 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_deferred_pp_sampled_recv_zero_preserves_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        use_v2_model_runner=False,
+    )
+
+    VllmConfig._verify_deferred_pp_sampled_token_recv(config)
+
+
+def test_post_model_sampled_recv_requires_nonzero_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "0")
+    monkeypatch.setenv("VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV", "1")
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=4),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        use_v2_model_runner=True,
+    )
+
+    with pytest.raises(ValueError, match="requires a non-zero"):
+        VllmConfig._verify_deferred_pp_sampled_token_recv(config)
+
+
+@pytest.mark.parametrize("delay", [-1, 4])
+def test_deferred_pp_sampled_recv_rejects_out_of_range_delay(
+    monkeypatch: pytest.MonkeyPatch, delay: int
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", str(delay))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=4),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        use_v2_model_runner=True,
+    )
+
+    with pytest.raises(ValueError, match="must satisfy"):
+        VllmConfig._verify_deferred_pp_sampled_token_recv(config)
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "async_scheduling", "is_cuda", "error"),
+    [
+        (False, True, True, "Model Runner V2"),
+        (True, False, True, "async scheduling"),
+        (True, True, False, "only on CUDA"),
+    ],
+)
+def test_deferred_pp_sampled_recv_rejects_unsupported_config(
+    monkeypatch: pytest.MonkeyPatch,
+    use_v2_model_runner: bool,
+    async_scheduling: bool,
+    is_cuda: bool,
+    error: str,
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "1")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=4),
+        scheduler_config=SimpleNamespace(async_scheduling=async_scheduling),
+        use_v2_model_runner=use_v2_model_runner,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        VllmConfig._verify_deferred_pp_sampled_token_recv(config)
+
+
+def test_deferred_pp_sampled_recv_accepts_supported_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_PP_DEFER_SAMPLED_TOKEN_RECV", "3")
+    monkeypatch.setenv("VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV", "1")
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(pipeline_parallel_size=4),
+        scheduler_config=SimpleNamespace(async_scheduling=True),
+        use_v2_model_runner=True,
+    )
+
+    VllmConfig._verify_deferred_pp_sampled_token_recv(config)
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

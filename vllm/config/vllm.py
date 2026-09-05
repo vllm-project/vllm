@@ -1080,6 +1080,39 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _verify_deferred_pp_sampled_token_recv(self) -> None:
+        delay = envs.VLLM_PP_DEFER_SAMPLED_TOKEN_RECV
+        post_model = envs.VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV
+        if post_model and delay == 0:
+            raise ValueError(
+                "VLLM_PP_POST_MODEL_SAMPLED_TOKEN_RECV requires a non-zero "
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV"
+            )
+        if delay == 0:
+            return
+
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if not 0 < delay < pp_size:
+            raise ValueError(
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV must satisfy "
+                f"1 <= delay < pp_size; got delay={delay}, pp_size={pp_size}"
+            )
+        if not self.use_v2_model_runner:
+            raise ValueError(
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV requires Model Runner V2"
+            )
+        if not self.scheduler_config.async_scheduling:
+            raise ValueError(
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV requires async scheduling"
+            )
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError(
+                "VLLM_PP_DEFER_SAMPLED_TOKEN_RECV is currently supported only on CUDA"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1662,6 +1695,8 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
+
+        self._verify_deferred_pp_sampled_token_recv()
 
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
