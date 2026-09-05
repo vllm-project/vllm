@@ -6,6 +6,7 @@ import atexit
 import contextlib
 import copy
 import functools
+import gc
 import importlib
 import itertools
 import json
@@ -17,7 +18,9 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import warnings
+import weakref
 from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
@@ -1593,6 +1596,328 @@ def record_gpu_memory_usage_stats(
     return output
 
 
+# Engine-owning objects whose survival keeps VRAM allocated. Matched by name so
+# that this diagnostic does not import (and thus keep alive) engine modules.
+_TEARDOWN_SUSPECT_TYPES = frozenset(
+    {
+        "LLM",
+        "LLMEngine",
+        "AsyncLLM",
+        "SyncMPClient",
+        "AsyncMPClient",
+        "InprocClient",
+        "CoreEngineProcManager",
+        # With VLLM_ENABLE_V1_MULTIPROCESSING=0 these live in the test process
+        # itself, so they are the ones holding VRAM rather than a subprocess.
+        "EngineCore",
+        "GPUModelRunner",
+        "Worker",
+        "UniProcExecutor",
+        "MultiprocExecutor",
+    }
+)
+
+
+def _gib(nbytes: int) -> str:
+    return f"{nbytes / 2**30:.2f} GiB"
+
+
+def _describe_dict_owner(mapping: dict) -> str:
+    """Name the namespace a dict belongs to, so the holder can be grepped for."""
+    for module in list(sys.modules.values()):
+        namespace = getattr(module, "__dict__", None)
+        if namespace is None:
+            continue
+        if namespace is mapping:
+            return f"globals of {module.__name__}"
+        for name, value in list(namespace.items()):
+            if value is mapping:
+                return f"{module.__name__}.{name}"
+    for owner in gc.get_referrers(mapping):
+        if isinstance(owner, type):
+            return f"namespace of class {owner.__module__}.{owner.__qualname__}"
+        if getattr(owner, "__dict__", None) is mapping:
+            return f"attributes of {type(owner).__module__}.{type(owner).__name__}"
+    return "dict"
+
+
+def _print_referrers(obj: Any, exclude_ids: frozenset[int], limit: int = 10) -> None:
+    referrers = [ref for ref in gc.get_referrers(obj) if id(ref) not in exclude_ids]
+    if not referrers:
+        # Unreachable garbage, not a reference teardown failed to drop.
+        print("[mem-diag]     no referrers; unreachable, awaiting collection")
+        return
+    for ref in itertools.islice(referrers, limit):
+        if isinstance(ref, dict):
+            keys = [k for k, v in ref.items() if v is obj]
+            print(f"[mem-diag]     held by {_describe_dict_owner(ref)}, keys={keys}")
+        elif hasattr(ref, "f_code"):
+            code = ref.f_code
+            print(
+                f"[mem-diag]     held by frame {code.co_name} @ "
+                f"{code.co_filename}:{ref.f_lineno}"
+            )
+        else:
+            # A half-torn-down object's __repr__ can raise, and must not
+            # decide whether this line prints.
+            try:
+                described = repr(ref)[:160]
+            except Exception as exc:
+                described = f"<unreprable, {type(exc).__name__}>"
+            print(f"[mem-diag]     held by {type(ref).__name__}: {described}")
+
+
+def _report_torch_allocator() -> None:
+    """Split resident VRAM into live tensors, allocator cache and the rest.
+
+    The cheapest fork in the diagnosis: live tensors mean a surviving
+    reference, reserved-but-unused means the caching allocator, and anything
+    above what torch reserves belongs to the context or another process.
+    """
+    try:
+        if not torch.cuda.is_available():
+            return
+        for device in range(torch.cuda.device_count()):
+            allocated = torch.cuda.memory_allocated(device)
+            reserved = torch.cuda.memory_reserved(device)
+            print(
+                f"[mem-diag] torch device {device}: live tensors "
+                f"{_gib(allocated)}, reserved {_gib(reserved)}, "
+                f"reserved but unused {_gib(reserved - allocated)}"
+            )
+    except Exception as exc:
+        print(f"[mem-diag] torch allocator query failed: {exc!r}")
+
+
+def _report_live_gpu_allocations(limit: int = 8) -> int:
+    """Name the largest live GPU allocations and return their total size.
+
+    Deduplicated by storage, since weights and the KV cache are handed out as
+    many views of one buffer.
+    """
+    try:
+        by_storage: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
+        for obj in gc.get_objects():
+            if not isinstance(obj, torch.Tensor):
+                continue
+            try:
+                if not obj.is_cuda:
+                    continue
+                storage = obj.untyped_storage()
+                key = (obj.device.index, storage.data_ptr())
+                nbytes = storage.nbytes()
+            except Exception:
+                # Meta, fake and already-freed tensors cannot be sized.
+                continue
+            by_storage.setdefault(key, (nbytes, []))[1].append(obj)
+
+        if not by_storage:
+            print("[mem-diag] no live GPU tensors reachable from the collector")
+            return 0
+        total = sum(nbytes for nbytes, _ in by_storage.values())
+        print(
+            f"[mem-diag] {len(by_storage)} live GPU allocation(s) holding "
+            f"{_gib(total)}, largest first:"
+        )
+        largest = sorted(by_storage.items(), key=lambda item: -item[1][0])
+        for (device, _ptr), (nbytes, tensors) in largest[:limit]:
+            sample = tensors[0]
+            print(
+                f"[mem-diag]   {_gib(nbytes)} on device {device}, "
+                f"{len(tensors)} view(s), e.g. shape={tuple(sample.shape)} "
+                f"dtype={sample.dtype}"
+            )
+        return total
+    except Exception as exc:
+        print(f"[mem-diag] tensor inspection failed: {exc!r}")
+        return 0
+
+
+def _report_module_level_containers(limit: int = 6) -> None:
+    """Report module-level containers pinning ``nn.Module`` instances.
+
+    A container in a module namespace is a GC root, so whatever it holds
+    survives any teardown the engine performs. Weak containers are not dicts
+    or lists and so are skipped, which is the shape such a cache should have.
+    """
+    try:
+        found = []
+        for module_name, module in list(sys.modules.items()):
+            # Scoped to vLLM on purpose. Walking every namespace materialises
+            # lazy submodules of third-party packages: measured at 2891 extra
+            # imports and 6.5 s, plus registries of stateless singletons that
+            # hold no memory.
+            if not module_name.startswith("vllm"):
+                continue
+            namespace = getattr(module, "__dict__", None)
+            if not isinstance(namespace, dict):
+                continue
+            for name, value in list(namespace.items()):
+                if name.startswith("__"):
+                    continue
+                try:
+                    if isinstance(value, dict):
+                        contents = itertools.chain(list(value), list(value.values()))
+                    elif isinstance(value, list | set | tuple):
+                        contents = iter(list(value))
+                    else:
+                        continue
+                    held = [
+                        type(item).__name__
+                        for item in itertools.islice(contents, 2048)
+                        if isinstance(item, torch.nn.Module)
+                    ]
+                except Exception:
+                    continue
+                if held:
+                    found.append(
+                        f"{module_name}.{name} holds {len(held)}: {sorted(set(held))}"
+                    )
+        if found:
+            print(
+                f"[mem-diag] {len(found)} module-level container(s) pinning "
+                "nn.Module instance(s):"
+            )
+            for entry in found[:limit]:
+                print(f"[mem-diag]   {entry}")
+    except Exception as exc:
+        print(f"[mem-diag] module container inspection failed: {exc!r}")
+
+
+def _report_finalizer_registry() -> None:
+    """Report objects held alive by a pending ``weakref.finalize``.
+
+    ``finalize`` holds its arguments strongly until it fires, and it fires only
+    once its referent is collected, so an argument is pinned for as long as the
+    owner is reachable. The registry is private because nothing public
+    enumerates pending finalizers; a rename only costs us this section.
+    """
+    try:
+        registry = weakref.finalize._registry
+    except Exception:
+        return
+    try:
+        pinned = []
+        for info in list(registry.values()):
+            for arg in getattr(info, "args", None) or ():
+                if type(arg).__module__.startswith("vllm"):
+                    func = getattr(info, "func", None)
+                    func_name = getattr(func, "__qualname__", repr(func))
+                    pinned.append(f"{type(arg).__name__} held by {func_name}")
+        if pinned:
+            print(
+                f"[mem-diag] {len(pinned)} vLLM object(s) pinned by a pending "
+                f"weakref.finalize: {pinned[:6]}"
+            )
+    except Exception as exc:
+        print(f"[mem-diag] finalizer inspection failed: {exc!r}")
+
+
+def _report_teardown_state() -> str | None:
+    """Say why VRAM is still occupied while the wait below is stuck.
+
+    The causes need different fixes, so name which one it was: a surviving
+    reference in this process, the caching allocator, a subprocess that never
+    finished tearing down, or memory held below the runtime. Best effort only
+    -- never let this mask the failure.
+
+    Returns the verdict when this process is holding something, so the caller
+    can refuse to pass a wait that this report may itself have unblocked.
+    """
+    # Engine startup calls gc.freeze(), and frozen objects are invisible to
+    # gc.get_objects(), so without this the in-process engine reports nothing.
+    # Must precede every collector walk below, tensors included.
+    with contextlib.suppress(Exception):
+        gc.unfreeze()
+
+    _report_torch_allocator()
+    live_bytes = _report_live_gpu_allocations()
+
+    survivor_count = 0
+    try:
+        survivors = [
+            obj
+            for obj in gc.get_objects()
+            if type(obj).__name__ in _TEARDOWN_SUSPECT_TYPES
+            and type(obj).__module__.startswith("vllm")
+        ]
+        if survivors:
+            # This frame and the list itself both reference the survivors; report
+            # neither, or every object looks like it is held by the diagnostic.
+            exclude_ids = frozenset(
+                {id(survivors), id(sys._getframe()), id(sys._getframe().f_locals)}
+            )
+            survivor_count = len(survivors)
+            print(f"[mem-diag] {survivor_count} engine-owning object(s) still alive:")
+            for obj in survivors:
+                print(f"[mem-diag]   {type(obj).__module__}.{type(obj).__name__}")
+                # One half-torn-down object must not cost the report for the
+                # others.
+                try:
+                    _print_referrers(obj, exclude_ids)
+                except Exception:
+                    print(
+                        "[mem-diag]     inspection failed: "
+                        + traceback.format_exc(limit=2).replace("\n", " ")
+                    )
+        else:
+            print("[mem-diag] no engine-owning objects alive; teardown did start")
+        del survivors
+        _report_module_level_containers()
+        _report_finalizer_registry()
+
+        # Whether collecting helps separates an uncollected cycle from a live
+        # reference, which need different fixes.
+        allocated_before = 0
+        with contextlib.suppress(Exception):
+            allocated_before = torch.cuda.memory_allocated()
+        collected = gc.collect()
+        allocated_after = allocated_before
+        with contextlib.suppress(Exception):
+            allocated_after = torch.cuda.memory_allocated()
+        print(
+            f"[mem-diag] gc.collect() freed {collected} object(s) and "
+            f"{_gib(allocated_before - allocated_after)} of device memory"
+        )
+    except Exception as exc:
+        print(f"[mem-diag] object inspection failed: {exc!r}")
+
+    children_count = 0
+    try:
+        import psutil
+
+        children = psutil.Process().children(recursive=True)
+        children_count = len(children)
+        if children:
+            print(f"[mem-diag] {children_count} child process(es) still alive:")
+            for child in children:
+                with contextlib.suppress(psutil.Error):
+                    cmd = " ".join(child.cmdline())[:120]
+                    print(
+                        f"[mem-diag]   pid={child.pid} status={child.status()} "
+                        f"name={child.name()} cmd={cmd}"
+                    )
+    except Exception as exc:
+        print(f"[mem-diag] process inspection failed: {exc!r}")
+
+    # Commit to one cause rather than leaving the reader to infer it.
+    actionable = True
+    if live_bytes:
+        verdict = (
+            f"{_gib(live_bytes)} sits in live tensors in this process, held by "
+            "the references reported above"
+        )
+    elif children_count:
+        verdict = "this process is clean; a subprocess has not finished teardown"
+    elif survivor_count:
+        verdict = "engine objects remain, but none of them holds a GPU tensor"
+    else:
+        verdict = "nothing left in this process; memory is held below the runtime"
+        actionable = False
+    print(f"[mem-diag] verdict: {verdict}")
+    return verdict if actionable else None
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
@@ -1631,6 +1956,9 @@ def wait_for_gpu_memory_to_clear(
     start_time = time.time()
     stable_since: float | None = None
     stable_used_bytes: dict[int, int] | None = None
+    early_after_s = min(timeout_s / 2, 30.0)
+    reported_early = False
+    early_finding: str | None = None
     while True:
         output_raw = record_gpu_memory_usage_stats(devices=devices)
         used_bytes_by_device = {
@@ -1715,13 +2043,33 @@ def wait_for_gpu_memory_to_clear(
             stable_since = None
             stable_used_bytes = None
 
+        # An outer watchdog (e.g. pytest-timeout) often fires first and kills
+        # the process without unwinding, so report before the raise too.
+        # Teardown that will succeed takes seconds, so this only fires when
+        # something is already wrong.
+        if not all_free and not reported_early and dur_s >= early_after_s:
+            reported_early = True
+            print(f"Memory still held after {dur_s=:.02f}, reporting early:")
+            early_finding = _report_teardown_state()
+
         if dur_s >= timeout_s:
+            _report_teardown_state()
             raise ValueError(
                 f"Memory of devices {devices=} not free after "
                 f"{dur_s=:.02f} ({threshold=})"
             )
 
         time.sleep(poll_interval_s)
+
+    # The report above runs gc.collect(), which can free the very memory this
+    # loop is waiting on and turn a real leak into a green run whose only trace
+    # is a block of log nobody reads. Once it has named a holder, refuse to pass.
+    if early_finding is not None:
+        raise ValueError(
+            f"Memory of devices {devices=} became free only after the "
+            f"diagnostic at {early_after_s:.02f}s reported: {early_finding}. "
+            "See the [mem-diag] block above; this pass is not trustworthy."
+        )
 
 
 def wait_for_memory_to_settle(
