@@ -989,7 +989,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(h!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0) -> ()");
+      "                 int resident_null_block=0,"
+      "                 int row_value_bytes=0) -> ()");
 
   ops.def(
       "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
@@ -1005,14 +1006,23 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor miss_mask,"
       "                     Tensor? request_state_indices,"
       "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     int attention_block_stride=0,"
+      "                     int row_value_bytes=0) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"
       "                        Tensor! hot_cache,"
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
-      "                        Tensor miss_counts) -> ()");
+      "                        Tensor miss_counts,"
+      "                        int row_value_bytes=0) -> ()");
+
+  ops.def(
+      "hisparse_backup(Tensor src_cache,"
+      "                Tensor src_indices,"
+      "                Tensor! host_cache,"
+      "                Tensor dst_slots,"
+      "                int row_value_bytes=0) -> ()");
 
 #endif  // !USE_ROCM
 
@@ -1129,6 +1139,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
            TORCH_BOX(&hisparse_invalidate_written_slots));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
+  ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
 #endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));

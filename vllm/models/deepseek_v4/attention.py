@@ -59,9 +59,14 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.hisparse.runtime import (
+    HiSparseCacheHandle,
+    create_hisparse_cache_handle,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 
@@ -137,6 +142,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     deepseek_v4 model module. The base is never instantiated directly.
     """
 
+    supports_hisparse: ClassVar[bool] = False
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
     # Backend for the SWA cache layer; None uses the default SWA backend.
@@ -350,6 +356,30 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
+        self.hisparse_cache: HiSparseCacheHandle | None = None
+        if (
+            vllm_config.attention_config.hisparse_config is not None
+            and self.compress_ratio == 4
+        ):
+            if not self.supports_hisparse:
+                raise NotImplementedError(
+                    "DeepSeek V4 HiSparse currently requires the FlashMLA backend; "
+                    f"got {type(self).__name__}."
+                )
+            if self.kv_cache_dtype != "fp8_ds_mla":
+                raise ValueError(
+                    "DeepSeek V4 HiSparse requires the fp8_ds_mla cache layout."
+                )
+            self.hisparse_cache = create_hisparse_cache_handle(
+                vllm_config,
+                config.index_topk,
+                is_index_group_leader=True,
+                row_width=584,
+                kv_dtype=torch.uint8,
+                storage_block_size=cache_config.block_size // self.compress_ratio,
+                row_value_bytes=576,
+            )
+            assert self.hisparse_cache is not None
 
         # Create the compressor for layers with compress_ratio > 1; after the
         # attention setup above so its KV-cache prefix (self.prefix) is set.
@@ -416,6 +446,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 )
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
+    @eager_break_during_capture
+    def prepare_hisparse_for_batch(self, attn_metadata: Any | None) -> None:
+        if self.hisparse_cache is None or attn_metadata is None:
+            return
+        self.hisparse_cache.decode_batch = (
+            attn_metadata.max_query_len == 1
+            and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+        )
 
     def forward(
         self,
@@ -521,6 +560,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         Only the latter runs in the eager break.
         """
         attn_metadata = get_forward_context().attn_metadata
+        if self.hisparse_cache is not None:
+            layer_metadata = (
+                attn_metadata.get(self.prefix)
+                if isinstance(attn_metadata, dict)
+                else None
+            )
+            self.prepare_hisparse_for_batch(layer_metadata)
         indexer = self.indexer
         compressor = self.compressor
         aux_streams = self.aux_stream_list
@@ -815,6 +861,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
             # head_size stays semantic (512).
             state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+            is_index_group_leader=self.indexer is not None,
         )
 
 
@@ -829,6 +876,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     ):
         super().__init__()
         self.kv_cache = torch.tensor([])
+        self.hisparse_cache: HiSparseCacheHandle | None = None
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config
@@ -855,6 +903,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            cache_role=SparseCacheRole.INDEXER,
         )
 
     def forward(self): ...

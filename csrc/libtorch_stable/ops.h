@@ -656,7 +656,8 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block,
+    int64_t row_value_bytes);
 
 void hisparse_invalidate_written_slots(
     torch::stable::Tensor& device_global_indices,
@@ -671,13 +672,20 @@ void hisparse_gather_plan(
     torch::stable::Tensor const& miss_mask,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     std::optional<torch::stable::Tensor> const& attention_indices,
-    int64_t attention_block_stride);
+    int64_t attention_block_stride, int64_t row_value_bytes);
 
 void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor& hot_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
-                             torch::stable::Tensor const& miss_counts);
+                             torch::stable::Tensor const& miss_counts,
+                             int64_t row_value_bytes);
+
+void hisparse_backup(torch::stable::Tensor const& src_cache,
+                     torch::stable::Tensor const& src_indices,
+                     torch::stable::Tensor& host_cache,
+                     torch::stable::Tensor const& dst_slots,
+                     int64_t row_value_bytes);
 
 #endif  // !USE_ROCM
 
