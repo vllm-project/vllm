@@ -378,6 +378,29 @@ class SpecDecodeBaseProposer:
                 self.hidden_size, dtype=self.dtype, device=self.device
             )
 
+    def _uses_multidim_positions(self) -> bool:
+        return self.uses_mrope or (
+            self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0
+        )
+
+    def _draft_seed_positions(
+        self, token_indices_to_sample: torch.Tensor
+    ) -> torch.Tensor:
+        """Positions the draft loop seeds from, per RoPE flavor.
+
+        The both-XD-RoPE config allocates ``xdrope_positions`` instead of the
+        1D ``positions`` buffer, so seeding from ``self.positions`` there would
+        raise ``AttributeError`` on the first draft step (#54555). XD-RoPE
+        decode positions are the absolute token index on every dim
+        (``has_delta=False`` in ``RopeState``), so dim 0 feeds the slot math
+        exactly the way the M-RoPE temporal dim does not.
+        """
+        if self.uses_mrope:
+            return self.mrope_positions[:, token_indices_to_sample]
+        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            return self.xdrope_positions[:, token_indices_to_sample]
+        return self.positions[token_indices_to_sample]
+
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
@@ -634,10 +657,7 @@ class SpecDecodeBaseProposer:
                 ).contiguous()
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, token_indices_to_sample]
-        else:
-            positions = self.positions[token_indices_to_sample]
+        positions = self._draft_seed_positions(token_indices_to_sample)
         hidden_states = hidden_states[token_indices_to_sample]
 
         if self.constant_draft_positions:
@@ -784,7 +804,7 @@ class SpecDecodeBaseProposer:
     ) -> torch.Tensor:
         """Update positions, slot mappings, and sequence metadata for the
         next draft step. Returns the updated positions tensor."""
-        positions_1d = positions[0] if self.uses_mrope else positions
+        positions_1d = positions[0] if self._uses_multidim_positions() else positions
         if self.uses_mrope:
             out_pos = self.mrope_positions[0, :batch_size]
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
