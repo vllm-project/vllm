@@ -29,6 +29,8 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_dispatchers_ = num_dispatchers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
+        # Pre-dispatch topk_ids, needed by finalize()'s combine() call -- see prepare().
+        self._original_topk_ids: torch.Tensor | None = None
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -73,6 +75,11 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         assert not apply_router_weight_on_input, (
             "mori does not support apply_router_weight_on_input=True now."
         )
+        # combine() needs pre-dispatch topk_ids, not the dispatched ids
+        # forward() substitutes in for the GEMM stage: combine() uses them to
+        # pick which remote nodes to gather THIS rank's tokens from, and the
+        # dispatched ids describe other ranks' tokens instead.
+        self._original_topk_ids = topk_ids
         scale = None
         # When defer_input_quant is True, the expert kernel handles
         # quantization internally, so skip FP8 dispatch quantization.
@@ -119,6 +126,6 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         result = self.mori_op.combine(
             fused_expert_output,
             None,
-            topk_ids,
+            self._original_topk_ids,
         )[0]
         output.copy_(result[:num_token])
