@@ -57,6 +57,24 @@ def test_language_model_only_affects_model_hash():
     assert base_hash != lm_only_hash
 
 
+def test_disabled_modality_limit_affects_model_hash():
+    """A modality limit of 0 disables that modality's code path just like
+    language_model_only does, so it must change the model config hash."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    enabled_hash = ModelConfig(model, limit_mm_per_prompt={"image": 1}).compute_hash()
+    disabled_hash = ModelConfig(model, limit_mm_per_prompt={"image": 0}).compute_hash()
+    assert enabled_hash != disabled_hash
+
+
+def test_nonzero_modality_limits_do_not_affect_model_hash():
+    """Non-zero limits only bound request validation, not the computation
+    graph, so they must not change the model config hash."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    one_hash = ModelConfig(model, limit_mm_per_prompt={"image": 1}).compute_hash()
+    many_hash = ModelConfig(model, limit_mm_per_prompt={"image": 8}).compute_hash()
+    assert one_hash == many_hash
+
+
 @pytest.mark.parametrize("backend_arg", ["video_backend", "backend"])
 def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
     config = MultiModalConfig(
