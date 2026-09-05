@@ -312,7 +312,7 @@ if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(
 
     register_experts(
         TrtLlmFp8ExpertsModular,
-        standard_format,
+        padded_standard_format,
         fp8_types,
         blocked_quantization_support=True,
     )
