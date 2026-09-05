@@ -80,10 +80,11 @@ def _warm_up(url: str) -> None:
 
 @contextmanager
 def server(
-    extra_args=None,
+    extra_args: list[str] | None = None,
     port: int = 8770,
     timeout: float = 180.0,
     dummy_weights: bool = False,
+    weight_transfer_config: dict[str, Any] | None = None,
 ):
     """Launch a vLLM server with the dev router; yield its base URL.
 
@@ -92,9 +93,23 @@ def server(
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+        weight_transfer_config: Backend configuration passed to
+            ``--weight-transfer-config`` as a JSON object. This only creates
+            the inference-side backend; callers must still initialize the
+            backend through ``init_weight_transfer_engine`` before starting a
+            real transfer.
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
-    base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
+    base = list(_DUMMY_ARGS if dummy_weights else _BASE_ARGS)
+    if weight_transfer_config is not None:
+        base.extend(
+            [
+                "--weight-transfer-config",
+                json.dumps(weight_transfer_config),
+            ]
+        )
+    base.extend(extra_args or [])
+
     cmd = [
         sys.executable,
         "-m",
@@ -105,7 +120,7 @@ def server(
         str(port),
         "--served-model-name",
         "m",
-        *(base + (extra_args or [])),
+        *base,
     ]
     proc = subprocess.Popen(
         cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
@@ -381,6 +396,15 @@ def health(url) -> int:
 # ---------------------------------------------------------------------------
 
 
+def init_weight_transfer_engine(url, init_info: dict[str, Any]):
+    """Initialize the configured backend before a weight-update cycle."""
+    return requests.post(
+        f"{url}/init_weight_transfer_engine",
+        json={"init_info": init_info},
+        timeout=10,
+    )
+
+
 def start_weight_update(url, is_checkpoint_format=True):
     return requests.post(
         f"{url}/start_weight_update",
@@ -391,6 +415,15 @@ def start_weight_update(url, is_checkpoint_format=True):
 
 def finish_weight_update(url):
     return requests.post(f"{url}/finish_weight_update", timeout=10)
+
+
+def update_weights(url, update_info: dict[str, Any]):
+    """Send one backend-specific weight update payload."""
+    return requests.post(
+        f"{url}/update_weights",
+        json={"update_info": update_info},
+        timeout=30,
+    )
 
 
 def get_world_size(url, include_dp=True):

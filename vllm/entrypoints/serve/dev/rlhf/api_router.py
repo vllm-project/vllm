@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
+import time
 from http import HTTPStatus
 from typing import Annotated
 
@@ -16,6 +18,17 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
+from .metrics import (
+    rl_weight_gen,
+    rl_weight_update_active,
+    rl_weight_update_duration_seconds,
+    rl_weight_update_total,
+)
+from .rl_state_machine import RLStateMachineState
+
+_ENGINE_IDX = "0"
+
+
 logger = init_logger(__name__)
 
 
@@ -24,6 +37,41 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+
+
+class _WeightVersionState:
+    """Track the generation and label of the active model weights."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._gen = 0
+        self._label = ""
+        self._update_start: float | None = None
+
+    def mark_start(self) -> None:
+        with self._lock:
+            self._update_start = time.perf_counter()
+
+    def bump(self, label: str | None = None) -> tuple[int, float | None]:
+        with self._lock:
+            self._gen += 1
+            if label is not None:
+                self._label = label
+            elapsed = (
+                time.perf_counter() - self._update_start
+                if self._update_start is not None
+                else None
+            )
+            self._update_start = None
+            return self._gen, elapsed
+
+    def set_label(self, label: str) -> None:
+        with self._lock:
+            self._label = label
+
+    def get(self) -> dict[str, str | int]:
+        with self._lock:
+            return {"weight_gen": self._gen, "weight_label": self._label}
 
 
 @router.post("/pause")
@@ -102,8 +150,10 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 
     try:
         body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="Invalid JSON format"
+        ) from exc  # noqa: B904
 
     request_ids = body.get("request_ids")
 
@@ -158,8 +208,10 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 async def init_weight_transfer_engine(raw_request: Request):
     try:
         body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="Invalid JSON format"
+        ) from exc  # noqa: B904
     init_info = body.get("init_info")
     if init_info is None:
         raise HTTPException(
@@ -174,7 +226,22 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    if sm.is_updating:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail=(
+                "start_weight_update called while a weight update is already "
+                "in progress. Call finish_weight_update first."
+            ),
+        )
+
     await engine_client(raw_request).start_weight_update()
+    await sm.on_start_weight_update()
+
+    weight_state: _WeightVersionState = raw_request.app.state.weight_version
+    weight_state.mark_start()
+    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(1)
     return JSONResponse(content={"message": "Weight update started"})
 
 
@@ -188,14 +255,26 @@ async def start_draft_weight_update(raw_request: Request):
 async def update_weights(raw_request: Request):
     try:
         body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="Invalid JSON format"
+        ) from exc  # noqa: B904
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
+
+    state: RLStateMachineState = raw_request.app.state.rl_state
+    try:
+        await state.on_update_weights()
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail=str(exc),
+        ) from exc
+
     await engine_client(raw_request).update_weights(
         request=WeightTransferUpdateRequest(update_info=update_info)
     )
@@ -203,12 +282,47 @@ async def update_weights(raw_request: Request):
 
 
 @router.post("/finish_weight_update")
-async def finish_weight_update(
-    raw_request: Request,
-    weight_version: Annotated[str | None, Body(embed=True)] = None,
-):
+async def finish_weight_update(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except (json.JSONDecodeError, RuntimeError):
+        body = {}
+
+    weight_version = body.get("weight_version")
+    weight_label = body.get("weight_label")
+
+    state: RLStateMachineState = raw_request.app.state.rl_state
+    if not state.is_updating:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail=(
+                "finish_weight_update called without a preceding "
+                "start_weight_update."
+            ),
+        )
+
     await engine_client(raw_request).finish_weight_update(weight_version)
-    return JSONResponse(content={"message": "Weight update finished"})
+
+    weight_state: _WeightVersionState = raw_request.app.state.weight_version
+    try:
+        await state.on_finish_weight_update()
+        new_gen, elapsed = weight_state.bump(label=weight_label)
+        rl_weight_update_total.labels(engine=_ENGINE_IDX).inc()
+        rl_weight_gen.labels(engine=_ENGINE_IDX).set(new_gen)
+        if elapsed is not None:
+            rl_weight_update_duration_seconds.labels(
+                engine=_ENGINE_IDX
+            ).observe(elapsed)
+    finally:
+        rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
+
+    return JSONResponse(
+        content={
+            "message": "Weight update finished",
+            "weight_gen": new_gen,
+            "weight_label": weight_state.get()["weight_label"],
+        }
+    )
 
 
 @router.post("/update_weight_version")
@@ -220,10 +334,35 @@ async def update_weight_version(
     return JSONResponse(content={"success": True, "new_version": new_version})
 
 
+@router.post("/update_weight_label")
+async def update_weight_label(raw_request: Request) -> JSONResponse:
+    """Set the human-readable weight label without changing weight_gen."""
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from exc
+
+    label = body.get("weight_label")
+    if label is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'weight_label' in request body",
+        )
+
+    weight_state: _WeightVersionState = raw_request.app.state.weight_version
+    weight_state.set_label(str(label))
+    return JSONResponse(content=weight_state.get())
+
+
 @router.get("/weight_info")
 async def weight_info(raw_request: Request):
     weight_version = await engine_client(raw_request).get_weight_version()
-    return JSONResponse(content={"weight_version": weight_version})
+    return JSONResponse(
+        content={
+            "weight_version": weight_version,
+            **raw_request.app.state.weight_version.get(),
+        }
+    )
 
 
 @router.get("/get_world_size")
@@ -247,4 +386,16 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
+    if not hasattr(app.state, "weight_version"):
+        app.state.weight_version = _WeightVersionState()
+    if not hasattr(app.state, "rl_state"):
+        app.state.rl_state = RLStateMachineState()
+
+    # Seed labeled children so the metrics are visible immediately at startup.
+    rl_weight_gen.labels(engine=_ENGINE_IDX).set(0)
+    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
+    rl_weight_update_total.labels(engine=_ENGINE_IDX)
+    rl_weight_update_duration_seconds.labels(engine=_ENGINE_IDX)
+
     app.include_router(router)
+
