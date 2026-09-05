@@ -190,6 +190,18 @@ class KVCacheManager:
         )
 
     @property
+    def group_block_sizes(self) -> tuple[int, ...]:
+        """Token block sizes for each KV cache group."""
+        return tuple(
+            manager.block_size for manager in self.coordinator.single_type_managers
+        )
+
+    @property
+    def null_block_id(self) -> int:
+        """Block id of the shared null-block sentinel."""
+        return self.block_pool.null_block.block_id
+
+    @property
     def usage(self) -> float:
         """Get the KV cache usage.
 
