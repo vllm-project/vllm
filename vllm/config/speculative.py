@@ -1391,6 +1391,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.hf_config.n_predict = (
+                        self.draft_model_config.hf_config.dspark_block_size
+                    )
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
