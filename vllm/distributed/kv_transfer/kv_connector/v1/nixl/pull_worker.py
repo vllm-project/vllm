@@ -78,6 +78,11 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
         if self.pcp_rank > 0:
+            # Replicated-KV PCP: only PCP rank 0 serves the KV, so this rank
+            # has nothing to send. Report the requests as sent right away so
+            # the scheduler-side aggregation (world_size workers, and any
+            # sibling connector inside a MultiConnector) still completes.
+            self._replicated_pcp_done_sending.update(metadata.reqs_to_send)
             return
 
         # Keep around the requests that have been part of a batch. This is
