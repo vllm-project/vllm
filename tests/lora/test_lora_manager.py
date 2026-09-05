@@ -705,6 +705,43 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_worker_adapter_manager_rejects_adapter_without_matching_target_modules(
+    dist_init, dummy_model, device, tmp_path
+):
+    lora_config = LoRAConfig(
+        max_lora_rank=8,
+        max_cpu_loras=1,
+        max_loras=1,
+        lora_dtype=DEFAULT_DTYPE,
+        target_modules=["layer1.dense1"],
+    )
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 1
+    vllm_config.scheduler_config.max_num_batched_tokens = 1
+
+    worker_adapter_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    worker_adapter_manager.create_lora_manager(dummy_model, vllm_config)
+
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+
+    with pytest.raises(
+        ValueError, match="does not contain any modules matching.*target_modules"
+    ):
+        worker_adapter_manager.set_active_adapters(
+            [LoRARequest("1", 1, dummy_lora_files)], LoRAMapping([], [])
+        )
+    assert worker_adapter_manager.list_adapters() == set()
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
@@ -1026,6 +1063,31 @@ def _test_target_modules(
         assert isinstance(model.get_submodule(module_path), lora_cls)
     for module_path, lora_cls in expected_no_lora:
         assert not isinstance(model.get_submodule(module_path), lora_cls)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_pooling_target_modules_load_apply_consistency(
+    default_vllm_config, dist_init, dummy_model, device, monkeypatch
+):
+    monkeypatch.setattr("vllm.lora.model_manager.is_pooling_model", lambda _: True)
+    backbone = nn.Module()
+    backbone.layer1 = dummy_model.layer1
+    del dummy_model.layer1
+    dummy_model.model = backbone
+
+    _test_target_modules(
+        dummy_model,
+        ["layer1.dense1"],
+        device,
+        expected_lora=[
+            ("model.layer1.dense1", ColumnParallelLinearWithLoRA),
+        ],
+        expected_no_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("model.layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+        vllm_config=default_vllm_config,
+    )
 
 
 @pytest.mark.parametrize("device", DEVICES)

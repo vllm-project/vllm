@@ -735,6 +735,7 @@ class LoRAModelManager:
             module_name,
             self.lora_config.target_modules,
             self.packed_modules_mapping,
+            module_name_prefix="model." if self.is_pooling_model else None,
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:

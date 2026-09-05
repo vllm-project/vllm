@@ -276,11 +276,13 @@ def is_in_target_modules(
     module_name: str,
     target_modules: list[str] | None,
     packed_modules_mapping: dict[str, list[str]] | None = None,
+    module_name_prefix: str | None = None,
 ) -> bool:
     """Check if a module passes the deployment-time target_modules filter.
 
-    When target_modules is None (no restriction), all modules pass.
-    Otherwise, the module's suffix must be in the target_modules list.
+    When target_modules is None (no restriction), all modules pass. Otherwise,
+    matching supports exact paths, leaf names, packed module relationships, and
+    an optional runtime-only module name prefix.
 
     Args:
         module_name: Full dot-separated module name.
@@ -289,6 +291,8 @@ def is_in_target_modules(
         packed_modules_mapping: Optional model-defined mapping from packed
             runtime module names to their adapter-visible submodule names
             (e.g. ``{"gate_up_proj": ["gate_proj", "up_proj"]}``).
+        module_name_prefix: Optional runtime-only prefix to add or remove when
+            matching module names (e.g. ``"model."`` for pooling models).
 
     Returns:
         True if the module passes the filter, False otherwise.
@@ -296,23 +300,50 @@ def is_in_target_modules(
     if target_modules is None:
         return True
     target_module_set = set(target_modules)
-    module_suffix = module_name.split(".")[-1]
-    if module_suffix in target_module_set or module_name in target_module_set:
-        return True
+    module_names = {module_name}
+    if module_name_prefix:
+        if module_name.startswith(module_name_prefix):
+            module_names.add(module_name.removeprefix(module_name_prefix))
+        else:
+            module_names.add(f"{module_name_prefix}{module_name}")
+
+    for candidate in module_names:
+        module_suffix = candidate.split(".")[-1]
+        if module_suffix in target_module_set or candidate in target_module_set:
+            return True
 
     if not packed_modules_mapping:
         return False
 
-    # Runtime packed parent matched by deployment-time child targets.
-    packed_children = packed_modules_mapping.get(module_suffix)
-    if packed_children and any(child in target_module_set for child in packed_children):
-        return True
+    def matches_suffix(name: str, suffix: str) -> bool:
+        return name == suffix or name.endswith(f".{suffix}")
 
-    # Adapter-visible packed child matched by deployment-time parent target.
-    return any(
-        module_suffix in children and packed_parent in target_module_set
-        for packed_parent, children in packed_modules_mapping.items()
-    )
+    for candidate in module_names:
+        for packed_parent, packed_children in packed_modules_mapping.items():
+            # Runtime packed parent matched by deployment-time child targets.
+            if matches_suffix(candidate, packed_parent):
+                prefix = candidate[: -len(packed_parent)]
+                if any(
+                    child in target_module_set
+                    or child.rsplit(".", 1)[-1] in target_module_set
+                    or f"{prefix}{child}" in target_module_set
+                    for child in packed_children
+                ):
+                    return True
+
+            # Adapter-visible packed child matched by deployment-time parent
+            # target. Preserve the child path so dotted MoE children and full
+            # deployment-time parent paths are handled correctly.
+            for child in packed_children:
+                if matches_suffix(candidate, child):
+                    prefix = candidate[: -len(child)]
+                    if (
+                        packed_parent in target_module_set
+                        or f"{prefix}{packed_parent}" in target_module_set
+                    ):
+                        return True
+
+    return False
 
 
 def get_adapter_absolute_path(lora_path: str) -> str:

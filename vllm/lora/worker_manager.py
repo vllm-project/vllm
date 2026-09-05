@@ -18,7 +18,7 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import get_adapter_absolute_path, is_in_target_modules
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
@@ -152,6 +152,23 @@ class WorkerLoRAManager:
                 skip_prefixes=lora_skip_prefixes,
                 moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
             )
+            target_modules = self.lora_config.target_modules
+            if target_modules is not None and not any(
+                is_in_target_modules(
+                    module_name,
+                    target_modules,
+                    packed_modules_mapping,
+                    module_name_prefix=(
+                        "model." if self._adapter_manager.is_pooling_model else None
+                    ),
+                )
+                for module_name in lora.loras
+            ):
+                raise ValueError(
+                    f"LoRA adapter {lora_request.lora_name!r} does not contain "
+                    "any modules matching the configured target_modules "
+                    f"{sorted(target_modules)}."
+                )
             # Stamp the on-disk MoE layout onto the loaded model so the
             # adapter manager can route 3D-format checkpoints through the
             # 3D->2D conversion when running under the universal 2D wrapper.
