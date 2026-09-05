@@ -304,7 +304,7 @@ def test_fused_norm_rope_packed_indexer_block_stride():
     assert (backing[block_size * idx_row : packed_block_stride] == 0).all()
 
 
-def test_fused_norm_rope_normalizes_query_without_local_cache_slots():
+def test_fused_norm_rope_materializes_qk_without_local_cache_slots():
     """DCP non-owner ranks still need valid query shards for query AllGather."""
     torch.manual_seed(7)
     dev = "cuda"

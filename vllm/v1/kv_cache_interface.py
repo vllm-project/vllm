@@ -641,7 +641,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         storage_block_size_set = set(spec.storage_block_size for spec in specs)
-        non_causal_mtd_set = {spec.non_causal_multi_token_decode for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
@@ -649,11 +648,10 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
             and len(storage_block_size_set) == 1
-            and len(non_causal_mtd_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, cache role, "
-            "index-sharing role, storage block size, and decode mode."
+            "index-sharing role, and storage block size."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,

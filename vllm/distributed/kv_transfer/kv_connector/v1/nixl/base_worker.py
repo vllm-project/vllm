@@ -210,8 +210,8 @@ class NixlBaseConnectorWorker:
             if not region_group_ids and num_regions == 1:
                 region_group_ids = [0]
             assert len(region_group_ids) == num_regions
-            region_group_ids_array = np.asarray(region_group_ids)
-            region_num_blocks_array = np.asarray(region_num_blocks)
+            region_group_ids_array = np.asarray(region_group_ids, dtype=np.int32)
+            region_num_blocks_array = np.asarray(region_num_blocks, dtype=np.int32)
             if np.unique(region_group_ids_array).size == 1:
                 block_arr = np.concatenate(
                     [np.asarray(group, dtype=np.int32) for group in block_ids]
@@ -1482,11 +1482,9 @@ class NixlBaseConnectorWorker:
             for base_addr, block_len, block_stride in region_specs:
                 if base_addr in seen_base_addresses:
                     region_index = seen_base_addresses.index(base_addr)
+                    assert region_mem_types[region_index] == mem_type
+                    self._region_is_mla[region_index] |= is_mla_region
                     if is_mla_region:
-                        # Dual-purpose HMA tensor: an MLA layer shares a region
-                        # that a non-MLA layer registered first. MLA is not
-                        # head-sharded, so the region must be flagged MLA.
-                        self._region_is_mla[region_index] = True
                         self.block_len_per_layer[region_index] = block_len
                         self.block_stride_per_layer[region_index] = block_stride
                         self.region_num_blocks[region_index] = num_blocks
@@ -1500,7 +1498,6 @@ class NixlBaseConnectorWorker:
                     self.region_group_ids.append(group_id)
                     self.region_names.append(layer_name)
                     self.region_num_blocks.append(num_blocks)
-                    region_mem_types.append(mem_type)
                     self._region_is_mla.append(is_mla_region)
                     region_mem_types.append(mem_type)
 
@@ -1547,7 +1544,6 @@ class NixlBaseConnectorWorker:
             == len(self.region_group_ids)
             == len(self.region_names)
             == len(self.region_num_blocks)
-            == len(region_mem_types)
         )
         # Descriptor ids must be region-ordered, matching the remote side.
         self._scratch_region_indices.sort()
@@ -2785,7 +2781,6 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
-            failed = req_id in self._failed_recv_pending
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
@@ -2793,8 +2788,7 @@ class NixlBaseConnectorWorker:
                         # Get telemetry from NIXL
                         res = self.nixl_wrapper.get_xfer_telemetry(handle)
                         self.xfer_stats.record_transfer(res)
-                        with contextlib.suppress(Exception):
-                            self.nixl_wrapper.release_xfer_handle(handle)
+                        self.nixl_wrapper.release_xfer_handle(handle)
                     elif xfer_state == "PROC":
                         in_progress.append(handle)
                     else:
@@ -2837,6 +2831,8 @@ class NixlBaseConnectorWorker:
                 if failed:
                     self._report_failed_recv(req_id)
                     continue
+                if req_id not in self._recving_metadata:
+                    continue
             done_req_ids.add(req_id)
             if is_recv:
                 self._send_pending_recv_notifs(req_id)
@@ -2861,7 +2857,8 @@ class NixlBaseConnectorWorker:
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """Defer failure reporting while sibling transfers remain in flight."""
         if handle is not None:
-            self.nixl_wrapper.release_xfer_handle(handle)
+            with contextlib.suppress(Exception):
+                self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
         with self._failed_recv_lock:
             if self._recving_transfers.get(req_id):
@@ -2873,7 +2870,11 @@ class NixlBaseConnectorWorker:
     def _report_failed_recv(self, req_id: str) -> None:
         """Report a failed recv exactly once and invalidate its blocks."""
         with self._failed_recv_lock:
-            if req_id in self._failed_recv_reported:
+            if (
+                req_id not in self._recving_metadata
+                or req_id in self._failed_recv_reported
+            ):
+                self._pending_recv_notifs.pop(req_id, None)
                 return
             self._failed_recv_reported.add(req_id)
         # Use .get() here; transfer-result collection owns metadata cleanup.
@@ -3007,42 +3008,6 @@ class NixlBaseConnectorWorker:
                     ).tolist()
                 )
         return physical_block_ids
-
-    @staticmethod
-    def _block_ids_by_region(
-        block_ids: BlockIds, region_group_ids: list[int]
-    ) -> BlockIds:
-        """Expand group block IDs into the corresponding region order."""
-        shared_block_ids = list(itertools.chain.from_iterable(block_ids))
-        block_ids_by_region = []
-        for group_id in region_group_ids:
-            if group_id == _SHARED_REGION_GROUP_ID:
-                block_ids_by_region.append(shared_block_ids.copy())
-                continue
-            block_ids_by_region.append(list(block_ids[group_id]))
-        return block_ids_by_region
-
-    @staticmethod
-    def _apply_prefix_caching_by_region(
-        decode_block_ids: BlockIds, prefill_block_ids: BlockIds
-    ) -> tuple[BlockIds, BlockIds]:
-        """Pair an uncached decode suffix with the same prefill regions."""
-        assert len(decode_block_ids) == len(prefill_block_ids)
-        if not any(decode_block_ids):
-            return [], prefill_block_ids
-
-        trimmed_prefill: list[list[int]] = []
-        for decode_region, prefill_region in zip(
-            decode_block_ids, prefill_block_ids, strict=True
-        ):
-            if len(decode_region) > len(prefill_region):
-                raise ValueError(
-                    "Decode allocated more KV pages than the prefill worker supplied"
-                )
-            trimmed_prefill.append(
-                list(prefill_region[-len(decode_region) :]) if decode_region else []
-            )
-        return decode_block_ids, trimmed_prefill
 
     def _apply_dcp_prefix_caching(
         self,
