@@ -39,7 +39,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     indexer_k_quant_and_cache_triton,
 )
 
-from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+from .test_fused_indexer_q_rope_quant import _hadamard_rotate, quantize_to_mxfp4
 
 
 def _on_gfx950() -> bool:
@@ -741,11 +741,14 @@ def _reference_kv_compress_norm_rope(
     rms_eps: float = 1e-6,
     fp8_max: float = 448.0,
     return_full_cache: bool = False,
+    rotate: bool = False,
 ):
     """Compress → RMSNorm → GPT-J RoPE → quantize.
 
     Gathers (1+overlap)*compress_ratio state entries per output token, applies
     per-element softmax over the scores, and computes the weighted kv sum.
+    With ``rotate=True``, the RoPE output is Hadamard-rotated (scaled by
+    head_dim**-0.5) before quantization, mirroring the indexer kernels.
     Returns (quantized_values, scale) matching the kernel's output layout.
     """
     device = state_cache.device
@@ -785,14 +788,23 @@ def _reference_kv_compress_norm_rope(
         var = (compressed * compressed).mean()
         normed = compressed * torch.rsqrt(var + rms_eps) * rms_weight.float()
         compressed_pos = (pos // compress_ratio) * compress_ratio
-        cos, sin = cos_sin_cache[compressed_pos].float().chunk(2)
+        cos, sin = cos_sin_cache[compressed_pos].double().chunk(2)
         nope, rope = normed.split([nope_dim, rope_dim])
+        # Emulate the kernels' pinned FMA contraction in fp64 (fp32 products
+        # are exact in fp64; rounding once reproduces tl.fma bit-exactly).
+        ev, od = rope[0::2].double(), rope[1::2].double()
         rope = torch.stack(
-            [rope[0::2] * cos - rope[1::2] * sin, rope[1::2] * cos + rope[0::2] * sin],
+            [
+                (ev * cos - (od * sin).float().double()).float(),
+                (od * cos + (ev * sin).float().double()).float(),
+            ],
             dim=-1,
         ).reshape(rope_dim)
         results.append(torch.cat([nope, rope]).to(state_cache.dtype))
     result = torch.stack(results)
+
+    if rotate:
+        result = _hadamard_rotate(result)
 
     if return_full_cache:
         # Contiguous 512-wide bf16 row (nope unrotated + rope rotated), matching
@@ -912,6 +924,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
+        HADAMARD=True,
         num_warps=1,
     )
 
@@ -926,6 +939,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         use_fp4,
         rms_eps=RMS_EPS,
         fp8_max=FP8_MAX,
+        rotate=True,
     )
 
     if use_fp4:
@@ -960,6 +974,139 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             )
             assert torch.equal(actual_scale, scale[i : i + 1]), (
                 f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
+            )
+
+
+@pytest.mark.parametrize(
+    "use_fp4",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability_family(100)
+                ),
+                reason="MXFP4 indexer cache requires an SM100-family GPU",
+            ),
+        ),
+    ],
+)
+@torch.inference_mode()
+def test_fused_kv_insert_indexer_dimension_guard(use_fp4: bool):
+    """Off-production indexer dims (head_dim=64, rope_dim=32) bypass the
+    Hadamard rotation: the shared launcher takes the original unrotated
+    path (no 128/64 static_assert) and the output is bit-exact against a
+    rotate=False reference."""
+    head_dim, rope_dim = 64, 32
+    block_size = 16  # state cache block size
+    rms_eps = 1e-6
+    num_tokens = 7
+    kv_block_size = 16
+    compress_ratio = 4
+    overlap = 1  # matching DeepseekCompressor logic at compress_ratio == 4
+
+    if use_fp4:
+        token_stride = head_dim // 2
+        scale_dim = head_dim // 32
+        quant_block = 32
+    else:
+        token_stride = head_dim
+        scale_dim = 4  # 1 float32: 4 bytes
+        quant_block = head_dim
+
+    device = "cuda"
+    torch.manual_seed(42)
+    coff = 1 + overlap
+    num_pages = (compress_ratio * num_tokens - 1) // block_size + 2
+    state_cache = torch.randn(
+        num_pages,
+        block_size,
+        2 * coff * head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(0)
+    token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    positions = torch.arange(
+        compress_ratio - 1,
+        compress_ratio * num_tokens,
+        compress_ratio,
+        dtype=torch.int64,
+        device=device,
+    )
+    rms_weight = torch.randn(head_dim, dtype=torch.bfloat16, device=device)
+    cos_sin_cache = torch.randn(
+        compress_ratio * num_tokens, rope_dim, dtype=torch.bfloat16, device=device
+    )
+
+    kv_n_blocks = (num_tokens + kv_block_size - 1) // kv_block_size + 1
+    kv_cache = torch.zeros(
+        kv_n_blocks,
+        kv_block_size,
+        token_stride + scale_dim,
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    compress_norm_rope_store_triton(
+        state_cache=state_cache,
+        num_actual=num_tokens,
+        token_to_req_indices=token_to_req,
+        positions=positions,
+        slot_mapping=slot_mapping,
+        block_table=block_table,
+        block_size=block_size,
+        state_width=coff * head_dim,
+        cos_sin_cache=cos_sin_cache,
+        kv_cache=kv_cache,
+        k_cache_metadata=SimpleNamespace(slot_mapping=slot_mapping),
+        pdl_kwargs={},
+        head_dim=head_dim,
+        rope_head_dim=rope_dim,
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+        use_fp4_cache=use_fp4,
+        rms_norm_weight=rms_weight,
+        rms_norm_eps=rms_eps,
+        quant_block=quant_block,
+        token_stride=token_stride,
+        scale_dim=scale_dim,
+    )
+
+    k_ref, s_ref = _reference_kv_compress_norm_rope(
+        state_cache,
+        block_table,
+        positions,
+        rms_weight,
+        cos_sin_cache,
+        compress_ratio,
+        overlap,
+        use_fp4,
+        rms_eps=rms_eps,
+        fp8_max=448.0,  # K-side kernels pin tl.float8e4nv/448 on all platforms
+        rotate=False,
+    )
+
+    kv_flat = kv_cache.view(kv_n_blocks, -1)
+    if not use_fp4:
+        k_ref = k_ref.view(torch.uint8)
+    for i in range(num_tokens):
+        blk, pos = i // kv_block_size, i % kv_block_size
+        val_off = pos * token_stride
+        val_actual = kv_flat[blk, val_off : val_off + token_stride]
+        assert torch.equal(k_ref[i], val_actual), f"token {i}: values differ"
+        scale_off = kv_block_size * token_stride + pos * scale_dim
+        scale_actual = kv_flat[blk, scale_off : scale_off + scale_dim]
+        if use_fp4:
+            assert torch.equal(scale_actual, s_ref[i]), (
+                f"token {i}: ue8m0 {scale_actual.tolist()} != {s_ref[i].tolist()}"
+            )
+        else:
+            assert torch.equal(scale_actual.view(torch.float32), s_ref[i : i + 1]), (
+                f"token {i}: scale differs"
             )
 
 
