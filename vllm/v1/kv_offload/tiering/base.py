@@ -4,9 +4,10 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -21,6 +22,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+)
+from vllm.v1.kv_offload.tiering.backpressure import (
+    BackpressureDetector,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +58,11 @@ class TieringOffloadingMetrics:
     )
     ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
     ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
+    BACKPRESSURE_STORE_LATENCY_EMA = (
+        "vllm:kv_offload_tiering_backpressure_store_latency_ema"
+    )
+    BACKPRESSURE_STORES_DROPPED = "vllm:kv_offload_tiering_backpressure_stores_dropped"
+    BACKPRESSURE_BLOCKS_DROPPED = "vllm:kv_offload_tiering_backpressure_blocks_dropped"
 
 
 @dataclass
@@ -65,6 +74,7 @@ class TransferJob:
     block_ids: np.ndarray
     is_promotion: bool
     req_context: ReqContext
+    submit_time: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -79,6 +89,7 @@ class JobResult:
     # indicated by `success`. Must be a subset of the job's original keys.
     successful_keys: Collection[OffloadKey] | None = None
     transfer_time: float | None = None
+    transfer_bytes: int | None = None
 
 
 class ParentManager(ABC):
@@ -139,6 +150,7 @@ class SecondaryTierManager(ABC):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
         """
         Args:
@@ -146,11 +158,24 @@ class SecondaryTierManager(ABC):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
+            backpressure_config: Optional backpressure detector configuration.
+            backpressure_detector: Optional `BackpressureDetector`.
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        shape = primary_kv_view.shape
+        self._block_size_bytes: int = shape[1] if shape and len(shape) > 1 else 1
         self.tier_type = tier_type
         self.locality: Locality | None = None
+        self._bp_detector = backpressure_detector
+
+    @property
+    def block_size_bytes(self) -> int:
+        return self._block_size_bytes
+
+    @property
+    def bp_detector(self) -> BackpressureDetector | None:
+        return self._bp_detector
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:

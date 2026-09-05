@@ -249,6 +249,34 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             assert isinstance(tier_config, dict)
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
+
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Exponential moving average of store latency "
+                    "for back-pressure detection, in s/MiB."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of store operations dropped due to "
+                    "back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of blocks dropped due to back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
+            )
+        )
+
         return metrics
 
     def __init__(self, config: OffloadingConfig):
@@ -260,6 +288,27 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
+
+        # Backpressure defaults are merged in priority order (highest first):
+        #   1. Per-tier ``backpressure`` dict in the tier config
+        #   2. Top-level ``backpressure`` in kv_connector_extra_config
+        #   3. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
+        # Within each tier's resolved dict, tier-type-aware water marks
+        # are filled in last so a bare ``"backpressure": {}`` picks up
+        # sensible thresholds for the storage medium.
+        import vllm.envs as envs
+
+        bp_env = envs.VLLM_KV_BACKPRESSURE_CONFIG or {}
+        bp_defaults = self.extra_config.get("backpressure")
+
+        for tier_cfg in self.secondary_tier_configs:
+            tier_type = tier_cfg.get("type", "")
+            # Layer 3: env var defaults for this tier type
+            if tier_type in bp_env and "backpressure" not in tier_cfg:
+                tier_cfg["backpressure"] = bp_env[tier_type].copy()
+            # Layer 2: top-level config defaults
+            if bp_defaults is not None:
+                tier_cfg.setdefault("backpressure", bp_defaults.copy())
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None

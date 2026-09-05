@@ -277,6 +277,7 @@ if TYPE_CHECKING:
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+    VLLM_KV_BACKPRESSURE_CONFIG: dict | None = None
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
@@ -1955,6 +1956,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES": lambda: bool(
         int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))
     ),
+    # JSON dict keyed by secondary tier type (e.g. "fs", "obj", "p2p")
+    # providing default backpressure detector configs. Each entry must
+    # include "backpressure_cls" naming the detector class (short names
+    # like "EMABackpressureDetector" resolve against
+    # vllm.v1.kv_offload.tiering.backpressure). Water marks default to
+    # tier-type-aware values via the detector's default_config() classmethod.
+    # Per-tier config in kv_connector_extra_config takes precedence.
+    #
+    # Example — enable EMA backpressure on fs and obj tiers:
+    #   '{"fs": {"backpressure_cls": "EMABackpressureDetector"},
+    #     "obj": {"backpressure_cls": "EMABackpressureDetector"}}'
+    #
+    # Example — with explicit water marks (s/MiB):
+    #   '{"fs": {"backpressure_cls": "EMABackpressureDetector",
+    #            "high_water_s": 0.005, "low_water_s": 0.001},
+    #     "obj": {"backpressure_cls": "EMABackpressureDetector",
+    #             "high_water_s": 0.020, "low_water_s": 0.005}}'
+    "VLLM_KV_BACKPRESSURE_CONFIG": lambda: json.loads(s)
+    if (s := os.getenv("VLLM_KV_BACKPRESSURE_CONFIG"))
+    else None,
     # Name of the shared memory buffer used for object storage.
     # Only effective when mm_config.mm_processor_cache_type == "shm".
     # Automatically generates a unique UUID-based name per process tree

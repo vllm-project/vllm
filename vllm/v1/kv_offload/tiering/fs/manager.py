@@ -41,6 +41,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -117,6 +118,7 @@ class FileSystemTierManager(SecondaryTierManager):
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        backpressure_detector: BackpressureDetector | None = None,
     ):
         """
         Args:
@@ -132,8 +134,11 @@ class FileSystemTierManager(SecondaryTierManager):
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
                 to the publishing vLLM instance.
+            backpressure_detector: Optional backpressure detector.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+        )
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -152,6 +157,8 @@ class FileSystemTierManager(SecondaryTierManager):
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Block count per in-flight job, used to report transfer_bytes.
+        self._job_block_counts: dict[JobId, int] = {}
         # Per load job: how many blocks loaded before a failure (partial keep).
         # Written by the pool worker inside the load task before it raises (so
         # before task_done publishes the job); read on the scheduler thread in
@@ -227,6 +234,7 @@ class FileSystemTierManager(SecondaryTierManager):
             self._block_size,
             self._use_o_direct,
         )
+        self._job_block_counts[job_metadata.job_id] = len(keys)
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
 
     @override
@@ -236,6 +244,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
+        self._job_block_counts[job_id] = len(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
 
@@ -274,6 +283,8 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
+            block_count = self._job_block_counts.pop(job_id, 0)
+            transfer_bytes = block_count * self._block_size if block_count else None
             if self.events is not None:
                 keys = self._store_job_keys.pop(job_id, None)
                 if success and keys:
@@ -301,6 +312,7 @@ class FileSystemTierManager(SecondaryTierManager):
                         success=False,
                         successful_keys=tuple(successful) if successful else None,
                         transfer_time=transfer_time,
+                        transfer_bytes=transfer_bytes,
                     )
                 )
                 continue
@@ -309,6 +321,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     job_id=job_id,
                     success=success,
                     transfer_time=transfer_time,
+                    transfer_bytes=transfer_bytes,
                 )
             )
         return results
