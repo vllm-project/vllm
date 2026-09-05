@@ -16,10 +16,10 @@ use crate::{Result, Tokenizer};
 /// Default regex pattern used when loading tiktoken from a BPE file. This is
 /// the same `cl100k_base` pattern that HuggingFace transformers uses as its
 /// default in `TikTokenConverter`.
-const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const CL100K_BASE_PATTERN: &str = fastokens::tiktoken::CL100K_BASE_PATTERN;
 
 /// Kimi BPE pattern from `moonshotai/Kimi-K2-Instruct/tokenization_kimi.py`.
-const KIMI_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const KIMI_PATTERN: &str = fastokens::tiktoken::KIMI_PATTERN;
 
 /// Fallback number of reserved special-token slots to assume when the model's
 /// `config.json` is not available (so we cannot read `vocab_size` directly).
@@ -36,6 +36,14 @@ const DISABLE_RIPTOKEN_ENV: &str = "VLLM_RS_DISABLE_RIPTOKEN";
 #[derive(Debug, Clone, Deserialize)]
 struct AddedToken {
     content: String,
+    #[serde(default)]
+    single_word: bool,
+    #[serde(default)]
+    lstrip: bool,
+    #[serde(default)]
+    rstrip: bool,
+    #[serde(default)]
+    normalized: bool,
     /// HuggingFace `added_tokens_decoder` entries can be marked `"special":
     /// true|false`. Special tokens are dropped from output when `decode` is
     /// called with `skip_special_tokens = true`. Defaults to `false` when
@@ -93,8 +101,13 @@ pub struct TiktokenTokenizer {
 }
 
 enum Backend {
+    Fastokens(FastokensBackend),
     Riptoken(RiptokenBackend),
     TiktokenRs(TiktokenRsBackend),
+}
+
+struct FastokensBackend {
+    inner: Box<fastokens::Tokenizer>,
 }
 
 struct RiptokenBackend {
@@ -124,16 +137,14 @@ struct TokenMetadata {
     /// vocab_upper_bound)` live in the special-token slots and are subject
     /// to `skip_special_tokens` filtering.
     num_base_tokens: u32,
-    /// Exclusive upper bound on token IDs that `inner` is guaranteed to know
+    /// Exclusive upper bound on token IDs every backend is guaranteed to know
     /// how to decode.
     ///
     /// The constructor registers every id in `[num_base_tokens,
-    /// vocab_upper_bound)` with the inner `CoreBPE` as a (named or
-    /// `<|reserved_token_{id}|>`) special token, and the BPE
-    /// encoder densely covers `[0, num_base_tokens)`. So any id below this
-    /// bound is in one of the inner `CoreBPE`'s decoder maps and
-    /// `_decode_native_and_split` will not panic on it. `decode` filters
-    /// out ids at or above this bound to keep that guarantee.
+    /// vocab_upper_bound)` as a named or `<|reserved_token_{id}|>` added token,
+    /// and the BPE encoder densely covers `[0, num_base_tokens)`. The
+    /// tiktoken-rs decode path filters ids at or above this bound before calling
+    /// `_decode_native_and_split`.
     vocab_upper_bound: u32,
     /// Ids in `[num_base_tokens, vocab_upper_bound)` whose
     /// `added_tokens_decoder` entry was explicitly marked `"special":
@@ -170,6 +181,21 @@ impl TokenMetadata {
 
     fn id_to_token(&self, token_id: u32) -> Option<String> {
         self.token_by_id.get(&token_id).cloned()
+    }
+}
+
+impl FastokensBackend {
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        if let Some(token_id) = self
+            .inner
+            .added_tokens()
+            .and_then(|added_tokens| added_tokens.token_to_id(token))
+        {
+            return Some(token_id);
+        }
+
+        let ids = self.inner.encode_ordinary(token).ok()?;
+        if ids.len() == 1 { Some(ids[0]) } else { None }
     }
 }
 
@@ -259,6 +285,17 @@ impl TiktokenTokenizer {
     /// directory when present. The `cl100k_base` regex pattern is used as a
     /// reasonable default.
     pub fn new(path: &Path) -> Result<Self> {
+        match Self::new_fastokens(path) {
+            Ok(tokenizer) => return Ok(tokenizer),
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    error = %error.as_report(),
+                    "failed to load tiktoken file with fastokens; falling back"
+                );
+            }
+        }
+
         if std::env::var_os(DISABLE_RIPTOKEN_ENV).is_some() {
             return Self::new_tiktoken_rs(path);
         }
@@ -274,6 +311,33 @@ impl TiktokenTokenizer {
                 Self::new_tiktoken_rs(path)
             }
         }
+    }
+
+    /// Load from `tiktoken.model` / `*.tiktoken` with fastokens.
+    pub fn new_fastokens(path: &Path) -> Result<Self> {
+        info!(path = %path.display(), "loading tokenizer with fastokens (BPE file)");
+
+        let config = LoadedTiktokenConfig::load(path)?;
+        let ranks: Vec<(Vec<u8>, u32)> = config.encoder.into_iter().collect();
+        let inner = fastokens::Tokenizer::from_tiktoken_ranks_with_added_tokens(
+            &ranks,
+            config.pattern,
+            &config.added_tokens,
+        )
+        .map_err(|error| {
+            tokenizer_error!(
+                "failed to create fastokens tokenizer from {}: {}",
+                path.display(),
+                error.as_report()
+            )
+        })?;
+
+        Ok(Self {
+            backend: Backend::Fastokens(FastokensBackend {
+                inner: Box::new(inner),
+            }),
+            metadata: config.metadata,
+        })
     }
 
     /// Load from `tiktoken.model` / `*.tiktoken` with riptoken.
@@ -335,6 +399,7 @@ impl TiktokenTokenizer {
 struct LoadedTiktokenConfig {
     encoder: FxHashMap<Vec<u8>, u32>,
     special_tokens_encoder: FxHashMap<String, u32>,
+    added_tokens: Vec<fastokens::AddedTokenConfig>,
     metadata: TokenMetadata,
     pattern: &'static str,
 }
@@ -411,18 +476,36 @@ impl LoadedTiktokenConfig {
                 (reserved_end - num_base_tokens) as usize,
                 Default::default(),
             );
+        let mut added_tokens = Vec::with_capacity((reserved_end - num_base_tokens) as usize);
         let mut non_special_added_ids: FxHashSet<u32> = FxHashSet::default();
         for id in num_base_tokens..reserved_end {
-            let name = match added_tokens_by_id.get(&id) {
+            let config = match added_tokens_by_id.get(&id) {
                 Some(token) => {
                     if !token.special {
                         non_special_added_ids.insert(id);
                     }
-                    token.content.clone()
+                    fastokens::AddedTokenConfig {
+                        id,
+                        content: token.content.clone(),
+                        single_word: token.single_word,
+                        lstrip: token.lstrip,
+                        rstrip: token.rstrip,
+                        normalized: token.normalized,
+                        special: token.special,
+                    }
                 }
-                None => format!("<|reserved_token_{id}|>"),
+                None => fastokens::AddedTokenConfig {
+                    id,
+                    content: format!("<|reserved_token_{id}|>"),
+                    single_word: false,
+                    lstrip: false,
+                    rstrip: false,
+                    normalized: false,
+                    special: true,
+                },
             };
-            special_tokens_encoder.insert(name, id);
+            special_tokens_encoder.insert(config.content.clone(), id);
+            added_tokens.push(config);
         }
 
         let mut token_by_id: FxHashMap<u32, String> = FxHashMap::with_capacity_and_hasher(
@@ -441,6 +524,7 @@ impl LoadedTiktokenConfig {
         Ok(Self {
             encoder,
             special_tokens_encoder,
+            added_tokens,
             metadata: TokenMetadata {
                 num_base_tokens,
                 vocab_upper_bound: reserved_end,
@@ -454,29 +538,37 @@ impl LoadedTiktokenConfig {
 
 impl Tokenizer for TiktokenTokenizer {
     fn encode(&self, text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
-        // Tiktoken does not have a separate add_special_tokens toggle; both
-        // backends recognize registered special tokens in the input.
-        Ok(match &self.backend {
-            Backend::Riptoken(backend) => backend.encode(text),
-            Backend::TiktokenRs(backend) => backend.encode(text),
-        })
+        // Tiktoken does not have a separate add_special_tokens toggle; every
+        // backend recognizes registered special tokens in the input.
+        match &self.backend {
+            Backend::Fastokens(backend) => backend
+                .inner
+                .encode(text)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+            Backend::Riptoken(backend) => Ok(backend.encode(text)),
+            Backend::TiktokenRs(backend) => Ok(backend.encode(text)),
+        }
     }
 
     fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>> {
-        Ok(match &self.backend {
-            Backend::Riptoken(backend) => backend.inner.encode_ordinary(text),
-            Backend::TiktokenRs(backend) => backend.inner.encode_ordinary(text),
-        })
+        match &self.backend {
+            Backend::Fastokens(backend) => backend
+                .inner
+                .encode_ordinary(text)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
+            Backend::Riptoken(backend) => Ok(backend.inner.encode_ordinary(text)),
+            Backend::TiktokenRs(backend) => Ok(backend.inner.encode_ordinary(text)),
+        }
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         // Filter passes:
         //
-        // 1. The constructor registers every id in `[num_base_tokens, vocab_upper_bound)` as a
-        //    special token (named or `<|reserved_token_{id}|>` placeholder, matching
+        // 1. The constructor registers every id in `[num_base_tokens, vocab_upper_bound)` as an
+        //    added token (named or `<|reserved_token_{id}|>` placeholder, matching
         //    `tokenization_kimi.py`). The tiktoken-rs backend additionally drops ids at or above
-        //    that bound so `_decode_native_and_split` cannot panic; riptoken's `decode_bytes`
-        //    already skips unknown ids.
+        //    that bound before `_decode_native_and_split`; fastokens and riptoken skip unknown
+        //    ids during decode.
         //
         // 2. When `skip_special_tokens = true`, ids in `[num_base_tokens, vocab_upper_bound)` are
         //    dropped *unless* they were marked `"special": false` in `added_tokens_decoder`. This
@@ -493,14 +585,19 @@ impl Tokenizer for TiktokenTokenizer {
             token_ids
         };
 
-        Ok(match &self.backend {
-            Backend::Riptoken(backend) => backend.decode(ids),
-            Backend::TiktokenRs(backend) => backend.decode(ids, &self.metadata),
-        })
+        match &self.backend {
+            Backend::Fastokens(backend) => backend
+                .inner
+                .decode(ids, false)
+                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+            Backend::Riptoken(backend) => Ok(backend.decode(ids)),
+            Backend::TiktokenRs(backend) => Ok(backend.decode(ids, &self.metadata)),
+        }
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
         match &self.backend {
+            Backend::Fastokens(backend) => backend.token_to_id(token),
             Backend::Riptoken(backend) => backend.token_to_id(token),
             Backend::TiktokenRs(backend) => backend.token_to_id(token),
         }
@@ -598,6 +695,7 @@ mod tests {
     /// `FALLBACK_NUM_RESERVED_SPECIAL_TOKENS` (256) path.
     fn explicit_backends(path: &Path) -> Vec<TiktokenTokenizer> {
         vec![
+            TiktokenTokenizer::new_fastokens(path).expect("load fastokens backend"),
             TiktokenTokenizer::new_riptoken(path).expect("load riptoken backend"),
             TiktokenTokenizer::new_tiktoken_rs(path).expect("load tiktoken-rs backend"),
         ]
@@ -695,7 +793,14 @@ mod tests {
         fs::write(dir.path().join("config.json"), r#"{"vocab_size": 1002}"#)
             .expect("write config.json");
 
-        for backend in explicit_backends(&bpe_path) {
+        // fastokens requires a contiguous, merge-decomposable rank table. The
+        // default constructor falls through to riptoken for this synthetic
+        // sparse table, while tiktoken-rs supports it directly.
+        assert!(TiktokenTokenizer::new_fastokens(&bpe_path).is_err());
+        for backend in [
+            TiktokenTokenizer::new(&bpe_path).expect("load fallback backend"),
+            TiktokenTokenizer::new_tiktoken_rs(&bpe_path).expect("load tiktoken-rs backend"),
+        ] {
             let sparse_id = backend.token_to_id("SPARSE");
             assert_eq!(sparse_id, Some(1000));
             assert_eq!(backend.id_to_token(1000).as_deref(), Some("SPARSE"));
