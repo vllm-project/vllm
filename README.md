@@ -17,7 +17,7 @@ Easy, fast, and cheap LLM serving for everyone
 🔥 We have built a vLLM website to help you get started with vLLM. Please visit [vllm.ai](https://vllm.ai) to learn more.
 For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
----
+----
 
 ## About
 
