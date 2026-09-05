@@ -26,11 +26,13 @@ from collections.abc import Sequence
 from transformers import PreTrainedTokenizerBase
 
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningWithThinkingParser,
+)
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 
-class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
+class PoolsideV1ReasoningParser(DeepSeekV3ReasoningWithThinkingParser):
     """Drop-in replacement for ``deepseek_v3`` that tolerates ``</think>``
     tokens appearing anywhere in the prompt other than the generation prefix.
     """
