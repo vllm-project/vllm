@@ -104,6 +104,27 @@ impl TextRequestProcessor {
         Ok(prompt_token_ids)
     }
 
+    /// Tokenize and truncate the prompt in place, so that later preparation
+    /// reuses the final token IDs instead of tokenizing again.
+    ///
+    /// Frontends that need the final prompt tokens before submission (for
+    /// example, to initialize a prompt-aware output parser) call this first
+    /// and then hand the same request to [`TextLlm::generate`].
+    pub fn tokenize_in_place<'r>(&self, request: &'r mut TextRequest) -> Result<&'r [u32]> {
+        request.validate()?;
+        let prompt_token_ids = self.prepare_prompt_tokens(
+            take(&mut request.prompt),
+            request.add_special_tokens,
+            request.prompt_truncation.take(),
+            request.sampling_params.max_tokens,
+        )?;
+        request.prompt = Prompt::TokenIds(prompt_token_ids);
+        match &request.prompt {
+            Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
+            Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
+        }
+    }
+
     /// Prepare one request's prompt tokens without generation-specific lowering.
     pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;

@@ -51,6 +51,11 @@ pub struct GenerateRequest {
     /// Optional reasoning-parser kwargs forwarded to engine-side structured
     /// output logic.
     pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Optional engine reasoning-gate override.
+    ///
+    /// `Some(true)` means the submitted grammar covers reasoning from the first
+    /// generated token.
+    pub reasoning_ended: Option<bool>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
 }
@@ -80,6 +85,7 @@ impl GenerateRequest {
             data_parallel_rank,
             session_id,
             reasoning_parser_kwargs,
+            reasoning_ended,
             lora_request,
         } = self;
 
@@ -110,9 +116,7 @@ impl GenerateRequest {
                 resumable: false,
                 session_id,
                 external_req_id: Some(external_request_id),
-                // Rust parser doesn't expose this information, leave it unset and let the
-                // reasoning logic in engine-sided structured output manager handle it.
-                reasoning_ended: None,
+                reasoning_ended,
                 reasoning_parser_kwargs,
                 abort_immediately: false,
             },
@@ -164,6 +168,7 @@ mod tests {
                 )]
                 .into(),
             }),
+            reasoning_ended: None,
             lora_request: None,
         }
     }

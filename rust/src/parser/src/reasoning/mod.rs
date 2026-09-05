@@ -29,6 +29,9 @@ mod step3p5;
 
 use thiserror::Error;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
+use xgrammar_structural_tag::format::Format;
+
+use crate::output_grammar::{self, OutputGrammarContext};
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
@@ -126,6 +129,15 @@ pub trait ReasoningParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Prepend the reasoning phase implied by the initialized parser state.
+    fn wrap_visible_format(
+        &self,
+        _ctx: &OutputGrammarContext<'_>,
+        _visible: &Format,
+    ) -> output_grammar::Result<Option<Format>> {
+        Ok(None)
     }
 
     /// Feed one decoded text delta into the parser.
