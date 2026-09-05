@@ -910,7 +910,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Granite4VisionForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-vision-4.1-4b",
-        is_available_online=False,
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
@@ -1530,7 +1529,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Qwen3DSparkModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
-        is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
     "Qwen3OmniDSparkModel": _HfExamplesInfo(
