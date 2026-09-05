@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticTensorAsym,
     kInt8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -727,7 +728,12 @@ class QuarkConfig(QuantizationConfig):
                 )
                 return QuantKeyMatch(False, None, None)
         elif input_quant["dtype"] == "fp8_e4m3":
-            activation_quant_key = kFp8DynamicTensorSym
+            is_mxfp8 = (
+                input_quant.get("qscheme") == "per_group"
+                and input_quant.get("group_size") == 32
+                and input_quant.get("scale_format") == "e8m0"
+            )
+            activation_quant_key = kMxfp8Dynamic if is_mxfp8 else kFp8DynamicTensorSym
         else:
             input_dtype = input_quant["dtype"].replace("fp", "mxfp")
             if input_dtype not in _ACTIVATION_QUANT_KEY_MAP:

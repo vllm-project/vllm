@@ -283,6 +283,27 @@ python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
 
 The current integration supports [all combination of FP4, FP6_E3M2, FP6_E2M3](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/ocp_mx_utils.py) used for either weights or activations.
 
+### Native MXFP6 W6A8 on SM120
+
+For Quark/OCP checkpoints with static E3M2 MXFP6 weights and dynamic E4M3
+MXFP8 activations, CUDA builds can optionally use the native
+[`mxfp6-sm120`](https://github.com/Nekofish-L/mxfp6_sm120) W6A8 backend on
+SM120 GPUs:
+
+```bash
+uv pip install --python .venv/bin/python mxfp6-sm120==0.2.1
+```
+
+Prebuilt wheel coverage is listed on the package's
+[PyPI page](https://pypi.org/project/mxfp6-sm120/); other supported Python and
+PyTorch CUDA ABIs can build the package from source. The project provides
+[model-scoped conversion and validation instructions](https://github.com/Nekofish-L/mxfp6_sm120/blob/main/docs/quantize-checkpoints.md)
+for the tested Qwen3.5 checkpoints.
+
+The native backend is selected only when the package, GPU, weight and activation
+formats, and matrix shape are supported. Other configurations retain the MXFP6
+emulation fallback.
+
 ## Using Quark Quantized layerwise Auto Mixed Precision (AMP) Models
 
 vLLM also supports loading layerwise mixed precision model quantized using AMD Quark. Currently, mixed scheme of {MXFP4, FP8} is supported, where FP8 here denotes for FP8 per-tensor scheme. More mixed precision schemes are planned to be supported in a near future, including

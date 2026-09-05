@@ -102,6 +102,10 @@ from vllm.model_executor.kernels.linear.mxfp6 import (
 from vllm.model_executor.kernels.linear.mxfp6.emulation import (
     EmulationMxfp6LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp6.sm120 import (
+    Mxfp6Sm120LinearKernel,
+    is_mxfp6_sm120_available,
+)
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -290,6 +294,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         MarlinMxfp8LinearKernel,
         MarlinNvFp4LinearKernel,
         MarlinMxFp4LinearKernel,
+    },
+    "mxfp6": {
+        Mxfp6Sm120LinearKernel,
     },
     "triton": {
         TritonInt8ScaledMMLinearKernel,
@@ -552,6 +559,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
 
 _POSSIBLE_MXFP6_KERNELS: dict[PlatformEnum, list[type[MxFp6LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        Mxfp6Sm120LinearKernel,
         EmulationMxfp6LinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -1234,6 +1242,8 @@ __all__ = [
     "MxFp6LinearLayerConfig",
     "init_mxfp6_linear_kernel",
     "EmulationMxfp6LinearKernel",
+    "Mxfp6Sm120LinearKernel",
+    "is_mxfp6_sm120_available",
     "AiterMxfp4LinearKernel",
     "EmulationMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",

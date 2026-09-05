@@ -47,6 +47,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
+    QuarkOCP_MX_MoEMethod,
     QuarkW4A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
@@ -82,6 +83,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Static,
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -499,6 +501,26 @@ QTENSOR_CONFIGS = [
         dispatch_cls=QuarkOCP_MX,
     ),
     QTensorConfig(
+        name="ocp_mx_mxfp6_e3m2_mxfp8_e4m3_activation",
+        weight={
+            "dtype": "fp6_e3m2",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp6E3M2Static,
+        act_quant_key=kMxfp8Dynamic,
+        dispatch_cls=QuarkOCP_MX,
+    ),
+    QTensorConfig(
         name="ocp_mx_mxfp4_mxfp6_e3m2_activation",
         weight={
             "dtype": "fp4",
@@ -865,6 +887,25 @@ def test_quant_method_dispatch_target(case):
     assert weight_quant_key == case.weight_quant_key
     assert act_quant_key == case.act_quant_key
     assert method_cls is (QuarkLinearMethod if is_linear else case.dispatch_cls)
+
+
+def test_ocp_mx_mxfp8_activation_is_rejected_for_moe(default_vllm_config):
+    case = next(
+        case
+        for case in QTENSOR_CONFIGS
+        if case.name == "ocp_mx_mxfp6_e3m2_mxfp8_e4m3_activation"
+    )
+    config = _make_qtensor_config(case.weight, case.input_tensors)
+
+    class TestRoutedExperts(RoutedExperts):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self.moe_config = _make_test_moe_config()
+
+    assert kMxfp8Dynamic in QuarkOCP_MX.supported_activation_quant_keys
+    assert kMxfp8Dynamic not in (QuarkOCP_MX_MoEMethod.supported_activation_quant_keys)
+    with pytest.raises(ValueError, match="Unsupported activation quant key"):
+        config.get_quant_method(TestRoutedExperts(), "experts")
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     dequant_mxfp6,
     quant_dequant_mxfp6,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    quant_dequant_mxfp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
@@ -22,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Static,
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
 )
 
 from .base import MxFp6LinearKernel, MxFp6LinearLayerConfig
@@ -37,7 +41,12 @@ _ACTIVATION_QUANT_DEQUANT_FUNCS: dict[
     kMxfp4Dynamic: quant_dequant_mxfp4,
     kMxfp6E3M2Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e3m2"),
     kMxfp6E2M3Dynamic: partial(quant_dequant_mxfp6, quant_dtype="fp6_e2m3"),
+    kMxfp8Dynamic: quant_dequant_mxfp8,
 }
+
+
+def _identity(x: torch.Tensor) -> torch.Tensor:
+    return x
 
 
 class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
@@ -46,11 +55,10 @@ class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
     def __init__(self, config: MxFp6LinearLayerConfig) -> None:
         super().__init__(config)
         self.dequant_func = _WEIGHT_DEQUANT_FUNCS[config.weight_quant_key]
+        self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor]
         if config.activation_quant_key is None:
             # no input Q/DQ for weight-only
-            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
-                lambda x: x
-            )
+            self.quant_dequant_func = _identity
         else:
             self.quant_dequant_func = _ACTIVATION_QUANT_DEQUANT_FUNCS[
                 config.activation_quant_key
@@ -74,8 +82,11 @@ class EmulationMxfp6LinearKernel(MxFp6LinearKernel):
             kMxfp4Dynamic,
             kMxfp6E3M2Dynamic,
             kMxfp6E2M3Dynamic,
+            kMxfp8Dynamic,
         ):
-            return False, "only supports MXFP4 or MXFP6 or unquantized activations"
+            return False, (
+                "only supports MXFP4, MXFP6, MXFP8, or unquantized activations"
+            )
 
         return True, None
 
