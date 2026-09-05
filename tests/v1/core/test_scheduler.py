@@ -13,12 +13,14 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -2777,6 +2779,7 @@ def create_scheduler_with_priority(
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
+    lora_config: LoRAConfig | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -2851,6 +2854,7 @@ def create_scheduler_with_priority(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -3464,6 +3468,395 @@ def test_priority_scheduling_heap_property():
     # Verify requests were scheduled in priority order (lowest value first)
     expected_priorities = sorted(priorities)
     assert scheduled_priorities == expected_priorities
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_priority_waiting_preemption_at_max_num_seqs(use_v2_model_runner):
+    """A high-priority WAITING request preempts the lowest-priority RUNNING
+    request when the running queue is full (max_num_seqs, issue #40004).
+
+    Scenario: max_num_seqs = 2, plenty of KV blocks (no cache pressure).
+    - Two low-priority requests (priority 5) fill the running queue.
+    - A high-priority request (priority 0) arrives while both are decoding.
+    - The scheduler preempts one low-priority runner to admit the
+      high-priority waiting request.
+    - Once the high-priority request finishes, the preempted request is
+      re-queued and scheduled again.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,  # Plenty of blocks, no KV pressure.
+        use_v2_model_runner=use_v2_model_runner,
+    )
+
+    # Two low-priority requests fill the running queue.
+    lo_requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    for req in lo_requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    assert {req.request_id for req in scheduler.running} == {"lo1", "lo2"}
+
+    # Both requests decode one token.
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "lo2"],
+        req_id_to_index={"lo1": 0, "lo2": 1},
+        sampled_token_ids=[[99], [98]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # A high-priority request arrives.
+    hi_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["hi"],
+    )[0]
+    scheduler.add_request(hi_req)
+
+    # The running queue is full; the high-priority waiting request must
+    # preempt a low-priority runner. Both runners have priority 5, so the
+    # latest-arrived one (lo2, arrival 2.0) is the victim.
+    output = scheduler.schedule()
+
+    scheduled_ids = set(output.num_scheduled_tokens)
+    assert "hi" in scheduled_ids
+    assert "lo1" in scheduled_ids
+    # The victim was scheduled earlier in this same step; its scheduling
+    # must have been rolled back when it was preempted.
+    assert "lo2" not in scheduled_ids
+
+    lo2_req = scheduler.requests["lo2"]
+    assert lo2_req.status == RequestStatus.PREEMPTED
+    assert lo2_req.num_preemptions == 1
+    assert len(scheduler.waiting) == 1
+    assert lo2_req in scheduler.waiting
+    assert {req.request_id for req in scheduler.running} == {"lo1", "hi"}
+
+    # Decode the survivors.
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "hi"],
+        req_id_to_index={"lo1": 0, "hi": 1},
+        sampled_token_ids=[[97], [96]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+    scheduler.finish_requests("hi", RequestStatus.FINISHED_STOPPED)
+
+    # The preempted request is re-queued and runs again once a slot frees.
+    output = scheduler.schedule()
+    assert len(scheduler.waiting) == 0
+    assert lo2_req.status == RequestStatus.RUNNING
+    assert {req.request_id for req in scheduler.running} == {"lo1", "lo2"}
+    if use_v2_model_runner:
+        # V2 emits the resumed request as a NewRequestData.
+        assert [req.req_id for req in output.scheduled_new_reqs] == ["lo2"]
+    else:
+        assert len(output.scheduled_new_reqs) == 0
+        assert "lo2" in output.scheduled_cached_reqs.resumed_req_ids
+
+
+def test_priority_waiting_no_preemption_when_not_higher_priority():
+    """A lower-priority waiting request must NOT preempt a higher-priority
+    running request when the running queue is full."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+    )
+
+    hi_requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[0, 1],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["hi1", "hi2"],
+    )
+    for req in hi_requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    model_output = ModelRunnerOutput(
+        req_ids=["hi1", "hi2"],
+        req_id_to_index={"hi1": 0, "hi2": 1},
+        sampled_token_ids=[[99], [98]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    lo_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],  # Lower priority than every runner.
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["lo"],
+    )[0]
+    scheduler.add_request(lo_req)
+
+    output = scheduler.schedule()
+    assert "lo" not in output.num_scheduled_tokens
+    assert scheduler.requests["lo"].status == RequestStatus.WAITING
+    assert {req.request_id for req in scheduler.running} == {"hi1", "hi2"}
+
+
+def test_priority_waiting_equal_priority_no_preemption():
+    """An equal-priority waiting request must NOT preempt a running request,
+    even if the waiting request has an earlier arrival time.
+
+    Using the Request.__lt__ tiebreak (priority, arrival_time) would let the
+    earlier-arrived waiting request preempt, while the preempted request
+    keeps its earlier arrival time and would reclaim the slot on the next
+    step -- preemption ping-pong. Only a strictly higher priority
+    (numerically lower value) may preempt.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+    )
+
+    running_reqs = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[2.0, 3.0],
+        num_tokens=10,
+        req_ids=["r1", "r2"],
+    )
+    for req in running_reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    # A waiting request with the SAME priority (5) but an EARLIER arrival
+    # time (1.0 < 2.0).
+    waiting_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=10,
+        req_ids=["w1"],
+    )[0]
+    scheduler.add_request(waiting_req)
+
+    # Run several steps: no preemption must ever fire (no churn/ping-pong).
+    for _ in range(3):
+        output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=["r1", "r2"],
+            req_id_to_index={"r1": 0, "r2": 1},
+            sampled_token_ids=[[99], [98]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_output)
+
+        assert "w1" not in output.num_scheduled_tokens
+        assert scheduler.requests["r1"].status == RequestStatus.RUNNING
+        assert scheduler.requests["r2"].status == RequestStatus.RUNNING
+        assert scheduler.requests["w1"].status == RequestStatus.WAITING
+        assert len(scheduler.running) == 2
+        assert len(scheduler.waiting) == 1
+
+
+def _attach_lora(requests, lora_int_ids):
+    for request, lora_int_id in zip(requests, lora_int_ids, strict=True):
+        request.lora_request = LoRARequest(
+            lora_name=f"lora{lora_int_id}",
+            lora_int_id=lora_int_id,
+            lora_path=f"/tmp/lora{lora_int_id}",
+        )
+
+
+def test_priority_waiting_preemption_keeps_shared_lora():
+    """Preempting a running request must NOT discard its LoRA ID from the
+    step's accounting while another request scheduled this step still uses
+    it (issue #40004 review feedback).
+
+    Scenario: max_num_seqs = 2, max_loras = 1.
+    - Y (priority 7, LoRA 1) is running.
+    - hi (0, LoRA 1), mid (1, LoRA 2), x (6, LoRA 1) are waiting.
+    Step: hi is admitted (slot is free). The queue is then full, so x
+    preempts Y. Y's LoRA 1 must stay accounted for: hi -- admitted this
+    same step -- still uses it, so mid (LoRA 2) must remain excluded by the
+    max_loras constraint rather than preempting anyone.
+    """
+    lora_config = LoRAConfig(max_loras=1, max_lora_rank=8)
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+        lora_config=lora_config,
+    )
+
+    req_y = create_requests_with_priority(
+        num_requests=1,
+        priorities=[7],
+        arrival_times=[0.0],
+        num_tokens=10,
+        req_ids=["y"],
+    )
+    _attach_lora(req_y, [1])
+    scheduler.add_request(req_y[0])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    model_output = ModelRunnerOutput(
+        req_ids=["y"],
+        req_id_to_index={"y": 0},
+        sampled_token_ids=[[99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    waiters = create_requests_with_priority(
+        num_requests=3,
+        priorities=[0, 1, 6],
+        arrival_times=[1.0, 2.0, 3.0],
+        num_tokens=10,
+        req_ids=["hi", "mid", "x"],
+    )
+    _attach_lora(waiters, [1, 2, 1])
+    for req in waiters:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # hi fills the free slot; x preempts y; mid (LoRA 2) stays out.
+    scheduled_ids = set(output.num_scheduled_tokens)
+    assert {"hi", "x"} <= scheduled_ids
+    assert "mid" not in scheduled_ids
+    assert "y" not in scheduled_ids
+    assert scheduler.requests["y"].status == RequestStatus.PREEMPTED
+    assert scheduler.requests["mid"].status == RequestStatus.WAITING
+    assert {req.request_id for req in scheduler.running} == {"hi", "x"}
+
+
+def test_priority_waiting_preemption_discards_unused_lora():
+    """Preempting a running request DOES free its LoRA slot when no other
+    request scheduled this step uses it.
+
+    Scenario: max_num_seqs = 2, max_loras = 2.
+    - A (priority 7, LoRA 1) and B (priority 8, LoRA 2) are running.
+    - hi (0, LoRA 1) and mid (1, LoRA 3) are waiting.
+    Step: hi preempts B, freeing LoRA 2 from the step's accounting. That
+    leaves LoRA capacity for mid (LoRA 3), which preempts A. Without the
+    discard, mid would be (wrongly) excluded by the max_loras constraint.
+    """
+    lora_config = LoRAConfig(max_loras=2, max_lora_rank=8)
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+        lora_config=lora_config,
+    )
+
+    runners = create_requests_with_priority(
+        num_requests=2,
+        priorities=[7, 8],
+        arrival_times=[0.0, 1.0],
+        num_tokens=10,
+        req_ids=["a", "b"],
+    )
+    _attach_lora(runners, [1, 2])
+    for req in runners:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    model_output = ModelRunnerOutput(
+        req_ids=["a", "b"],
+        req_id_to_index={"a": 0, "b": 1},
+        sampled_token_ids=[[99], [98]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    waiters = create_requests_with_priority(
+        num_requests=2,
+        priorities=[0, 1],
+        arrival_times=[2.0, 3.0],
+        num_tokens=10,
+        req_ids=["hi", "mid"],
+    )
+    _attach_lora(waiters, [1, 3])
+    for req in waiters:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    # hi preempts b; discarding b's now-unused LoRA leaves room for mid,
+    # which preempts a.
+    scheduled_ids = set(output.num_scheduled_tokens)
+    assert {"hi", "mid"} <= scheduled_ids
+    assert "a" not in scheduled_ids
+    assert "b" not in scheduled_ids
+    assert scheduler.requests["a"].status == RequestStatus.PREEMPTED
+    assert scheduler.requests["b"].status == RequestStatus.PREEMPTED
+    assert len(scheduler.waiting) == 2
+    assert {req.request_id for req in scheduler.running} == {"hi", "mid"}
+
+
+def test_waiting_no_preemption_at_max_num_seqs_fcfs():
+    """Queue-full preemption is exclusive to the priority scheduling policy;
+    FCFS never preempts (issue #40004)."""
+    scheduler = create_scheduler(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+    )
+
+    fcfs_requests = create_requests(
+        num_requests=2,
+        num_tokens=10,
+        req_ids=["f1", "f2"],
+    )
+    for req in fcfs_requests:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in fcfs_requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(fcfs_requests)},
+        sampled_token_ids=[[99], [98]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    waiting_request = create_requests(num_requests=1, num_tokens=10, req_ids=["f3"])[0]
+    waiting_request.priority = 0  # Irrelevant under FCFS.
+    scheduler.add_request(waiting_request)
+
+    output = scheduler.schedule()
+    assert waiting_request.request_id not in output.num_scheduled_tokens
+    assert waiting_request.status == RequestStatus.WAITING
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
 
 
 def test_schedule_skip_tokenizer_init():
