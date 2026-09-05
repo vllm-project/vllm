@@ -305,6 +305,7 @@ class ParserEngine(Parser):
         the closing tag arrives.
         """
         last_colon = -1
+        last_comma = -1
         last_key: str | None = None
         pending_key: str | None = None
         in_string = False
@@ -334,27 +335,50 @@ class ParserEngine(Parser):
                 last_colon = i
                 last_key = pending_key
                 pending_key = None
+            elif c == "," and depth == 1:
+                last_comma = i
         if last_colon < 0:
             return ""
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
-        if end >= len(json_str) or json_str[end] != '"':
-            return json_str[:end]
-        if string_keys is not None and last_key not in string_keys:
-            return json_str[:end]
+        if (
+            end >= len(json_str)
+            or json_str[end] != '"'
+            or (string_keys is not None and last_key not in string_keys)
+        ):
+            # The trailing value cannot stream. Stop after the last complete
+            # top-level value rather than after ``"key": ``: the flush can
+            # drop an unfinished parameter, and a prefix that ends on the
+            # separator then has no valid completion.
+            return json_str[:last_comma] if last_comma >= 0 else ""
 
         escape = False
+        escape_start = -1
+        hex_left = 0
         for i in range(end + 1, len(json_str)):
             c = json_str[i]
+            if hex_left:
+                hex_left -= 1
+                if hex_left == 0:
+                    escape_start = -1
+                continue
             if escape:
                 escape = False
+                if c == "u":
+                    hex_left = 4
+                else:
+                    escape_start = -1
                 continue
             if c == "\\":
                 escape = True
+                escape_start = i
                 continue
             if c == '"':
                 return json_str[:i]
+        if escape_start >= 0:
+            # Never end on a partial escape: ``\u12`` has no valid completion.
+            return json_str[:escape_start]
         return json_str
 
     @staticmethod
@@ -1005,11 +1029,83 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         if final_json and len(final_json) > len(prev):
             if prev and not final_json.startswith(prev):
-                return None
+                return self._close_streamed_json(slot, prev)
             diff = final_json[len(prev) :]
             slot.streamed_json = final_json
             return diff
+        if prev:
+            return self._close_streamed_json(slot, prev)
         return None
+
+    def _close_streamed_json(self, slot: ToolCallSlot, prev: str) -> str | None:
+        """Terminate an argument prefix the flush cannot extend.
+
+        ``_safe_arg_prefix`` deliberately streams unterminated string values for
+        prefix-stable keys, on the understanding that the flush completes them.
+        If the model never closes a parameter, the non-partial re-derivation
+        drops that parameter entirely, so it is neither longer than nor a prefix
+        of what was already sent. Returning ``None`` there ends the stream with
+        ``finish_reason`` set while the client holds a half-written string, which
+        no JSON parser accepts. Close what was already sent instead: the client
+        gets the truncated value rather than an unparsable message.
+        """
+        suffix = self._json_prefix_terminator(prev)
+        if not suffix:
+            return None
+        slot.streamed_json = prev + suffix
+        return suffix
+
+    @staticmethod
+    def _json_prefix_terminator(prefix: str) -> str:
+        """Return the shortest suffix that makes ``prefix`` parse, or ``""``."""
+        in_string = False
+        escape = False
+        stack: list[str] = []
+        for c in prefix:
+            if escape:
+                escape = False
+                continue
+            if in_string:
+                if c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                stack.append("}")
+            elif c == "[":
+                stack.append("]")
+            elif c in "}]" and stack:
+                stack.pop()
+        suffix = ""
+        if escape:
+            # A trailing escape would swallow the quote that closes the string.
+            suffix += "\\"
+        if in_string:
+            suffix += '"'
+        else:
+            # A dangling separator has no value to close. ``null`` is used
+            # purely to make the prefix PARSE: the client is being handed a
+            # truncated call either way, and a null placeholder may still fail
+            # the tool's schema, which is strictly better than arguments no
+            # JSON parser accepts. An object cannot be completed after a comma
+            # without inventing a key, so that case falls through to the parse
+            # check below and yields no suffix.
+            tail = prefix.rstrip()
+            if tail.endswith(":") or (
+                tail.endswith(",") and stack and stack[-1] == "]"
+            ):
+                suffix += "null"
+        suffix += "".join(reversed(stack))
+        if not suffix:
+            return ""
+        try:
+            json.loads(prefix + suffix)
+        except (json.JSONDecodeError, ValueError):
+            return ""
+        return suffix
 
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
 

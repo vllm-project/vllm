@@ -44,6 +44,100 @@ def parser(mock_tokenizer):
     )
 
 
+class TestUnclosedParameterFlush:
+    def test_unclosed_parameter_still_streams_valid_json(self, parser, mock_request):
+        """A tool call reopened mid-parameter must still stream parsable JSON.
+
+        The flush re-derives without the open parameter, so it cannot extend
+        the streamed prefix; the prefix has to be closed instead. Fed one
+        character at a time, the worst case for the prefix invariant.
+        """
+        raw = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=path>\nREADME.md\n</parameter>\n"
+            "<parameter=content>\n# Title\n\n"
+            "body text that continues for a while\n\n"
+            # The model reopens a tool call without closing <parameter=content>.
+            "<tool_call>\n<function=write_file>"
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(raw))
+        finish = parser.finish_streaming()
+        if finish is not None:
+            results.append((finish, ""))
+
+        args = collect_tool_arguments(results)
+        assert args, "no arguments were streamed"
+        assert args.startswith('{"path": "README.md"'), args[:60]
+        json.loads(args)
+
+    def test_truncated_parameter_still_streams_valid_json(self, parser, mock_request):
+        """The common trigger: generation simply stops inside a parameter."""
+        raw = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=path>\nREADME.md\n</parameter>\n"
+            "<parameter=content>\n# Title\n\n"
+            "body text that stops mid-sen"
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(raw))
+        finish = parser.finish_streaming()
+        if finish is not None:
+            results.append((finish, ""))
+
+        args = collect_tool_arguments(results)
+        assert args, "no arguments were streamed"
+        assert args.startswith('{"path": "README.md"'), args[:60]
+        json.loads(args)
+
+    @pytest.fixture
+    def tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "count": {"type": "integer"},
+                        },
+                    },
+                },
+            }
+        ]
+
+    @pytest.fixture
+    def parser_with_tools(self, mock_tokenizer, tools):
+        return ParserEngine(
+            mock_tokenizer,
+            tools=tools,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+
+    def test_truncated_typed_parameter_still_streams_valid_json(
+        self, parser_with_tools, mock_request
+    ):
+        """Truncation inside a schema-typed (non-string) parameter.
+
+        The number cannot stream, so before the fix the prefix ended on the
+        separator, ``{"path": "README.md", "count": ``, and the flush had no
+        completion for it.
+        """
+        raw = (
+            "<tool_call>\n<function=write_file>\n"
+            "<parameter=path>\nREADME.md\n</parameter>\n"
+            "<parameter=count>\n12"
+        )
+        results = simulate_tool_streaming(parser_with_tools, mock_request, list(raw))
+        finish = parser_with_tools.finish_streaming()
+        if finish is not None:
+            results.append((finish, ""))
+
+        args = collect_tool_arguments(results)
+        assert args, "no arguments were streamed"
+        assert json.loads(args)["path"] == "README.md"
+
+
 class TestNonStreaming:
     def test_no_tool_calls(self, parser, mock_request):
         result = parser.extract_tool_calls(
