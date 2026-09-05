@@ -170,3 +170,26 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
         ]
     );
 }
+
+pub(super) fn assert_tool_framing_preserves_body_whitespace<P: ToolParser + 'static>(
+    framing: &str,
+    call: &str,
+) {
+    use super::test_utils::{collect_stream, test_tools};
+
+    let body = "  before\n";
+    let wire = format!("{body}{framing}{call}");
+    for split in wire.char_indices().map(|(i, _)| i).chain(std::iter::once(wire.len())) {
+        let mut parser = P::create(&test_tools()).unwrap();
+        let output = collect_stream(parser.as_mut(), &[&wire[..split], &wire[split..]]);
+        assert_eq!(output.normal_text(), body, "split {split}");
+        assert_eq!(output.calls().len(), 1, "split {split}");
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    }
+    let plain = "  no tool\n\n<to";
+    let mut parser = P::create(&test_tools()).unwrap();
+    assert_eq!(
+        collect_stream(parser.as_mut(), &[plain]).normal_text(),
+        plain
+    );
+}

@@ -3,7 +3,10 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 const M3_THINK_START: &str = "<mm:think>";
 const M3_THINK_END: &str = "</mm:think>";
@@ -27,7 +30,8 @@ impl MiniMaxM3ReasoningParser {
     /// Create a MiniMax M3 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, M3_THINK_START, M3_THINK_END)?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, M3_THINK_START, M3_THINK_END)
+                .build()?,
             at_response_start: true,
             leading_end_buffer: DecodedText::default(),
         })
@@ -77,7 +81,7 @@ impl ReasoningParser for MiniMaxM3ReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
+        self.inner.initialize(prompt_token_ids)?;
         self.at_response_start = true;
         self.leading_end_buffer.clear();
         Ok(())

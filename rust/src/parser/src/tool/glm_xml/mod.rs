@@ -8,7 +8,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
-use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::tool::Tool;
 
@@ -19,6 +19,7 @@ pub use glm45_moe::Glm45MoeToolParser;
 pub use glm47_moe::Glm47MoeToolParser;
 
 const TOOL_CALL_START: &str = "<tool_call>";
+const FRAMED_TOOL_CALL_START: &str = "\n<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
 const ARG_KEY_START: &str = "<arg_key>";
 const ARG_KEY_END: &str = "</arg_key>";
@@ -149,7 +150,7 @@ fn parse_next_glm_event(
     separator: Separator,
 ) -> ModalResult<GlmEvent> {
     match mode {
-        GlmMode::Text => parse_text_event(input),
+        GlmMode::Text => parse_text_event(input, separator),
         GlmMode::ToolCall { tool_call_end_scan } => {
             tool_call_event(input, separator, tool_call_end_scan)
         }
@@ -158,18 +159,25 @@ fn parse_next_glm_event(
 }
 
 /// Parse a text-mode GLM event.
-fn parse_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    alt((tool_call_start_event, safe_text_event)).parse_next(input)
+fn parse_text_event(input: &mut GlmInput<'_>, separator: Separator) -> ModalResult<GlmEvent> {
+    let framed_start = match separator {
+        Separator::Newline => FRAMED_TOOL_CALL_START,
+        Separator::Flexible => TOOL_CALL_START,
+    };
+    alt((
+        literal(framed_start).value(GlmEvent::ToolCallStart),
+        tool_call_start_event,
+        |input: &mut GlmInput<'_>| {
+            safe_text_len_mul(input, &[framed_start, TOOL_CALL_START])
+                .map(|len| GlmEvent::Text { len })
+        },
+    ))
+    .parse_next(input)
 }
 
 /// Parse a GLM tool-call start marker.
 fn tool_call_start_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     literal(TOOL_CALL_START).value(GlmEvent::ToolCallStart).parse_next(input)
-}
-
-/// Parse a safe text run before the next GLM marker.
-fn safe_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| GlmEvent::Text { len })
 }
 
 /// Parse text after a completed GLM tool call.
@@ -303,7 +311,7 @@ mod tests {
 
         let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(output.normal_text(), "Let me search for that.\n");
+        assert_eq!(output.normal_text(), "Let me search for that.");
         assert_eq!(output.calls().len(), 1);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(

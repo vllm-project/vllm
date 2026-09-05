@@ -8,8 +8,9 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution};
 
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DelimitedReasoningParser,
-    KimiReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
-    ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
+    DelimitedReasoningParserBuilder, KimiReasoningParser, MiniMaxM3ReasoningParser,
+    Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result, SeedOssReasoningParser,
+    Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -57,7 +58,9 @@ pub(crate) fn content_str(delta: &ReasoningDelta) -> Option<&str> {
 #[test]
 fn delimited_content_only_stream() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
 
     let delta = parser.push(DecodedText::unattributed("plain content"));
     assert_eq!(content_str(&delta), Some("plain content"));
@@ -66,7 +69,9 @@ fn delimited_content_only_stream() {
 #[test]
 fn delimited_single_chunk_with_reasoning_and_content() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
 
     let delta = parser.push(DecodedText::unattributed("<think>reason</think>answer"));
     assert_eq!(reasoning_str(&delta), Some("reason"));
@@ -76,7 +81,9 @@ fn delimited_single_chunk_with_reasoning_and_content() {
 #[test]
 fn delimited_partial_tokens_across_chunks() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
 
     assert!(parser.push(DecodedText::unattributed("<thi")).is_empty());
     let delta = parser.push(DecodedText::unattributed("nk>reason</think>answer"));
@@ -87,8 +94,10 @@ fn delimited_partial_tokens_across_chunks() {
 #[test]
 fn delimited_finish_flushes_buffer() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
-    parser.initialize(&[THINK_START_ID]);
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
+    parser.initialize(&[THINK_START_ID]).unwrap();
 
     let delta = parser.push(DecodedText::unattributed("unfinished</thi"));
     assert_eq!(reasoning_str(&delta), Some("unfinished"));
@@ -99,8 +108,10 @@ fn delimited_finish_flushes_buffer() {
 #[test]
 fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
-    parser.initialize(&[THINK_START_ID]);
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
+    parser.initialize(&[THINK_START_ID]).unwrap();
 
     // A filtered special token produces a zero-width attribution with no text;
     // it must survive as a reasoning piece rather than being dropped.
@@ -130,7 +141,9 @@ fn delimited_zero_width_only_piece_is_attributed_to_current_state() {
 #[test]
 fn delimited_marker_tokens_are_dropped_from_attributions() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>").unwrap();
+    let mut parser = DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+        .build()
+        .unwrap();
 
     let mut collected = CollectedAttributions::default();
     for chunk in attributed_chunks(&[
@@ -282,4 +295,171 @@ pub(crate) fn collect_attributed(
     }
     collected.record(parser.finish().unwrap());
     collected
+}
+
+fn framed_parser() -> DelimitedReasoningParser {
+    DelimitedReasoningParserBuilder::new(Arc::new(fake_tokenizer()), "<think>", "</think>")
+        .with_after_start("\n")
+        .with_before_end("\n")
+        .with_after_end("\n\n")
+        .build()
+        .unwrap()
+}
+
+fn collect_framed(parser: &mut DelimitedReasoningParser, chunks: &[&str]) -> (String, String) {
+    let mut result = (String::new(), String::new());
+    for chunk in chunks.iter().copied().map(Some).chain(std::iter::once(None)) {
+        let delta = match chunk {
+            Some(chunk) => parser.push(DecodedText::unattributed(chunk)),
+            None => parser.finish(),
+        };
+        if let Some(reasoning) = delta.reasoning {
+            result.0.push_str(&reasoning.text);
+        }
+        if let Some(content) = delta.content {
+            result.1.push_str(&content.text);
+        }
+    }
+    result
+}
+
+#[test]
+fn delimited_framing_preserves_body_whitespace_at_every_split() {
+    let wire = "<think>\n\n  reason\t\n\n</think>\n\n\n    answer\n";
+    let expected = ("\n  reason\t\n".to_string(), "\n    answer\n".to_string());
+    for split in 0..=wire.len() {
+        let mut parser = framed_parser();
+        assert_eq!(
+            collect_framed(&mut parser, &[&wire[..split], &wire[split..]]),
+            expected,
+            "split at {split}"
+        );
+    }
+    let chars = wire
+        .as_bytes()
+        .chunks(1)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(collect_framed(&mut framed_parser(), &chars), expected);
+}
+
+#[test]
+fn delimited_partial_framing_is_preserved_on_mismatch_or_finish() {
+    for (wire, reasoning, content) in [
+        ("<think>reason</think>\nanswer", "reason", "\nanswer"),
+        ("<think>\nreason\nmore\n", "reason\nmore\n", ""),
+        ("<think>\nreason\n</thi", "reason\n</thi", ""),
+        ("<think>\nreason\n</think>\n", "reason", "\n"),
+        ("  plain\n", "", "  plain\n"),
+    ] {
+        for split in 0..=wire.len() {
+            assert_eq!(
+                collect_framed(&mut framed_parser(), &[&wire[..split], &wire[split..]]),
+                (reasoning.to_string(), content.to_string()),
+                "wire {wire:?}, split {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn delimited_prompt_initialization_consumes_only_remaining_framing() {
+    use vllm_tokenizer::Tokenizer;
+    let tokenizer = fake_tokenizer();
+    for (prompt, wire, reasoning, content) in [
+        (
+            "<think>",
+            "\nreason\n</think>\n\nanswer",
+            "reason",
+            "answer",
+        ),
+        (
+            "<think>\n",
+            "\nreason\n</think>\n\nanswer",
+            "\nreason",
+            "answer",
+        ),
+        (
+            "<think>\nprefill",
+            "\nreason\n</think>\n\nanswer",
+            "\nreason",
+            "answer",
+        ),
+        ("</think>", "\n\n\nanswer", "", "\nanswer"),
+        ("</think>\n", "\n\nanswer", "", "\nanswer"),
+        ("</think>\n\n", "\nanswer", "", "\nanswer"),
+        ("</think>\n\nprefill", "\nanswer", "", "\nanswer"),
+    ] {
+        let mut parser = framed_parser();
+        parser.initialize(&tokenizer.encode(prompt, false).unwrap()).unwrap();
+        assert_eq!(
+            collect_framed(&mut parser, &[wire]),
+            (reasoning.to_string(), content.to_string()),
+            "prompt {prompt:?}"
+        );
+    }
+}
+
+#[test]
+fn delimited_framing_holds_only_boundary_candidates() {
+    let mut parser = framed_parser();
+    let first = parser.push(DecodedText::unattributed("<think>\nreason\n"));
+    assert_eq!(reasoning_str(&first), Some("reason"));
+    let more = parser.push(DecodedText::unattributed("more\n"));
+    assert_eq!(reasoning_str(&more), Some("\nmore"));
+    assert!(parser.push(DecodedText::unattributed("</think>\n")).is_empty());
+    let answer = parser.push(DecodedText::unattributed("\n    answer"));
+    assert_eq!(content_str(&answer), Some("    answer"));
+}
+
+#[test]
+fn delimited_start_prefix_is_consumed_only_before_the_marker() {
+    for wire in [
+        "\n<think>reason</think>answer",
+        "\n\n<think>reason</think>answer",
+    ] {
+        for split in 0..=wire.len() {
+            let mut parser = DelimitedReasoningParserBuilder::new(
+                Arc::new(fake_tokenizer()),
+                "<think>",
+                "</think>",
+            )
+            .with_before_start("\n")
+            .build()
+            .unwrap();
+            let expected_content = if wire.starts_with("\n\n") {
+                "\nanswer"
+            } else {
+                "answer"
+            };
+            assert_eq!(
+                collect_framed(&mut parser, &[&wire[..split], &wire[split..]]),
+                ("reason".to_string(), expected_content.to_string())
+            );
+        }
+    }
+}
+
+#[test]
+fn delimited_framing_preserves_body_token_attributions() {
+    let mut parser = framed_parser();
+    let mut collected = CollectedAttributions::default();
+    for chunk in attributed_chunks(&[
+        Some("<think>"),
+        Some("\n"),
+        Some("reason"),
+        None,
+        Some("\n"),
+        Some("</think>"),
+        Some("\n"),
+        Some("\n"),
+        Some("    answer"),
+    ]) {
+        collected.record(parser.push(chunk));
+    }
+    collected.record(parser.finish());
+    assert_eq!(collected.reasoning_text, "reason");
+    assert_eq!(collected.content_text, "    answer");
+    assert_eq!(collected.reasoning_ids, [3, 4]);
+    assert_eq!(collected.content_ids, [9]);
 }

@@ -4,6 +4,90 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer, Tokenizer};
 
 use super::{ReasoningDelta, ReasoningError, Result};
+use crate::utils::partial_prefix_len;
+
+/// Build a delimited reasoning parser with fixed text at each boundary.
+pub(crate) struct DelimitedReasoningParserBuilder {
+    tokenizer: DynTokenizer,
+    start_token: String,
+    end_token: String,
+    before_start: &'static str,
+    after_start: &'static str,
+    before_end: &'static str,
+    after_end: &'static str,
+}
+
+impl DelimitedReasoningParserBuilder {
+    /// Configure the tokenizer and reasoning delimiters.
+    pub(crate) fn new(
+        tokenizer: DynTokenizer,
+        start_token: impl Into<String>,
+        end_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            tokenizer,
+            start_token: start_token.into(),
+            end_token: end_token.into(),
+            before_start: "",
+            after_start: "",
+            before_end: "",
+            after_end: "",
+        }
+    }
+
+    /// Include a fixed prefix when it immediately precedes the start marker.
+    pub(crate) fn with_before_start(mut self, before_start: &'static str) -> Self {
+        self.before_start = before_start;
+        self
+    }
+
+    /// Consume fixed text immediately after the start marker.
+    pub(crate) fn with_after_start(mut self, after_start: &'static str) -> Self {
+        self.after_start = after_start;
+        self
+    }
+
+    /// Include a fixed prefix when it immediately precedes the end marker.
+    pub(crate) fn with_before_end(mut self, before_end: &'static str) -> Self {
+        self.before_end = before_end;
+        self
+    }
+
+    /// Consume fixed text immediately after the end marker.
+    pub(crate) fn with_after_end(mut self, after_end: &'static str) -> Self {
+        self.after_end = after_end;
+        self
+    }
+
+    /// Create one delimited parser state machine.
+    pub(crate) fn build(self) -> Result<DelimitedReasoningParser> {
+        let start_token_id = self.tokenizer.token_to_id(&self.start_token).ok_or_else(|| {
+            ReasoningError::MissingToken {
+                token: self.start_token.clone(),
+            }
+        })?;
+        let end_token_id = self.tokenizer.token_to_id(&self.end_token).ok_or_else(|| {
+            ReasoningError::MissingToken {
+                token: self.end_token.clone(),
+            }
+        })?;
+
+        Ok(DelimitedReasoningParser {
+            tokenizer: self.tokenizer,
+            framed_start_token: format!("{}{}", self.before_start, self.start_token),
+            start_token: self.start_token,
+            framed_end_token: format!("{}{}", self.before_end, self.end_token),
+            end_token: self.end_token,
+            start_token_id,
+            end_token_id,
+            after_start: self.after_start,
+            after_end: self.after_end,
+            current_in_reasoning: false,
+            buffer: DecodedText::default(),
+            pending_after: "",
+        })
+    }
+}
 
 /// Shared incremental state machine for tag-delimited reasoning protocols.
 ///
@@ -18,54 +102,45 @@ use super::{ReasoningDelta, ReasoningError, Result};
 /// prefill different prompts.
 pub(crate) struct DelimitedReasoningParser {
     tokenizer: DynTokenizer,
-    current_in_reasoning: bool,
-    buffer: DecodedText,
     start_token: String,
+    framed_start_token: String,
     end_token: String,
     start_token_id: u32,
     end_token_id: u32,
+    after_start: &'static str,
+    after_end: &'static str,
+    framed_end_token: String,
+
+    // Mutable state.
+    current_in_reasoning: bool,
+    buffer: DecodedText,
+    pending_after: &'static str,
 }
 
 impl DelimitedReasoningParser {
-    /// Create one delimited parser state machine.
-    pub(crate) fn new(
-        tokenizer: DynTokenizer,
-        start_token: impl Into<String>,
-        end_token: impl Into<String>,
-    ) -> Result<Self> {
-        let start_token = start_token.into();
-        let end_token = end_token.into();
-        let start_token_id =
-            tokenizer
-                .token_to_id(&start_token)
-                .ok_or_else(|| ReasoningError::MissingToken {
-                    token: start_token.clone(),
-                })?;
-        let end_token_id =
-            tokenizer.token_to_id(&end_token).ok_or_else(|| ReasoningError::MissingToken {
-                token: end_token.clone(),
-            })?;
-
-        Ok(Self {
-            tokenizer,
-            current_in_reasoning: false,
-            buffer: DecodedText::default(),
-            start_token,
-            end_token,
-            start_token_id,
-            end_token_id,
-        })
-    }
-
-    /// Initialize the starting state from prompt token IDs.
-    pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) {
-        self.current_in_reasoning = last_reasoning_boundary(
+    /// Initialize the starting state and remaining framing from prompt tokens.
+    pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
+        self.buffer = DecodedText::default();
+        self.current_in_reasoning = false;
+        self.pending_after = "";
+        if let Some((index, in_reasoning)) = last_reasoning_boundary_position(
             prompt_token_ids,
             self.start_token_id,
             self.end_token_id,
             self.tokenizer.as_ref(),
-        )
-        .unwrap_or(false);
+        ) {
+            self.current_in_reasoning = in_reasoning;
+            self.pending_after = if in_reasoning {
+                self.after_start
+            } else {
+                self.after_end
+            };
+            if !self.pending_after.is_empty() && index + 1 < prompt_token_ids.len() {
+                let tail = self.tokenizer.decode(&prompt_token_ids[index + 1..], false)?;
+                self.pending_after = self.pending_after.strip_prefix(&tail).unwrap_or("");
+            }
+        }
+        Ok(())
     }
 
     /// Return whether the parser is currently inside a reasoning section.
@@ -76,84 +151,74 @@ impl DelimitedReasoningParser {
     /// Parse one decoded text delta and return its reasoning/content split.
     pub(crate) fn push(&mut self, delta: DecodedText) -> ReasoningDelta {
         self.buffer.append(delta);
-
-        let partial_suffix_len = self.partial_suffix_len(&self.buffer.text);
-        let stable_len = self.buffer.text.len() - partial_suffix_len;
-        let stable = self.buffer.drain_prefix(stable_len);
-
-        self.parse_stable_text(stable)
+        self.parse_buffer(false)
     }
 
-    /// Flush any buffered partial delimiter suffix at end of stream.
+    /// Flush partial framing and delimiters as body text at end of stream.
     pub(crate) fn finish(&mut self) -> ReasoningDelta {
-        // `drain_prefix(text.len())` takes trailing zero-width tokens too.
-        let stable = self.buffer.drain_prefix(self.buffer.text.len());
-        self.parse_stable_text(stable)
+        self.parse_buffer(true)
     }
 
-    /// Parse text that is known not to end with a partial delimiter suffix.
-    ///
     /// Reasoning and content pieces keep the attributions of the tokens that
     /// produced them; delimiter marker spans are drained and dropped, keeping
     /// marker tokens out of any count.
-    fn parse_stable_text(&mut self, mut stable: DecodedText) -> ReasoningDelta {
+    fn parse_buffer(&mut self, finishing: bool) -> ReasoningDelta {
         let mut delta = ReasoningDelta::default();
-
-        while !stable.text.is_empty() {
-            if self.current_in_reasoning {
-                if let Some(end_idx) = stable.text.find(&self.end_token) {
-                    delta.push_reasoning(stable.drain_prefix(end_idx));
-                    let _ = stable.drain_prefix(self.end_token.len());
-                    self.current_in_reasoning = false;
-                } else {
-                    delta.push_reasoning(stable);
-                    return delta;
+        loop {
+            if !self.pending_after.is_empty() {
+                if self.buffer.text.starts_with(self.pending_after) {
+                    let _ = self.buffer.drain_prefix(self.pending_after.len());
+                } else if !finishing && self.pending_after.starts_with(&self.buffer.text) {
+                    break;
                 }
-            } else if let Some(start_idx) = stable.text.find(&self.start_token) {
-                delta.push_content(stable.drain_prefix(start_idx));
-                let _ = stable.drain_prefix(self.start_token.len());
-                self.current_in_reasoning = true;
-            } else {
-                delta.push_content(stable);
-                return delta;
+                // A mismatch preserves the candidate as body text.
+                self.pending_after = "";
             }
-        }
 
-        // A remainder with empty text may still carry zero-width tokens;
-        // attribute them to the current state.
-        if !stable.attributions.is_empty() {
-            if self.current_in_reasoning {
-                delta.push_reasoning(stable);
+            let (marker, framed_marker) = if self.current_in_reasoning {
+                (&self.end_token, &self.framed_end_token)
             } else {
-                delta.push_content(stable);
+                (&self.start_token, &self.framed_start_token)
+            };
+            if let Some(index) = self.buffer.text.find(marker) {
+                let before = &framed_marker[..framed_marker.len() - marker.len()];
+                let body_len = if self.buffer.text[..index].ends_with(before) {
+                    index - before.len()
+                } else {
+                    index
+                };
+                let boundary_len = index + marker.len() - body_len;
+                let body = self.buffer.drain_prefix(body_len);
+                self.push_body(&mut delta, body);
+                let _ = self.buffer.drain_prefix(boundary_len);
+                self.current_in_reasoning = !self.current_in_reasoning;
+                self.pending_after = if self.current_in_reasoning {
+                    self.after_start
+                } else {
+                    self.after_end
+                };
+                continue;
             }
-        }
 
+            let keep_len = if finishing {
+                0
+            } else {
+                partial_prefix_len(&self.buffer.text, marker)
+                    .max(partial_prefix_len(&self.buffer.text, framed_marker))
+            };
+            let body = self.buffer.drain_prefix(self.buffer.text.len() - keep_len);
+            self.push_body(&mut delta, body);
+            break;
+        }
         delta
     }
 
-    /// Return the longest trailing suffix that could still complete a
-    /// delimiter.
-    fn partial_suffix_len(&self, text: &str) -> usize {
-        let mut best = 0;
-        for idx in text.char_indices().map(|(idx, _)| idx).skip(1) {
-            let suffix = &text[idx..];
-            if self.start_token.starts_with(suffix) && self.start_token != suffix {
-                best = best.max(text.len() - idx);
-            }
-            if self.end_token.starts_with(suffix) && self.end_token != suffix {
-                best = best.max(text.len() - idx);
-            }
+    fn push_body(&self, delta: &mut ReasoningDelta, body: DecodedText) {
+        if self.current_in_reasoning {
+            delta.push_reasoning(body);
+        } else {
+            delta.push_content(body);
         }
-
-        if self.start_token.starts_with(text) && self.start_token != text {
-            best = best.max(text.len());
-        }
-        if self.end_token.starts_with(text) && self.end_token != text {
-            best = best.max(text.len());
-        }
-
-        best
     }
 }
 
@@ -164,12 +229,22 @@ pub(crate) fn last_reasoning_boundary(
     end_token_id: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Option<bool> {
-    for token_id in prompt_token_ids.iter().rev().copied() {
+    last_reasoning_boundary_position(prompt_token_ids, start_token_id, end_token_id, tokenizer)
+        .map(|(_, in_reasoning)| in_reasoning)
+}
+
+fn last_reasoning_boundary_position(
+    prompt_token_ids: &[u32],
+    start_token_id: u32,
+    end_token_id: u32,
+    tokenizer: &dyn Tokenizer,
+) -> Option<(usize, bool)> {
+    for (index, &token_id) in prompt_token_ids.iter().enumerate().rev() {
         if token_id == start_token_id {
-            return Some(true);
+            return Some((index, true));
         }
         if token_id == end_token_id {
-            return Some(false);
+            return Some((index, false));
         }
         if tokenizer.is_special_id(token_id) {
             return None;
