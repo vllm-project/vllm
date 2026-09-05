@@ -2548,6 +2548,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
                 prefill_backend=self._prefill_backend,
+                query_lens_cpu=prefill_query_lens_cpu,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
