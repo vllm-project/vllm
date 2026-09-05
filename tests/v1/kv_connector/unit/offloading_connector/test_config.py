@@ -336,6 +336,16 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
+def test_parallel_config_preserves_local_world_size():
+    config = _make_vllm_config(tensor_parallel_size=8)
+    config.parallel_config.nnodes = 2
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.world_size == 8
+    assert offloading_config.parallel.local_world_size == 4
+
+
 def test_zero_blocks_skips_tensor_layout_validation():
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
