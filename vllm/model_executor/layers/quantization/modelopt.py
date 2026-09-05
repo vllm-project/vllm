@@ -1887,7 +1887,9 @@ class KNvfp4Static(QuantKeyScheme):
             PerTensorScaleParameter,
             wl,
         )
-        # Per-block (group_size) weight scale.
+        # Per-block (group_size) weight scale. Initialized to NaN (rather than
+        # left as torch.empty garbage) so an unloaded scale is unambiguously
+        # detectable in process() below, matching the sentinel pattern in #45320.
         self.register_params(
             layer,
             "weight_scale",
@@ -1900,11 +1902,26 @@ class KNvfp4Static(QuantKeyScheme):
             wl,
             input_dim=1,
             output_dim=0,
+            init=float("nan"),
         )
 
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
+        # Sanity-check: weight_scale must have been overwritten by the weight
+        # loader. A value still equal to the NaN sentinel it was created with
+        # means the FP4 weights were never actually loaded (e.g. the
+        # checkpoint stores this layer as BF16 and the weight loader silently
+        # skipped it).
+        if torch.isnan(layer.weight_scale).any():
+            raise RuntimeError(
+                f"NVFP4 weight_scale for layer "
+                f"{getattr(layer, 'name', repr(layer))!r} was never loaded "
+                "(still NaN). The checkpoint likely stores this layer as "
+                "BF16 (not FP4). Fix: pass quant_config=None when "
+                "constructing this layer, or add it to the quantization "
+                "ignore list."
+            )
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
                 "In NVFP4 linear, the global weight scale differs across "
