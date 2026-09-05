@@ -431,10 +431,21 @@ class INCARKLinearMethod(INCXPULinearBase):
                 # ARK consumes GPTQ-style packed nibbles; convert AWQ losslessly.
                 qweight_src = self._convert_awq_qweight_to_gptq(qweight_src)
             ark_linear.qweight.copy_(qweight_src)
-            if hasattr(layer, "qzeros") and layer.qzeros is not None:
+
+            # Safely handle qzeros to prevent empty/mismatched tensor copy crashes on symmetric layers
+            if (
+                hasattr(layer, "qzeros")
+                and layer.qzeros is not None
+                and layer.qzeros.numel() > 0
+                and hasattr(ark_linear, "qzeros")
+                and ark_linear.qzeros is not None
+                and ark_linear.qzeros.numel() > 0
+                and layer.qzeros.shape == ark_linear.qzeros.shape
+            ):
                 ark_linear.qzeros.copy_(layer.qzeros.detach())
             else:
                 ark_linear.qzeros = None
+
             ark_linear.scales.copy_(layer.scales.detach())
             if hasattr(layer, "bias") and layer.bias is not None:
                 ark_linear.bias.copy_(layer.bias.detach())
