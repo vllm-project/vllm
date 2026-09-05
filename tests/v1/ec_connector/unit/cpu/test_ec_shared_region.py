@@ -5,6 +5,7 @@
 import contextlib
 import ctypes
 import errno
+import glob
 import mmap
 import os
 import uuid
@@ -15,7 +16,6 @@ import torch
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
-    _wait_for_file_size,
 )
 
 
@@ -119,31 +119,6 @@ def test_only_creator_unlinks_file_on_cleanup():
     # Creator goes away — file is removed.
     r1.cleanup()
     assert not os.path.exists(path), "creator cleanup must unlink the file"
-
-
-# ── _wait_for_file_size ──────────────────────────────────────────────────────
-
-
-def test_wait_for_file_size_returns_when_already_big_enough(tmp_path):
-    """The fast path: file already at expected size — return immediately."""
-    p = tmp_path / "f.bin"
-    p.write_bytes(b"\x00" * 128)
-    fd = os.open(str(p), os.O_RDONLY)
-    try:
-        _wait_for_file_size(fd, expected_size=128, timeout=1.0)  # must not raise
-    finally:
-        os.close(fd)
-
-
-def test_wait_for_file_size_times_out_when_file_stays_empty(tmp_path):
-    p = tmp_path / "f.bin"
-    p.write_bytes(b"")
-    fd = os.open(str(p), os.O_RDONLY)
-    try:
-        with pytest.raises(TimeoutError):
-            _wait_for_file_size(fd, expected_size=4096, timeout=0.05)
-    finally:
-        os.close(fd)
 
 
 # ── MADV_POPULATE_WRITE pre-faulting / fallback ──────────────────────────────
@@ -366,3 +341,64 @@ def test_pin_memory_noop_without_cuda(region):
 def test_cleanup_is_idempotent(region):
     region.cleanup()
     region.cleanup()  # fixture calls a third time — must not raise
+
+
+def _write_orphan(path: str, size: int) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.ftruncate(fd, size)
+    os.close(fd)
+
+
+def test_orphaned_ec_file_reclaimed_on_next_start():
+    orphan = f"/dev/shm/vllm_ec_orphan-{uuid.uuid4()}.mmap"
+    _write_orphan(orphan, 4096)
+    try:
+        r = _make_region()
+        try:
+            assert not os.path.exists(orphan)
+        finally:
+            r.cleanup()
+    finally:
+        if os.path.exists(orphan):
+            os.unlink(orphan)
+
+
+def test_live_ec_region_survives_another_start():
+    live = _make_region()
+    try:
+        other = _make_region()
+        try:
+            assert os.path.exists(live._mmap_path)
+        finally:
+            other.cleanup()
+    finally:
+        live.cleanup()
+
+
+def test_stale_ec_file_with_same_engine_id_does_not_wedge_restart():
+    engine_id = str(uuid.uuid4())
+    path = f"/dev/shm/vllm_ec_{engine_id}.mmap"
+    _write_orphan(path, 8 * 64)
+    try:
+        r = ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
+        try:
+            assert r._is_creator is True
+        finally:
+            r.cleanup()
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def test_constructor_failure_releases_the_region(monkeypatch):
+    """The fd holds the flock that marks a region live, so a constructor that
+    fails after creating the file must release it — otherwise the file is
+    unreclaimable for the life of the process."""
+    engine_id = str(uuid.uuid4())
+    path = f"/dev/shm/vllm_ec_{engine_id}.mmap"
+    monkeypatch.setattr(
+        "torch.frombuffer", MagicMock(side_effect=RuntimeError("frombuffer"))
+    )
+    with pytest.raises(RuntimeError, match="frombuffer"):
+        ECSharedRegion(engine_id=engine_id, num_blocks=8, block_size_bytes=64)
+    assert not glob.glob(f"{path}*")

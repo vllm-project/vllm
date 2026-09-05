@@ -9,13 +9,13 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from vllm.distributed.device_communicators.shm_broadcast import (
-    check_shm_free_space,
-)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.shm_utils import open_region_file, reap_orphaned_region_files
 
 logger = init_logger(__name__)
+
+_REGION_GLOB = "/dev/shm/vllm_offload_*.mmap*"
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
@@ -66,10 +66,9 @@ def _get_populate_write_fn(
 class SharedOffloadRegion:
     """
     Single mmap-backed memory region shared across all workers for a
-    vLLM instance.  Workers coordinate via the filesystem: the first worker
-    to open the file with O_EXCL becomes the creator and calls ftruncate;
-    the rest open the existing file and wait until it reaches the expected
-    size.  Each worker then mmap()s the full file.
+    vLLM instance.  Workers coordinate via the filesystem: exactly one wins
+    creation and publishes a fully sized file, and the rest join it.  Each
+    worker then mmap()s the full file.
 
     File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
     given, the path is unlinked once every worker has mapped the file, so
@@ -103,50 +102,29 @@ class SharedOffloadRegion:
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        reap_orphaned_region_files(_REGION_GLOB)
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
         try:
-            try:
-                self.fd: int | None = os.open(
-                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-                )
-            except FileExistsError:
-                # Joiner path — another worker won O_EXCL. Reopen and wait
-                # for the file to reach expected size.
-                self.fd = os.open(self.mmap_path, os.O_RDWR)
-                try:
-                    _wait_for_file_size(self.fd, self.total_size_bytes)
-                except (TimeoutError, OSError):
-                    os.close(self.fd)
-                    raise
-                logger.info("Opened existing mmap file %s", self.mmap_path)
-            else:
-                # Creator path. We won O_EXCL, so we own the file: any
-                # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
-                try:
-                    check_shm_free_space(self.total_size_bytes)
-                    os.ftruncate(self.fd, self.total_size_bytes)
-                except (RuntimeError, OSError):
-                    os.unlink(self.mmap_path)
-                    os.close(self.fd)
-                    raise
-                self._creator = True
-                logger.info(
-                    "Created mmap file %s (%.2f GB)",
-                    self.mmap_path,
-                    self.total_size_bytes / 1e9,
-                )
-
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+            self.fd, self._creator = open_region_file(
+                self.mmap_path, self.total_size_bytes
+            )
+            self.mmap_obj = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
         except Exception:
+            # Drop the region before releasing peers: the fd holds the shared
+            # flock that marks it live, so leaving it open would make the file
+            # unreclaimable for the life of this process.
             if self._creator:
                 os.unlink(self.mmap_path)
                 self._creator = False
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -332,12 +310,9 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close mmap_obj", exc_info=True)
             self.mmap_obj = None
-        if self.fd is not None:
-            try:
-                os.close(self.fd)
-            except Exception:
-                logger.warning("Failed to close fd %s", self.fd, exc_info=True)
-            self.fd = None
+        # Unlink before closing the fd: the fd holds the shared flock, so
+        # dropping it first would leave the file briefly unlocked and a
+        # concurrently starting engine could reclaim it as an orphan.
         if self._creator and getattr(self, "mmap_path", None):
             try:
                 os.unlink(self.mmap_path)
@@ -347,3 +322,9 @@ class SharedOffloadRegion:
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
             self._creator = False
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except Exception:
+                logger.warning("Failed to close fd %s", self.fd, exc_info=True)
+            self.fd = None

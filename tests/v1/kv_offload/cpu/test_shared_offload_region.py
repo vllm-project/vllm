@@ -5,6 +5,7 @@
 import contextlib
 import ctypes
 import errno
+import glob
 import mmap
 import os
 import threading
@@ -14,11 +15,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.utils.shm_utils import open_region_file
 from vllm.utils.system_utils import get_mp_context
-from vllm.v1.kv_offload.cpu.shared_offload_region import (
-    SharedOffloadRegion,
-    _wait_for_file_size,
-)
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 PAGE_SIZE = mmap.PAGESIZE
 
@@ -766,47 +765,49 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
 
 
 # ---------------------------------------------------------------------------
-# _wait_for_file_size
+# Region file publication
 # ---------------------------------------------------------------------------
 
 
-def test_wait_for_file_size_already_large_enough(tmp_path):
-    """_wait_for_file_size must return immediately when file is already big enough."""
-    fd = os.open(str(tmp_path / "ready.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        os.ftruncate(fd, PAGE_SIZE)
-        start = time.monotonic()
-        _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)
-        assert time.monotonic() - start < 0.5
-    finally:
-        os.close(fd)
+def test_published_file_is_fully_sized(iid):
+    """A joiner never observes a partial region: the name appears only once
+    the creator has sized the file."""
+    with _region(iid, num_blocks=4) as r:
+        assert os.stat(r.mmap_path).st_size == r.total_size_bytes
 
 
-def test_wait_for_file_size_waits_for_grow(tmp_path):
-    """_wait_for_file_size must return once a background thread grows the file."""
-    fd = os.open(str(tmp_path / "grow.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-
-        def grow():
-            time.sleep(0.05)
-            os.ftruncate(fd, PAGE_SIZE)
-
-        t = threading.Thread(target=grow)
-        t.start()
-        _wait_for_file_size(fd, PAGE_SIZE, timeout=5.0)  # must not raise
-        t.join()
-    finally:
-        os.close(fd)
+def test_joining_a_differently_sized_region_fails_fast(iid):
+    """A region sized by another configuration must raise an explanatory
+    error rather than block until a timeout, and must not keep the fd: it
+    carries the flock, so a leak here leaves the region unreclaimable."""
+    with _region(iid, num_blocks=4) as r:
+        inode = os.fstat(r.fd).st_ino
+        held = len(_fds_for_inode(inode))
+        with pytest.raises(RuntimeError, match="different offloading configuration"):
+            open_region_file(r.mmap_path, r.total_size_bytes + PAGE_SIZE)
+        assert len(_fds_for_inode(inode)) == held
 
 
-def test_wait_for_file_size_timeout(tmp_path):
-    """_wait_for_file_size must raise TimeoutError when the file never grows."""
-    fd = os.open(str(tmp_path / "stuck.mmap"), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        with pytest.raises(TimeoutError):
-            _wait_for_file_size(fd, PAGE_SIZE, timeout=0.1)
-    finally:
-        os.close(fd)
+def test_open_region_file_gives_up_after_repeated_races(iid, monkeypatch):
+    """Nothing else bounds startup once a creator keeps losing the publish
+    race, so the retry loop must give up with a clear error."""
+    import vllm.utils.shm_utils as shm_utils
+
+    monkeypatch.setattr(shm_utils, "_create_region_file", lambda path, size: None)
+    with pytest.raises(TimeoutError, match="losing creation races"):
+        open_region_file(f"/dev/shm/vllm_offload_{iid}.mmap", PAGE_SIZE, timeout=0.05)
+
+
+def test_creator_failure_leaves_no_temp_file(iid, monkeypatch):
+    """A creator that fails mid-build must remove its unpublished temp file:
+    nothing would ever publish it, and it is not reachable by name."""
+    monkeypatch.setattr(
+        os, "ftruncate", MagicMock(side_effect=OSError("ftruncate failed"))
+    )
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    with pytest.raises(OSError, match="ftruncate failed"):
+        open_region_file(path, PAGE_SIZE)
+    assert glob.glob(f"{path}*") == []
 
 
 # ---------------------------------------------------------------------------
@@ -816,66 +817,19 @@ def test_wait_for_file_size_timeout(tmp_path):
 
 def test_insufficient_space_raises_clear_error(monkeypatch):
     """A failed creator capacity check must clean up and give a clear error."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
+    import vllm.distributed.device_communicators.shm_broadcast as shm_broadcast
 
-    engine_id = str(uuid.uuid4())
-    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-    mock_open = MagicMock(return_value=9999)
-    mock_unlink = MagicMock()
-    mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", mock_open)
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
     monkeypatch.setattr(
-        region,
+        shm_broadcast,
         "check_shm_free_space",
-        lambda *a, **kw: (_ for _ in ()).throw(
-            RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
+        MagicMock(
+            side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
         ),
     )
-
+    path = f"/dev/shm/vllm_offload_{uuid.uuid4()}.mmap"
     with pytest.raises(RuntimeError, match="Insufficient space"):
-        SharedOffloadRegion(
-            engine_id=engine_id,
-            num_blocks=4,
-            rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
-
-
-def test_ftruncate_failure_cleans_up_creator(monkeypatch):
-    """A failed creator ftruncate must close and unlink before re-raising."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
-    engine_id = str(uuid.uuid4())
-    mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-    mock_unlink = MagicMock()
-    mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
-    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
-    monkeypatch.setattr(
-        region.os,
-        "ftruncate",
-        MagicMock(side_effect=OSError("ftruncate failed")),
-    )
-
-    with pytest.raises(OSError, match="ftruncate failed"):
-        SharedOffloadRegion(
-            engine_id=engine_id,
-            num_blocks=4,
-            rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-
-    mock_unlink.assert_called_once_with(mmap_path)
-    mock_close.assert_called_once_with(9999)
+        open_region_file(path, PAGE_SIZE)
+    assert not os.path.exists(path)
 
 
 # ---------------------------------------------------------------------------
@@ -907,7 +861,7 @@ def test_backing_file_unlinked_after_barrier(iid):
 
 def test_barrier_failure_unlinks_creator_and_raises(iid):
     """A failed rendezvous must remove the creator's file and re-raise, not
-    leave a stub that wedges the next start in _wait_for_file_size."""
+    leave a region behind for the next start to join."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
         _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
@@ -955,7 +909,7 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
 
     monkeypatch.setattr(
         region,
-        "check_shm_free_space",
+        "open_region_file",
         MagicMock(side_effect=RuntimeError("Insufficient space")),
     )
     barrier = MagicMock()
@@ -987,7 +941,7 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
 
     monkeypatch.setattr(
         region,
-        "check_shm_free_space",
+        "open_region_file",
         MagicMock(side_effect=RuntimeError("Insufficient space")),
     )
 
@@ -995,3 +949,72 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch):
         _make_region(iid, barrier=MagicMock(side_effect=TimeoutError("barrier")))
 
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+def _write_orphan(path: str, size: int) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.ftruncate(fd, size)
+    os.close(fd)
+
+
+def test_orphaned_file_reclaimed_on_next_start(iid):
+    orphan = f"/dev/shm/vllm_offload_orphan-{iid}.mmap"
+    _write_orphan(orphan, PAGE_SIZE)
+    try:
+        with _region(iid):
+            assert not os.path.exists(orphan)
+    finally:
+        _cleanup_file(orphan)
+
+
+def test_live_region_survives_another_start(iid):
+    live_id = f"{iid}-live"
+    live_path = f"/dev/shm/vllm_offload_{live_id}.mmap"
+    with _region(live_id), _region(f"{iid}-new"):
+        assert os.path.exists(live_path)
+
+
+def test_zero_length_orphan_is_reclaimed(iid):
+    """A creator killed before it sized its region leaves a 0-byte file.
+    Publishing atomically means such a file can never be a live creator, so
+    the sweep must reclaim it instead of letting it wedge the next start."""
+    stub = f"/dev/shm/vllm_offload_stub-{iid}.mmap"
+    fd = os.open(stub, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    os.close(fd)
+    try:
+        with _region(iid):
+            assert not os.path.exists(stub)
+    finally:
+        _cleanup_file(stub)
+
+
+def _fds_for_inode(inode: int) -> list[str]:
+    """Descriptors this process holds on a given inode."""
+    hits = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            if os.stat(f"/proc/self/fd/{name}").st_ino == inode:
+                hits.append(name)
+        except OSError:
+            continue
+    return hits
+
+
+def test_failed_join_releases_the_region_lock(iid, monkeypatch):
+    """A constructor that fails after opening the file must close its fd: the
+    fd carries the shared flock, so leaking it would keep the region marked
+    live — and therefore unreclaimable — for the life of the process."""
+    with _region(iid) as creator:
+        inode = os.fstat(creator.fd).st_ino
+        held = len(_fds_for_inode(inode))
+        monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
+        with pytest.raises(OSError, match="mmap"):
+            _make_region(iid)
+        assert len(_fds_for_inode(inode)) == held
+
+
+def test_stale_file_with_same_engine_id_does_not_wedge_restart(iid):
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    _write_orphan(path, 4 * PAGE_SIZE)
+    with _region(iid) as region:
+        assert region._creator is True

@@ -10,15 +10,17 @@ for EC: flat shared layout, no multi-tensor cursor, no block_size_factor.
 import errno
 import mmap
 import os
-import time
 from collections.abc import Callable
 
 import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils.shm_utils import open_region_file, reap_orphaned_region_files
 
 logger = init_logger(__name__)
+
+_REGION_GLOB = "/dev/shm/vllm_ec_*.mmap*"
 
 # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
@@ -53,19 +55,6 @@ def _get_populate_write_fn(
     return _madvise_populate_write
 
 
-def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0):
-    """Spin-wait until the file reaches expected_size (creator truncated it)."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.fstat(fd).st_size >= expected_size:
-            return
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Timed out waiting for EC mmap file to reach {expected_size} bytes"
-            )
-        time.sleep(0.005)
-
-
 class ECSharedRegion:
     """Flat mmap-backed memory region shared across TP workers for
     encoder cache blocks.
@@ -97,44 +86,33 @@ class ECSharedRegion:
         # True after successful cudaHostRegister (cleanup must unregister).
         self._is_pinned = False
 
-        # File descriptor for the shared memory backing file.
+        reap_orphaned_region_files(_REGION_GLOB)
+        self._fd: int | None = None
+        self._mmap_obj: mmap.mmap | None = None
         try:
-            self._fd: int | None = os.open(
-                self._mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+            self._fd, self._is_creator = open_region_file(
+                self._mmap_path, total_size_bytes
             )
-            os.ftruncate(self._fd, total_size_bytes)
-            self._is_creator = True
-            logger.info(
-                "Created EC mmap file %s (%.2f MiB)",
-                self._mmap_path,
-                total_size_bytes / (1 << 20),
+            # MAP_SHARED mmap over _fd; all processes see the same pages.
+            self._mmap_obj = mmap.mmap(
+                self._fd,
+                total_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
-        except FileExistsError:
-            self._fd = os.open(self._mmap_path, os.O_RDWR)
-            try:
-                _wait_for_file_size(self._fd, total_size_bytes)
-            except Exception:
-                os.close(self._fd)
-                self._fd = None
-                raise
-            logger.info("Opened existing EC mmap file %s", self._mmap_path)
-
-        # MAP_SHARED mmap over _fd; all processes see the same pages.
-        self._mmap_obj: mmap.mmap | None = mmap.mmap(
-            self._fd,
-            total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
-
-        if self._is_creator:
-            populate_write_fn = _get_populate_write_fn(self._mmap_obj)
-            populate_write_fn(self._mmap_obj, 0, total_size_bytes)
-
-        # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
-        self.blocks: torch.Tensor = torch.frombuffer(
-            memoryview(self._mmap_obj), dtype=torch.int8
-        ).view(num_blocks, block_size_bytes)
+            if self._is_creator:
+                populate_write_fn = _get_populate_write_fn(self._mmap_obj)
+                populate_write_fn(self._mmap_obj, 0, total_size_bytes)
+            # (num_blocks, block_size_bytes) int8 tensor over the mmap buffer.
+            self.blocks: torch.Tensor = torch.frombuffer(
+                memoryview(self._mmap_obj), dtype=torch.int8
+            ).view(num_blocks, block_size_bytes)
+        except Exception:
+            # The fd holds the shared flock that marks the region live, so
+            # leaving it open would make the file unreclaimable for the life
+            # of this process.
+            self.cleanup()
+            raise
         # Cached for cudaHostRegister/Unregister and pointer math.
         self._blocks_ptr: int = self.blocks.data_ptr()
         self._blocks_nbytes: int = self.blocks.nbytes
