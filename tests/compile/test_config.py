@@ -1095,23 +1095,17 @@ def test_sequence_parallelism_requires_full_graph_compilation(
     ) == expected_enable_sp
 
 
-def test_cached_compilation_config(default_vllm_config):
+def test_custom_op_dispatch_follows_current_compilation_config(default_vllm_config):
     import torch
     from torch._inductor.utils import run_and_get_code
 
-    from vllm.config import get_cached_compilation_config, set_current_vllm_config
+    from vllm.config import set_current_vllm_config
     from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
     device = torch.device(f"{DEVICE_TYPE}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
-
-    # access and cache default compilation config
-    # default compilation config does not contain +quant_fp8 custom op. If this is
-    # used, the generated code would use inductor-generated triton kernel instead
-    # of the custom op `torch.ops._C.static_scaled_fp8_quant`.
-    get_cached_compilation_config()
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
@@ -1120,8 +1114,8 @@ def test_cached_compilation_config(default_vllm_config):
         )
     )
 
-    # set_current_vllm_config should clear cached compilation config and
-    # use the new compilation_config in vllm_config
+    # A CustomOp built inside the context must pick up custom_ops=["+quant_fp8"]
+    # and dispatch to the custom op rather than an inductor-generated kernel.
     with set_current_vllm_config(vllm_config):
         query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         query_quant = torch.compile(query_quant)

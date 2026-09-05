@@ -2997,11 +2997,6 @@ def set_current_vllm_config(
 
     num_models_seen = compilation_counter.num_models_seen
     try:
-        # Clear the compilation config cache when context changes.
-        # This is needed since the old config may have been accessed
-        # and cached before the new config is set.
-        get_cached_compilation_config.cache_clear()
-
         _current_vllm_config = vllm_config
         _current_prefix = prefix
         yield
@@ -3030,14 +3025,6 @@ def set_current_vllm_config(
     finally:
         _current_vllm_config = old_vllm_config
         _current_prefix = old_prefix
-        # Clear the compilation config cache when context changes
-        get_cached_compilation_config.cache_clear()
-
-
-@lru_cache(maxsize=1)
-def get_cached_compilation_config():
-    """Cache config to avoid repeated calls to get_current_vllm_config()"""
-    return get_current_vllm_config().compilation_config
 
 
 def get_current_vllm_config() -> VllmConfig:
