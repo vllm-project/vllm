@@ -174,11 +174,11 @@ class VocabParallelEmbeddingShardIndices:
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def get_masked_input_and_mask(
     input_: torch.Tensor,
-    org_vocab_start_index: int,
-    org_vocab_end_index: int,
-    num_org_vocab_padding: int,
-    added_vocab_start_index: int,
-    added_vocab_end_index: int,
+    org_vocab_start_index: int | torch.Tensor,
+    org_vocab_end_index: int | torch.Tensor,
+    num_org_vocab_padding: int | torch.Tensor,
+    added_vocab_start_index: int | torch.Tensor,
+    added_vocab_end_index: int | torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # torch.compile will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
@@ -347,6 +347,42 @@ class VocabParallelEmbedding(PluggableLayer):
             self.num_embeddings_padded,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
+        )
+        self.register_buffer(
+            "org_vocab_start_index",
+            torch.tensor(
+                self.shard_indices.org_vocab_start_index, dtype=torch.int64
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "org_vocab_end_index",
+            torch.tensor(
+                self.shard_indices.org_vocab_end_index, dtype=torch.int64
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "num_org_vocab_padding",
+            torch.tensor(
+                self.shard_indices.num_org_vocab_padding, dtype=torch.int64
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "added_vocab_start_index",
+            torch.tensor(
+                self.shard_indices.added_vocab_start_index,
+                dtype=torch.int64,
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "added_vocab_end_index",
+            torch.tensor(
+                self.shard_indices.added_vocab_end_index, dtype=torch.int64
+            ),
+            persistent=False,
         )
         self.update_param_tp_status()
 
@@ -522,11 +558,11 @@ class VocabParallelEmbedding(PluggableLayer):
         else:
             masked_input, input_mask = get_masked_input_and_mask(
                 input_,
-                self.shard_indices.org_vocab_start_index,
-                self.shard_indices.org_vocab_end_index,
-                self.shard_indices.num_org_vocab_padding,
-                self.shard_indices.added_vocab_start_index,
-                self.shard_indices.added_vocab_end_index,
+                self.org_vocab_start_index,
+                self.org_vocab_end_index,
+                self.num_org_vocab_padding,
+                self.added_vocab_start_index,
+                self.added_vocab_end_index,
             )
             output_parallel = self.quant_method.embedding(self, masked_input.long())
             if output_parallel.dtype in (
