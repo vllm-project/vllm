@@ -4,7 +4,10 @@ import logging
 import random
 import time
 import uuid
-from unittest.mock import MagicMock
+from datetime import timedelta
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -47,6 +50,270 @@ def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
         ops.swap_blocks_batch
     )
+
+
+def test_unpinned_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: False)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(
+        refs, gpu_to_cpu=False, host_memory_is_pinned=False
+    ) is ops.swap_blocks_batch
+
+
+def _pin_mmap_coordination(group: Any) -> gpu_worker._ModelParallelCoordination:
+    singleton = SimpleNamespace(
+        rank_in_group=0,
+        world_size=1,
+        cpu_group=None,
+        barrier=lambda: None,
+    )
+    return gpu_worker._ModelParallelCoordination((group, singleton, singleton))
+
+
+def _pin_mmap_region_worker(
+    rank: int, init_method: str, result_queue: Any, failure_mode: str
+) -> None:
+    torch.distributed.init_process_group(
+        backend="gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        group = SimpleNamespace(
+            rank_in_group=rank,
+            world_size=2,
+            cpu_group=torch.distributed.group.WORLD,
+            barrier=lambda: torch.distributed.barrier(),
+        )
+        region = MagicMock()
+        # Replicated layouts use mmap rank zero in every process, so the
+        # registration turn must be selected with rank_in_group instead.
+        region.rank = 0
+        region._base.data_ptr.return_value = 4096 + rank
+        region.total_size_bytes = 8192
+        region.is_pinned = False
+
+        cudart = MagicMock()
+        cudart.cudaHostRegister.return_value = SimpleNamespace(
+            value=int(failure_mode == "return" and rank == 1)
+        )
+        cudart.cudaHostUnregister.return_value = SimpleNamespace(value=0)
+        if failure_mode == "setup" and rank == 1:
+            region._base.data_ptr.side_effect = RuntimeError("setup failed")
+        if failure_mode == "register" and rank == 1:
+            cudart.cudaHostRegister.side_effect = RuntimeError("register failed")
+
+        with (
+            patch.object(
+                gpu_worker.current_platform, "is_cuda_alike", return_value=True
+            ),
+            patch.object(torch.cuda, "cudart", return_value=cudart),
+        ):
+            raised = False
+            try:
+                gpu_worker.pin_mmap_region(region, _pin_mmap_coordination(group))
+            except RuntimeError:
+                raised = True
+
+        result_queue.put(
+            (
+                rank,
+                region.is_pinned,
+                cudart.cudaHostRegister.call_count,
+                cudart.cudaHostUnregister.call_count,
+                raised,
+            )
+        )
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    ("failure_mode", "expected"),
+    [
+        (
+            "success",
+            [
+                (0, True, 1, 0, False),
+                (1, True, 1, 0, False),
+            ],
+        ),
+        (
+            "return",
+            [
+                (0, False, 1, 1, False),
+                (1, False, 1, 0, False),
+            ],
+        ),
+        (
+            "setup",
+            [
+                (0, False, 1, 1, True),
+                (1, False, 0, 0, True),
+            ],
+        ),
+        (
+            "register",
+            [
+                (0, False, 1, 1, True),
+                (1, False, 1, 0, True),
+            ],
+        ),
+    ],
+)
+def test_pin_mmap_region_coordinates_failures(
+    tmp_path,
+    failure_mode: str,
+    expected: list[tuple[int, bool, int, int, bool]],
+) -> None:
+    context = torch.multiprocessing.get_context("spawn")
+    result_queue = context.SimpleQueue()
+
+    torch.multiprocessing.spawn(
+        _pin_mmap_region_worker,
+        args=(
+            f"file://{tmp_path / f'pin-mmap-{failure_mode}'}",
+            result_queue,
+            failure_mode,
+        ),
+        nprocs=2,
+        join=True,
+    )
+
+    results = sorted(result_queue.get() for _ in range(2))
+    assert results == expected
+
+
+def test_model_parallel_coordination_excludes_dp(monkeypatch) -> None:
+    events: list[str] = []
+
+    def group(name: str, rank: int, size: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            rank_in_group=rank,
+            world_size=size,
+            cpu_group=name,
+            barrier=lambda: events.append(name),
+        )
+
+    tp = group("tp", 1, 2)
+    pcp = group("pcp", 1, 2)
+    pp = group("pp", 1, 2)
+    monkeypatch.setattr(gpu_worker, "get_tp_group", lambda: tp)
+    monkeypatch.setattr(gpu_worker, "get_pcp_group", lambda: pcp)
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: pp)
+
+    coordination = gpu_worker._model_parallel_coordination()
+    coordination.barrier()
+
+    assert coordination.groups == (tp, pcp, pp)
+    assert coordination.rank == 7
+    assert coordination.world_size == 8
+    assert events == ["tp", "pcp", "pp"]
+
+
+def test_pin_mmap_region_uses_group_rank_for_registration_turn(monkeypatch) -> None:
+    events: list[str] = []
+    group = SimpleNamespace(
+        rank_in_group=1,
+        world_size=2,
+        cpu_group=MagicMock(),
+        barrier=lambda: events.append("barrier"),
+    )
+    region = MagicMock()
+    region.rank = 0
+    region._base.data_ptr.return_value = 4096
+    region.total_size_bytes = 8192
+    region.is_pinned = False
+    cudart = MagicMock()
+
+    def register(*_args: Any) -> SimpleNamespace:
+        events.append("register")
+        return SimpleNamespace(value=0)
+
+    cudart.cudaHostRegister.side_effect = register
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(gpu_worker, "_group_max", lambda *_args: 0)
+
+    gpu_worker.pin_mmap_region(region, _pin_mmap_coordination(group))
+
+    assert events == ["barrier", "barrier", "register", "barrier"]
+    assert region.is_pinned
+    cudart.cudaHostUnregister.assert_not_called()
+
+
+def test_pin_mmap_region_fails_after_rollback_error(monkeypatch) -> None:
+    group = SimpleNamespace(
+        rank_in_group=0,
+        world_size=2,
+        cpu_group=MagicMock(),
+        barrier=MagicMock(),
+    )
+    region = MagicMock()
+    region.rank = 0
+    region._base.data_ptr.return_value = 4096
+    region.total_size_bytes = 8192
+    region.is_pinned = False
+    cudart = MagicMock()
+    cudart.cudaHostRegister.return_value = SimpleNamespace(value=0)
+    cudart.cudaHostUnregister.return_value = SimpleNamespace(value=1)
+
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    monkeypatch.setattr(gpu_worker, "_group_max", MagicMock(side_effect=[1, 1]))
+
+    with pytest.raises(RuntimeError, match="could not roll back"):
+        gpu_worker.pin_mmap_region(region, _pin_mmap_coordination(group))
+
+    # Leave ownership marked so constructor cleanup can retry the failed
+    # unregister before releasing the mmap.
+    assert region.is_pinned
+    cudart.cudaHostUnregister.assert_called_once_with(4096)
+
+
+def test_worker_uses_model_parallel_coordination(monkeypatch) -> None:
+    coordination = MagicMock()
+    region = MagicMock()
+    region.is_pinned = False
+    region.create_next_worker_view.return_value = torch.zeros((1, 8), dtype=torch.int8)
+    pin_region = MagicMock()
+    handler = MagicMock()
+
+    monkeypatch.setattr(gpu_worker, "PIN_MEMORY", True)
+    monkeypatch.setattr(
+        gpu_worker, "model_parallel_is_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        gpu_worker, "_model_parallel_coordination", lambda: coordination
+    )
+    monkeypatch.setattr(gpu_worker, "pin_mmap_region", pin_region)
+    monkeypatch.setattr(gpu_worker, "SingleDirectionOffloadingHandler", handler)
+
+    CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=torch.zeros((1, 8), dtype=torch.int8),
+                    page_size_bytes=8,
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=8)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_blocks=1,
+        mmap_region=region,
+    )
+
+    pin_region.assert_called_once_with(region, coordination)
+    assert handler.call_count == 2
+    assert not handler.call_args_list[1].kwargs["host_memory_is_pinned"]
 
 
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
