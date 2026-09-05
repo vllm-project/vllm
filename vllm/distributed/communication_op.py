@@ -6,11 +6,21 @@ from typing import Any
 import torch
 import torch.distributed
 
+import vllm.envs as envs
+
 from .parallel_state import get_tp_group
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
+    if (
+        envs.VLLM_FORCE_FP32_ALL_REDUCE
+        and input_.is_floating_point()
+        and input_.dtype in (torch.bfloat16, torch.float16)
+    ):
+        orig_dtype = input_.dtype
+        out = get_tp_group().all_reduce(input_.float())
+        return out.to(orig_dtype)
     return get_tp_group().all_reduce(input_)
 
 
@@ -25,6 +35,14 @@ def tensor_model_parallel_reduce_scatter(
     input_: torch.Tensor, dim: int = -1
 ) -> torch.Tensor:
     """Reduce-Scatter the input tensor across model parallel group."""
+    if (
+        envs.VLLM_FORCE_FP32_ALL_REDUCE
+        and input_.is_floating_point()
+        and input_.dtype in (torch.bfloat16, torch.float16)
+    ):
+        orig_dtype = input_.dtype
+        out = get_tp_group().reduce_scatter(input_.float(), dim)
+        return out.to(orig_dtype)
     return get_tp_group().reduce_scatter(input_, dim)
 
 
