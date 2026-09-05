@@ -14,6 +14,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import autotune as flashinfer_autotune
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
     allowed_backends: frozenset[str],
+    profile_seq_lens: int | None = None,
 ) -> bool:
     """Autotune FlashInfer's SM120 sparse-MLA decode path."""
     runner = worker.model_runner
@@ -119,6 +121,8 @@ def _run_flashinfer_sparse_mla_decode_autotune(
         force_attention=True,
         create_mixed_batch=True,
     )
+    if profile_seq_lens is not None:
+        dummy_run_kwargs["profile_seq_lens"] = profile_seq_lens
 
     if is_leader:
         logger.info(
@@ -127,10 +131,18 @@ def _run_flashinfer_sparse_mla_decode_autotune(
             cache_path,
         )
 
+    # V2 model runner does not yet support profile_seq_lens; fall through
+    # to the V1 dummy_run path when it is provided so that C128A widths
+    # beyond the default short-sequence warmup are still exercised.
+    use_v2 = (
+        _uses_v2_model_runner(runner)
+        and runner.max_num_reqs >= 2
+        and profile_seq_lens is None
+    )
     with torch.inference_mode():
         warmup_executed = True
         if is_leader:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
+            if use_v2:
                 v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
                     v2_runner,
@@ -144,7 +156,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 with flashinfer_autotune(True, cache=str(cache_path)):
                     runner._dummy_run(**dummy_run_kwargs)
         else:
-            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
+            if use_v2:
                 v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
                     v2_runner,
@@ -200,9 +212,13 @@ def _flashinfer_sparse_mla_decode_autotune(
 def _deepseek_v4_sparse_mla_decode_autotune(
     worker: "Worker",
     num_tokens: int,
+    profile_seq_lens: int | None = None,
 ) -> bool:
     return _run_flashinfer_sparse_mla_decode_autotune(
-        worker, num_tokens, _DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS
+        worker,
+        num_tokens,
+        _DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS,
+        profile_seq_lens=profile_seq_lens,
     )
 
 
@@ -219,8 +235,51 @@ def flashinfer_sparse_mla_decode_autotune_warmup(worker: "Worker") -> None:
     _flashinfer_sparse_mla_decode_autotune(worker, mixed_tokens)
 
 
+def _compute_c128a_reachable_widths(
+    max_model_len: int,
+    compress_ratio: int = 128,
+    alignment: int = 128,
+) -> list[tuple[int, int]]:
+    """Compute all runtime-reachable C128A extra_topk widths.
+
+    Returns a list of (extra_topk, representative_seq_len) pairs, sorted by
+    extra_topk ascending.  The representative seq_len is the smallest value
+    that triggers each width, suitable for use as profile_seq_lens in a
+    dummy run.
+    """
+    c128a_max = cdiv(cdiv(max_model_len, compress_ratio), alignment) * alignment
+
+    widths: list[tuple[int, int]] = []
+    seen: set[int] = set()
+    # Scan from short to long to find each width transition.
+    # We step by compress_ratio to hit every distinct // compress_ratio value.
+    prev_width = 0
+    for seq_len in range(1, max_model_len + 1, compress_ratio):
+        raw = max(seq_len // compress_ratio, 1)
+        pw = next_power_of_2(raw)
+        width = min(max(pw, alignment), c128a_max)
+        if width != prev_width and width not in seen:
+            widths.append((width, seq_len))
+            seen.add(width)
+            prev_width = width
+    # Also check the boundary at max_model_len itself.
+    raw = max(max_model_len // compress_ratio, 1)
+    pw = next_power_of_2(raw)
+    width = min(max(pw, alignment), c128a_max)
+    if width not in seen:
+        widths.append((width, max_model_len))
+    return widths
+
+
 def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
-    """Warm DSv4 sparse-MLA mixed prefill+decode attention."""
+    """Warm DSv4 sparse-MLA mixed prefill+decode attention.
+
+    Runs autotune warmup passes that cover every runtime-reachable C128A
+    extra_topk width.  The existing mixed-batch pass uses seq_lens=[1],
+    which only triggers extra_topk=128.  Additional passes with
+    profile_seq_lens set to representative values for each wider C128A
+    width ensure the autotune cache covers all production shapes.
+    """
     runner = worker.model_runner
     if runner.is_pooling_model or not _has_deepseek_v4_sparse_mla_backend(runner):
         return
@@ -235,6 +294,35 @@ def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
         mixed_tokens,
     )
     mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(worker, mixed_tokens)
+
+    # Additional autotune passes for C128A widths beyond 128.
+    # The mixed-batch warmup above uses seq_lens=[1] for decode tokens,
+    # which only triggers extra_topk=128.  At runtime, longer sequences
+    # select wider C128A widths (e.g. 256 for seq 16512-32895, 384 for
+    # seq 32896-33792 when max_model_len=33792).  Each width is an
+    # independent FlashInfer autotune cache key; a 128-width tactic
+    # cannot cover 256 or 384.  Without these passes, long-sequence
+    # decode falls back to SparseMlaDecodeV3Runner tactic=-1 at runtime.
+    # See https://github.com/vllm-project/vllm/issues/53600
+    if mixed_warmup_done and not _uses_v2_model_runner(runner):
+        max_model_len = worker.vllm_config.model_config.max_model_len
+        reachable_widths = _compute_c128a_reachable_widths(max_model_len)
+        # Skip width=128; it is already covered by the mixed-batch pass above.
+        for extra_topk, seq_len in reachable_widths:
+            if extra_topk <= 128:
+                continue
+            logger.info(
+                "Warming up DeepSeek V4 sparse MLA attention for "
+                "C128A extra_topk=%s with seq_lens=%s.",
+                extra_topk,
+                seq_len,
+            )
+            _deepseek_v4_sparse_mla_decode_autotune(
+                worker,
+                mixed_tokens,
+                profile_seq_lens=seq_len,
+            )
+
     if not mixed_warmup_done:
         if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
             v2_runner = cast("V2GPUModelRunner", runner)
