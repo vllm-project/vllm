@@ -925,9 +925,15 @@ class MambaSpec(KVCacheSpec):
                 cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
             ) * self.page_size_bytes
         elif vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (
+            num_pages = (
                 2 + self.num_speculative_blocks + self.num_prefill_checkpoint_blocks
             )
+            # One spared live block per grid boundary during a max-length
+            # prefill.
+            interval = vllm_config.cache_config.prefix_cache_retention_interval
+            if interval and interval // self.block_size > 1:
+                num_pages += cdiv(vllm_config.model_config.max_model_len, interval)
+            return self.page_size_bytes * num_pages
         else:
             return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
