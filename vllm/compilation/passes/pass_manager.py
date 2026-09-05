@@ -163,7 +163,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SequenceParallelismPass(config)]
 
             if self.pass_config.enable_sp_moe:
-                self.passes += [SequenceParallelismMoEPass(config)]
+                if current_platform.is_cuda_alike() or current_platform.is_xpu():
+                    self.passes += [SequenceParallelismMoEPass(config)]
+                else:
+                    logger.warning_once(
+                        "Skipping SequenceParallelismMoEPass: the pass is only "
+                        "supported on CUDA-alike and XPU platforms."
+                    )
 
             if self.pass_config.enable_sp and self.pass_config.fuse_gemm_comms:
                 self.passes += [AsyncTPPass(config)]

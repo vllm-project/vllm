@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -13,6 +14,7 @@ from vllm.compilation.passes.inductor_pass import (
 from vllm.compilation.passes.pass_manager import PostGradPassManager
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.utils import Range
+from vllm.platforms import current_platform
 
 
 # dummy custom pass that doesn't inherit
@@ -29,6 +31,24 @@ def test_bad_callable():
 
     with pytest.raises(AssertionError):
         pass_manager.add(simple_callable)  # type: ignore[arg-type]
+
+
+def test_sp_moe_pass_is_skipped_on_unsupported_platform():
+    """Unsupported platforms must not hit a conditionally imported pass."""
+    config = VllmConfig()
+    config.compilation_config.pass_config.enable_sp_moe = True
+
+    with (
+        patch.object(current_platform, "is_cuda_alike", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+    ):
+        pass_manager = PostGradPassManager()
+        pass_manager.configure(config)
+
+    assert all(
+        type(pass_).__name__ != "SequenceParallelismMoEPass"
+        for pass_ in pass_manager.passes
+    )
 
 
 # Pass that inherits from InductorPass

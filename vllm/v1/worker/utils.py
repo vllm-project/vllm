@@ -755,6 +755,10 @@ def is_residual_scattered_for_sp(
     if tp == 1:
         return False
 
+    min_token_num = vllm_config.compilation_config.pass_config.sp_min_token_num
+    if min_token_num is not None and num_input_tokens < min_token_num:
+        return False
+
     assert (
         vllm_config.compilation_config.use_inductor_graph_partition
         or not vllm_config.compilation_config.splitting_ops

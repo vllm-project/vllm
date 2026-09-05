@@ -21,6 +21,9 @@ from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger
 
+from ..inductor_pass import enable_fake_mode
+from ..utility.noop_elimination import NoOpEliminationPass
+
 logger = init_logger(__name__)
 
 
@@ -195,6 +198,7 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     removes the extra round trip introduced before the MoE router.
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
@@ -206,6 +210,12 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
             self.min_token_num = min(
                 self.min_token_num, config.scheduler_config.max_num_batched_tokens
             )
+
+        # Replacements involving fused residual RMSNorm temporarily introduce
+        # slices whose shapes are stale until all adjacent SP rewrites have
+        # been applied.  Remove those cleanup-only views before lowering.
+        self.noop_cleanup = NoOpEliminationPass(config)
+        self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
 
         self.patterns = PatternMatcherPass(pass_name="sequence_parallelism_moe_pass")
         for epsilon in (1e-5, 1e-6):
@@ -242,3 +252,4 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        self.noop_cleanup(graph)
