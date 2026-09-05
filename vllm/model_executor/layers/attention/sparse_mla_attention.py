@@ -285,6 +285,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         prefill_max_seq_len = 0
         prefill: MLACommonPrefillMetadata | None = None
         if num_prefills > 0 and self._prefill_backend is not None:
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            prefill_query_start_loc_cpu = (
+                query_start_loc_cpu[num_decodes:] - query_start_loc_cpu[num_decodes]
+            )
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             prefill_max_seq_len = int(
@@ -293,6 +297,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill = MLACommonPrefillMetadata(
                 block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
                 query_start_loc=prefill_query_start_loc,
+                query_start_loc_cpu=prefill_query_start_loc_cpu,
                 max_query_len=prefill_max_query_len,
                 query_lens_cpu=prefill_query_lens_cpu,
                 chunked_context=self._build_chunked_context_fields(
