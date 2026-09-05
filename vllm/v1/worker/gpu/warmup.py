@@ -281,14 +281,14 @@ def warmup_kernels(
 
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
-        sampling_params = None
+        sampling_params_list = [None]
         pooling_task = model_runner.model_config.get_pooling_task(
             model_runner.get_supported_tasks()
         )
         pooling_params = PoolingParams(task=pooling_task)
         pooling_params.verify(model_runner.model_config)
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params_list = SamplingParams.for_all_sampler_warmup_configs()
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -309,7 +309,7 @@ def warmup_kernels(
             Request(
                 req_ids[i],
                 prompt_token_ids,
-                sampling_params,
+                sampling_params_list[i % len(sampling_params_list)],
                 pooling_params,
                 mm_features=warmup_mm_features,
             ),
@@ -410,10 +410,20 @@ def warmup_kernels(
                 # Exercise the model paths that split a batch by whether each
                 # request received draft tokens.
                 decode_steps.append(([0, 1], [False, False]))
-        if num_reqs > 1:
+
+            # Single-request steps covering unseeded, seeded, and greedy configs.
             decode_steps.append(([0], [use_spec_decode]))
             if use_spec_decode:
                 decode_steps.append(([0], [False]))
+
+            decode_steps.append(([1], [use_spec_decode]))
+            if use_spec_decode:
+                decode_steps.append(([1], [False]))
+
+            if num_reqs >= 3:
+                decode_steps.append(([2], [use_spec_decode]))
+                if use_spec_decode:
+                    decode_steps.append(([2], [False]))
         elif use_spec_decode:
             decode_steps.append(([0], [False]))
 

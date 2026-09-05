@@ -6446,6 +6446,14 @@ class GPUModelRunner(
                 logits,
                 all_greedy_metadata,
             )
+            if self.model_config.dtype != logits.dtype:
+                model_dtype_logits = logits.to(self.model_config.dtype)
+                self.rejection_sampler(
+                    dummy_spec_decode_metadata,
+                    draft_probs,
+                    model_dtype_logits,
+                    all_greedy_metadata,
+                )
             torch.accelerator.synchronize()
         return sampler_output
 
