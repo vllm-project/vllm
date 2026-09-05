@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.logits_processor import LocalLogits
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -424,6 +425,11 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         if self.config.model_type == "glm_moe_dsa":
             enable_glm52_low_latency_gemm(self, vllm_config.model_config.dtype)
+
+    def compute_local_logits(self, hidden_states: torch.Tensor) -> LocalLogits | None:
+        if self.config.model_type != "glm_moe_dsa":
+            return None
+        return self.logits_processor.get_local_logits(self.lm_head, hidden_states)
 
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the

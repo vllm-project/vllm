@@ -6,11 +6,24 @@ import numpy as np
 import torch
 
 from vllm.config.model import LogprobsMode
+from vllm.distributed import get_tp_group
+from vllm.logger import init_logger
+from vllm.model_executor.layers.logits_processor import LocalLogits
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
+
+logger = init_logger(__name__)
+
+# The TP-local target-only route removes the full-vocabulary gather, but its
+# collectives are not worthwhile for short MRV2 prompt chunks. This is applied
+# to each actual chunk below, not to a request-wide prompt length.
+MIN_LOCAL_PROMPT_LOGPROB_ROWS = 512
+SHORT_CHUNK_GATHERED_MARKER = (
+    "MRV2_PROMPT_LOGPROBS_SHORT_CHUNK_FALLBACK route=gathered reason=rows_lt_512"
+)
 
 
 class PromptLogprobsWorker:
@@ -36,6 +49,7 @@ class PromptLogprobsWorker:
     def compute_prompt_logprobs(
         self,
         logits_fn: Callable[[torch.Tensor], torch.Tensor],
+        local_logits_fn: Callable[[torch.Tensor], LocalLogits | None] | None,
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         # [max_num_reqs, max_model_len]
@@ -83,6 +97,7 @@ class PromptLogprobsWorker:
                 prompt_logprobs_token_ids,
                 hidden_states[: input_batch.num_tokens],
                 logits_fn,
+                local_logits_fn,
                 max_num_prompt_logprobs,
                 self.logprobs_mode,
             )
@@ -200,6 +215,7 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
     logits_fn: Callable[[torch.Tensor], torch.Tensor],
+    local_logits_fn: Callable[[torch.Tensor], LocalLogits | None] | None,
     num_prompt_logprobs: int,
     logprobs_mode: LogprobsMode = "raw_logprobs",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -213,8 +229,35 @@ def compute_prompt_logprobs_with_chunking(
     prompt_token_ids = prompt_token_ids.to(torch.int64)
     for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
         end_idx = start_idx + CHUNK_SIZE
+        chunk_hidden_states = prompt_hidden_states[start_idx:end_idx]
+        chunk_token_ids = prompt_token_ids[start_idx:end_idx]
+        if num_prompt_logprobs == 0 and local_logits_fn is not None:
+            if chunk_hidden_states.shape[0] >= MIN_LOCAL_PROMPT_LOGPROB_ROWS:
+                local_logits = local_logits_fn(chunk_hidden_states)
+                if local_logits is not None:
+                    logger.info_once(
+                        "MRV2 prompt_logprobs=0 is using TP-local target-only "
+                        "logits (no full-vocabulary gather)."
+                    )
+                    result = compute_distributed_token_logprobs(
+                        local_logits, chunk_token_ids, logprobs_mode
+                    )
+                    token_ids.append(result.logprob_token_ids)
+                    scores.append(result.logprobs)
+                    ranks.append(result.selected_token_ranks)
+                    continue
+            else:
+                # Preserve the gathered fallback without even projecting local
+                # logits. A request can thus distribute a full-sized prefix
+                # while gathering only its short final chunk.
+                logger.info_once(
+                    "%s rows=%d threshold=%d",
+                    SHORT_CHUNK_GATHERED_MARKER,
+                    chunk_hidden_states.shape[0],
+                    MIN_LOCAL_PROMPT_LOGPROB_ROWS,
+                )
         # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
+        prompt_logits = logits_fn(chunk_hidden_states)
         requested_num = (
             prompt_logits.shape[-1]
             if num_prompt_logprobs == -1
@@ -223,7 +266,7 @@ def compute_prompt_logprobs_with_chunking(
         result = compute_topk_scores(
             prompt_logits,
             requested_num,
-            prompt_token_ids[start_idx:end_idx],
+            chunk_token_ids,
             logits_mode=logits_mode,
         )
         token_ids.append(result.logprob_token_ids)
@@ -234,3 +277,58 @@ def compute_prompt_logprobs_with_chunking(
     scores = torch.cat(scores, dim=0) if len(scores) > 1 else scores[0]
     ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
     return token_ids, scores, ranks
+
+
+def _local_token_indices(
+    token_ids: torch.Tensor, local_logits: LocalLogits
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global token ids to this rank's original vocabulary shard."""
+    indices = local_logits.shard_indices
+    owned = (token_ids >= indices.org_vocab_start_index) & (
+        token_ids < indices.org_vocab_end_index
+    )
+    return token_ids - indices.org_vocab_start_index, owned
+
+
+def _all_reduce_max(values: torch.Tensor) -> torch.Tensor:
+    tp_group = get_tp_group()
+    if tp_group.world_size > 1:
+        torch.distributed.all_reduce(
+            values, op=torch.distributed.ReduceOp.MAX, group=tp_group.device_group
+        )
+    return values
+
+
+def compute_distributed_token_logprobs(
+    local_logits: LocalLogits,
+    token_ids: torch.Tensor,
+    logprobs_mode: LogprobsMode = "raw_logprobs",
+) -> LogprobsTensors:
+    """Compute exact target scores from TP-local original-vocabulary logits."""
+    logits = local_logits.logits[..., : local_logits.shard_indices.num_org_elements]
+    local_token_ids, owned = _local_token_indices(token_ids, local_logits)
+    row_ids = torch.arange(token_ids.numel(), device=token_ids.device)
+    selected_scores = torch.zeros(
+        token_ids.numel(), dtype=torch.float32, device=logits.device
+    )
+    selected_scores[owned] = logits[row_ids[owned], local_token_ids[owned]].float()
+    selected_scores = get_tp_group().all_reduce(selected_scores)
+
+    # vLLM's custom GPU all-reduce accepts floating-point tensors, not int64.
+    # Vocabulary ranks are exactly representable in fp32 at supported sizes.
+    selected_ranks = (logits >= selected_scores[:, None]).sum(
+        dim=-1, dtype=torch.float32
+    )
+    selected_ranks = get_tp_group().all_reduce(selected_ranks).to(torch.int64)
+
+    if logprobs_mode not in ("raw_logits", "processed_logits"):
+        row_max = _all_reduce_max(logits.float().amax(dim=-1))
+        local_exp_sum = torch.exp(logits.float() - row_max[:, None]).sum(dim=-1)
+        exp_sum = get_tp_group().all_reduce(local_exp_sum)
+        selected_scores -= row_max + torch.log(exp_sum)
+
+    return LogprobsTensors(
+        logprob_token_ids=token_ids.unsqueeze(-1),
+        logprobs=selected_scores.unsqueeze(-1),
+        selected_token_ranks=selected_ranks,
+    )
