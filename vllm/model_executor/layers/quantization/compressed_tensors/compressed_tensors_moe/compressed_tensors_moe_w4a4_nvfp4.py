@@ -5,7 +5,6 @@ from typing import cast
 
 import torch
 
-from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -13,13 +12,16 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_cutedsl import (
-    FlashInferMoeEpCutedsl,
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    FlashInferMoeEpEpilogue,
+    FlashInferMoeEpWeights,
+    is_flashinfer_moe_ep_backend,
+    make_flashinfer_moe_ep,
+    validate_flashinfer_moe_ep_config,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -39,8 +41,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
-_FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
-
 # NVFP4 backends that have been verified to support EPLB for this quantization recipe.
 _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
     {
@@ -51,40 +51,6 @@ _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
 )
 
 logger = init_logger(__name__)
-
-
-def _validate_flashinfer_moe_ep_cutedsl_config(
-    moe: FusedMoEConfig,
-    *,
-    use_a16: bool,
-) -> None:
-    vllm_config = get_current_vllm_config()
-
-    unsupported: list[str] = []
-    if use_a16:
-        unsupported.append("A16 activations")
-    if moe.is_lora_enabled:
-        unsupported.append("LoRA")
-    if vllm_config.weight_transfer_config is not None:
-        unsupported.append("runtime weight transfer")
-    if vllm_config.parallel_config.enable_dbo:
-        unsupported.append("dual batch overlap")
-    if moe.skip_final_all_reduce:
-        unsupported.append("skip_final_all_reduce")
-    if moe.in_dtype != torch.bfloat16:
-        unsupported.append(f"activation dtype {moe.in_dtype}")
-    if moe.activation is not MoEActivation.SILU:
-        unsupported.append(f"activation {moe.activation.value}")
-    if moe.has_bias:
-        unsupported.append("expert bias")
-    if moe.swiglu_alpha is not None or moe.swiglu_beta is not None:
-        unsupported.append("custom SwiGLU alpha or beta")
-
-    if unsupported:
-        raise ValueError(
-            f"{_FLASHINFER_MOE_EP_CUTEDSL} only supports W4A4 BF16 SiLU MoE; "
-            f"unsupported: {', '.join(unsupported)}"
-        )
 
 
 def _require_finite_positive(name: str, value: torch.Tensor) -> None:
@@ -126,14 +92,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 16
         self.use_a16 = use_a16
-        self.use_flashinfer_moe_ep_cutedsl = (
-            self.moe.moe_backend == _FLASHINFER_MOE_EP_CUTEDSL
-        )
-        self.load_input_scales_by_shard = self.use_flashinfer_moe_ep_cutedsl
-        self._flashinfer_moe_ep_cutedsl: FlashInferMoeEpCutedsl | None = None
+        self.use_flashinfer_moe_ep = is_flashinfer_moe_ep_backend(self.moe.moe_backend)
+        self.load_input_scales_by_shard = self.use_flashinfer_moe_ep
 
-        if self.use_flashinfer_moe_ep_cutedsl:
-            _validate_flashinfer_moe_ep_cutedsl_config(moe, use_a16=use_a16)
+        if self.use_flashinfer_moe_ep:
+            validate_flashinfer_moe_ep_config(moe, "nvfp4", use_a16=use_a16)
             self.use_global_sf = False
             return
 
@@ -150,39 +113,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
     @property
     def supports_eplb(self) -> bool:
-        if self.use_flashinfer_moe_ep_cutedsl:
+        if self.use_flashinfer_moe_ep:
             return False
         return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
-
-    @property
-    def supports_internal_mk(self) -> bool:
-        return self.use_flashinfer_moe_ep_cutedsl or self.moe_kernel is not None
-
-    @property
-    def mk_can_overlap_shared_experts(self) -> bool:
-        if self.use_flashinfer_moe_ep_cutedsl:
-            return False
-        return (
-            self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
-        )
-
-    @property
-    def output_is_reduced(self) -> bool:
-        if self.use_flashinfer_moe_ep_cutedsl:
-            return True
-        return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.use_flashinfer_moe_ep_cutedsl:
-            return torch.int32
-        return super().topk_indices_dtype
-
-    @property
-    def is_monolithic(self) -> bool:
-        if self.use_flashinfer_moe_ep_cutedsl:
-            return False
-        return super().is_monolithic
 
     def create_weights(
         self,
@@ -264,7 +197,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 torch.nan,
                 dtype=torch.float32,
             )
-            if self.use_flashinfer_moe_ep_cutedsl
+            if self.use_flashinfer_moe_ep
             else torch.empty(
                 num_experts,
                 w13_num_shards,
@@ -283,7 +216,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         w2_weight_global_data = (
             torch.full((num_experts,), torch.nan, dtype=torch.float32)
-            if self.use_flashinfer_moe_ep_cutedsl
+            if self.use_flashinfer_moe_ep
             else torch.empty(num_experts, dtype=torch.float32)
         )
         w2_weight_scale_2 = torch.nn.Parameter(
@@ -303,7 +236,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 torch.nan,
                 dtype=torch.float32,
             )
-            if self.use_flashinfer_moe_ep_cutedsl
+            if self.use_flashinfer_moe_ep
             else torch.empty(
                 num_experts,
                 w13_num_shards,
@@ -322,7 +255,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         w2_input_data = (
             torch.full((num_experts,), torch.nan, dtype=torch.float32)
-            if self.use_flashinfer_moe_ep_cutedsl
+            if self.use_flashinfer_moe_ep
             else torch.empty(num_experts, dtype=torch.float32)
         )
         w2_input_scale = torch.nn.Parameter(
@@ -339,8 +272,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
-        if self.use_flashinfer_moe_ep_cutedsl:
-            self._process_flashinfer_moe_ep_cutedsl_weights(layer)
+        if self.use_flashinfer_moe_ep:
+            self._process_flashinfer_moe_ep_weights(layer)
             return
         nvfp4_backend = cast(NvFp4MoeBackend, self.nvfp4_backend)
 
@@ -414,7 +347,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def _process_flashinfer_moe_ep_cutedsl_weights(
+    def _process_flashinfer_moe_ep_weights(
         self,
         layer: RoutedExperts,
     ) -> None:
@@ -435,12 +368,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_input_global_scale,
         )
 
-        if layer.expert_map_manager.placement_strategy != "linear":
-            raise ValueError(
-                f"{_FLASHINFER_MOE_EP_CUTEDSL} requires contiguous linear "
-                "expert placement"
-            )
-
         # CT stores the FI norm constants directly: q * stored_sf reconstructs
         # x * norm_const, and alpha cancels the activation and weight constants.
         input_norm_const = _global_exact_scale(w13_input_global)
@@ -450,15 +377,25 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_global_scale * layer.w2_input_global_scale
         ).contiguous()
 
-        adapter = FlashInferMoeEpCutedsl(
-            layer,
-            self.moe,
+        weights = FlashInferMoeEpWeights(
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+        )
+        epilogue = FlashInferMoeEpEpilogue(
             input_norm_const=input_norm_const,
             fc1_alpha=fc1_alpha,
             fc2_alpha=fc2_alpha,
             fc1_norm_const=fc1_norm_const,
         )
-        self._flashinfer_moe_ep_cutedsl = adapter
+        adapter = make_flashinfer_moe_ep(
+            self.moe,
+            layer,
+            weights,
+            epilogue,
+        )
+        self.direct_backend = adapter
         self.moe_quant_config = FusedMoEQuantConfig.make(
             "nvfp4",
             weight_dtype="nvfp4",
@@ -477,7 +414,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             delattr(layer, name)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        if self.use_flashinfer_moe_ep_cutedsl:
+        if self.use_flashinfer_moe_ep:
             return cast(FusedMoEQuantConfig, self.moe_quant_config)
         return make_nvfp4_moe_quant_config(
             backend=cast(NvFp4MoeBackend, self.nvfp4_backend),
@@ -527,9 +464,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        if self.use_flashinfer_moe_ep_cutedsl:
-            adapter = cast(FlashInferMoeEpCutedsl, self._flashinfer_moe_ep_cutedsl)
-            return adapter(x, topk_ids, topk_weights)
+        if self.direct_backend is not None:
+            return self.direct_backend(x, topk_ids, topk_weights)
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

@@ -208,6 +208,11 @@ def _import_deep_gemm():
     return None
 
 
+def import_deep_gemm() -> Any | None:
+    """Return vLLM's external or vendored DeepGEMM module."""
+    return _import_deep_gemm()
+
+
 def _apply_pdl(mod, enable: bool = True) -> None:
     mod_name = getattr(mod, "__name__", str(mod))
     try:
@@ -802,4 +807,5 @@ __all__ = [
     "pack_ue8m0_to_int",
     "get_mn_major_tma_aligned_packed_ue8m0_tensor",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
+    "import_deep_gemm",
 ]

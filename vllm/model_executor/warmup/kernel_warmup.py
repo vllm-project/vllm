@@ -114,6 +114,12 @@ def _warmup_kimi_k3_gemm_rs_ar() -> None:
         logger.info_once("Warmed up %d Kimi-K3 GEMM-RS/AR variants.", compiled)
 
 
+def _warmup_flashinfer_moe_ep() -> None:
+    module = sys.modules.get("vllm.model_executor.layers.fused_moe.flashinfer_moe_ep")
+    if module is not None:
+        module.warmup_flashinfer_moe_ep()
+
+
 def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
     module = sys.modules.get("vllm.models.kimi_k3.nvidia.low_latency_gemm")
     if module is not None:
@@ -179,6 +185,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # to the shared JIT warmup infrastructure.
         # https://github.com/vllm-project/vllm/pull/47451
         cutedsl_warmup()
+
+    _warmup_flashinfer_moe_ep()
 
     if process_local_only:
         return

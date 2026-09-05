@@ -133,7 +133,6 @@ MoEBackend = Literal[
     "flashinfer_b12x",
     "b12x",
     "flashinfer_moe_ep_mega_deep_gemm",
-    "flashinfer_moe_ep_mega_cutedsl",
     "marlin",
     "humming",
     "triton_unfused",
@@ -144,24 +143,25 @@ MoEBackend = Literal[
     "emulation",
 ]
 
-# Backends that run the mega-MoE model path through the flashinfer moe_ep
-# runtime. Only architectures in FLASHINFER_MOE_EP_ARCHITECTURES wire up
-# these experts.
+FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
+FLASHINFER_MOE_EP_DEEP_GEMM = "flashinfer_moe_ep_mega_deep_gemm"
+_FLASHINFER_MOE_EP_LEGACY_ALIASES = {
+    "flashinfer_moe_ep_mega_cutedsl": FLASHINFER_MOE_EP_CUTEDSL,
+}
+
+# Backends implemented by the shared FlashInfer MoE-EP adapter.
 FLASHINFER_MOE_EP_BACKENDS = frozenset(
     {
-        "flashinfer_moe_ep_mega_deep_gemm",
-        "flashinfer_moe_ep_mega_cutedsl",
+        FLASHINFER_MOE_EP_CUTEDSL,
+        FLASHINFER_MOE_EP_DEEP_GEMM,
     }
 )
 
-# Backends that run a mega-MoE model path (fused expert module plus
-# prepare_megamoe routing): vLLM's native deep_gemm path, which any model
-# with a mega-MoE module may use (DeepSeek-V4, Kimi K3), plus the flashinfer
-# moe_ep variants.
-MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
+# Backends that use a model-specific mega-MoE module and routing path.
+MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"})
 
-# Architectures whose model code wires up the flashinfer moe_ep experts. MTP
-# and DSpark draft variants inherit the setting from these target models.
+# DeepGEMM consumes the DeepSeek-V4 MXFP4 checkpoint recipe. CuTeDSL is
+# selected by quantization methods and is not architecture-specific.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
     {
         "DeepseekV4ForCausalLM",
@@ -173,8 +173,8 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
 def validate_flashinfer_moe_ep_model(
     moe_backend: str, architectures: Iterable[str]
 ) -> None:
-    """Reject flashinfer moe_ep backends for models that lack the FI path."""
-    if moe_backend not in FLASHINFER_MOE_EP_BACKENDS:
+    """Reject architecture-specific FlashInfer MoE-EP backends."""
+    if moe_backend != FLASHINFER_MOE_EP_DEEP_GEMM:
         return
     if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):
         raise ValueError(
@@ -247,7 +247,9 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TRTLLM-GEN kernels
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
-    - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE EP mega-kernel
+    - "flashinfer_moe_ep_cutedsl": Use FlashInfer's CuTeDSL MoE-EP
+      mega-kernel with NVFP4 weights (MXFP4 checkpoints are requantized at
+      load); requires Blackwell, expert parallelism, and NVSHMEM
     - "flashinfer_b12x": Use FlashInfer CuteDSL fused MoE for SM12x
       (RTX Pro 6000 / DGX Spark)
     - "b12x": Use b12x FP4 MoE kernels on SM12x
@@ -255,10 +257,8 @@ class KernelConfig:
       expert-parallel mega-MoE with the DeepGEMM megakernel, which consumes an
       MXFP4 checkpoint verbatim (Blackwell, requires expert parallel;
       DeepSeek-V4 only)
-    - "flashinfer_moe_ep_mega_cutedsl": Same, with the CuteDSL megakernel
-      (additionally requires NVSHMEM). The checkpoint selects the weight path:
-      an NVFP4 checkpoint is consumed prequantized, MXFP4 weights are
-      requantized at load
+    - "flashinfer_moe_ep_mega_cutedsl": Legacy alias for
+      "flashinfer_moe_ep_cutedsl"
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
@@ -304,7 +304,8 @@ class KernelConfig:
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
-            return value.lower().replace("-", "_")
+            normalized = value.lower().replace("-", "_")
+            return _FLASHINFER_MOE_EP_LEGACY_ALIASES.get(normalized, normalized)
         return value
 
     @field_validator("linear_backend", mode="before")

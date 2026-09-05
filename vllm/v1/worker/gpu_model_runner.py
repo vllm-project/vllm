@@ -6649,12 +6649,12 @@ class GPUModelRunner(
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
-        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_cutedsl import (
-            destroy_flashinfer_moe_ep_cutedsl,
-            has_flashinfer_moe_ep_cutedsl,
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            destroy_flashinfer_moe_ep,
+            has_flashinfer_moe_ep,
         )
 
-        has_flashinfer_megamoe = has_flashinfer_moe_ep_cutedsl()
+        has_flashinfer_megamoe = has_flashinfer_moe_ep()
         clear_graphs_before_distributed_teardown = (
             current_platform.is_rocm() or has_flashinfer_megamoe
         )
@@ -6670,7 +6670,7 @@ class GPUModelRunner(
             gc.collect()
             torch.accelerator.synchronize()
         if has_flashinfer_megamoe:
-            destroy_flashinfer_moe_ep_cutedsl()
+            destroy_flashinfer_moe_ep()
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()

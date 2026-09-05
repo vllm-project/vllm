@@ -2116,12 +2116,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_cutedsl import (
-            destroy_flashinfer_moe_ep_cutedsl,
-            has_flashinfer_moe_ep_cutedsl,
+        from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+            destroy_flashinfer_moe_ep,
+            has_flashinfer_moe_ep,
         )
 
-        if has_flashinfer_moe_ep_cutedsl():
+        if has_flashinfer_moe_ep():
             from vllm.compilation.breakable_cudagraph import (
                 BreakableCUDAGraphWrapper,
             )
@@ -2136,7 +2136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.cudagraph_manager = None
                 del cudagraph_manager
             torch.accelerator.synchronize()
-            destroy_flashinfer_moe_ep_cutedsl()
+            destroy_flashinfer_moe_ep()
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
