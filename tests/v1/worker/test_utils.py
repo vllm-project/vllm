@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache, is_residual_scattered_for_sp
 
 
 class _TestReplaySSMMixer(MambaMixer2):
@@ -28,6 +29,47 @@ class _TestReplaySSMMixer(MambaMixer2):
 
 def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
     return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
+
+
+def test_is_residual_scattered_for_sp_clamps_threshold():
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(
+                enable_sp=False,
+                enable_sp_moe=True,
+                sp_min_token_num=4096,
+            ),
+            use_inductor_graph_partition=False,
+            splitting_ops=[],
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=1024),
+    )
+
+    assert not is_residual_scattered_for_sp(vllm_config, 512)
+    assert is_residual_scattered_for_sp(vllm_config, 1024)
+
+
+def test_is_residual_scattered_for_sp_skips_unsupported_sp_moe():
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(
+                enable_sp=False,
+                enable_sp_moe=True,
+                sp_min_token_num=1,
+            ),
+            use_inductor_graph_partition=False,
+            splitting_ops=[],
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=1024),
+    )
+
+    with (
+        patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False),
+        patch("vllm.platforms.current_platform.is_xpu", return_value=False),
+    ):
+        assert not is_residual_scattered_for_sp(vllm_config, 2)
 
 
 def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():

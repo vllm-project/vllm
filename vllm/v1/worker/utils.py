@@ -744,12 +744,29 @@ def is_residual_scattered_for_sp(
     parallelism and tensor parallelism is enabled. SP is only supported in
     full-graph compilation mode.
     """
-    if not vllm_config.compilation_config.pass_config.enable_sp:
+    pass_config = vllm_config.compilation_config.pass_config
+    enable_sp = pass_config.enable_sp
+    enable_sp_moe = pass_config.enable_sp_moe
+    if enable_sp_moe:
+        from vllm.platforms import current_platform
+
+        enable_sp_moe = current_platform.is_cuda_alike() or current_platform.is_xpu()
+
+    if not (enable_sp or enable_sp_moe):
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size
 
     if tp == 1:
+        return False
+
+    min_token_num = pass_config.sp_min_token_num
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    if min_token_num is not None and max_num_batched_tokens is not None:
+        # Keep the runtime layout decision in sync with the compile pass,
+        # which clamps the threshold to the largest compiled token count.
+        min_token_num = min(min_token_num, max_num_batched_tokens)
+    if min_token_num is not None and num_input_tokens < min_token_num:
         return False
 
     assert (

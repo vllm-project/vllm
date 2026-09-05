@@ -553,6 +553,16 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        if (
+            self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.enable_sp_moe
+        ) and self.parallel_config.tensor_parallel_size > 1:
+            # Sequence-parallel collectives operate on TP-sized token shards.
+            # The scheduler still counts unpadded tokens, but every runner
+            # buffer must also hold the padded shape used by the compiled graph.
+            self.max_num_tokens = round_up(
+                self.max_num_tokens, self.parallel_config.tensor_parallel_size
+            )
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)
@@ -3580,7 +3590,10 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.enable_sp_moe
+        ) and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -4096,7 +4109,10 @@ class GPUModelRunner(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self.compilation_config.pass_config.enable_sp:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.enable_sp_moe
+        ):
             assert (
                 batch_descriptor.num_tokens
                 % self.vllm_config.parallel_config.tensor_parallel_size
@@ -7568,7 +7584,7 @@ class GPUModelRunner(
             self.model_config.enable_return_routed_experts,
         )
         self.routed_experts_capturer = RoutedExpertsCapturer(
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_num_batched_tokens=self.max_num_tokens,
             vllm_config=self.vllm_config,
             kv_cache_config=self.kv_cache_config,
         )
@@ -7585,7 +7601,7 @@ class GPUModelRunner(
         )
         # ``slot_mapping`` dtype is fixed to int64 by
         # ``block_table.slot_mapping``; we mirror that here.
-        max_tokens = self.scheduler_config.max_num_batched_tokens
+        max_tokens = self.max_num_tokens
         self.routed_experts_slot_mapping_cpu = torch.empty(
             (max_tokens,),
             dtype=torch.int64,

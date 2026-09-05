@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.math_utils import round_up
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -248,6 +249,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
@@ -271,6 +273,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -294,6 +297,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -317,6 +321,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -1491,10 +1496,49 @@ class VllmConfig:
         pass_config = self.compilation_config.pass_config
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
-        if pass_config.enable_sp:
+
+        if pass_config.enable_sp_moe and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
+            logger.warning_once(
+                "Sequence-parallel MoE compilation is only supported on "
+                "CUDA-alike and XPU platforms; disabling enable_sp_moe."
+            )
+            pass_config.enable_sp_moe = False
+        elif pass_config.enable_sp_moe and not (
+            self.parallel_config.use_sequence_parallel_moe
+        ):
+            logger.warning_once(
+                "Sequence-parallel MoE compilation requires expert parallelism "
+                "with a supported all2all backend, data parallelism, and TP>1; "
+                "disabling enable_sp_moe."
+            )
+            pass_config.enable_sp_moe = False
+
+        if pass_config.enable_sp or pass_config.enable_sp_moe:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if tp_size > 1 and max_num_batched_tokens is not None:
+                padded_max_num_batched_tokens = round_up(
+                    max_num_batched_tokens, tp_size
+                )
+                if padded_max_num_batched_tokens != max_num_batched_tokens:
+                    logger.info_once(
+                        "Rounding max_num_batched_tokens from %d to %d for "
+                        "sequence parallelism with tensor_parallel_size=%d.",
+                        max_num_batched_tokens,
+                        padded_max_num_batched_tokens,
+                        tp_size,
+                    )
+                    self.scheduler_config.max_num_batched_tokens = (
+                        padded_max_num_batched_tokens
+                    )
+
+        if pass_config.enable_sp or pass_config.enable_sp_moe:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
+                pass_config.enable_sp_moe = False
                 pass_config.fuse_gemm_comms = False
             else:
                 if pass_config.sp_min_token_num is None:
@@ -1517,6 +1561,7 @@ class VllmConfig:
                         "set pass_config.sp_min_token_num manually."
                     )
                     pass_config.enable_sp = False
+                    pass_config.enable_sp_moe = False
                     pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
@@ -1681,7 +1726,10 @@ class VllmConfig:
             data_parallel_size=effective_dp_size,
         )
 
-        if self.compilation_config.pass_config.enable_sp:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.enable_sp_moe
+        ):
             # With pipeline parallelism, native rms norm tracing errors due to
             # incorrect residual shape.
             # Use custom rms norm to unblock. In the future,
@@ -2153,9 +2201,9 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
-            if (
-                self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sp
+            if self.parallel_config.tensor_parallel_size > 1 and (
+                self.compilation_config.pass_config.enable_sp
+                or self.compilation_config.pass_config.enable_sp_moe
             ):
                 # Sequence parallelism only captures TP-divisible sizes, so a
                 # wider non-divisible decode batch cannot be captured under SP.
@@ -2255,7 +2303,10 @@ class VllmConfig:
                     )
 
         # Add the compile ranges for sequence parallelism
-        if compilation_config.pass_config.enable_sp:
+        if (
+            compilation_config.pass_config.enable_sp
+            or compilation_config.pass_config.enable_sp_moe
+        ):
             pass_config = compilation_config.pass_config
 
             # Calculate min_token_num if not explicitly provided
@@ -2555,8 +2606,8 @@ class VllmConfig:
 
         if (
             self.compilation_config.pass_config.enable_sp
-            and self.parallel_config.tensor_parallel_size > 1
-        ):
+            or self.compilation_config.pass_config.enable_sp_moe
+        ) and self.parallel_config.tensor_parallel_size > 1:
             unsupported.append("sequence parallelism")
 
         # V2 does not implement the external_launcher (torchrun) PP-output
