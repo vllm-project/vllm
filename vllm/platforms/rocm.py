@@ -915,6 +915,23 @@ class RocmPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
+        # Ported from cuda side - If the model requires prefix lm and is multimodal,
+        # we should disable chunked mm input as we want the image tokens to be attended
+        # bidirectionally. Chunked prefill splits a multimodal item, the scheduler
+        # can break that intended attention pattern. ROCm should do the same because
+        # the issue is scheduler/model semantics
+        if (
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
+        ):
+            logger.warning(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
+            )
+            scheduler_config.disable_chunked_mm_input = True
+
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
