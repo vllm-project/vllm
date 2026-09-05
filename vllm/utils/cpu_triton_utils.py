@@ -146,6 +146,106 @@ def _eagle_step_slot_mapping_metadata_kernel_impl(
     )
 
 
+def _copy_and_expand_eagle_inputs_anchored(
+    target_token_ids,
+    target_positions,
+    next_token_ids,
+    out_input_ids,
+    out_positions,
+    out_is_rejected_token_mask,
+    out_is_masked_token_mask,
+    out_new_token_indices,
+    out_hidden_state_mapping,
+    query_start_loc,
+    query_end_loc,
+    padding_token_id,
+    parallel_drafting_token_id,
+    num_padding_slots_per_request,
+    shift_input_ids,
+    anchor_flags,
+    out_is_anchor_mask,
+    net_new_slots_per_request,
+):
+    """Torch build of the anchored draft-input layout (PARD-2, CPU backend).
+
+    A request whose first target position is 0 gets a leading anchor row
+    (its first token, position 0); every other request gets a trailing junk
+    row, so each request contributes the same number of rows.
+    """
+    device = out_input_ids.device
+    num_reqs = query_start_loc.numel() - 1
+    p = int(num_padding_slots_per_request)
+
+    qs = query_start_loc[:-1].to(torch.int64)
+    nqs = query_start_loc[1:].to(torch.int64)
+    qe = query_end_loc.to(torch.int64)
+    input_offset = 1 if shift_input_ids else 0
+    num_valid = qe - qs + (0 if shift_input_ids else 1)
+    num_rejected = nqs - qe - 1
+    base_total = num_valid + p + num_rejected
+    total = base_total + 1
+    output_start = qs + torch.arange(num_reqs, device=device) * int(
+        net_new_slots_per_request
+    )
+
+    # One flat row index over the whole batch, plus its (request, local j).
+    req_idx = torch.repeat_interleave(torch.arange(num_reqs, device=device), total)
+    row_starts = torch.cumsum(total, 0) - total
+    j = torch.arange(int(total.sum()), device=device) - row_starts[req_idx]
+
+    anchor = anchor_flags.to(torch.int64)[req_idx]
+    jj = j - anchor  # index into the layout without the anchor row
+    nv = num_valid[req_idx]
+    bt = base_total[req_idx]
+
+    is_anchor_row = (anchor == 1) & (j == 0)
+    is_junk_row = (anchor == 0) & (j == bt)
+    is_valid = (jj >= 0) & (jj < nv)
+    is_bonus = jj == nv
+    is_parallel_draft = (jj > nv) & (jj < nv + p)
+    is_rejected = ((jj >= nv + p) & (jj < bt)) | is_junk_row
+
+    out_idx = output_start[req_idx] + j
+    in_idx = (qs[req_idx] + input_offset + jj).clamp_(0, target_token_ids.numel() - 1)
+
+    token_ids = torch.where(
+        is_valid, target_token_ids.to(torch.int64)[in_idx], torch.zeros_like(in_idx)
+    )
+    token_ids = torch.where(
+        is_bonus, next_token_ids.to(torch.int64)[req_idx], token_ids
+    )
+    token_ids = torch.where(is_parallel_draft, parallel_drafting_token_id, token_ids)
+    token_ids = torch.where(is_rejected, padding_token_id, token_ids)
+    token_ids = torch.where(
+        is_anchor_row, target_token_ids.to(torch.int64)[qs[req_idx]], token_ids
+    )
+
+    start_pos = target_positions.to(torch.int64)[qs[req_idx]]
+    positions = start_pos + jj + 1  # true positions (+1 for the anchor entry)
+    positions = torch.where(is_anchor_row, start_pos, positions)
+    positions = torch.where(is_rejected, torch.zeros_like(positions), positions)
+
+    out_input_ids[out_idx] = token_ids.to(out_input_ids.dtype)
+    out_positions[out_idx] = positions.to(out_positions.dtype)
+    out_is_rejected_token_mask[out_idx] = is_rejected
+    out_is_masked_token_mask[out_idx] = is_parallel_draft
+    if out_is_anchor_mask is not None:
+        out_is_anchor_mask[out_idx] = is_anchor_row
+
+    is_new_token = (jj >= nv) & (jj < nv + p)
+    new_token_out_idx = req_idx * p + (jj - nv)
+    out_new_token_indices[new_token_out_idx[is_new_token]] = out_idx[is_new_token].to(
+        out_new_token_indices.dtype
+    )
+
+    if shift_input_ids:
+        is_input = (jj >= 0) & (jj < (nqs - qs)[req_idx])
+        src_idx = qs[req_idx] + jj
+        out_hidden_state_mapping[src_idx[is_input]] = out_idx[is_input].to(
+            out_hidden_state_mapping.dtype
+        )
+
+
 def _copy_and_expand_eagle_inputs_kernel_impl(
     target_token_ids_ptr,
     target_positions_ptr,
@@ -163,8 +263,12 @@ def _copy_and_expand_eagle_inputs_kernel_impl(
     total_input_tokens,
     num_padding_slots_per_request,
     shift_input_ids,
+    anchor_flags_ptr=None,
+    out_is_anchor_mask_ptr=None,
+    net_new_slots_per_request=None,
     BLOCK_SIZE_TOKENS=None,
     BLOCK_SIZE_REQS=None,
+    ANCHOR=False,
 ):
     """Adapter between Triton kernel call convention and C++ implementation.
 
@@ -173,6 +277,33 @@ def _copy_and_expand_eagle_inputs_kernel_impl(
     the C++ implementation. C++ reads token id tensors as int64_t*.
     Output tensors that are int32 need copy-back after C++ writes int64.
     """
+    if ANCHOR:
+        # The C++ kernel does not know about the PARD-2 anchor row, so build
+        # the anchored layout here instead. Same semantics as the ANCHOR path
+        # of the Triton kernel (tests/v1/spec_decode/test_anchor_kernel.py
+        # checks the two against each other).
+        _copy_and_expand_eagle_inputs_anchored(
+            target_token_ids_ptr,
+            target_positions_ptr,
+            next_token_ids_ptr,
+            out_input_ids_ptr,
+            out_positions_ptr,
+            out_is_rejected_token_mask_ptr,
+            out_is_masked_token_mask_ptr,
+            out_new_token_indices_ptr,
+            out_hidden_state_mapping_ptr,
+            query_start_loc_ptr,
+            query_end_loc_ptr,
+            padding_token_id,
+            parallel_drafting_token_id,
+            num_padding_slots_per_request,
+            shift_input_ids,
+            anchor_flags_ptr,
+            out_is_anchor_mask_ptr,
+            net_new_slots_per_request,
+        )
+        return
+
     orig_ids_dtype = out_input_ids_ptr.dtype
     orig_pos_dtype = out_positions_ptr.dtype
     out_ids_i64 = _ensure_int64(out_input_ids_ptr)
