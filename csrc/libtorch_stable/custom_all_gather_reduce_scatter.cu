@@ -191,6 +191,46 @@ void CustomAllreduce::mnnvl_lamport_reduce_scatter(cudaStream_t stream,
 #undef MNNVL_LAMPORT_RS_LAUNCH
 }
 
+template <typename T>
+void CustomAllreduce::mnnvl_multimem_reduce_scatter(cudaStream_t stream,
+                                                    const T* multicast_input,
+                                                    T* output, int size,
+                                                    int block_limit) {
+  if (size <= 0)
+    throw std::runtime_error(
+        "MNNVL multimem reduce-scatter requires a non-empty input");
+  int size_bytes = size * sizeof(T);
+  if (size_bytes % (kMnnvlMultimemRsVectorBytes * world_size_) != 0)
+    throw std::runtime_error(
+        "MNNVL multimem reduce-scatter requires each output shard byte size "
+        "to be a multiple of 16");
+  if (block_limit <= 0 || block_limit > kMnnvlMultimemRsBlockLimit)
+    throw std::runtime_error(
+        "MNNVL multimem reduce-scatter block limit is out of range");
+
+  int packs_per_rank = size_bytes / kMnnvlMultimemRsVectorBytes / world_size_;
+  int packs_per_block = kMnnvlMultimemRsThreads * kMnnvlMultimemRsUnroll;
+  int blocks = std::min(
+      block_limit, (packs_per_rank + packs_per_block - 1) / packs_per_block);
+
+#define MNNVL_MULTIMEM_RS_CASE(ngpus)                                       \
+  case ngpus:                                                               \
+    mnnvl_multimem_reduce_scatter_kernel<T, ngpus>                          \
+        <<<blocks, kMnnvlMultimemRsThreads, 0, stream>>>(                   \
+            multicast_input, output, sg_, self_sg_, rank_, packs_per_rank); \
+    break;
+
+  switch (world_size_) {
+    MNNVL_MULTIMEM_RS_CASE(2)
+    MNNVL_MULTIMEM_RS_CASE(4)
+    MNNVL_MULTIMEM_RS_CASE(8)
+    default:
+      throw std::runtime_error(
+          "MNNVL multimem reduce-scatter only supports num gpus in (2,4,8)");
+  }
+#undef MNNVL_MULTIMEM_RS_CASE
+}
+
 }  // namespace vllm
 
 using fptr_t = int64_t;
@@ -357,6 +397,61 @@ void mnnvl_lamport_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
     default:
       throw std::runtime_error(
           "MNNVL Lamport reduce-scatter only supports float32, float16 and "
+          "bfloat16");
+  }
+}
+
+void mnnvl_multimem_reduce_scatter(fptr_t _fa, torch::stable::Tensor& inp,
+                                   torch::stable::Tensor& out,
+                                   fptr_t _local_buffer,
+                                   fptr_t _multicast_buffer,
+                                   int64_t stage_sz_bytes,
+                                   int64_t block_limit) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      inp.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(inp.get_device_index());
+
+  STD_TORCH_CHECK((inp.scalar_type()) == (out.scalar_type()));
+  STD_TORCH_CHECK((out.numel() * fa->world_size_) == (inp.numel()));
+  STD_TORCH_CHECK(inp.numel() > 0);
+  STD_TORCH_CHECK(_is_weak_contiguous(out));
+  STD_TORCH_CHECK(_is_weak_contiguous(inp));
+  auto input_size = inp.numel() * inp.element_size();
+  STD_TORCH_CHECK(input_size <= stage_sz_bytes);
+  auto local_buffer = reinterpret_cast<void*>(_local_buffer);
+  auto multicast_buffer = reinterpret_cast<void*>(_multicast_buffer);
+  STD_TORCH_CHECK(local_buffer != nullptr);
+  STD_TORCH_CHECK(multicast_buffer != nullptr);
+  STD_CUDA_CHECK(cudaMemcpyAsync(local_buffer, inp.const_data_ptr(), input_size,
+                                 cudaMemcpyDeviceToDevice, stream));
+  switch (out.scalar_type()) {
+    case torch::headeronly::ScalarType::Float: {
+      fa->mnnvl_multimem_reduce_scatter<float>(
+          stream, reinterpret_cast<float*>(multicast_buffer),
+          reinterpret_cast<float*>(out.mutable_data_ptr()), inp.numel(),
+          block_limit);
+      break;
+    }
+    case torch::headeronly::ScalarType::Half: {
+      fa->mnnvl_multimem_reduce_scatter<half>(
+          stream, reinterpret_cast<half*>(multicast_buffer),
+          reinterpret_cast<half*>(out.mutable_data_ptr()), inp.numel(),
+          block_limit);
+      break;
+    }
+#if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
+    case torch::headeronly::ScalarType::BFloat16: {
+      fa->mnnvl_multimem_reduce_scatter<nv_bfloat16>(
+          stream, reinterpret_cast<nv_bfloat16*>(multicast_buffer),
+          reinterpret_cast<nv_bfloat16*>(out.mutable_data_ptr()), inp.numel(),
+          block_limit);
+      break;
+    }
+#endif
+    default:
+      throw std::runtime_error(
+          "MNNVL multimem reduce-scatter only supports float32, float16 and "
           "bfloat16");
   }
 }

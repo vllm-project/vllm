@@ -7,6 +7,10 @@ namespace vllm {
 constexpr int kMnnvlLamportAgThreads = 128;
 constexpr int kMnnvlLamportRsThreads = 256;
 constexpr int kMnnvlLamportConcurrentPollMaxPacks = 8192;
+constexpr int kMnnvlMultimemRsThreads = 1024;
+constexpr int kMnnvlMultimemRsBlockLimit = 8;
+constexpr int kMnnvlMultimemRsVectorBytes = 16;
+constexpr int kMnnvlMultimemRsUnroll = 8;
 
 using CopyPack = array_t<uint64_t, 2>;
 
@@ -45,6 +49,106 @@ __global__ void __launch_bounds__(512, 1)
     reinterpret_cast<P*>(result)[idx] =
         packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], offset + idx);
   }
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+}
+
+template <typename T>
+DINLINE void multimem_load_reduce_16(uint32_t (&result)[4], const T* address) {
+#if !defined(USE_ROCM) && CUDA_VERSION >= 12020 && defined(__CUDA_ARCH__) && \
+    (__CUDA_ARCH__ >= 900)
+  if constexpr (std::is_same<T, nv_bfloat16>::value) {
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.bf16x2 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  } else if constexpr (std::is_same<T, half>::value) {
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.acc::f32.v4.f16x2 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  } else {
+    static_assert(std::is_same<T, float>::value);
+    asm volatile(
+        "multimem.ld_reduce.relaxed.sys.global.add.v4.f32 "
+        "{%0,%1,%2,%3}, [%4];"
+        : "=r"(result[0]), "=r"(result[1]), "=r"(result[2]), "=r"(result[3])
+        : "l"(address)
+        : "memory");
+  }
+#elif defined(USE_ROCM)
+  __builtin_trap();
+#else
+  asm volatile("trap;");
+#endif
+}
+
+DINLINE void store_global_16(void* address, const uint32_t (&value)[4]) {
+#if !defined(USE_ROCM)
+  asm volatile("st.global.v4.u32 [%0], {%1,%2,%3,%4};"
+               :
+               : "l"(address), "r"(value[0]), "r"(value[1]), "r"(value[2]),
+                 "r"(value[3])
+               : "memory");
+#else
+  auto* output = reinterpret_cast<uint32_t*>(address);
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) output[i] = value[i];
+#endif
+}
+
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(kMnnvlMultimemRsThreads, 1)
+    mnnvl_multimem_reduce_scatter_kernel(const T* __restrict__ multicast_input,
+                                         T* __restrict__ result, RankSignals sg,
+                                         Signal* self_sg, int rank,
+                                         int packs_per_rank) {
+  constexpr int kThreadsPerWarp = 32;
+  constexpr int kWarpsPerCta = kMnnvlMultimemRsThreads / kThreadsPerWarp;
+  constexpr int kPacksPerWarpIteration =
+      kThreadsPerWarp * kMnnvlMultimemRsUnroll;
+
+  barrier_at_start_release<ngpus>(sg, self_sg, rank);
+
+  int lane;
+#if !defined(USE_ROCM)
+  asm volatile("mov.u32 %0, %%laneid;" : "=r"(lane));
+#else
+  lane = threadIdx.x % kThreadsPerWarp;
+#endif
+  int warp = blockIdx.x * kWarpsPerCta + threadIdx.x / kThreadsPerWarp;
+  int num_warps = gridDim.x * kWarpsPerCta;
+  int pack_offset = warp * kPacksPerWarpIteration + lane;
+  int pack_stride = num_warps * kPacksPerWarpIteration;
+  auto* rank_input = reinterpret_cast<const char*>(multicast_input) +
+                     rank * packs_per_rank * kMnnvlMultimemRsVectorBytes;
+  auto* rank_output = reinterpret_cast<char*>(result);
+
+  while (pack_offset < packs_per_rank) {
+    uint32_t reduced[kMnnvlMultimemRsUnroll][4];
+#pragma unroll
+    for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
+      int pack = pack_offset + u * kThreadsPerWarp;
+      if (pack < packs_per_rank) {
+        multimem_load_reduce_16<T>(
+            reduced[u], reinterpret_cast<const T*>(
+                            rank_input + pack * kMnnvlMultimemRsVectorBytes));
+      }
+    }
+#pragma unroll
+    for (int u = 0; u < kMnnvlMultimemRsUnroll; ++u) {
+      int pack = pack_offset + u * kThreadsPerWarp;
+      if (pack < packs_per_rank) {
+        store_global_16(rank_output + pack * kMnnvlMultimemRsVectorBytes,
+                        reduced[u]);
+      }
+    }
+    pack_offset += pack_stride;
+  }
+
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
