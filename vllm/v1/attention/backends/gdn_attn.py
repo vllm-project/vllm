@@ -37,6 +37,14 @@ class GDNAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # Only implemented for NVIDIA CUDA. ROCm AITER and XPU paths still
+        # use batch-shaped projections and the fused norm kernel, which are
+        # not batch-invariant.
+        import torch
+        return torch.cuda.is_available() and torch.version.hip is None
+
 
 @dataclass
 class GDNAttentionMetadata:

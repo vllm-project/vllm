@@ -153,8 +153,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     server_args: list[str] = [
         "--max-model-len=8192",
         "--max-num-seqs=32",
-        f"--attention-backend={backend}",
     ]
+    # GDN_ATTN is auto-selected by model architecture and is not a valid
+    # AttentionBackendEnum value, so --attention-backend must not be set.
+    if backend != "GDN_ATTN":
+        server_args.append(f"--attention-backend={backend}")
     if tp_size:
         server_args += ["-tp", tp_size]
 

@@ -313,6 +313,12 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT:
+            # rmsnorm_fn uses calc_rows_per_block which selects ROWS_PER_BLOCK
+            # based on M.  Different M values compile different Triton binaries
+            # with different FP reduction orders, breaking batch invariance.
+            # Fall back to the native PyTorch path which is row-independent.
+            return self.forward_native(x, z)
         from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
             rmsnorm_fn,
         )
