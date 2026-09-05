@@ -403,3 +403,27 @@ class TestReasoningStructuredOutput:
         assert manager_with_reasoner.trim_reasoning_for_advance(
             mock_request_with_structured_output, new_token_ids
         ) == [271, 5005]
+
+    def test_should_advance_uses_grammar_start_when_distinct_from_tool_end(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Muse Glimmer: grammar may start at the answer channel (#52594)."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        class SplitPredicateReasoner:
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return False
+
+            def is_grammar_start_allowed(self, input_ids, delta_ids):
+                return True
+
+        structured_req.reasoner = SplitPredicateReasoner()
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=[9],
+        )
+        assert result is True
+        assert structured_req.reasoning_ended is True

@@ -156,6 +156,26 @@ class MuseGlimmerReasoningParser(ReasoningParser):
     ) -> bool:
         return self.is_reasoning_end(list(input_ids))
 
+    def is_grammar_start_allowed(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        """True once the current assistant turn has opened a ``to=user`` answer.
+
+        ``is_reasoning_end_streaming`` stays tool-only so ``DelegatingParser``
+        does not hand a prose answer to the ATEM tool parser. Structured
+        output is a second consumer of the same stream and must start the
+        grammar on the user-facing answer (#52594).
+        """
+        try:
+            text = self.model_tokenizer.decode(list(input_ids))
+        except Exception:
+            return False
+        turn = _current_assistant_turn(text)
+        return any(
+            match.group("recipient") == "user"
+            for match in _CHANNEL_HEADER_RE.finditer(turn)
+        )
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Content-id slicing is unreliable for multi-token markers; the serving
         # path uses extract_reasoning() for the final split.
