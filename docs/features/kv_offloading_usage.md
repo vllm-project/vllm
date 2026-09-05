@@ -200,9 +200,11 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 #### Cross-Process Sharing
 
-KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
+For an unbounded filesystem tier (`max_bytes` unset), KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
 
-The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing a cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
+This sharing guidance does not apply when `max_bytes` is set. Bounded filesystem tiers maintain independent in-memory capacity state, so each mapped directory must have exclusive ownership by one engine instance.
+
+The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing an unbounded cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
 
 ```bash
 PYTHONHASHSEED=<shared-value> vllm serve ...
