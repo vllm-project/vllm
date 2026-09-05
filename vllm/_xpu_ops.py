@@ -633,6 +633,37 @@ def _xpu_mxfp4_quantize_fake(
     return x_q, x_s
 
 
+def _xpu_fused_input_norm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    torch.ops._xpu_C.fused_input_norm(out, x.contiguous(), weight, bias)
+    return out
+
+
+def _xpu_fused_input_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    return out
+
+
 @triton.jit
 def _softplus(x):
     return tl.where(x <= 20.0, tl.math.log(tl.math.exp(x) + 1.0), x)
@@ -1339,6 +1370,12 @@ class xpu_ops:
                     "index_weights_out",
                 ],
                 fake_impl=_xpu_deepseek_fused_indexer_q_rope_mxfp4_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fused_input_norm",
+                op_func=_xpu_fused_input_norm_impl,
+                fake_impl=_xpu_fused_input_norm_fake,
             )
 
             _OPS_REGISTERED = True
