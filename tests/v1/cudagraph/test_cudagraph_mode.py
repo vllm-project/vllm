@@ -6,7 +6,7 @@ import pytest
 
 from tests.utils import create_new_process_for_each_test
 from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
-from vllm import LLM
+from vllm import LLM, TokensPrompt
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
 
@@ -64,6 +64,32 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             ),
         )
         llm.generate(["Hello, my name is"] * 10)
+
+
+@create_new_process_for_each_test("spawn")
+def test_full_cudagraph_capture_size_exceeds_max_model_len(monkeypatch):
+    """Dummy sequence lengths must fit within their block-table rows."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    max_model_len = 1024
+    capture_size = max_model_len + 8
+
+    llm = LLM(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_num_seqs=256,
+        trust_remote_code=True,
+        gpu_memory_utilization=0.45,
+        load_format="dummy",
+        max_model_len=max_model_len,
+        max_num_batched_tokens=capture_size,
+        skip_tokenizer_init=True,
+        attention_config={"backend": "FLEX_ATTENTION"},
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE,
+            cudagraph_mode="FULL",
+            cudagraph_capture_sizes=[capture_size],
+        ),
+    )
+    llm.generate([TokensPrompt(prompt_token_ids=[1])])
 
 
 # test cudagraph_mode with different compilation mode.

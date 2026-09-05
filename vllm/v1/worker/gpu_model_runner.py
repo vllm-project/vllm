@@ -6127,6 +6127,12 @@ class GPUModelRunner(
                     seq_lens = max_query_len + dcp_dummy_context_len  # type: ignore[assignment]
                 else:
                     seq_lens = max_query_len  # type: ignore[assignment]
+                # Dummy requests cannot address KV blocks beyond their block
+                # table rows, which are sized for max_model_len.
+                if isinstance(seq_lens, torch.Tensor):
+                    seq_lens.clamp_max_(self.max_model_len)
+                else:
+                    seq_lens = min(seq_lens, self.max_model_len)
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
                 self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
