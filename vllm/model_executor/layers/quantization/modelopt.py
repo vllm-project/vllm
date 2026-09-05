@@ -1968,7 +1968,7 @@ class KNvfp4Static(QuantKeyScheme):
         # means the FP4 weights were never actually loaded (e.g. the
         # checkpoint stores this layer as BF16 and the weight loader silently
         # skipped it).
-        if torch.isnan(layer.weight_scale).any():
+        if torch.isnan(layer.weight_scale.float()).any():
             raise RuntimeError(
                 f"NVFP4 weight_scale for layer "
                 f"{getattr(layer, 'name', repr(layer))!r} was never loaded "
