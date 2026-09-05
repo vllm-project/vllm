@@ -1307,6 +1307,78 @@ def test_thinking_budget_enforced_without_penalties():
     )
 
 
+class _StubLogitsProcessor(LogitsProcessor):
+    """Minimal no-op processor relying on the conservative default
+    (``needs_output_token_ids() == True``)."""
+
+    def __init__(self, vllm_config, device, is_pin_memory):
+        pass
+
+    def is_argmax_invariant(self) -> bool:
+        return True
+
+    def update_state(self, batch_update) -> None:
+        pass
+
+    def apply(self, logits):
+        return logits
+
+
+class _ValueAgnosticLogitsProcessor(_StubLogitsProcessor):
+    """Custom processor that opts out of output-token-id tracking."""
+
+    @classmethod
+    def needs_output_token_ids(cls) -> bool:
+        return False
+
+
+def test_needs_output_token_ids_declarations():
+    """Builtins read at most the length of the output token ids, so they
+    declare no dependency; the base default stays conservative (True) for
+    out-of-tree processors."""
+    assert LogitsProcessor.needs_output_token_ids() is True
+    for cls in (
+        MinPLogitsProcessor,
+        LogitBiasLogitsProcessor,
+        MinTokensLogitsProcessor,
+    ):
+        assert cls.needs_output_token_ids() is False
+
+
+def test_build_logitsprocs_aggregates_output_token_ids_gate():
+    """``LogitsProcessors.needs_output_token_ids`` ORs the per-processor
+    declarations so async scheduling only repairs `-1` placeholders when a
+    loaded processor actually reads token values."""
+    device = torch.device("cpu")
+    vllm_config = VllmConfig()
+
+    builtins_only = build_logitsprocs(
+        vllm_config=vllm_config,
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
+    )
+    assert builtins_only.needs_output_token_ids is False
+
+    value_agnostic = build_logitsprocs(
+        vllm_config=vllm_config,
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
+        custom_logitsprocs=[_ValueAgnosticLogitsProcessor],
+    )
+    assert value_agnostic.needs_output_token_ids is False
+
+    value_reading = build_logitsprocs(
+        vllm_config=vllm_config,
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
+        custom_logitsprocs=[_StubLogitsProcessor],
+    )
+    assert value_reading.needs_output_token_ids is True
+
+
 @pytest.mark.parametrize(
     ("raw_value", "expected"),
     [
