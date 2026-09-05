@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
@@ -240,6 +241,13 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         if self.g_proj is not None:
-            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
+            gate = self.g_proj(hidden_states)[0]
+            if envs.VLLM_ROCM_USE_FUSED_SIGMOID_GATE:
+                from aiter.ops.triton.fusions.fused_sigmoid_mul import (
+                    fused_sigmoid_mul,
+                )
+                attn_out = fused_sigmoid_mul(attn_out, gate)
+            else:
+                attn_out = attn_out * gate.sigmoid()
 
         return self.o_proj(attn_out)[0]
