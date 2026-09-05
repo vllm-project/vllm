@@ -148,7 +148,9 @@ class FakeNixlWrapper:
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
 
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
+    def prep_xfer_dlist(
+        self, agent_name: str, descs, mem_type: str | None = None
+    ) -> int:
         return uuid.uuid4().int
 
     def get_agent_metadata(self) -> bytes:
@@ -482,7 +484,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attributes needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
-        self.src_blocks_data = np.empty((0, 3), dtype=np.uint64)
+        self.src_blocks_data = np.empty((0, 5), dtype=np.uint64)
         rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
@@ -805,11 +807,12 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+        block_len = worker.block_len_per_layer[0]
         worker.src_blocks_data = np.array(
-            [(0, worker.block_len_per_layer[0], worker.tp_rank)],
+            [(0, block_len, worker.tp_rank, block_len, worker.num_blocks)],
             dtype=np.uint64,
         )
-        worker.num_descs = len(worker.src_blocks_data)
+        worker.num_descs = int(worker.src_blocks_data[:, 4].sum())
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
@@ -1176,7 +1179,7 @@ class TestNixlHandshake:
         )
 
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
-            [0x1000 + local_block_len, local_block_len, 0]
+            [0x1000 + local_block_len, local_block_len, 0, remote_block_len, 1]
         ]
 
     @patch(
@@ -1211,12 +1214,12 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
             worker.src_blocks_data = np.array(
                 [
-                    (0, fa_len, worker.tp_rank),
-                    (0, idx_len, worker.tp_rank),
+                    (0, fa_len, worker.tp_rank, fa_len, worker.num_blocks),
+                    (0, idx_len, worker.tp_rank, idx_len, worker.num_blocks),
                 ],
                 dtype=np.uint64,
             )
-            worker.num_descs = len(worker.src_blocks_data)
+            worker.num_descs = int(worker.src_blocks_data[:, 4].sum())
 
             # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region scales by tp_ratio;
             # REPLICATE region is unchanged.
@@ -1888,8 +1891,8 @@ def test_register_kv_caches(
     This test verifies:
     1. nixl_wrapper.get_reg_descs() is called with caches_data containing
        tensor metadata
-    2. nixl_wrapper.get_xfer_descs() is called with blocks_data containing
-       block layout info
+    2. nixl_wrapper.prep_xfer_dlist() is called with strided block runs whose
+       expansion covers exactly the registered blocks
     """
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
@@ -2004,9 +2007,12 @@ def test_register_kv_caches(
             assert size == raw.nbytes
             assert base_addr == raw.data_ptr()
 
-        # Verify get_xfer_descs was called with blocks_data
-        assert mock_wrapper_instance.get_xfer_descs.called
-        blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
+        # Verify the local dlist was prepared from one strided run per region;
+        # expand it to per-block windows for the layout-blind checks below.
+        assert mock_wrapper_instance.prep_xfer_dlist.called
+        _agent, block_runs = mock_wrapper_instance.prep_xfer_dlist.call_args[0]
+        assert block_runs.shape[1] == 5
+        blocks_data = NixlConnectorWorker._expand_stride_descs(block_runs)
 
         # Layout-blind contract: whatever regions the worker carves out,
         # transferring "block b" must move exactly logical block b's bytes for
@@ -2040,6 +2046,7 @@ def test_register_kv_caches(
             start for start, _len, _tp in blocks_data if owner[start] == 0
         }
         assert len(blocks_data) == num_blocks * len(base_addrs)
+        assert len(block_runs) == len(base_addrs)
 
         assert connector.connector_worker.block_size == 16
 
@@ -2103,14 +2110,14 @@ def test_register_packed_dsv4_mla_cache_as_single_region(
         )
         connector.register_kv_caches(dict(zip(layer_names, views)))
 
-        blocks_data, _ = wrapper.get_xfer_descs.call_args[0]
+        _agent, block_runs = wrapper.prep_xfer_dlist.call_args[0]
         packed_block_len = num_layers * spec.page_size_bytes
         assert connector.connector_worker.kv_caches_base_addr[
             connector.connector_worker.engine_id
         ][0] == [raw.data_ptr()]
-        assert blocks_data.tolist() == [
-            [raw.data_ptr() + block_idx * packed_block_len, packed_block_len, 0]
-            for block_idx in range(num_blocks)
+        # One packed region -> one run of num_blocks packed rows.
+        assert block_runs.tolist() == [
+            [raw.data_ptr(), packed_block_len, 0, packed_block_len, num_blocks]
         ]
 
 
