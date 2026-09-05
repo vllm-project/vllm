@@ -558,6 +558,14 @@ torch::stable::Tensor moe_wna16_marlin_gemm(
     int64_t size_n, int64_t size_k, bool is_k_full, bool use_atomic_add,
     bool use_fp32_reduce, bool is_zp_float, int64_t thread_k, int64_t thread_n,
     int64_t blocks_per_sm) {
+  // The kernel reinterprets topk_weights as `const float*` (see marlin_mm),
+  // so a non-float tensor would be silently type-punned, and for dtypes
+  // narrower than 4 bytes it would also be read out of bounds. Validate up
+  // front instead of relying on every caller to pass fp32.
+  STD_TORCH_CHECK(
+      topk_weights.scalar_type() == torch::headeronly::ScalarType::Float,
+      "scalar type of topk_weights must be float");
+
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 
   auto c_dtype = a.scalar_type();
