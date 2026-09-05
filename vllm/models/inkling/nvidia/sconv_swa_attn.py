@@ -49,7 +49,10 @@ class InklingSconvMetadata(AttentionMetadata):
 
 
 class InklingSconvMetadataBuilder(AttentionMetadataBuilder[InklingSconvMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Per-token seq_idx/query_start are searched from the device query_start_loc,
+    # and the tokens adaptive verification trims carry PAD slots the conv skips,
+    # so varlen decode batches replay correctly from a capture.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,

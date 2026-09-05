@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import cast
+from typing import ClassVar, cast
 
 import torch
 from torch import nn
@@ -21,10 +21,11 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -63,6 +64,31 @@ class RelLogitsProj(nn.Module):
     def forward(self, r_out: torch.Tensor) -> torch.Tensor:
         # r_out: (T, num_heads, d_rel) -> (T, num_heads, rel_extent)
         return torch.einsum("thd,de->the", r_out, self.proj)
+
+
+class InklingAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+    """FlashAttention metadata for Inkling's own varlen rel-attention kernel.
+
+    The kernel reads its per-request bounds from the device ``query_start_loc``
+    and ``seq_lens``; the host-side ``max_query_len`` and ``num_actual_tokens``
+    only size the launch, and both stay upper bounds when adaptive verification
+    trims drafts on device. Varlen decode batches are therefore capture-safe,
+    unlike the FlashAttention decode kernel this metadata is shared with.
+    """
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class InklingAttentionBackend(FlashAttentionBackend):
+    """FlashAttention KV-cache layout and metadata, Inkling's cudagraph support."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "INKLING_FA4_REL"
+
+    @staticmethod
+    def get_builder_cls() -> type[InklingAttentionMetadataBuilder]:
+        return InklingAttentionMetadataBuilder
 
 
 class InklingAttention(nn.Module, AttentionLayerBase):
@@ -175,7 +201,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return FlashAttentionBackend
+        return InklingAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         block_size = vllm_config.cache_config.block_size
