@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import contextlib
+from collections import deque
 from contextlib import AsyncExitStack
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -347,6 +351,151 @@ class TestValidateGeneratorInput:
         # Should return an ErrorResponse
         assert result is not None
         assert isinstance(result, ErrorResponse)
+
+
+class TestBackgroundStreamTermination:
+    """Tests for responses_background_stream_generator termination.
+
+    The consumer must terminate not only on a `response.completed` event but
+    also when the producer exits without one (cancellation, generation error,
+    or an unexpected exception). Before the producer-done signal existed, the
+    consumer would block forever on `new_event_signal.wait()` in those cases.
+    """
+
+    @pytest_asyncio.fixture
+    async def serving_responses_instance(self):
+        engine_client = MagicMock()
+
+        model_config = MagicMock()
+        model_config.max_model_len = 100
+        model_config.hf_config.model_type = "test"
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.input_processor = MagicMock()
+        engine_client.renderer = MagicMock()
+
+        return OpenAIServingResponses(
+            engine_client=engine_client,
+            models=MagicMock(),
+            online_renderer=MagicMock(),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
+    @staticmethod
+    async def _collect(serving, response_id):
+        return [
+            event
+            async for event in serving.responses_background_stream_generator(
+                response_id
+            )
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip_global_cleanup
+    async def test_terminates_when_producer_exits_without_terminal_event(
+        self, serving_responses_instance
+    ):
+        """A dead producer without `response.completed` must not hang the
+        consumer; buffered events are still flushed."""
+        serving = serving_responses_instance
+        response_id = "resp_producer_died"
+        done_signal = asyncio.Event()
+        done_signal.set()
+        serving.event_store[response_id] = (
+            deque(
+                [
+                    SimpleNamespace(type="response.created"),
+                    SimpleNamespace(type="response.in_progress"),
+                ]
+            ),
+            asyncio.Event(),
+            done_signal,
+        )
+
+        events = await asyncio.wait_for(
+            self._collect(serving, response_id), timeout=1.0
+        )
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.in_progress",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip_global_cleanup
+    async def test_terminates_when_background_producer_is_cancelled(
+        self, serving_responses_instance, monkeypatch
+    ):
+        """Cancelling the background task must terminate stream consumers."""
+        serving = serving_responses_instance
+        response_id = "resp_cancelled"
+        request = MagicMock()
+        request.request_id = response_id
+        blocked = asyncio.Event()
+
+        async def fake_stream_generator(request, *args, **kwargs):
+            yield SimpleNamespace(type="response.created")
+            yield SimpleNamespace(type="response.in_progress")
+            await blocked.wait()
+
+        monkeypatch.setattr(
+            serving, "responses_stream_generator", fake_stream_generator
+        )
+        task = asyncio.create_task(serving._run_background_request_stream(request))
+
+        async def wait_for_events():
+            while (
+                response_id not in serving.event_store
+                or len(serving.event_store[response_id][0]) < 2
+            ):
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_events(), timeout=1.0)
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+        events = await asyncio.wait_for(
+            self._collect(serving, response_id), timeout=1.0
+        )
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.in_progress",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip_global_cleanup
+    async def test_still_terminates_on_completed_event(
+        self, serving_responses_instance
+    ):
+        """The normal `response.completed` path keeps working even while the
+        producer is still alive (done signal unset)."""
+        serving = serving_responses_instance
+        response_id = "resp_completed"
+        serving.event_store[response_id] = (
+            deque(
+                [
+                    SimpleNamespace(type="response.created"),
+                    SimpleNamespace(type="response.completed"),
+                ]
+            ),
+            asyncio.Event(),
+            asyncio.Event(),
+        )
+
+        events = await asyncio.wait_for(
+            self._collect(serving, response_id), timeout=1.0
+        )
+
+        assert [event.type for event in events] == [
+            "response.created",
+            "response.completed",
+        ]
 
 
 @pytest.mark.asyncio
