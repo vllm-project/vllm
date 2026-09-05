@@ -91,6 +91,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BATCH_INVARIANT_CANONICAL_PREFILL_CHUNK_BLOCKS: int = 8
+    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -629,6 +631,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Experimental: when batch-invariant mode is enabled with prefix caching,
+    # force prefill scheduling and prefix-cache hits onto fixed boundaries.
+    # This is specified in scheduler blocks, not raw tokens, so the effective
+    # chunk size is always aligned. If unset or 0, vLLM uses an automatic
+    # default.
+    "VLLM_BATCH_INVARIANT_CANONICAL_PREFILL_CHUNK_BLOCKS": lambda: int(
+        os.getenv("VLLM_BATCH_INVARIANT_CANONICAL_PREFILL_CHUNK_BLOCKS", "8")
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),

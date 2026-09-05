@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -391,6 +392,60 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
+    def _canonical_prefill_chunk_size(self) -> int:
+        if not envs.VLLM_BATCH_INVARIANT:
+            return 0
+        if not self.cache_config.enable_prefix_caching:
+            return 0
+        chunk_blocks = envs.VLLM_BATCH_INVARIANT_CANONICAL_PREFILL_CHUNK_BLOCKS
+        if chunk_blocks <= 0:
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT_CANONICAL_PREFILL_CHUNK_BLOCKS "
+                f"({chunk_blocks}) must be positive."
+            )
+        # When prefix caching is on, cache-hit length is non-deterministic.
+        # Align to a fixed block multiple so all requests see the same prefill
+        # tile layout regardless of how much was cached.
+        return self.block_size * chunk_blocks
+
+    def _canonical_prefill_split(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> int:
+        chunk_size = self._canonical_prefill_chunk_size()
+        if chunk_size <= 0 or num_new_tokens <= 0:
+            return num_new_tokens
+
+        # Only canonicalize prompt/extend prefill. Decode must still schedule
+        # its normal token(s), and the final prompt chunk may be shorter than
+        # chunk_size.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if num_computed_tokens >= prefill_end:
+            return num_new_tokens
+
+        next_boundary = (
+            (num_computed_tokens // chunk_size) + 1
+        ) * chunk_size
+        canonical_end = min(
+            num_computed_tokens + num_new_tokens,
+            next_boundary,
+            request.num_tokens,
+        )
+        return max(0, canonical_end - num_computed_tokens)
+
+    def _canonical_prefill_isolation_enabled(self) -> bool:
+        return self._canonical_prefill_chunk_size() > 0
+
+    @staticmethod
+    def _is_prefill_work(
+        request: Request,
+        num_computed_tokens: int,
+    ) -> bool:
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        return num_computed_tokens < prefill_end
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -634,10 +689,23 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=self.num_prefill_lookahead,
                 )
 
+            num_new_tokens = self._canonical_prefill_split(
+                request,
+                request.num_computed_tokens,
+                num_new_tokens,
+            )
+
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(
+                    request, num_new_tokens
+                )
+
             # Multi-module MTP: avoid ending a prefill chunk within
             # num_prefill_lookahead of the prefill end.
             num_new_tokens = self._reserve_prefill_lookahead(
-                request, request.num_computed_tokens, num_new_tokens
+                request,
+                request.num_computed_tokens,
+                num_new_tokens,
             )
 
             if num_new_tokens == 0:
@@ -733,7 +801,15 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
+
+            if (
+                self._canonical_prefill_isolation_enabled()
+                and self._is_prefill_work(request, request.num_computed_tokens)
+            ):
+                token_budget = 0
+
             input_budget -= num_new_tokens + draft_slots
+
             req_index += 1
 
             # Speculative decode related.
@@ -1045,10 +1121,31 @@ class Scheduler(SchedulerInterface):
                             shift_computed_tokens=self.num_prefill_lookahead,
                         )
 
-                    # Multi-module MTP: avoid ending a prefill chunk within
-                    # num_prefill_lookahead of the prefill end.
-                    num_new_tokens = self._reserve_prefill_lookahead(
-                        request, num_computed_tokens, num_new_tokens
+                num_new_tokens = self._canonical_prefill_split(
+                    request,
+                    num_computed_tokens,
+                    num_new_tokens,
+                )
+
+                # Multi-module MTP: avoid ending a prefill chunk within
+                # num_prefill_lookahead of the prefill end.
+                num_new_tokens = self._reserve_prefill_lookahead(
+                    request,
+                    num_computed_tokens,
+                    num_new_tokens,
+                )
+
+                if num_new_tokens == 0:
+                    break
+
+                # Skip block alignment when setting up async receive (no local work).
+                if self.need_mamba_block_aligned_split and not load_kv_async:
+                    num_new_tokens = self._mamba_block_aligned_split(
+                        request,
+                        num_new_tokens,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                        num_uncached_common_prefix_tokens,
                     )
 
                     if num_new_tokens == 0:
@@ -1190,11 +1287,19 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+
+                if (
+                    self._canonical_prefill_isolation_enabled()
+                    and self._is_prefill_work(request, num_computed_tokens)
+                ):
+                    token_budget = 0
+
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
                     ] * self.num_spec_tokens
+
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
