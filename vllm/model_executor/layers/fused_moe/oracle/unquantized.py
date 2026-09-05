@@ -346,9 +346,14 @@ def convert_to_unquantized_kernel_format(
     moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
-    layer: torch.nn.Module,
+    layer: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.MOONEP:
+        if layer is None:
+            raise ValueError(
+                "MoonEP weight conversion requires the layer module to stash "
+                "the [E+B] weight layout on"
+            )
         # MoonEP addresses expert weights by global [E+B] row and needs one
         # contiguous tensor per projection (gate / up / down). The layer's
         # w13_weight becomes the gate tensor and w2_weight the down tensor;
@@ -512,7 +517,6 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         w2_weight: torch.Tensor,
         layer: torch.nn.Module | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert layer is not None
         return convert_to_unquantized_kernel_format(
             backend, moe_config, w13_weight, w2_weight, layer=layer
         )
