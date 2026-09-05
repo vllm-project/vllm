@@ -2321,13 +2321,17 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
-        torch.accelerator.empty_cache()
         try:
-            torch.accelerator.empty_host_cache()
-        except AttributeError:
-            logger.warning(
-                "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
-            )
+            if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "is_available") and torch.accelerator.is_available():
+                torch.accelerator.empty_cache()
+                try:
+                    torch.accelerator.empty_host_cache()
+                except AttributeError:
+                    logger.warning(
+                        "torch.accelerator.empty_host_cache() only available in Pytorch >=2.9"
+                    )
+        except Exception:
+            pass
 
     logger.debug_once("[shutdown] Distributed: cleanup complete")
 

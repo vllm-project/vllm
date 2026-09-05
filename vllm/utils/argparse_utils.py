@@ -314,7 +314,7 @@ class FlexibleArgumentParser(ArgumentParser):
                     "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
                 )
 
-        if "--config" in args:
+        if any(arg == "--config" or arg.startswith("--config=") for arg in args):
             args = self._pull_args_from_config(args)
 
         def repl(match: re.Match) -> str:
@@ -493,15 +493,30 @@ class FlexibleArgumentParser(ArgumentParser):
         this way the order of priorities is maintained when these are args
         parsed by super().
         """
-        assert args.count("--config") <= 1, "More than one config file specified!"
+        config_indices = [
+            i
+            for i, arg in enumerate(args)
+            if arg == "--config" or arg.startswith("--config=")
+        ]
+        assert len(config_indices) <= 1, "More than one config file specified!"
 
-        index = args.index("--config")
-        if index == len(args) - 1:
-            raise ValueError(
-                "No config file specified! Please check your command-line arguments."
-            )
-
-        file_path = args[index + 1]
+        index = config_indices[0]
+        if args[index].startswith("--config="):
+            file_path = args[index].split("=", 1)[1]
+            if not file_path:
+                raise ValueError(
+                    "No config file specified! "
+                    "Please check your command-line arguments."
+                )
+            after_config_slice = args[index + 1 :]
+        else:
+            if index == len(args) - 1:
+                raise ValueError(
+                    "No config file specified! "
+                    "Please check your command-line arguments."
+                )
+            file_path = args[index + 1]
+            after_config_slice = args[index + 2 :]
 
         config_args = self.load_config_file(file_path)
 
@@ -513,7 +528,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # of cli > config > defaults
         if args[0].startswith("-"):
             # No sub command (e.g., api_server entry point)
-            args = config_args + args[0:index] + args[index + 2 :]
+            args = config_args + args[0:index] + after_config_slice
         elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith("-")
             model_in_config = any(arg == "--model" for arg in config_args)
@@ -531,21 +546,21 @@ class FlexibleArgumentParser(ArgumentParser):
                     + [args[1]]
                     + config_args
                     + args[2:index]
-                    + args[index + 2 :]
+                    + after_config_slice
                 )
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+                args = [args[0]] + config_args + args[1:index] + after_config_slice
         else:
-            args = [args[0]] + config_args + args[1:index] + args[index + 2 :]
+            args = [args[0]] + config_args + args[1:index] + after_config_slice
 
         return args
 
     def load_config_file(self, file_path: str) -> list[str]:
-        """Loads a yaml file and returns the key value pairs as a
+        """Loads a yaml or json file and returns the key value pairs as a
         flattened list with argparse like pattern.
 
-        Supports both flat configs and nested YAML structures.
+        Supports both flat configs and nested YAML/JSON structures.
 
         Flat config example:
         ```yaml
@@ -568,19 +583,22 @@ class FlexibleArgumentParser(ArgumentParser):
             ['--compilation-config', '{"pass_config": {"fuse_allreduce_rms": true}}',
              '--speculative-config', '{"model": "nvidia/gpt-oss-120b-Eagle3-v2", ...}']
         """
-        extension: str = file_path.split(".")[-1]
-        if extension not in ("yaml", "yml"):
+        extension: str = file_path.split(".")[-1].lower()
+        if extension not in ("yaml", "yml", "json"):
             raise ValueError(
-                f"Config file must be of a yaml/yml type. {extension} supplied"
+                f"Config file must be of a yaml/yml/json type. {extension} supplied"
             )
 
-        # Supports both flat configs and nested dicts
+        # Supports both flat configs, JSON, and nested dicts
         processed_args: list[str] = []
 
         config: dict[str, Any] = {}
         try:
             with open(file_path) as config_file:
-                config = yaml.safe_load(config_file)
+                if extension == "json":
+                    config = json.load(config_file)
+                else:
+                    config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(
                 "Unable to read the config file at %s. Check path correctness",
@@ -588,12 +606,28 @@ class FlexibleArgumentParser(ArgumentParser):
             )
             raise ex
 
+        if not isinstance(config, dict):
+            return processed_args
+
         for key, value in config.items():
+            if value is None:
+                continue
             if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
-                elif (no_key := f"--no-{key}") in self._option_string_actions:
-                    processed_args.append(no_key)
+                else:
+                    dashed_key = key.replace("_", "-")
+                    no_dashed = f"--no-{dashed_key}"
+                    no_direct = f"--no-{key}"
+                    if (
+                        no_dashed in self._option_string_actions
+                        or no_direct in self._option_string_actions
+                    ):
+                        processed_args.append(
+                            no_dashed
+                            if no_dashed in self._option_string_actions
+                            else no_direct
+                        )
             elif isinstance(value, list):
                 if value:
                     processed_args.append("--" + key)
