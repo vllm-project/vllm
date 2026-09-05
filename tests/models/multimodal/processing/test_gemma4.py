@@ -286,3 +286,41 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
         )
         == 1
     )
+
+
+# ``torch.accelerator.get_memory_info()`` requires a PyTorch-native
+# accelerator backend. On out-of-tree platforms that run torch models through
+# a non-PyTorch runtime (e.g. the TPU backend, where this model executes via
+# torchax on JAX) the call raises ``RuntimeError: PyTorch is not linked with
+# support for jax devices``, which used to kill the engine on the first image
+# request. ``_accelerator_memory_info`` reports ``(0, 0)`` instead, which
+# ``_encoder_chunk`` maps to the always-memory-safe chunk size of 1.
+
+_accelerator_memory_info = Gemma4ForConditionalGeneration._accelerator_memory_info
+
+
+def test_accelerator_memory_info_passes_through(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        torch.accelerator,
+        "get_memory_info",
+        lambda: (3 * GiB_bytes, 22 * GiB_bytes),
+    )
+    assert _accelerator_memory_info() == (3 * GiB_bytes, 22 * GiB_bytes)
+
+
+def test_accelerator_memory_info_unsupported_platform_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def raise_unsupported():
+        raise RuntimeError("PyTorch is not linked with support for jax devices")
+
+    monkeypatch.setattr(torch.accelerator, "get_memory_info", raise_unsupported)
+
+    free, total = _accelerator_memory_info()
+
+    assert (free, total) == (0, 0)
+    # A zero budget must degrade to the minimal chunk size, not crash.
+    assert (
+        _encoder_chunk(_VIDEO_PATCHES_PER_FRAME, free, total, _POSITION_EMBEDDING_SIZE)
+        == 1
+    )
