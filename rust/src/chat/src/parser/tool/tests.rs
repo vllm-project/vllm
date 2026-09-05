@@ -248,3 +248,15 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_new_registers_lfm2_by_name_and_model() {
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::LFM2));
+    factory.create(names::LFM2, &[]).unwrap();
+    assert_eq!(
+        factory.resolve_name_for_model("LiquidAI/LFM2.5-1.2B-Instruct"),
+        Some(names::LFM2)
+    );
+}
