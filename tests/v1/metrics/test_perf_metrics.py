@@ -32,6 +32,7 @@ from vllm.v1.metrics.perf import (
     ModelMetrics,
     ParsedArgs,
     UnembedMetrics,
+    estimate_num_activated_experts,
 )
 
 
@@ -86,7 +87,15 @@ def create_mock_vllm_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     enable_expert_parallel=False,
+    moe_activated_experts_estimator="expected_uniform",
 ) -> SimpleNamespace:
+    """Build a minimal mock VllmConfig covering the fields perf.py parsers read.
+
+    `moe_activated_experts_estimator` mirrors
+    `ObservabilityConfig.mfu_moe_activated_experts_estimator` and defaults to
+    the new S-MBU-style estimate; pass `"upper_bound"` to pin a test to the
+    legacy perfect-load-balancing formula.
+    """
     vllm_config = SimpleNamespace()
     vllm_config.model_config = MockModelConfig(hf_config, model_dtype)
 
@@ -100,6 +109,11 @@ def create_mock_vllm_config(
     vllm_config.parallel_config.tensor_parallel_size = tensor_parallel_size
     vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
     vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
+
+    vllm_config.observability_config = SimpleNamespace()
+    vllm_config.observability_config.mfu_moe_activated_experts_estimator = (
+        moe_activated_experts_estimator
+    )
 
     return vllm_config
 
@@ -463,7 +477,20 @@ def test_model_metrics_aggregation():
 
 
 def test_moe_expert_activation_proportional_scaling():
-    """Test that routed expert metrics scale proportionally with num_experts_per_tok."""
+    """Test that routed expert metrics scale proportionally with num_experts_per_tok.
+
+    Pinned to the legacy `upper_bound` estimator: with num_tokens=100 and
+    num_experts=64, `num_activated_tokens = num_tokens * top_k` already
+    exceeds num_experts for every top_k tested here, so
+    `min(num_activated_tokens, num_experts)` saturates to a *constant* 64
+    regardless of top_k, which is exactly what makes read/write bytes exact
+    linear functions of top_k below. The default `expected_uniform`
+    estimator is intentionally *not* a linear function of top_k (that
+    non-linearity is the point of the S-MBU fix -- see
+    `test_ffn_metrics_s_mbu_below_naive_upper_bound` below), so it would
+    break this proportionality assertion for reasons unrelated to what this
+    test is checking (FLOPS/dense-activation scaling).
+    """
     base_moe_config = Qwen3MoeConfig(
         hidden_size=2048,
         intermediate_size=8192,
@@ -494,9 +521,15 @@ def test_moe_expert_activation_proportional_scaling():
         n_shared_experts=2,  # Same shared experts
     )
 
-    base_vllm_config = create_mock_vllm_config(base_moe_config)
-    double_vllm_config = create_mock_vllm_config(double_experts_config)
-    triple_vllm_config = create_mock_vllm_config(triple_experts_config)
+    base_vllm_config = create_mock_vllm_config(
+        base_moe_config, moe_activated_experts_estimator="upper_bound"
+    )
+    double_vllm_config = create_mock_vllm_config(
+        double_experts_config, moe_activated_experts_estimator="upper_bound"
+    )
+    triple_vllm_config = create_mock_vllm_config(
+        triple_experts_config, moe_activated_experts_estimator="upper_bound"
+    )
 
     base_metrics = FfnMetrics.from_vllm_config(base_vllm_config)
     double_metrics = FfnMetrics.from_vllm_config(double_vllm_config)
@@ -758,6 +791,16 @@ def test_moe_per_gpu_with_expert_parallelism():
 def test_moe_per_gpu_expert_activation_accounting():
     """
     Test that MoE correctly accounts for expert activations with small batch sizes.
+
+    Pinned to the legacy `upper_bound` estimator, which this test exercises
+    directly (see inline comments below): with only 8 local experts after
+    expert-parallel sharding and top_k=8, `min(n, 8)` saturates to a
+    constant 8 for both the small and large batch, by construction. Under
+    the (more realistic) default `expected_uniform` estimator this
+    saturate-immediately behavior is exactly the bug being fixed -- a
+    10-token batch should *not* be assumed to touch every local expert; see
+    `test_ffn_metrics_s_mbu_below_naive_upper_bound` for a version of this
+    same small-vs-large-batch comparison under the new default.
     """
     hf_config = Qwen3MoeConfig(
         hidden_size=2048,
@@ -774,6 +817,7 @@ def test_moe_per_gpu_expert_activation_accounting():
         hf_config,
         data_parallel_size=8,
         enable_expert_parallel=True,
+        moe_activated_experts_estimator="upper_bound",
     )
     metrics = FfnMetrics.from_vllm_config(vllm_config)
 
@@ -1336,3 +1380,247 @@ def test_mla_attention_scaling_with_layers():
     assert double_metrics.get_num_flops(ctx) == 2 * base_metrics.get_num_flops(ctx)
     assert double_metrics.get_read_bytes(ctx) == 2 * base_metrics.get_read_bytes(ctx)
     assert double_metrics.get_write_bytes(ctx) == 2 * base_metrics.get_write_bytes(ctx)
+
+
+#### S-MBU: estimate_num_activated_experts() Tests ####
+
+
+def test_estimate_num_activated_experts_matches_closed_form():
+    """Test the estimator against a hand-computed closed-form value.
+
+    For num_tokens=6, top_k=2, num_experts=8, the expected number of
+    distinct experts hit under uniform-random routing with per-token
+    DISTINCT top-k picks is:
+        8 * (1 - (1 - 2/8) ** 6) = 8 * (1 - 0.75 ** 6) ~= 6.576 -> rounds to 7.
+    This is below the naive upper bound min(6 * 2, 8) = 8 (the legacy
+    "upper_bound" formula this function replaces), and strictly above the
+    old slot-independent estimate that ignores within-token distinctness
+    (treats the num_tokens * top_k = 12 activations as independent draws):
+        8 * (1 - (1 - 1/8) ** 12) ~= 6.389 -> rounds to 6.
+    """
+    num_tokens = 6
+    top_k = 2
+    num_experts = 8
+
+    expected = round(num_experts * (1 - (1 - top_k / num_experts) ** num_tokens))
+    assert expected == 7  # hand-computed reference value
+
+    result = estimate_num_activated_experts(num_tokens, top_k, num_experts)
+    assert result == expected
+    assert result < min(num_tokens * top_k, num_experts)  # naive upper bound
+
+    old_slot_independent = round(
+        num_experts * (1 - (1 - 1 / num_experts) ** (num_tokens * top_k))
+    )
+    assert old_slot_independent == 6  # hand-computed reference value
+    assert result > old_slot_independent
+
+
+def test_estimate_num_activated_experts_edge_cases():
+    """Test degenerate inputs: no tokens, no experts, non-positive top_k,
+    and top_k >= num_experts (every token's picks already span every
+    expert, so the result saturates to num_experts even at small
+    num_tokens)."""
+    assert estimate_num_activated_experts(0, 8, 64) == 0  # no tokens
+    assert estimate_num_activated_experts(100, 8, 0) == 0  # no experts
+    assert estimate_num_activated_experts(100, 0, 64) == 0  # top_k == 0
+    assert estimate_num_activated_experts(-5, 8, 64) == 0  # defensive, shouldn't occur
+    # defensive, shouldn't occur
+    assert estimate_num_activated_experts(100, -1, 64) == 0
+
+    # top_k >= num_experts: every token's top_k picks already cover every
+    # expert, regardless of how large top_k is beyond num_experts.
+    assert estimate_num_activated_experts(5, 64, 64) == 64
+    assert estimate_num_activated_experts(5, 100, 64) == 64
+
+
+def test_estimate_num_activated_experts_exact_at_single_token():
+    """Test the estimate is EXACT (not just close) at num_tokens == 1.
+
+    A single token's top_k picks are distinct by construction (top-k
+    routing never selects the same expert twice for one token), so the
+    estimator returns exactly min(top_k, num_experts) with zero
+    estimation error. This is the property that makes T=1 a ground-truth
+    check rather than just another sample point.
+    """
+    for top_k, num_experts in [(1, 8), (2, 8), (8, 8), (16, 8), (3, 64)]:
+        result = estimate_num_activated_experts(1, top_k, num_experts)
+        assert result == min(top_k, num_experts)
+
+
+def test_estimate_num_activated_experts_saturates_for_large_batches():
+    """Test the estimate saturates to num_experts as num_tokens grows large."""
+    assert estimate_num_activated_experts(10**6, 4, 32) == 32
+
+
+def test_estimate_num_activated_experts_observed_override():
+    """Test that a real observed union count, when supplied, wins outright.
+
+    This is the hook a future patch would use to wire in true per-step
+    routing telemetry (e.g. from EPLB); it must take priority over the
+    analytic estimate and be defensively clipped to [0, num_experts].
+    """
+    # Real telemetry says only 3 distinct experts were touched, even though
+    # the analytic estimate (or the naive upper bound) would say more.
+    assert (
+        estimate_num_activated_experts(1000, 8, 64, num_observed_activated_experts=3)
+        == 3
+    )
+
+    # Clipped to num_experts if the observed count is (erroneously) larger.
+    assert (
+        estimate_num_activated_experts(1000, 8, 64, num_observed_activated_experts=999)
+        == 64
+    )
+
+    # Clipped to 0 if negative.
+    assert (
+        estimate_num_activated_experts(1000, 8, 64, num_observed_activated_experts=-1)
+        == 0
+    )
+
+
+def test_estimate_num_activated_experts_never_exceeds_naive_upper_bound():
+    """Test S-MBU estimate <= naive upper bound for a broad parameter sweep.
+
+    The whole point of the fix is that the estimate must never overshoot
+    `min(num_tokens * top_k, num_experts)`; this is the safety property
+    that actually matters for callers (the fix can only reduce or match
+    estimated MoE weight-read bytes, never increase them). Sweep a grid of
+    (num_tokens, top_k, num_experts) triples and confirm this invariant
+    holds everywhere.
+
+    Note: this does *not* assert a strict inequality across the whole
+    sweep. Because the estimate is rounded to the nearest integer, ties
+    with the naive bound are expected (and correct, not a bug) at both
+    ends of the range: at num_tokens == 1 the two formulas coincide
+    exactly (see `test_estimate_num_activated_experts_exact_at_single_token`),
+    and for num_tokens * top_k >> num_experts the true expected value gets
+    rounded to num_experts, same as the naive bound. Strictness in the
+    interesting middle range is covered by
+    `test_estimate_num_activated_experts_matches_closed_form` and
+    `test_ffn_metrics_s_mbu_below_naive_upper_bound`.
+    """
+    for num_tokens in range(0, 200, 17):
+        for top_k in range(0, 40, 7):
+            for num_experts in range(0, 300, 11):
+                naive_upper_bound = min(num_tokens * top_k, num_experts)
+                estimate = estimate_num_activated_experts(
+                    num_tokens, top_k, num_experts
+                )
+                assert estimate <= naive_upper_bound
+
+
+def test_estimate_num_activated_experts_at_least_old_slot_independent_formula():
+    """Test the new (top-k-DISTINCT-aware) estimate is always >= the old
+    (pre-fix) formula that treated `num_tokens * top_k` as independent
+    slot draws with replacement.
+
+    Forcing a token's `top_k` picks to be distinct can only raise the
+    expected number of distinct experts touched relative to a model that
+    allows a token to (nonsensically) redraw the same expert multiple
+    times; this sweep is the property-test counterpart to the strict
+    inequality demonstrated on one concrete example in
+    `test_estimate_num_activated_experts_matches_closed_form`.
+    """
+    for num_tokens in range(1, 200, 17):
+        for top_k in range(1, 40, 7):
+            for num_experts in range(1, 300, 11):
+                new_estimate = estimate_num_activated_experts(
+                    num_tokens, top_k, num_experts
+                )
+                n = num_tokens * top_k
+                old_estimate = round(num_experts * (1 - (1 - 1 / num_experts) ** n))
+                assert new_estimate >= old_estimate
+
+
+#### S-MBU: FfnMetrics end-to-end Tests ####
+
+
+def test_ffn_metrics_s_mbu_below_naive_upper_bound():
+    """Test that the default S-MBU estimator reads fewer weight bytes than
+    the legacy upper-bound estimator for the same batch, and that small
+    batches are no longer assumed to saturate every local expert.
+
+    This is the end-to-end (ExecutionContext -> FfnMetrics) counterpart to
+    `test_estimate_num_activated_experts_never_exceeds_naive_upper_bound`,
+    and mirrors the small-vs-large-batch scenario in
+    `test_moe_per_gpu_expert_activation_accounting` (which is pinned to
+    `upper_bound`) under the new default instead.
+    """
+    hf_config = Qwen3MoeConfig(
+        hidden_size=2048,
+        intermediate_size=8192,
+        num_hidden_layers=12,
+        num_experts=64,
+        num_experts_per_tok=8,
+        moe_intermediate_size=14336,
+        n_shared_experts=0,
+    )
+
+    expected_uniform_config = create_mock_vllm_config(
+        hf_config, moe_activated_experts_estimator="expected_uniform"
+    )
+    upper_bound_config = create_mock_vllm_config(
+        hf_config, moe_activated_experts_estimator="upper_bound"
+    )
+    assert (
+        expected_uniform_config.observability_config.mfu_moe_activated_experts_estimator
+        == ("expected_uniform")
+    )
+
+    expected_uniform_metrics = FfnMetrics.from_vllm_config(expected_uniform_config)
+    upper_bound_metrics = FfnMetrics.from_vllm_config(upper_bound_config)
+    assert (
+        expected_uniform_metrics.moe_activated_experts_estimator == "expected_uniform"
+    )
+    assert upper_bound_metrics.moe_activated_experts_estimator == "upper_bound"
+
+    # Small batch, single request: num_activated_tokens = 10 * 8 = 80 for
+    # num_experts=64 -- well past the naive "always a new expert" regime.
+    small_ctx = ExecutionContext.from_single_request(
+        num_tokens=10, context_len=512, is_prefill=True
+    )
+
+    naive_weight_bytes = upper_bound_metrics.get_read_bytes_breakdown(small_ctx)[
+        "routed_up_gate_weights"
+    ]
+    s_mbu_weight_bytes = expected_uniform_metrics.get_read_bytes_breakdown(small_ctx)[
+        "routed_up_gate_weights"
+    ]
+
+    # The naive formula assumes all 64 experts get touched by only 10
+    # tokens (min(80, 64) == 64); the S-MBU estimate must be strictly
+    # smaller.
+    assert s_mbu_weight_bytes < naive_weight_bytes
+
+    # Total read bytes (all components, not just the routed-expert weight
+    # term) must also strictly decrease, since nothing else in the
+    # breakdown changes between the two estimator modes.
+    assert expected_uniform_metrics.get_read_bytes(
+        small_ctx
+    ) < upper_bound_metrics.get_read_bytes(small_ctx)
+
+    # Write bytes are untouched by this fix (MoE writes are pure
+    # activation traffic, not expert-weight traffic) and must be identical
+    # across both estimator modes.
+    assert expected_uniform_metrics.get_write_bytes(
+        small_ctx
+    ) == upper_bound_metrics.get_write_bytes(small_ctx)
+
+
+def test_ffn_moe_activation_estimator_parser_default():
+    """Test the parser defaults to 'expected_uniform' when unset, matching
+    `ObservabilityConfig.mfu_moe_activated_experts_estimator`'s default."""
+    hf_config = Qwen3MoeConfig(
+        hidden_size=2048,
+        intermediate_size=8192,
+        num_hidden_layers=4,
+        num_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=4096,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+
+    result = FfnMetrics.get_parser().parse(vllm_config)
+    assert result.moe_activated_experts_estimator == "expected_uniform"

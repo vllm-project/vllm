@@ -77,6 +77,21 @@ class ObservabilityConfig:
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
 
+    mfu_moe_activated_experts_estimator: Literal["expected_uniform", "upper_bound"] = (
+        "expected_uniform"
+    )
+    """How MoE MBU/MFU accounting (see `enable_mfu_metrics`) estimates the
+    number of distinct experts activated per step for routed-expert
+    weight-byte reads, when no real per-step routing telemetry is
+    available (none is wired in today). `expected_uniform` (default)
+    computes the expected number of distinct experts hit under a
+    uniform-random routing assumption -- a sparsity-aware (S-MBU style,
+    see MoE-CAP arXiv:2412.07067) estimate. `upper_bound` restores the
+    legacy `min(num_tokens * top_k, num_experts)` perfect-load-balancing
+    upper bound, which can overestimate routed-expert weight-read bytes
+    several-fold on bandwidth-bound / small-batch workloads; kept only for
+    comparison against pre-existing dashboards or baselines."""
+
     enable_mm_processor_stats: bool = False
     """Enable collection of timing statistics for multimodal processor operations.
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI

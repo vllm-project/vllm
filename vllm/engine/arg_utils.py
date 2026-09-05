@@ -675,6 +675,9 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    mfu_moe_activated_experts_estimator: Literal["expected_uniform", "upper_bound"] = (
+        ObservabilityConfig.mfu_moe_activated_experts_estimator
+    )
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
@@ -1523,6 +1526,10 @@ class EngineArgs:
             **observability_kwargs["enable_mfu_metrics"],
         )
         observability_group.add_argument(
+            "--mfu-moe-activated-experts-estimator",
+            **observability_kwargs["mfu_moe_activated_experts_estimator"],
+        )
+        observability_group.add_argument(
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
         )
@@ -1975,6 +1982,9 @@ class EngineArgs:
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
+            mfu_moe_activated_experts_estimator=(
+                self.mfu_moe_activated_experts_estimator
+            ),
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             jit_monitor_mode=self.jit_monitor_mode,
