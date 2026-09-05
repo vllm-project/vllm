@@ -2147,12 +2147,21 @@ class EngineArgs:
                 self.node_rank * local_world_size
             ) // world_size_within_dp
             if self.data_parallel_size > 1 and self.data_parallel_external_lb:
-                self.data_parallel_rank = inferred_data_parallel_rank
-                logger.info(
-                    "Inferred data_parallel_rank %d from node_rank %d for external lb",
-                    self.data_parallel_rank,
-                    self.node_rank,
-                )
+                if self.data_parallel_rank is None:
+                    if self.data_parallel_size > self.nnodes:
+                        raise ValueError(
+                            "Invalid data-parallel launch options: "
+                            "`--node-rank` cannot identify multiple external "
+                            "data-parallel ranks on the same node. Set a unique "
+                            "`--data-parallel-rank` for each external-LB process."
+                        )
+                    self.data_parallel_rank = inferred_data_parallel_rank
+                    logger.info(
+                        "Inferred data_parallel_rank %d from node_rank %d "
+                        "for external lb",
+                        self.data_parallel_rank,
+                        self.node_rank,
+                    )
             elif self.data_parallel_size_local is None:
                 # Infer data parallel size local for internal dplb:
                 self.data_parallel_size_local = max(

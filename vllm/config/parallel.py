@@ -744,12 +744,18 @@ class ParallelConfig:
 
     @property
     def nnodes_within_dp(self) -> int:
+        """Number of nodes one DP replica spans. Always >= 1.
+
+        External LB pins ``data_parallel_size_local`` to 1, so the ratio
+        rounds down to 0 once DP replicas outnumber nodes. A replica that
+        does not span nodes still occupies exactly one.
+        """
         if self.nnodes == 1:
             return 1
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return self.nnodes // data_parallel_node_size
+        return max(self.nnodes // data_parallel_node_size, 1)
 
     @property
     def local_world_size(self) -> int:
