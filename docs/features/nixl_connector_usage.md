@@ -8,7 +8,17 @@ For feature compatibility details (supported model architectures, TP configurati
 
 ### Installation
 
-Install the NIXL library: `uv pip install nixl`, as a quick start on Nvidia platform.
+Install the NIXL library that matches your CUDA major version on Nvidia
+platforms:
+
+- CUDA 12.x:
+  `uv pip install "nixl-cu12>=0.7.1,<0.10.0"`
+- CUDA 13.x:
+  `uv pip install "nixl-cu13>=0.7.1,<0.10.0"`
+
+Apply the version bound directly to `nixl-cu12` or `nixl-cu13`, not to the
+`nixl` meta package. Older `nixl` meta package releases can still pull a newer
+runtime-specific wheel through their transitive `>=` dependency.
 
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
 - The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
