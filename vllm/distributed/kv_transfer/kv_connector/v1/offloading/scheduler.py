@@ -997,6 +997,7 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        self._record_allocated_blocks(blocks)
         if num_external_tokens == 0:
             return
 
@@ -1018,10 +1019,6 @@ class OffloadingConnectorScheduler:
             req_status.group_states,
             blocks.blocks,
         ):
-            self._current_batch_allocated_block_ids.update(
-                block.block_id for block in group_blocks if block.block_id != 0
-            )
-
             tokens_per_block = group_config.tokens_per_block
             tokens_per_chunk = group_config.tokens_per_chunk
             offload_keys = group_state.offload_keys
@@ -1106,6 +1103,14 @@ class OffloadingConnectorScheduler:
         if self._chunks_being_loaded is not None:
             self._chunks_being_loaded.update(keys_to_load)
         req_status.partial_tail_boundary = None
+
+    def _record_allocated_blocks(self, blocks: KVCacheBlocks) -> None:
+        self._current_batch_allocated_block_ids.update(
+            block.block_id
+            for group_blocks in blocks.blocks
+            for block in group_blocks
+            if block.block_id != 0
+        )
 
     def _update_req_states(self, scheduler_output: SchedulerOutput) -> None:
         """
