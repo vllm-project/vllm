@@ -30,9 +30,9 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     fi
 else
     if [ "${TORCH_NIGHTLY:-0}" = "1" ]; then
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130"
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu132"
     else
-        TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+        TORCH_INDEX_URL="https://download.pytorch.org/whl/cu132"
     fi
 fi
 echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
