@@ -900,7 +900,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ZENTORCH_WEIGHT_PREPACK": lambda: bool(
         int(os.getenv("VLLM_ZENTORCH_WEIGHT_PREPACK", "1"))
     ),
-    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ.
+    # (CPU backend only) whether to use SGLang INT4 W4A8 kernels for AWQ, and
+    # on Zen CPUs whether to serve int4 checkpoints as DA8W4 rather than W4A16.
     "VLLM_CPU_INT4_W4A8": lambda: bool(int(os.getenv("VLLM_CPU_INT4_W4A8", "1"))),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to

@@ -23,6 +23,9 @@ steps:
   - tests/kernels/test_onednn.py
   - tests/kernels/test_awq_int4_to_int8.py
   - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
+  - tests/kernels/quantization/test_zen_da8w4.py
+  - vllm/model_executor/kernels/linear/mixed_precision/zentorch.py
+  - vllm/model_executor/layers/fused_moe/experts/zentorch_moe.py
   - tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
   - tests/kernels/mamba/test_cpu_short_conv.py
   - tests/kernels/mamba/test_causal_conv1d.py
@@ -43,6 +46,7 @@ steps:
       pytest -x -v -s tests/kernels/test_onednn.py
       pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
       pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
+      pytest -x -v -s tests/kernels/quantization/test_zen_da8w4.py
       pytest -x -v -s tests/kernels/mamba/cpu/test_cpu_gdn_ops.py
       pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
       pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py

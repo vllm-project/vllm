@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Zentorch W4A16 GPTQ weight-only-quantized linear kernel for AMD Zen CPUs.
+"""Zentorch int4 weight-quantized linear kernels for AMD Zen CPUs.
 
 Selected by ``choose_mp_linear_kernel`` ahead of the generic oneDNN-backed
 ``CPUWNA16LinearKernel``. When ``can_implement`` rejects a layer, the selector
@@ -9,6 +9,7 @@ falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import current_platform
@@ -34,7 +35,8 @@ def _import_unpack_from_int32():
 
 
 class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
-    """W4A16 GPTQ kernel backed by ``torch.ops.zentorch.zentorch_woq_linear``."""
+    """Int4 kernel backed by ``zentorch_dynamic_qlinear`` (DA8W4) or
+    ``zentorch_woq_linear`` (W4A16)."""
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
@@ -97,8 +99,81 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         num_groups = weight_scale.shape[1]
         return num_groups > 0 and in_features % num_groups == 0
 
+    def _zentorch_da8w4_eligible(self, layer: torch.nn.Module) -> bool:
+        if not envs.VLLM_CPU_INT4_W4A8:
+            return False
+
+        if not has_zentorch_op(["zentorch_dynamic_qlinear"]):
+            return False
+
+        # DA8W4 is symmetric-only, and the kernel rejects f32 activations.
+        if self.config.zero_points or self.config.weight_type == scalar_types.uint4:
+            return False
+        if self.config.act_type != torch.bfloat16:
+            return False
+
+        if not self._zentorch_woq_eligible(layer):
+            return False
+
+        weight_packed = getattr(layer, self.w_q_name)
+        weight_scale = getattr(layer, self.w_s_name)
+        in_features = weight_packed.shape[1] * 8
+        num_groups = weight_scale.shape[1]
+        group_size = in_features // num_groups
+        # AOCL sym_quant requires K/G to be a multiple of 4; K must be even to
+        # pack two s4 values per byte.
+        return group_size % 4 == 0 and in_features % 2 == 0
+
+    def _process_da8w4_weights(self, layer: torch.nn.Module) -> None:
+        if self.w_zp_name is not None:
+            setattr(layer, self.w_zp_name, None)
+        if self.w_gidx_name is not None:
+            setattr(layer, self.w_gidx_name, None)
+
+        weight_q = getattr(layer, self.w_q_name)
+        weight_s = getattr(layer, self.w_s_name)
+        weight_packed = weight_q.data if hasattr(weight_q, "data") else weight_q
+        weight_scale = weight_s.data if hasattr(weight_s, "data") else weight_s
+
+        bits = self.config.weight_type.mantissa
+        pack_factor = torch.iinfo(weight_packed.dtype).bits // bits
+        out_features, num_groups = weight_scale.shape[0], weight_scale.shape[1]
+        in_features = weight_packed.shape[1] * pack_factor
+        unpack_from_int32 = _import_unpack_from_int32()
+
+        weight_unpacked = unpack_from_int32(
+            weight_packed,
+            bits,
+            torch.Size([out_features, in_features]),
+            packed_dim=weight_q.packed_dim,
+        )
+        # The WOQ repack packs 8 int4 per int32, which on little-endian is the
+        # same byte stream as s4 [N, K/2]; the kernel takes either view.
+        layer._zentorch_da8w4_packed = (
+            torch.ops.zentorch.zentorch_woq_repack_weight.default(
+                weight_unpacked.to(torch.int8).contiguous()
+            ).view(torch.int8)
+        )
+        # CT stores scales as [N, G]; DA8W4 wants per-group {G, N}.
+        layer._zentorch_da8w4_scale = weight_scale.t().to(torch.bfloat16).contiguous()
+
+        for param_name in (self.w_q_name, self.w_s_name):
+            param = getattr(layer, param_name, None)
+            if param is not None and hasattr(param, "data"):
+                param.data = torch.empty(0)
+
+        layer._zentorch_kind = "compressed_tensors_w4a8_da8w4"
+        layer._zentorch_da8w4 = True
+        layer._zentorch_processed_weights = True
+        logger.info_once(
+            "[zen_cpu] Using zentorch_dynamic_qlinear for DA8W4 (W4A8) "
+            "(weight_type=%s, group_size=%d)",
+            self.config.weight_type,
+            in_features // num_groups,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Repack CT GPTQ weights into the zentorch WOQ layout.
+        """Repack CT GPTQ weights into the zentorch DA8W4 or WOQ layout.
 
         Falls back to ``CPUWNA16LinearKernel.process_weights_after_loading``
         via ``super()`` when the layer doesn't satisfy
@@ -107,6 +182,10 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         On success, ``layer._zentorch_processed_weights`` is set to ``True``
         """
         if getattr(layer, "_zentorch_processed_weights", False):
+            return
+
+        if self._zentorch_da8w4_eligible(layer):
+            self._process_da8w4_weights(layer)
             return
 
         if not self._zentorch_woq_eligible(layer):
@@ -197,6 +276,16 @@ class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if getattr(layer, "_zentorch_da8w4", False):
+            # The kernel reads bias through a raw pointer, so it must be
+            # contiguous; the weight and scales already are.
+            return torch.ops.zentorch.zentorch_dynamic_qlinear.default(
+                x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16),
+                layer._zentorch_da8w4_packed,
+                layer._zentorch_da8w4_scale,
+                bias.contiguous() if bias is not None else None,
+            )
+
         if getattr(layer, "_zentorch_processed_weights", False):
             return torch.ops.zentorch.zentorch_woq_linear.default(
                 x,

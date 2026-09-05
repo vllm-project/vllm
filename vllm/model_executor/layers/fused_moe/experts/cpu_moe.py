@@ -49,6 +49,33 @@ from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 # ===========================================================================
+# Weight layout
+# ===========================================================================
+
+
+def swigluoai_w13_interleave_perm(
+    experts_cls: type[mk.FusedMoEExperts],
+    activation: MoEActivation | str | None,
+    two_i: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Index taking a half-split w13 ``[gate | up]`` to the interleaved order
+    ZenDNN's ``swiglu_oai_mul`` expects, or None when no reorder is needed.
+    Callers apply it along whichever axis holds their output channels."""
+    if not getattr(experts_cls, "requires_interleaved_w13", False):
+        return None
+    activation = getattr(activation, "value", activation)
+    if not (isinstance(activation, str) and activation.lower() == "swigluoai"):
+        return None
+
+    i = two_i // 2
+    return torch.stack(
+        [torch.arange(0, i, device=device), torch.arange(i, two_i, device=device)],
+        dim=1,
+    ).flatten()
+
+
+# ===========================================================================
 # Routing
 # ===========================================================================
 
