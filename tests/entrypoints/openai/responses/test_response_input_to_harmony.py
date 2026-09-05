@@ -15,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import DeveloperContent, Role
 
 from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -85,6 +86,25 @@ class TestResponseInputToHarmonyMessage:
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "final"
         assert msg.content[0].text == "The answer is 42."
+
+    @pytest.mark.parametrize(
+        ("phase", "expected_channel"),
+        [
+            ("commentary", "commentary"),
+            ("final_answer", "final"),
+            (None, "final"),
+        ],
+    )
+    def test_assistant_message_phase_selects_channel(self, phase, expected_channel):
+        """Replaying an assistant preamble must not turn it into a final
+        answer; clients that omit `phase` keep the previous behavior."""
+        item = {"type": "message", "role": "assistant", "content": "Let me check."}
+        if phase is not None:
+            item["phase"] = phase
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg.channel == expected_channel
 
     def test_developer_message_gets_instructions_prefix(self):
         """Developer messages must use DeveloperContent which adds the
@@ -279,3 +299,36 @@ class TestResponseInputToHarmonyMessage:
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
+
+
+class TestResponsesRequestPhaseValidation:
+    """`phase` must survive typed request parsing, not just the conversion
+    helper. Production JSON reaches ``response_input_to_harmony`` only after
+    ``ResponsesRequest`` validation, which coerces assistant messages through
+    a union of TypedDict and BaseModel types -- the boundary where an
+    unrecognized key would be silently dropped.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "Let me check.",
+            [{"type": "output_text", "text": "Let me check.", "annotations": []}],
+        ],
+        ids=["string_content", "list_content"],
+    )
+    def test_assistant_phase_survives_request_validation(self, content):
+        request = ResponsesRequest(
+            input=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": content,
+                    "phase": "commentary",
+                }
+            ]
+        )
+
+        msg = response_input_to_harmony(request.input[0], prev_responses=[])
+
+        assert msg.channel == "commentary"
