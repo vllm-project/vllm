@@ -478,3 +478,145 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+def test_update_invalid_blocks_resets_output_placeholders_branch1(
+    recompute_scheduler: Scheduler,
+):
+    """
+    Regression test for #45138 — Branch 1 (unique invalid block).
+
+    When _update_requests_with_invalid_blocks truncates num_computed_tokens
+    at the first invalid block, it must also reset num_output_placeholders to 0.
+    Stale placeholders from a prior schedule step would corrupt scheduling
+    arithmetic in subsequent steps (num_new_tokens would include the stale
+    placeholder count), permanently stranding the request in the running queue.
+    """
+    block_size = recompute_scheduler.block_size
+
+    num_prompt_blocks = 100
+    num_prompt_tokens = num_prompt_blocks * block_size
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    recompute_scheduler.add_request(request=request)
+
+    scheduler_output = recompute_scheduler.schedule()
+
+    assert request.num_computed_tokens > 0
+    original_num_computed_tokens = request.num_computed_tokens
+
+    request.num_output_placeholders = 1
+
+    allocated = recompute_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    req_block_ids = allocated[0]
+    invalid_block_idx = 50
+    invalid_block_id = req_block_ids[invalid_block_idx]
+
+    affected, total_tokens, _ = (
+        recompute_scheduler._update_requests_with_invalid_blocks(
+            [request],
+            {invalid_block_id},
+            scheduler_output.num_scheduled_tokens,
+        )
+    )
+
+    assert request.request_id in affected, (
+        "request must be marked affected when an invalid block is detected"
+    )
+    assert request.num_output_placeholders == 0, (
+        f"num_output_placeholders should be reset to 0 after invalid-block "
+        f"recomputation, but got {request.num_output_placeholders}"
+    )
+    assert request.num_computed_tokens < original_num_computed_tokens, (
+        "num_computed_tokens must be truncated past the invalid block"
+    )
+
+    expected_truncated = invalid_block_idx * block_size
+    assert request.num_computed_tokens == expected_truncated, (
+        f"num_computed_tokens should be {expected_truncated}, "
+        f"got {request.num_computed_tokens}"
+    )
+    assert total_tokens > 0, (
+        "total_affected_tokens must be positive when tokens are lost to "
+        "an invalid block"
+    )
+
+
+def test_update_invalid_blocks_resets_output_placeholders_branch2(
+    recompute_scheduler: Scheduler,
+):
+    """
+    Regression test for #45138 — Branch 2 (shared-block fallthrough).
+
+    When two requests share the same invalid block, the second request
+    skips the first-hit truncation (marked_invalid_block remains False)
+    and instead has its num_computed_tokens adjusted backward to the
+    externally-computed-token boundary. num_output_placeholders must also
+    be reset to 0 on this path, otherwise the stale placeholder count
+    leaks through and corrupts scheduling arithmetic.
+    """
+    block_size = recompute_scheduler.block_size
+
+    request_a = create_request(
+        request_id=101, num_tokens=100 * block_size, common_prefix_len=0
+    )
+    request_b = create_request(
+        request_id=102,
+        num_tokens=100 * block_size,
+        common_prefix_len=80 * block_size,
+    )
+
+    recompute_scheduler.add_request(request_a)
+    recompute_scheduler.add_request(request_b)
+
+    recompute_scheduler.schedule()
+
+    request_a.num_output_placeholders = 1
+    request_b.num_output_placeholders = 1
+
+    blocks_a = recompute_scheduler.kv_cache_manager.get_block_ids(
+        request_a.request_id
+    )[0]
+    blocks_b = recompute_scheduler.kv_cache_manager.get_block_ids(
+        request_b.request_id
+    )[0]
+
+    shared_block_idx = 40
+    assert blocks_a[shared_block_idx] == blocks_b[shared_block_idx], (
+        "common-prefix requests must share blocks at index "
+        f"{shared_block_idx}"
+    )
+
+    invalid_block_id = blocks_a[shared_block_idx]
+
+    # Simulate both requests having externally-computed tokens.
+    external_tokens = 60 * block_size
+    request_a.num_computed_tokens = external_tokens
+    request_b.num_computed_tokens = external_tokens
+
+    affected, _, _ = recompute_scheduler._update_requests_with_invalid_blocks(
+        [request_a, request_b],
+        {invalid_block_id},
+        {},
+    )
+
+    assert request_a.request_id in affected
+    assert request_a.num_output_placeholders == 0, (
+        "request A (Branch 1): num_output_placeholders should be reset to 0, "
+        f"got {request_a.num_output_placeholders}"
+    )
+    assert request_a.num_computed_tokens == shared_block_idx * block_size, (
+        "request A: num_computed_tokens should be truncated to the invalid "
+        f"block boundary ({shared_block_idx * block_size}), "
+        f"got {request_a.num_computed_tokens}"
+    )
+
+    assert request_b.request_id in affected, (
+        "request B must be marked affected when it shares an invalid block"
+    )
+    assert request_b.num_output_placeholders == 0, (
+        "request B (Branch 2): num_output_placeholders should be reset to 0, "
+        f"got {request_b.num_output_placeholders}"
+    )
