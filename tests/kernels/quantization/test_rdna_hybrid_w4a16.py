@@ -30,6 +30,8 @@ RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
+LDS_CAPACITY_ELEMENTS = hybrid_module.LDS_CAPACITY_ELEMENTS
+MEDIUM_SKINNY_LIMIT_ELEMENTS = hybrid_module.MEDIUM_SKINNY_LIMIT_ELEMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +88,8 @@ def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M)
     """Smoke test the registered custom op for both decode and prefill batches.
 
     Verifies the dispatch logic in `_rdna_hybrid_w4a16_apply_impl`:
-      - M <= MAX_SKINNY_BATCH_SIZE: HIP wvSplitK_int4_g
-      - M > MAX_SKINNY_BATCH_SIZE: Triton prefill kernel
+      - supported M and K*M: HIP wvSplitK_int4_g
+      - otherwise: Triton prefill kernel
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -523,3 +525,76 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize(
+    "M,K,expected_path",
+    [
+        (4, 8192, "hip"),
+        (4, 9728, "hip"),
+        (4, 9856, "triton"),
+        (MAX_SKINNY_BATCH_SIZE + 1, 1024, "triton"),
+    ],
+    ids=["regular_limit", "medium_range", "above_medium", "batch_too_large"],
+)
+def test_rdna_hybrid_w4a16_dispatch_boundaries(M, K, expected_path, monkeypatch):
+    """Route only supported regular and medium skinny shapes to HIP."""
+    import vllm._custom_ops as ops
+
+    N, G = 16, 128
+    x_mk = torch.empty((M, K), dtype=torch.float16)
+    w_q = torch.empty((N, K // 2), dtype=torch.int8)
+    scales = torch.empty((N, K // G), dtype=torch.float16)
+    called = []
+
+    def fake_hip(*args, **kwargs):
+        called.append("hip")
+        return torch.empty((M, N), dtype=x_mk.dtype)
+
+    def fake_triton(*args, **kwargs):
+        called.append("triton")
+        return torch.empty((M, N), dtype=x_mk.dtype)
+
+    monkeypatch.setattr(ops, "wvSplitK_int4_g", fake_hip)
+    monkeypatch.setattr(hybrid_module, "triton_w4a16_skinny_fmt_gemm", fake_triton)
+
+    output = hybrid_module._rdna_hybrid_w4a16_apply_impl(
+        x_mk, w_q, scales, None, None, 40, G
+    )
+
+    assert output.shape == (M, N)
+    assert called == [expected_path]
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
+    """Validate the HIP medium path against an FP32 dequantization reference."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    M, K, N, G = 4, 9728, 256, 128
+    assert LDS_CAPACITY_ELEMENTS < K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS
+
+    x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).contiguous().view(torch.int8)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32).to(dtype)
+        if has_zp
+        else None
+    )
+
+    output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        x_mk, w_q, scales, zp, None, num_compute_units(), G
+    )
+    reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
+
+    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
