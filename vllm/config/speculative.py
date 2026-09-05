@@ -620,16 +620,15 @@ class SpeculativeConfig:
         )
         factors.append(uses_aux_hidden_states)
 
-        if uses_aux_hidden_states and self.draft_model_config is not None:
-            factors.append(self.draft_model_config.compute_hash())
-
+        if self.draft_model_config is not None:
+            factors.append(self.draft_model_config.compute_hash())            
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
-            if layer_ids is not None:
+            if layer_ids is not None and uses_aux_hidden_states:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
