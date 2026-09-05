@@ -1734,6 +1734,7 @@ class rocm_aiter_ops:
     """
 
     _MOE_DISPATCH_POLICY: int | None = None
+    _MOE_CHUNK_TOKENS: int | None = None
 
     @classmethod
     @if_aiter_supported
@@ -1744,6 +1745,16 @@ class rocm_aiter_ops:
 
             cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
         return cls._MOE_DISPATCH_POLICY
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_chunk_tokens(cls) -> int:
+        """Cached token-chunk size for the fused-MoE experts call."""
+        if cls._MOE_CHUNK_TOKENS is None:
+            import vllm.envs as envs
+
+            cls._MOE_CHUNK_TOKENS = envs.VLLM_ROCM_AITER_MOE_CHUNK_TOKENS
+        return cls._MOE_CHUNK_TOKENS
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
@@ -1792,6 +1803,7 @@ class rocm_aiter_ops:
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        cls._MOE_CHUNK_TOKENS = None
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
