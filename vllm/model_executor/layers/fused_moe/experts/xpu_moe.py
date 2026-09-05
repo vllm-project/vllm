@@ -31,6 +31,32 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
 
 
+def _validate_expert_map(
+    expert_map: torch.Tensor,
+    global_num_experts: int,
+    local_num_experts: int,
+    device: torch.device,
+) -> None:
+    if expert_map.dtype != torch.int32:
+        raise ValueError("XPU MoE expert_map must have dtype torch.int32")
+    if expert_map.dim() != 1 or expert_map.numel() != global_num_experts:
+        raise ValueError(
+            "XPU MoE expert_map must have shape "
+            f"({global_num_experts},), got {tuple(expert_map.shape)}"
+        )
+    if not expert_map.is_contiguous():
+        raise ValueError("XPU MoE expert_map must be contiguous")
+    if expert_map.device != device:
+        raise ValueError(
+            "XPU MoE expert_map and hidden states must be on the same device"
+        )
+    if bool(((expert_map < -1) | (expert_map >= local_num_experts)).any()):
+        raise ValueError(
+            "XPU MoE expert_map values must be -1 or local expert IDs in "
+            f"[0, {local_num_experts})"
+        )
+
+
 def prepare_fp8_moe_layer_for_xpu(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -94,6 +120,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.RELU2_NO_MUL,
         ]
@@ -151,6 +178,13 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if expert_map is not None:
+            _validate_expert_map(
+                expert_map,
+                global_num_experts,
+                self.moe_config.num_local_experts,
+                hidden_states.device,
+            )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             if (
@@ -171,9 +205,16 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 num_experts=self.moe_config.num_local_experts,
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
+                expert_map=expert_map,
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
+                activation_situ_beta=self.moe_config.activation_situ_beta,
+                activation_situ_linear_beta=(
+                    self.moe_config.activation_situ_linear_beta
+                ),
             )
         assert self.fused_moe_impl is not None
+        if expert_map is not None:
+            self.fused_moe_impl.expert_map = expert_map
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
