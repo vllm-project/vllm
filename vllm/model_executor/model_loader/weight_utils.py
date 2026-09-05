@@ -1346,6 +1346,11 @@ def initialize_dummy_weights(
         initialize_single_dummy_weight(param, low, high, seed)
 
 
+# Chunk size (in elements) for initializing large FP8 dummy weights. Keeps the
+# fp16 temporary at ~128 MiB instead of 2x the parameter size.
+_FP8_DUMMY_INIT_CHUNK_SIZE = 64 * 1024 * 1024
+
+
 @torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
@@ -1392,9 +1397,23 @@ def initialize_single_dummy_weight(
     if torch.finfo(param.data.dtype).bits < 16:
         # uniform_ doesn't support < 16-bit datatypes (FP8)
         dtype = param.data.dtype
-        tmp_param = param.data.to(torch.float16)
-        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-        param.data.copy_(tmp_param)
+        if (
+            param.data.is_contiguous()
+            and param.data.numel() > _FP8_DUMMY_INIT_CHUNK_SIZE
+        ):
+            # Initialize in chunks to avoid materializing fp16 temporaries
+            # twice the parameter size, which OOMs on large FP8 tensors
+            # (e.g. fused embedding tables) under --load-format dummy.
+            flat = param.data.view(-1)
+            for start in range(0, flat.numel(), _FP8_DUMMY_INIT_CHUNK_SIZE):
+                chunk = flat[start : start + _FP8_DUMMY_INIT_CHUNK_SIZE]
+                tmp = chunk.to(torch.float16)
+                tmp = tmp.uniform_(low, high, generator=generator).to(dtype)
+                chunk.copy_(tmp)
+        else:
+            tmp_param = param.data.to(torch.float16)
+            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+            param.data.copy_(tmp_param)
     else:
         param.uniform_(low, high, generator=generator)
 

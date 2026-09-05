@@ -5,6 +5,7 @@ import tempfile
 
 import huggingface_hub.constants
 import pytest
+import torch
 from huggingface_hub.utils import LocalEntryNotFoundError
 
 from vllm.model_executor.model_loader.weight_utils import (
@@ -279,6 +280,78 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+class TestInitializeSingleDummyWeight:
+    """Tests for FP8 dummy weight initialization.
+
+    Regression tests for
+    https://github.com/vllm-project/vllm/issues/54712: large FP8 parameters
+    must be initialized in chunks instead of materializing fp16 temporaries
+    twice the parameter size.
+
+    The default [-1e-3, 1e-3] range is below the smallest positive FP8
+    e4m3fn value (~2e-3), so these tests pass a wider range explicitly.
+    Quantization may round values slightly outside (low, high), hence the
+    slack in the bounds assertions.
+    """
+
+    LOW, HIGH = -0.4, 0.4
+    SLACK = 0.07
+
+    def _assert_filled(self, param):
+        values = param.float()
+        assert (values >= self.LOW - self.SLACK).all()
+        assert (values <= self.HIGH + self.SLACK).all()
+        assert values.unique().numel() > 1
+
+    def test_fp8_chunked_init_in_range_and_deterministic(self, monkeypatch):
+        """Chunked path fills every element within (low, high) and is
+        reproducible for a fixed seed."""
+        import vllm.model_executor.model_loader.weight_utils as weight_utils
+
+        monkeypatch.setattr(weight_utils, "_FP8_DUMMY_INIT_CHUNK_SIZE", 512)
+        param = torch.empty(4096, dtype=torch.float8_e4m3fn)
+        weight_utils.initialize_single_dummy_weight(param, low=self.LOW, high=self.HIGH)
+        self._assert_filled(param)
+
+        param2 = torch.empty(4096, dtype=torch.float8_e4m3fn)
+        weight_utils.initialize_single_dummy_weight(
+            param2, low=self.LOW, high=self.HIGH
+        )
+        assert torch.equal(param, param2)
+
+    def test_fp8_chunked_init_covers_partial_last_chunk(self, monkeypatch):
+        """A numel that is not a multiple of the chunk size initializes the
+        tail correctly."""
+        import vllm.model_executor.model_loader.weight_utils as weight_utils
+
+        monkeypatch.setattr(weight_utils, "_FP8_DUMMY_INIT_CHUNK_SIZE", 128)
+        param = torch.empty(3, 100, dtype=torch.float8_e4m3fn)
+        assert param.numel() % 128 != 0
+        weight_utils.initialize_single_dummy_weight(param, low=self.LOW, high=self.HIGH)
+        self._assert_filled(param)
+
+    def test_fp8_non_contiguous_param_in_range(self, monkeypatch):
+        """Non-contiguous parameters fall back to the single-shot path and
+        are still initialized."""
+        import vllm.model_executor.model_loader.weight_utils as weight_utils
+
+        monkeypatch.setattr(weight_utils, "_FP8_DUMMY_INIT_CHUNK_SIZE", 4)
+        param = torch.empty(8, 3, dtype=torch.float8_e4m3fn).t()
+        assert not param.is_contiguous()
+        weight_utils.initialize_single_dummy_weight(param, low=self.LOW, high=self.HIGH)
+        self._assert_filled(param)
+
+    def test_fp8_small_param_in_range(self):
+        """Small contiguous parameters use the single-shot path unchanged."""
+        from vllm.model_executor.model_loader.weight_utils import (
+            initialize_single_dummy_weight,
+        )
+
+        param = torch.empty(16, dtype=torch.float8_e4m3fn)
+        initialize_single_dummy_weight(param, low=self.LOW, high=self.HIGH)
+        self._assert_filled(param)
 
 
 if __name__ == "__main__":
