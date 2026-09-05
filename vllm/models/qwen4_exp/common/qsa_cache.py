@@ -21,6 +21,7 @@ from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -43,6 +44,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+
+logger = init_logger(__name__)
 
 
 def canonical_qsa_rope_positions(positions: torch.Tensor) -> torch.Tensor:
@@ -798,6 +801,46 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
         return QSAStateBackend
 
 
+# The ring may be widened past the minimal whole-group size by at most this
+# factor. Widening keeps the scheduler LCM unchanged, but every request holds
+# one ring block for its lifetime, so a large divisor must not be picked
+# silently (e.g. 20 rows -> 212 on a block size of 848 = 16 * 53).
+QSA_RING_MAX_WIDENING = 2
+
+
+def qsa_ring_capacity(
+    compress_ratio: int, num_speculative_tokens: int, block_size: int
+) -> int:
+    """Rows of the QSA raw-key ring for a given attention block size.
+
+    The ring holds the open group's committed keys plus every row a
+    speculative step stores before acceptance is known (``span``). Anything
+    narrower lets a rejected draft row overwrite a committed key the next
+    step needs to close the group, so ``span`` is a lower bound; a wider ring
+    is slack. The ring is rounded up to whole groups, and a whole-group size
+    that divides ``block_size`` is preferred so that adding the circular-buffer
+    group does not increase the scheduler block size (the LCM over all
+    groups). When the minimal size does not divide ``block_size``, the next
+    multiple of ``compress_ratio`` that does is used, up to
+    ``QSA_RING_MAX_WIDENING`` times the minimal size; beyond that a
+    ``ValueError`` is raised rather than allocating a disproportionate ring.
+    """
+    span = compress_ratio + num_speculative_tokens
+    minimal = compress_ratio * cdiv(span, compress_ratio)
+    limit = min(block_size, QSA_RING_MAX_WIDENING * minimal)
+    capacity = minimal
+    while capacity <= limit:
+        if block_size % capacity == 0:
+            return capacity
+        capacity += compress_ratio
+    raise ValueError(
+        f"QSA ring needs {minimal} rows for num_speculative_tokens="
+        f"{num_speculative_tokens} (compress ratio {compress_ratio}), and no "
+        f"multiple of {compress_ratio} up to {limit} divides the attention "
+        f"block size {block_size}; choose a depth whose ring divides it"
+    )
+
+
 class QSAKeyStateCache(_QSAStateCache):
     """Raw BF16 key, optionally followed by exact int64 MRoPE positions."""
 
@@ -829,17 +872,20 @@ class QSAKeyStateCache(_QSAStateCache):
             self.rope_position_cache = None
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Hold the open group's committed keys plus every row a speculative
-        # step stores before acceptance is known, rounded up to whole groups so
-        # the ring divides the attention block size (it joins the LCM that sets
-        # the scheduler block size). Anything narrower lets a rejected draft row
-        # overwrite a committed key the next step needs to close the group.
-        span = self.compress_ratio + vllm_config.num_speculative_tokens
-        capacity = self.compress_ratio * cdiv(span, self.compress_ratio)
-        assert self.cache_config.block_size % capacity == 0, (
-            f"QSA ring capacity {capacity} must divide the attention block "
-            f"size {self.cache_config.block_size}"
-        )
+        num_spec = vllm_config.num_speculative_tokens
+        block_size = self.cache_config.block_size
+        span = self.compress_ratio + num_spec
+        minimal = self.compress_ratio * cdiv(span, self.compress_ratio)
+        capacity = qsa_ring_capacity(self.compress_ratio, num_spec, block_size)
+        if capacity != minimal:
+            logger.info_once(
+                "QSA ring widened from %d to %d rows so that it divides the "
+                "attention block size %d (num_speculative_tokens=%d).",
+                minimal,
+                capacity,
+                block_size,
+                num_spec,
+            )
         return CircularBufferSpec(
             block_size=capacity,
             num_kv_heads=1,

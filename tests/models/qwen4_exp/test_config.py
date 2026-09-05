@@ -12,11 +12,16 @@ from vllm.model_executor.models.config import (
     Qwen3_5ForConditionalGenerationConfig,
     Qwen4ExpForConditionalGenerationConfig,
 )
+from vllm.models.qwen4_exp.common.qsa_cache import (
+    QSA_RING_MAX_WIDENING,
+    qsa_ring_capacity,
+)
 from vllm.models.qwen4_exp.config import (
     Qwen4ExpConfig,
     Qwen4ExpTextConfig,
 )
 from vllm.models.qwen4_exp.nvidia.model_state import Qwen4ExpModelState
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 
@@ -198,3 +203,39 @@ def test_qwen4_exp_model_state_prepares_stable_dummy_ngram_inputs() -> None:
     )
     assert second["query_start_loc"].data_ptr() == query_start_loc_ptr
     assert second["ngram_context"].data_ptr() == ngram_context_ptr
+
+
+@pytest.mark.parametrize("block_size", [848, 1616])
+def test_qsa_ring_capacity_divides_block_size(block_size: int) -> None:
+    compress_ratio = 4
+    # Depths 0..12 are servable on both hybrid block sizes (16 * 53, 16 * 101).
+    for num_spec in range(13):
+        span = compress_ratio + num_spec
+        minimal = compress_ratio * cdiv(span, compress_ratio)
+        capacity = qsa_ring_capacity(compress_ratio, num_spec, block_size)
+        assert capacity >= span
+        assert capacity % compress_ratio == 0
+        assert block_size % capacity == 0
+        assert capacity <= QSA_RING_MAX_WIDENING * minimal
+        if block_size % minimal == 0:
+            # Every previously legal depth keeps its ring size.
+            assert capacity == minimal
+
+
+def test_qsa_ring_capacity_widens_within_bound() -> None:
+    # num_speculative_tokens 5..8 need 12 rows; 848 and 1616 have no factor 3,
+    # so the ring widens to 16, the next multiple of 4 that divides them.
+    assert qsa_ring_capacity(4, 5, 848) == 16
+    assert qsa_ring_capacity(4, 8, 1616) == 16
+    assert qsa_ring_capacity(4, 5, 16) == 16
+
+
+@pytest.mark.parametrize("block_size", [16, 848, 1616])
+def test_qsa_ring_capacity_refuses_disproportionate_widening(
+    block_size: int,
+) -> None:
+    # num_speculative_tokens 13..16 need 20 rows. The next divisors of 848 and
+    # 1616 that are multiples of 4 are 212 and 404 (16 * 53, 16 * 101); 16 has
+    # none. All three must fail loudly instead of allocating a 10x ring.
+    with pytest.raises(ValueError, match="QSA ring"):
+        qsa_ring_capacity(4, 13, block_size)
