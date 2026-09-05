@@ -1486,6 +1486,40 @@ def test_layer_metadata_round_trip():
     assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
 
 
+@pytest.mark.parametrize(
+    "layouts, error",
+    [
+        ({"L0": (-1, 64)}, "escapes its block"),
+        ({"L0": (0, 0)}, "escapes its block"),
+        ({"L0": (200, 64)}, "escapes its block"),
+        ({"L1": (0, 64)}, "has no layout"),
+        ({"L0": (0, 32)}, "page sizes must match"),
+    ],
+)
+def test_packed_layer_alignment_rejects_invalid_page_layout(layouts, error):
+    worker = _layer_routing_worker([["L0"]], {"L0": 0})
+    worker.block_len_per_layer = [64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.packed_member_layouts = layouts
+    with pytest.raises(AssertionError, match=error):
+        worker._align_remote_regions_by_layer(metadata)
+
+
+def test_layer_alignment_preserves_nonpacked_regions_alongside_packed_layers():
+    worker = _layer_routing_worker([["a"], ["b"]], {"a": 0, "b": 1})
+    worker.block_len_per_layer = [64, 128]
+    metadata = _agent_metadata(
+        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
+    )
+    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
+
+    worker._align_remote_regions_by_layer(metadata)
+
+    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
+    assert metadata.block_lens == [64, 128]
+    assert metadata.block_strides == [256, 128]
+
+
 def test_layer_identity_gate_preserves_the_non_hma_path():
     assert _layer_routing_worker([["a"]], {"a": 0})._transfer_layer_region_indices == (
         0,
