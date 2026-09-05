@@ -872,7 +872,7 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
-    from vllm.v1.core.kv_cache_utils import (
+    from vllm.v1.core.kv_cache_planning import (
         get_kv_cache_config_from_groups,
         get_kv_cache_groups,
     )
