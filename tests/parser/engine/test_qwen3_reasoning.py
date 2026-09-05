@@ -261,6 +261,19 @@ class TestIsReasoningEndTurnBoundaries:
         parser = Qwen3Parser(make_mock_tokenizer(vocab))
         assert parser.is_reasoning_end([_TEXT_ID, _THINK_END_ID, _TEXT_ID])
 
+    def test_boundary_with_thinking_disabled_is_end(self, mock_tokenizer):
+        """With thinking disabled (initial state CONTENT) a walk that stops at a turn
+        boundary must report reasoning as ended: the model never emits a marker."""
+        parser = Qwen3Parser(
+            mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+        )
+        assert parser.is_reasoning_end([_IM_START_ID, _TEXT_ID])
+
+    def test_boundary_with_thinking_enabled_not_end(self, parser):
+        """With thinking disabled (initial state REASONING) a walk that stops at a turn
+        boundary must keep reasoning open"""
+        assert not parser.is_reasoning_end([_IM_START_ID, _TEXT_ID])
+
 
 class TestDelegatingPromptDetection:
     def test_prompt_tool_example_does_not_skip_streaming_reasoning(
