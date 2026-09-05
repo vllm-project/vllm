@@ -71,6 +71,17 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 f"KV cache layout; got kv_cache_dtype={kv_cache_dtype!r}."
             )
 
+        sinks: torch.Tensor | None = mla_args.pop("sinks", None)
+        if sinks is not None and (
+            sinks.dtype != torch.float32 or sinks.shape != (num_heads,)
+        ):
+            raise ValueError(
+                "FLASHINFER_MLA_SPARSE_SM120 sinks must have dtype "
+                f"torch.float32 and shape ({num_heads},), got "
+                f"{sinks.dtype} {tuple(sinks.shape)}."
+            )
+        self.sinks = sinks
+
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
@@ -156,5 +167,6 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             bmm2_scale=1.0,
             sparse_mla_top_k=attn_metadata.topk_tokens,
             kv_scale_format=self.kv_scale_format,
+            sinks=self.sinks,
         )
         return out.squeeze(1), None
