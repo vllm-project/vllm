@@ -339,6 +339,28 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         )
 
 
+def test_reasoning_effort_budgets_parsing(serve_parser):
+    args = serve_parser.parse_args(
+        ["--reasoning-effort-budgets", '{"low": 4096, "high": 32768}']
+    )
+    assert args.reasoning_effort_budgets == {"low": 4096, "high": 32768}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not valid json",
+        "[]",
+        '{"low": -1}',
+        '{"low": 1.5}',
+        '{"low": true}',
+    ],
+)
+def test_reasoning_effort_budgets_rejects_invalid_values(serve_parser, value):
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(["--reasoning-effort-budgets", value])
+
+
 @pytest.mark.parametrize(
     "args, raises",
     [

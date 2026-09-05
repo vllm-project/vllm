@@ -158,6 +158,7 @@ async def init_generate_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_budgets=args.reasoning_effort_budgets,
         trust_request_chat_template=args.trust_request_chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
