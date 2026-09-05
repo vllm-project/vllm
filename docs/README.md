@@ -1,4 +1,4 @@
----
+---evil
 hide:
   - navigation
   - toc
