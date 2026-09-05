@@ -129,6 +129,14 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             ),
         )
 
+        # page_table width = topk buffer width, which kpool widens past
+        # index_topk (topk_tokens) and rounds up to a multiple of 128. The
+        # kernel treats sparse_mla_top_k as the page-table *capacity* and
+        # bounds the active per-query length by the -1 padding, so use the
+        # actual buffer width instead of the fixed topk_tokens, which
+        # mismatches the page_table when index_kpool > 1.
+        sparse_topk_capacity = topk_indices_physical.shape[1]
+
         output = q.new_empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),
             dtype=q.dtype,
@@ -150,11 +158,11 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
             seq_lens=None,
-            max_seq_len=attn_metadata.topk_tokens,
+            max_seq_len=sparse_topk_capacity,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
+            sparse_mla_top_k=sparse_topk_capacity,
             kv_scale_format=self.kv_scale_format,
         )
         return out.squeeze(1), None
