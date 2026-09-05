@@ -27,6 +27,10 @@ from vllm.parser.abstract_parser import Parser, StreamState
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.metrics import (
+    classify_completed_tool_call,
+    record_tool_call_completed,
+)
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
@@ -54,6 +58,8 @@ class ToolCallSlot:
         "name_sent",
         "string_keys",
         "streamed_json",
+        "completed",
+        "function_call",
     )
 
     def __init__(self) -> None:
@@ -64,6 +70,8 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
+        self.completed: bool = False
+        self.function_call: tuple[str, str] | None = None
 
     @property
     def args(self) -> str:
@@ -123,6 +131,7 @@ class ParserEngine(Parser):
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
         self._suppress_tool_calls: bool = False
+        self._metrics_request: object | None = None
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
@@ -449,6 +458,7 @@ class ParserEngine(Parser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
+        self._metrics_request = request
         self._initialize_history_tool_call_cnt(request)
         if not self._prompt_streaming_prepared and prompt_token_ids is not None:
             # NOTE: call the hook BEFORE setting the flag, because the hook
@@ -577,6 +587,7 @@ class ParserEngine(Parser):
         output, this method starts the parser engine in ``CONTENT`` state
         so it can parse content that has already had reasoning stripped.
         """
+        self._metrics_request = request
         self._check_skip_tool_parsing(request)
         _, parsed_content, tool_call_info = self._single_pass_parse(
             content,
@@ -602,6 +613,7 @@ class ParserEngine(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
         self.initialize_streaming()
+        self._metrics_request = request
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
@@ -688,6 +700,7 @@ class ParserEngine(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        self._metrics_request = request
         self._initialize_history_tool_call_cnt(request)
         self._check_skip_tool_parsing(request)
         reasoning, content, tool_call_info = self._single_pass_parse(
@@ -877,8 +890,11 @@ class ParserEngine(Parser):
         if idx >= len(self._tool_slots):
             return
 
-        remaining = self._flush_arg_converter(idx)
         slot = self._tool_slots[idx]
+        if slot.completed:
+            return
+
+        remaining = self._flush_arg_converter(idx)
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx) or ""
@@ -909,6 +925,17 @@ class ParserEngine(Parser):
                     function=DeltaFunctionCall(arguments=remaining),
                 )
             )
+
+        slot.function_call = self._slot_to_function_call(slot)
+        slot.completed = True
+        if slot.function_call is None:
+            return
+
+        name, arguments = slot.function_call
+        record_tool_call_completed(
+            request=self._metrics_request,
+            outcome=classify_completed_tool_call(name, arguments, self._tools),
+        )
 
     # ── Tool-call delta coalescing ──────────────────────────────────────
 
@@ -1023,6 +1050,34 @@ class ParserEngine(Parser):
 
     # ── Build ExtractedToolCallInformation ─────────────────────────────
 
+    def _slot_to_function_call(self, slot: ToolCallSlot) -> tuple[str, str] | None:
+        """Return (name, arguments) the client would see, or None to skip."""
+        if not slot.name and not slot.args:
+            return None
+
+        name = slot.name.strip()
+        raw_body = slot.args
+
+        if not name and raw_body.strip():
+            name, args_json = self._extract_name_and_args(raw_body)
+        elif raw_body.strip():
+            converter = self._arg_converter
+            if converter is not None:
+                try:
+                    args_json = converter(raw_body, False)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    logger.debug("arg converter failed (extract): %s", raw_body[:80])
+                    args_json = self._extract_args_json(raw_body, name)
+            else:
+                args_json = self._extract_args_json(raw_body, name)
+        else:
+            args_json = "{}"
+
+        if not self._accept_tool_name(name):
+            return None
+
+        return name, self._fix_arg_types(args_json, name)
+
     def _build_extracted_result(
         self,
         *deltas: DeltaMessage | None,
@@ -1033,39 +1088,21 @@ class ParserEngine(Parser):
                 content_parts.append(delta.content)
 
         tool_calls: list[ToolCall] = []
-        for idx, slot in enumerate(self._tool_slots):
-            if not slot.name and not slot.args:
-                continue
-
-            name = slot.name.strip()
-            raw_body = slot.args
-
-            if not name and raw_body.strip():
-                name, args_json = self._extract_name_and_args(raw_body)
-            elif raw_body.strip():
-                converter = self._arg_converter
-                if converter is not None:
-                    try:
-                        args_json = converter(raw_body, False)
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        logger.debug(
-                            "arg converter failed (extract): %s", raw_body[:80]
-                        )
-                        args_json = self._extract_args_json(raw_body, name)
-                else:
-                    args_json = self._extract_args_json(raw_body, name)
+        for slot in self._tool_slots:
+            if slot.completed:
+                function_call = slot.function_call
             else:
-                args_json = "{}"
-
-            if self._accept_tool_name(name):
-                self._ensure_tool_id(slot, name)
-                args_json = self._fix_arg_types(args_json, name)
-                tool_calls.append(
-                    ToolCall(
-                        id=slot.id,
-                        function=FunctionCall(name=name, arguments=args_json),
-                    )
+                function_call = self._slot_to_function_call(slot)
+            if function_call is None:
+                continue
+            name, args_json = function_call
+            self._ensure_tool_id(slot, name)
+            tool_calls.append(
+                ToolCall(
+                    id=slot.id,
+                    function=FunctionCall(name=name, arguments=args_json),
                 )
+            )
 
         content_str = "".join(content_parts)
         content = self._strip_content_whitespace(content_str, len(tool_calls) > 0)
