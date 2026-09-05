@@ -611,11 +611,14 @@ def test_encoder_instance_zero_kv_cache(
         )
 
 
-def _cadenced_dp_engine_core(monkeypatch, results: list[tuple[bool, bool]]):
+def _cadenced_dp_engine_core(
+    monkeypatch, results: list[tuple[bool, bool]], dp_sync_interval: int = 32
+):
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
     core.dp_group = object()
+    core.dp_sync_interval = dp_sync_interval
     core.step_counter = 0
     core.pending_pause = False
     core.ignore_start_dp_wave = False
@@ -629,19 +632,30 @@ def _cadenced_dp_engine_core(monkeypatch, results: list[tuple[bool, bool]]):
     return core, synced
 
 
-def test_dp_sync_cadence_normal_wave(monkeypatch):
-    """First all-reduce of a wave after one step, then every 32."""
-    core, synced = _cadenced_dp_engine_core(monkeypatch, [(True, False)] * 3)
-    for _ in range(70):
+def test_dp_sync_interval_default_is_16():
+    """Regression pin: lowering the default narrows the mid-wave pause tail
+    for async RL, where the engine is rarely idle when pause lands."""
+    assert ParallelConfig.dp_sync_interval == 16
+
+
+@pytest.mark.parametrize("dp_sync_interval", [32, 16])
+def test_dp_sync_interval_normal_wave(monkeypatch, dp_sync_interval: int):
+    """First all-reduce of a wave after one step, then every N."""
+    core, synced = _cadenced_dp_engine_core(
+        monkeypatch, [(True, False)] * 3, dp_sync_interval=dp_sync_interval
+    )
+    for _ in range(dp_sync_interval * 2 + 6):
         assert DPEngineCoreProc._has_global_unfinished_reqs(core, True)
-    assert synced == [1, 32, 64]
+    assert synced == [1, dp_sync_interval, dp_sync_interval * 2]
 
 
-def test_dp_sync_cadence_idle_pause_consensus_on_first_step(monkeypatch):
+def test_dp_sync_interval_idle_pause_consensus_on_first_step(monkeypatch):
     """A pause of an idle engine arms every rank before its kick-started
     first step, so the step-1 sync reaches consensus after one dummy batch
-    instead of 32."""
-    core, synced = _cadenced_dp_engine_core(monkeypatch, [(False, True)])
+    regardless of the configured cadence."""
+    core, synced = _cadenced_dp_engine_core(
+        monkeypatch, [(False, True)], dp_sync_interval=32
+    )
     core.pending_pause = True
     assert DPEngineCoreProc._has_global_unfinished_reqs(core, False) is False
     assert synced == [1]
