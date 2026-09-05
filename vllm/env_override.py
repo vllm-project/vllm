@@ -2,7 +2,47 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
 import importlib.util
+import json
 import os
+
+
+def _setup_atomgit_env() -> None:
+    """Point HuggingFace Hub at AtomGit when VLLM_USE_ATOMGIT is set.
+
+    Must run before `huggingface_hub` is imported: its endpoint is read once
+    at import time. This mirrors the env setup the `atomgit` SDK performs on
+    `import atomgit_hub`, so the rest of vLLM's HuggingFace-based download
+    paths work against AtomGit unchanged.
+    """
+    if os.environ.get("VLLM_USE_ATOMGIT", "False").strip().lower() not in (
+        "1",
+        "true",
+    ):
+        return
+    os.environ.setdefault("HF_ENDPOINT", "https://hub.atomgit.com")
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    # Use a dedicated cache: the HF cache is keyed by repo id, not endpoint, so
+    # sharing it would let an AtomGit repo collide with a same-named repo pulled
+    # from the real HF Hub. Only set when the user has not chosen their own.
+    os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/atomgit"))
+    # Reuse the token saved by `atomgit login` for private repositories,
+    # but never attach an AtomGit credential to a foreign HF endpoint.
+    if (
+        os.environ.get("HF_ENDPOINT", "https://hub.atomgit.com")
+        == "https://hub.atomgit.com"
+        and "HF_TOKEN" not in os.environ
+    ):
+        try:
+            with open(os.path.expanduser("~/.atomgit/config.json")) as f:
+                data = json.load(f)
+            token = data.get("token") if isinstance(data, dict) else None
+            if isinstance(token, str):
+                os.environ["HF_TOKEN"] = token
+        except (OSError, ValueError):
+            pass
+
+
+_setup_atomgit_env()
 
 
 def _get_torch_cuda_version():

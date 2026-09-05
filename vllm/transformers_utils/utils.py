@@ -58,6 +58,25 @@ def modelscope_list_repo_files(
     ]
 
 
+def normalize_atomgit_repo_id(repo_id: str) -> str:
+    """Collapse an HF-style nested repo id into AtomGit's ``owner/repo`` form.
+
+    AtomGit hosts mirrored repos as a single ``owner/repo`` pair, joining every
+    path segment before the final one into the owner with dashes
+    (``hf_mirrors/Qwen/Qwen3`` -> ``hf_mirrors-Qwen/Qwen3``). Ids already in
+    ``owner/repo`` form are returned unchanged, so the function is idempotent.
+
+    URLs, object-storage URIs and (absolute or relative) paths are never repo
+    ids and are returned unchanged.
+    """
+    if "://" in repo_id or repo_id.startswith(("/", "./", "../")):
+        return repo_id
+    parts = repo_id.split("/")
+    if len(parts) >= 3:
+        return "-".join(parts[:-1]) + "/" + parts[-1]
+    return repo_id
+
+
 def _maybe_json_dict(path: str | PathLike) -> dict[str, str]:
     with open(path) as f:
         try:
