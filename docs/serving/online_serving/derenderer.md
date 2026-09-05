@@ -6,7 +6,8 @@ This closes the loop for a token-in / token-out engine in disaggregated serving:
 
 - **GPU less post processing**: Detokenization, reasoning parsing, and tool call parsing run on the same GPU less frontend that hosts `/render`
 - **Parser parity**: The derenderer reuses vLLM's tool and reasoning parsers, so a disaggregated deployment produces the same `content`/`reasoning`/ `tool_calls` split as a standard `vllm serve` server
-- **Non-streaming**: The endpoints expect a complete `GenerateResponse` with all token IDs present and perform one-shot parsing. Streaming derender would require a separate endpoint design and is not currently supported but is in the pipeline
+- **Non-streaming**: The endpoints accept a complete `GenerateResponse` with all token IDs present and perform one-shot parsing
+- **Streaming**: The same endpoints accept `stream: true` bodies, processing one generate chunk per call with a client-carried `stream_state` (plain detokenization; parser-aware streaming is in progress)
 
 Both endpoints are hosted by the GPU less rendering server started with [`vllm launch render`](../../cli/launch/render.md), alongside the `/render`
 endpoints.
@@ -51,6 +52,15 @@ Each request wraps the engine's `GenerateResponse`(s) together with the caller m
     ```
 
 Oversized payloads are rejected with a `400` before any `tokenizer.decode()` or parser runs.
+
+## Streaming state and logprobs
+
+Streaming derender is stateless server side: all mutable state lives in the client-carried `stream_state` (`DerenderStreamState`), passed back on every per-chunk call. Besides the bounded incremental detokenization window (`prev_tokens`, `prefix_offset`, `read_offset`) and `role_sent`, the state carries two fields for logprob handling:
+
+- `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
+- `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
+
+When a streamed `GenerateResponseStreamChoice` carries `logprobs`, the `token_id:N` placeholders are resolved per chunk and the resolved logprobs are attached to the corresponding streamed choice — for chat as `ChatCompletionLogProbs`, for completions converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
 
 ## Example
 

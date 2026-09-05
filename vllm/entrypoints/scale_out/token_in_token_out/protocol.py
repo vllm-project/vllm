@@ -410,6 +410,17 @@ class DerenderStreamState(BaseModel):
     window is transiently empty (e.g. usage only final chunk).
     """
 
+    logprob_context_token_ids: list[int] = Field(default_factory=list, max_length=4)
+    """Trailing sampled token IDs carried across chunks so byte-fallback
+    (U+FFFD) correction during logprob placeholder resolution has context
+    at chunk boundaries. Bounded to the 4-token window that
+    ``_correct_decoded_token`` reads."""
+
+    logprob_text_offset: int = Field(default=0, ge=0)
+    """Cumulative emitted text length. Seeds ``text_offset`` for completion
+    streaming logprobs so offsets stay absolute across chunks, mirroring
+    ``initial_text_offset`` in the generate streaming path."""
+
     # TODO: Properties used in follow on PR for tool call parsing
     last_content: str | None = None
     """Last emitted cumulative assistant content text."""
