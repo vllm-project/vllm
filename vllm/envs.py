@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
+    VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE: bool = False
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
@@ -1317,6 +1318,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "auto",
         ["auto", "gluon", "asm"],
         case_sensitive=False,
+    ),
+    "VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE": lambda: bool(
+        int(os.getenv("VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE", "0"))
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.

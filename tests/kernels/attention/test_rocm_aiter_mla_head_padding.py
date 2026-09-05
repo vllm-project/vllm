@@ -355,3 +355,55 @@ def test_h12_aiter_mla_decode_matches_reference():
         atol=1e-2,
         rtol=1e-2,
     )
+
+
+NATIVE_TILE_CASES = [
+    (12, 16, 16),
+    (16, 16, 16),
+    (32, 32, 32),
+    (48, 48, 64),
+    (64, 64, 64),
+    (80, 80, 128),
+    (96, 96, 128),
+    (112, 112, 128),
+    (128, 128, 128),
+    (256, 256, 256),
+]
+
+
+@pytest.mark.parametrize("num_heads,expect_off,expect_on", NATIVE_TILE_CASES)
+def test_native_tile_rounding(monkeypatch, num_heads, expect_off, expect_on):
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE", False)
+    assert AiterMLAHelper.get_actual_mla_num_heads(num_heads) == expect_off
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE", True)
+    assert AiterMLAHelper.get_actual_mla_num_heads(num_heads) == expect_on
+
+
+@pytest.mark.parametrize("num_heads", [48, 80, 96, 112])
+def test_native_tile_pad_unpad_round_trip(monkeypatch, num_heads):
+    """Padding to a native tile is exactly reversible for both o and lse."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_AITER_MLA_PAD_NATIVE_TILE", True)
+    padded_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+    assert padded_heads in AiterMLAHelper._AITER_NATIVE_MLA_TILES
+    assert padded_heads > num_heads
+
+    tokens = 5
+    q = torch.randn(tokens, num_heads, QK_HEAD_DIM)
+    q_padded = AiterMLAHelper.get_mla_padded_q(num_heads, q)
+    assert q_padded.shape == (tokens, padded_heads, QK_HEAD_DIM)
+    torch.testing.assert_close(q_padded[:, :num_heads, :], q)
+
+    o = torch.randn(tokens, padded_heads, KV_LORA_RANK)
+    torch.testing.assert_close(
+        AiterMLAHelper.get_mla_unpadded_o(num_heads, o), o[:, :num_heads, :]
+    )
+
+    lse = torch.randn(tokens, padded_heads)
+    torch.testing.assert_close(
+        AiterMLAHelper.get_mla_unpadded_lse(num_heads, lse), lse[:, :num_heads]
+    )
