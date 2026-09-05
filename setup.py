@@ -460,6 +460,20 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+    def get_outputs(self):
+        # Some CMake extensions (e.g. _deep_gemm_C) compile into a vendored
+        # package instead of a top-level `.so`, so their nominal output path
+        # never exists. Filter those out so strict editable installs don't try
+        # to copy a phantom artifact.
+        return [f for f in super().get_outputs() if os.path.exists(f)]
+
+    def get_output_mapping(self):
+        return {
+            src: dst
+            for src, dst in super().get_output_mapping().items()
+            if os.path.exists(src)
+        }
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
