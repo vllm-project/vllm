@@ -34,6 +34,10 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     refine_fp8_moe_block_shape,
     select_fp8_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -368,6 +372,7 @@ class Fp8LinearMethod(LinearMethodBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
+        expose_input_quant_key(layer, self.fp8_linear)
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
@@ -435,7 +440,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, prefer direct FP8 path

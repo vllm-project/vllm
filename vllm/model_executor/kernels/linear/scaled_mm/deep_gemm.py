@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
+    kFp8Dynamic128Sym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -42,6 +44,11 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
             column_major_scales=True,
         )
+
+    def input_quant_key(self) -> QuantKey | None:
+        if self.config.activation_quant_key == kFp8Dynamic128Sym:
+            return kFp8Dynamic128Sym
+        return None
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -131,6 +138,11 @@ def _fp8_gemm_nt_op(
     output: torch.Tensor,
     use_deep_gemm_e8m0: bool,
 ) -> None:
+    if use_deep_gemm_e8m0 and input_scale.dtype == torch.int32:
+        logical_rows = q_input.shape[0]
+        aligned_rows = (logical_rows + 3) // 4 * 4
+        if input_scale.shape[0] == aligned_rows and aligned_rows != logical_rows:
+            input_scale = input_scale[:logical_rows]
     fp8_gemm_nt(
         (q_input, input_scale),
         (weight, weight_scale),
