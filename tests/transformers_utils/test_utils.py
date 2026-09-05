@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+
+import vllm.envs as envs
 from vllm.transformers_utils.utils import (
     is_azure,
     is_cloud_storage,
     is_gcs,
     is_s3,
+    maybe_model_redirect,
 )
 
 
@@ -35,3 +39,23 @@ def test_is_cloud_storage():
     assert is_cloud_storage("az://model-container/path")
     assert not is_cloud_storage("/unix/local/path")
     assert not is_cloud_storage("nfs://nfs-fqdn.local")
+
+
+def test_maybe_model_redirect_ignores_non_dict_json(tmp_path, monkeypatch):
+    # A redirect file that is valid JSON but not an object (e.g. a list) must
+    # not crash; it should be treated as "no redirect".
+    redirect_file = tmp_path / "redirect.json"
+    redirect_file.write_text(json.dumps(["a", "b"]))
+    monkeypatch.setattr(envs, "VLLM_MODEL_REDIRECT_PATH", str(redirect_file))
+    maybe_model_redirect.cache_clear()
+
+    assert maybe_model_redirect("some/model") == "some/model"
+
+
+def test_maybe_model_redirect_uses_dict_json(tmp_path, monkeypatch):
+    redirect_file = tmp_path / "redirect.json"
+    redirect_file.write_text(json.dumps({"some/model": "/local/model"}))
+    monkeypatch.setattr(envs, "VLLM_MODEL_REDIRECT_PATH", str(redirect_file))
+    maybe_model_redirect.cache_clear()
+
+    assert maybe_model_redirect("some/model") == "/local/model"
