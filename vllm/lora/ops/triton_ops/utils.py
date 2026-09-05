@@ -218,12 +218,15 @@ def get_lora_op_configs(
     # default config
     default = {}
     if op_type == "shrink":
-        split_k = 64 if batch < 128 else 8
-        if is_batch_invariant:
-            split_k = 1
+        # split_k > 1 uses tl.atomic_add in do_shrink_kernel, which is
+        # non-deterministic due to relaxed floating-point reduction order.
+        # Fused MoE LoRA shrink already pins split_k=1; match that here
+        # (see vllm-project/vllm#50059).
+        split_k = 1
+        block_n = max(16, min(64, next_power_of_2(rank)))
         default = {
             "block_m": 32,
-            "block_n": 16,
+            "block_n": block_n,
             "block_k": 256 if batch < 128 else 32,
             "split_k": split_k,
             "num_warps": 4,
