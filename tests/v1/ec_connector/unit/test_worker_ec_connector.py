@@ -12,6 +12,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.worker.ec_connector_model_runner_mixin import (
+    ECConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.gpu.ec_connector import NO_OP_EC_CONNECTOR, ActiveECConnector
 
 pytestmark = pytest.mark.cpu_test
@@ -75,3 +78,21 @@ def test_no_forward_reports_without_running_the_model():
 
     empty = NO_OP_EC_CONNECTOR.no_forward(_scheduler_output())
     assert empty is EMPTY_MODEL_RUNNER_OUTPUT
+
+
+@pytest.mark.skip_global_cleanup
+def test_legacy_no_forward_reports_worker_metadata():
+    _, fake = _connector(is_producer=False, is_consumer=True)
+    module = "vllm.v1.worker.ec_connector_model_runner_mixin"
+
+    with (
+        patch(f"{module}.has_ec_transfer", return_value=True),
+        patch(f"{module}.get_ec_transfer", return_value=fake),
+    ):
+        output = ECConnectorModelRunnerMixin.ec_connector_no_forward(
+            _scheduler_output(), {}
+        )
+
+    assert output.ec_connector_output.ec_connector_worker_meta is WORKER_META
+    fake.start_load_caches.assert_called_once()
+    fake.clear_connector_metadata.assert_called_once()
