@@ -590,7 +590,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             # prepare checkpoint metadata
             assert m.seq_lens_cpu_upper_bound is not None
             request_rows = list(range(m.num_reqs))
-            if spec_sequence_masks_cpu is not None:
+            if num_spec_decodes > 0:
                 # get non spec request rows
                 request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
             all_query_lens = query_start_loc_cpu.diff().tolist()

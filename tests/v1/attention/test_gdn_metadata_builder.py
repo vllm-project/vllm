@@ -221,3 +221,18 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
+
+
+def test_builder_stores_base_fields():
+    """The builder must expose what AttentionMetadataBuilder.__init__ stores.
+
+    It used to assign its own fields instead of calling super(), which silently
+    dropped layer_names and device. layer_names has exactly one reader --
+    KimiK3KDAMetadataBuilder._get_recoverssm_context -- and device has none, so
+    neither absence showed up until something reached for it.
+    """
+    builder = _create_gdn_builder()
+    assert builder.layer_names == ["layer.0"]
+    assert builder.device == DEVICE
+    assert builder.kv_cache_spec is not None
+    assert builder.vllm_config is not None

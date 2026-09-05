@@ -857,3 +857,59 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_checkpoint_metadata_on_prefill_only_step_under_recoverssm():
+    """A prefill-only step under RecoverSSM must build checkpoint metadata.
+
+    num_decode_draft_tokens is filled with -1 and only written on spec-decode
+    rows, so a prefill-only step leaves the >= 0 mask all False: non-None with
+    num_spec_decodes == 0. Without RecoverSSM the classification clears such a
+    mask to None, but that clearing carries `not self.use_recoverssm`, so here
+    the mask survives and any reader guarding on `masks is not None` instead of
+    `num_spec_decodes > 0` reads an unbound local.
+    """
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[50, 32], query_lens=[50, 16])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=1,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        use_recoverssm=True,
+        device=device,
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+        common_attn_metadata.block_table_tensor,
+        common_attn_metadata.seq_lens,
+        builder.kv_cache_spec,
+        "align",
+    )
+    # The -1 fill is what the runner passes on a prefill-only step, and it is
+    # what makes the mask all-False rather than absent. Omitting the kwarg
+    # takes the `num_decode_draft_tokens_cpu is None` branch, which sets the
+    # mask to None and never reaches the guard under test.
+    actual = builder.build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.full((2,), -1, dtype=torch.int32),
+    )
+
+    # Same expectation as the non-RecoverSSM case: every row is its own
+    # checkpoint row, because non_spec_query_start_loc is the full
+    # query_start_loc when num_spec_decodes == 0.
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices,
+        torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(
+        actual.checkpoint.checkpoint_offsets,
+        torch.tensor([48, 0], dtype=torch.int32, device=device),
+    )
