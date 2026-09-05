@@ -6410,7 +6410,7 @@ class GPUModelRunner(
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             draft_probs = None
             if (
-                self.speculative_config.rejection_sample_method == "standard"
+                self.speculative_config.rejection_sample_method in ("standard", "fly")
                 and self.speculative_config.draft_sample_method == "probabilistic"
             ):
                 draft_probs = torch.rand(

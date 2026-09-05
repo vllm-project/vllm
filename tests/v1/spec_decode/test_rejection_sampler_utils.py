@@ -6,6 +6,7 @@ import math
 import pytest
 import torch
 
+from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
@@ -80,6 +81,139 @@ def _build_rejection_sample_inputs(
         expanded_local_pos=expanded_local_pos,
         temperature=temp_tensor,
         seed=seed,
+    )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+def test_fly_requires_entropy_and_native_lookahead(
+    temperature: float, has_draft_logits: bool
+):
+    """Defer only supported rejections with a full, natively accepted window."""
+    device = "cuda"
+    inputs = _build_rejection_sample_inputs(
+        torch.zeros(10, device=device),
+        torch.zeros(10, device=device),
+        num_speculative_steps=4,
+        temperature=temperature,
+        num_trials=7,
+    )
+    # Full window, low entropy, masked token, consecutive rejections,
+    # short request, placeholder draft, and bonus-only request.
+    counts = [5, 5, 5, 5, 3, 5, 1]
+    target_probs = torch.zeros(7, 5, 10, device=device)
+    target_probs[:, 0, 7:10] = torch.tensor([1e-12, 0.5, 0.5], device=device)
+    for row, token in enumerate([2, 3, 4, 8], start=1):
+        target_probs[:, row, token] = 1.0
+    target_probs[1, 0, 8:10] = torch.tensor([1.0, 0.0], device=device)
+    target_probs[2, 0, 7] = 0.0
+    target_probs[3, 1, 2] = 1e-12
+    target_probs[3, 1, 8:10] = 0.5
+    draft_tokens = inputs["draft_sampled"].view(7, 5)
+    draft_tokens[:, 1:] = torch.tensor([7, 2, 3, 4], device=device)
+    draft_tokens[5, 2] = -1
+    if has_draft_logits:
+        inputs["draft_logits"].fill_(float("-inf"))
+        for step, token in enumerate([7, 2, 3, 4]):
+            inputs["draft_logits"][:, step, token] = 0.0
+    else:
+        inputs["draft_logits"] = None
+    rows = torch.tensor(
+        [req * 5 + row for req, count in enumerate(counts) for row in range(count)],
+        device=device,
+    )
+    inputs["target_logits"] = target_probs.log().view(-1, 10)[rows]
+    for key in ("draft_sampled", "pos", "expanded_idx_mapping", "expanded_local_pos"):
+        inputs[key] = inputs[key][rows]
+    inputs["cu_num_logits"] = torch.tensor(
+        [0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int32, device=device
+    )
+
+    sampled, num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=4, fly_window_size=2
+    )
+    assert num_sampled.tolist() == [5, 1, 1, 1, 1, 1, 1]
+    assert sampled[0].tolist() == [7, 2, 3, 4, 8]
+    assert sampled[1:6, 0].min().item() >= 8
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+@pytest.mark.parametrize("failing_step", [None, 2, 5])
+def test_fly_pending_window_preserves_recovery_position(
+    temperature: float, failing_step: int | None
+):
+    """A failed window recovers at its first rejection using that position's p/q."""
+    device = "cuda"
+    num_steps, vocab_size, num_trials = 7, 16, 32
+    draft_ids = torch.arange(1, num_steps + 1, device=device)
+    steps = torch.arange(num_steps, device=device)
+    draft_probs = torch.zeros(num_steps, vocab_size, device=device)
+    draft_probs[steps, draft_ids] = 0.8
+    draft_probs[:, -1] = 0.2
+    target_probs = torch.zeros(num_steps + 1, vocab_size, device=device)
+    target_probs[steps, draft_ids] = 0.9
+    target_probs[:-1, -1] = 0.1
+    target_probs[-1, -2:] = torch.tensor([0.7, 0.3], device=device)
+    # Distinct normalizers expose accidentally overwritten recovery statistics.
+    shifts = torch.arange(num_steps + 1, device=device)[:, None] * 11
+    native_logits = target_probs.log() + shifts
+    rejections = [0, 3] + ([] if failing_step is None else [failing_step])
+    target_probs[rejections] = 0
+    target_probs[rejections, draft_ids[rejections]] = 1e-12
+    target_probs[rejections, -2:] = torch.tensor([0.7, 0.3], device=device)
+    inputs = _build_rejection_sample_inputs(
+        native_logits[0], draft_probs[0].log(), num_steps, temperature, num_trials
+    )
+    inputs["target_logits"] = (target_probs.log() + shifts).repeat(num_trials, 1)
+    inputs["draft_logits"] = (
+        draft_probs.log() * (temperature if temperature > 0 else 1) + steps[:, None] * 7
+    ).repeat(num_trials, 1, 1)
+    inputs["draft_sampled"].view(num_trials, num_steps + 1)[:, 1:] = draft_ids
+    rejected_step = (
+        num_steps if failing_step is None else (0 if failing_step == 2 else 3)
+    )
+    reference_inputs = dict(inputs)
+    reference_logits = (
+        inputs["target_logits"].clone().view(num_trials, num_steps + 1, vocab_size)
+    )
+    for step in (0, 3):
+        if step < rejected_step:
+            reference_logits[:, step] = native_logits[step]
+    reference_inputs["target_logits"] = reference_logits.flatten(0, 1)
+    expected, expected_counts = rejection_sample(
+        **reference_inputs, num_speculative_steps=num_steps
+    )
+    sampled, counts = rejection_sample(
+        **inputs, num_speculative_steps=num_steps, fly_window_size=2
+    )
+    assert counts.tolist() == [rejected_step + 1] * num_trials
+    assert torch.equal(counts, expected_counts)
+    assert torch.equal(
+        sampled[:, : rejected_step + 1], expected[:, : rejected_step + 1]
+    )
+
+
+@pytest.mark.parametrize("top_k", [1, 3, 100])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fly_entropy_from_logits_matches_probabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    top_k: int,
+    dtype: torch.dtype,
+):
+    """Logits match probability-based entropy with masking and top-k clipping."""
+    monkeypatch.setenv("VLLM_FLY_ENTROPY_TOP_K", str(top_k))
+    torch.manual_seed(7)
+    logits = torch.randn(2, 20, dtype=dtype, device="cuda")[:, :17]
+    logits[0, 0] = -30
+    logits[0, 3] = -float("inf")
+    logits[1] = -float("inf")
+    logits[1, 1] = 0
+    reference_entropy = compute_fly_entropy(logits.softmax(-1, dtype=torch.float32))
+    torch.testing.assert_close(
+        compute_fly_entropy(logits, from_logits=True),
+        reference_entropy,
+        atol=1e-5,
+        rtol=1e-5,
     )
 
 
@@ -688,7 +822,10 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
 
 
 @pytest.mark.parametrize("has_draft_logits", [True, False])
-def test_chunked_requests_match_full_batch(has_draft_logits: bool):
+@pytest.mark.parametrize("fly_window_size", [0, 2])
+def test_chunked_requests_match_full_batch(
+    has_draft_logits: bool, fly_window_size: int
+):
     torch.manual_seed(7)
     device = "cuda"
     num_reqs = 5
@@ -714,8 +851,28 @@ def test_chunked_requests_match_full_batch(has_draft_logits: bool):
     if not has_draft_logits:
         inputs["draft_logits"] = None
 
+    if fly_window_size:
+        native, native_counts = rejection_sample(
+            **inputs, num_speculative_steps=num_speculative_steps
+        )
+        gated, gated_counts = rejection_sample(
+            **inputs,
+            num_speculative_steps=num_speculative_steps,
+            fly_window_size=fly_window_size,
+            fly_entropy_threshold=float("inf"),
+        )
+        assert torch.equal(gated_counts, native_counts)
+        valid = (
+            torch.arange(num_speculative_steps + 1, device=device)
+            < native_counts[:, None]
+        )
+        assert torch.equal(gated[valid], native[valid])
+
     sampled, num_sampled = rejection_sample(
-        **inputs, num_speculative_steps=num_speculative_steps
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        fly_window_size=fly_window_size,
+        fly_entropy_threshold=0.0,
     )
 
     sampled_chunks = []
@@ -736,7 +893,10 @@ def test_chunked_requests_match_full_batch(has_draft_logits: bool):
         chunk_inputs["idx_mapping"] = inputs["idx_mapping"][start:end]
 
         chunk_sampled, chunk_num_sampled = rejection_sample(
-            **chunk_inputs, num_speculative_steps=num_speculative_steps
+            **chunk_inputs,
+            num_speculative_steps=num_speculative_steps,
+            fly_window_size=fly_window_size,
+            fly_entropy_threshold=0.0,
         )
         sampled_chunks.append(chunk_sampled)
         num_sampled_chunks.append(chunk_num_sampled)

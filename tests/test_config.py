@@ -2526,6 +2526,63 @@ def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
     _validate_qwen3_omni_dspark(target_config, draft_config, 7)
 
 
+def test_fly_defaults_window_size():
+    with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
+        config = SpeculativeConfig(
+            method="draft_model",
+            num_speculative_tokens=2,
+            rejection_sample_method="fly",
+        )
+
+    assert config.fly_window_size == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        (
+            {"method": "draft_model", "num_speculative_tokens": 1},
+            "at least 2",
+        ),
+        (
+            {
+                "method": "draft_model",
+                "num_speculative_tokens": 8,
+                "fly_window_size": 8,
+            },
+            "fly_window_size to be smaller",
+        ),
+        (
+            {
+                "method": "draft_model",
+                "num_speculative_tokens": 8,
+                "use_heterogeneous_vocab": True,
+                "use_local_argmax_reduction": True,
+            },
+            "use_local_argmax_reduction",
+        ),
+    ],
+)
+def test_fly_rejects_unsupported_configurations(kwargs: dict[str, object], match: str):
+    with (
+        patch.object(SpeculativeConfig, "__post_init__", lambda self: None),
+        pytest.raises(ValidationError, match=match),
+    ):
+        SpeculativeConfig(rejection_sample_method="fly", **kwargs)
+
+
+def test_fly_accepts_heterogeneous_vocab():
+    with patch.object(SpeculativeConfig, "__post_init__", lambda self: None):
+        config = SpeculativeConfig(
+            method="draft_model",
+            num_speculative_tokens=8,
+            rejection_sample_method="fly",
+            use_heterogeneous_vocab=True,
+        )
+
+    assert config.fly_window_size == 6
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
