@@ -1251,3 +1251,6 @@ class AsyncLLM(EngineClient):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         return await self.engine_core.get_weight_version_async()
+
+    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return await self.engine_core.get_inflight_queue_diagnostics_async(limit)

@@ -206,6 +206,29 @@ async def test_server_load(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
+async def test_server_load_with_inflight_diagnostics():
+    from vllm.entrypoints.serve.instrumentator.basic import get_server_load_metrics
+
+    mock_request = Mock(spec=Request)
+    mock_request.app.state.server_load_metrics = 2
+    mock_request.app.state.engine_client = AsyncMock()
+    mock_request.app.state.engine_client.get_inflight_queue_diagnostics.return_value = [
+        {"data_parallel_rank": 0, "queues": []}
+    ]
+
+    response = await get_server_load_metrics(
+        mock_request, include_inflight=True, inflight_limit=10
+    )
+
+    assert response.body == (
+        b'{"server_load":2,"inflight":[{"data_parallel_rank":0,"queues":[]}]}'
+    )
+    mock_request.app.state.engine_client.get_inflight_queue_diagnostics.assert_awaited_once_with(
+        10
+    )
+
+
+@pytest.mark.asyncio
 async def test_health_check_engine_dead_error():
     # Import the health function directly to test it in isolation
     from vllm.entrypoints.serve.instrumentator.health import health

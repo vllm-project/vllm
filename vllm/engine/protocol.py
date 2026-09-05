@@ -296,3 +296,7 @@ class EngineClient(ABC):
     async def get_weight_version(self) -> str:
         """Return the latest committed weight version."""
         raise NotImplementedError
+
+    async def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        """Return bounded snapshots of in-flight request queues."""
+        raise NotImplementedError

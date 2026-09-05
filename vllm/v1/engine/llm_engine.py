@@ -443,6 +443,9 @@ class LLMEngine:
         """Return the latest committed weight version."""
         return self.engine_core.get_weight_version()
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return self.engine_core.get_inflight_queue_diagnostics(limit)
+
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
 

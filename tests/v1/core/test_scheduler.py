@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import time
 from concurrent.futures import Future
 from unittest.mock import Mock
 
@@ -145,6 +146,29 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def test_get_inflight_queue_diagnostics():
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=3)
+    for request in requests:
+        request.arrival_time = time.time() - 1
+        scheduler.add_request(request)
+
+    scheduler.running.append(scheduler.waiting.pop_request())
+    scheduler.running[0].status = RequestStatus.RUNNING
+
+    diagnostics = scheduler.get_inflight_queue_diagnostics(limit=2)
+
+    assert diagnostics["data_parallel_rank"] == 0
+    assert [queue["name"] for queue in diagnostics["queues"]] == [
+        "running",
+        "waiting",
+        "skipped_waiting",
+    ]
+    assert [len(queue["requests"]) for queue in diagnostics["queues"]] == [1, 1, 0]
+    assert diagnostics["queues"][0]["requests"][0]["status"] == "RUNNING"
+    assert diagnostics["queues"][0]["requests"][0]["age_seconds"] >= 1
 
 
 @pytest.mark.parametrize(

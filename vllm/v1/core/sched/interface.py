@@ -3,7 +3,7 @@
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
@@ -233,6 +233,11 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_inflight_queue_diagnostics(self, limit: int) -> dict[str, Any]:
+        """Return a bounded snapshot of in-flight request queues."""
         raise NotImplementedError
 
     def get_kv_cache_usage(self) -> float:
