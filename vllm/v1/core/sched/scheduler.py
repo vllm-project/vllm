@@ -798,6 +798,10 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                if request.is_finished():
+                    request_queue.pop_request()
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -1177,6 +1181,9 @@ class Scheduler(SchedulerInterface):
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                elif request.is_finished():
+                    self._undo_schedule_for_finished_request(request)
+                    continue
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -2519,6 +2526,25 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
         self._free_request_blocks(request)
         del self.requests[request.request_id]
+
+    def _undo_schedule_for_finished_request(self, request: Request) -> None:
+        """Release this step's allocations for a request that turned out to
+        already be finished (e.g. aborted by a concurrent client disconnect)
+        by the time schedule() reached it. request.request_id is no longer
+        in self.requests -- freed once already by whatever finished it --
+        so this releases only what this scheduling attempt allocated, and
+        never calls _free_request()/_free_blocks(), which would KeyError on
+        that already-deleted entry.
+        """
+        self.running.pop()
+        self._inflight_prefills.discard(request)
+        delay_free_blocks, _ = self._connector_finished(request)
+        if self.ec_connector is not None:
+            ec_delay_free, _ = self.ec_connector.request_finished(request)
+            delay_free_blocks |= ec_delay_free
+        self.encoder_cache_manager.free(request)
+        if not delay_free_blocks:
+            self._free_request_blocks(request)
 
     @property
     def pause_state(self) -> PauseState:
