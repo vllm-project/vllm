@@ -27,6 +27,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .aiter import AITERConfig
 from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -371,6 +372,8 @@ class VllmConfig:
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
+    aiter_config: AITERConfig = Field(default_factory=AITERConfig)
+    """ROCm AITER operations configuration. Only used on ROCm."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -528,6 +531,10 @@ class VllmConfig:
             vllm_factors.append(self.kernel_config.compute_hash())
         else:
             vllm_factors.append(None)
+        if self.aiter_config:
+            vllm_factors.append(self.aiter_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -1433,6 +1440,14 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
+
+        # Apply per-process config state (e.g. ROCm AITER class vars from
+        # aiter_config). Must precede apply_config_platform_defaults, which
+        # reads rocm_aiter_ops.is_*_enabled() to decide custom_ops. Runs here
+        # for the front-end / engine-core / single-GPU (UniProcExecutor) path;
+        # worker subprocesses re-apply in WorkerBase.__init__ because pickle
+        # does not re-run __post_init__.
+        current_platform.sync_process_config_state(self)
 
         current_platform.apply_config_platform_defaults(self)
 

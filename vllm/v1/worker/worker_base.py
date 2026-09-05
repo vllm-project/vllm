@@ -100,6 +100,10 @@ class WorkerBase:
             vllm_config.compilation_config.ir_enable_torch_wrap
         )
 
+        # pickle does not re-run VllmConfig.__post_init__ in worker
+        # subprocesses, so re-apply the per-process config state here.
+        current_platform.sync_process_config_state(vllm_config)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError

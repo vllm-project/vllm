@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING
 import torch
 from torch._ops import OpOverload
 
+if TYPE_CHECKING:
+    from vllm.config import AITERConfig
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -1733,18 +1736,6 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
-    _MOE_DISPATCH_POLICY: int | None = None
-
-    @classmethod
-    @if_aiter_supported
-    def get_moe_dispatch_policy(cls) -> int:
-        """Cached MoE sorting dispatch policy."""
-        if cls._MOE_DISPATCH_POLICY is None:
-            import vllm.envs as envs
-
-            cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
-        return cls._MOE_DISPATCH_POLICY
-
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -1762,6 +1753,7 @@ class rocm_aiter_ops:
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+    _MOE_DISPATCH_POLICY: int = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1770,12 +1762,19 @@ class rocm_aiter_ops:
 
     @classmethod
     def refresh_env_variables(cls):
-        """
-        Since the environment variables are assigned when the module is imported,
-        This is a helper function to reload all the env variables from
-        the environment variables.
-        for example, after monkey patching the env variables in the unit test,
-        you can call this function to reload the env variables.
+        """Re-read the AITER enablement class vars from their ``VLLM_ROCM_USE_AITER*``
+        env vars.
+
+        They are read once at import (see the class ``Note``), so call this
+        after monkeypatching an env var in a test to pick up the new value.
+        ``init_from_config`` is the equivalent entry point when the values
+        come from an ``AITERConfig`` instead.
+
+        Teardown / test only. This ignores any ``AITERConfig`` and reverts to
+        the raw env vars, so never call it on a live engine that was
+        configured via ``--aiter-config`` -- it would silently drop the
+        config's values. The one in-tree caller is ``cleanup_dist_env_and_memory``
+        at engine shutdown, where nothing reads the class vars afterwards.
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
@@ -1791,7 +1790,38 @@ class rocm_aiter_ops:
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._MOE_SITUV2_A8W4 = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
+        cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+
+    @classmethod
+    def init_from_config(cls, aiter_config: "AITERConfig") -> None:
+        """Set the AITER enablement class vars from ``aiter_config``.
+
+        Called once per process -- ``VllmConfig.__post_init__`` for the
+        front-end / single-GPU path, ``WorkerBase.__init__`` for worker
+        subprocesses (pickle does not re-run ``__post_init__`` there). Each
+        ``AITERConfig`` field defaults from the matching ``VLLM_ROCM_USE_AITER*``
+        env var, so an unset config reproduces the import-time values.
+
+        Args:
+            aiter_config: The ``AITERConfig`` from ``VllmConfig``.
+        """
+        cls._AITER_ENABLED = aiter_config.enabled
+        cls._CUSTOM_ALL_REDUCE_ENABLED = aiter_config.custom_all_reduce
+        cls._LINEAR_ENABLED = aiter_config.linear
+        cls._FMOE_ENABLED = aiter_config.moe
+        cls._MLA_ENABLED = aiter_config.mla
+        cls._MHA_ENABLED = aiter_config.mha
+        cls._SHUFFLE_KV_CACHE_ENABLED = aiter_config.shuffle_kv_cache_layout
+        cls._TRITON_UNIFIED_ATTN_ENABLED = aiter_config.unified_attention
+        cls._FP8BMM_ENABLED = aiter_config.fp8bmm
+        cls._FP4BMM_ENABLED = aiter_config.fp4bmm
+        cls._LINEAR_HIPBMM_ENABLED = aiter_config.linear_hipbmm
+        cls._TRITON_ROTARY_EMBED = aiter_config.triton_rope
+        cls._MOE_SHARED_EXPERTS_ENABLED = aiter_config.moe_shared_experts
+        cls._MOE_SITUV2_A8W4 = aiter_config.moe_situv2_a8w4
+        cls._MOE_DISPATCH_POLICY = aiter_config.moe_dispatch_policy
+        cls._TRITON_UNQUANT_GEMM = aiter_config.triton_gemm
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str) -> "ActivationType | None":
@@ -1907,6 +1937,12 @@ class rocm_aiter_ops:
         # _MOE_SITUV2_A8W4 is a variant of aiter fused moe, so aiter
         # fused moe must be enabled as well.
         return cls.is_fused_moe_enabled() and cls._MOE_SITUV2_A8W4
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_dispatch_policy(cls) -> int:
+        """MoE sorting dispatch policy for AITER fused-MoE kernels."""
+        return cls._MOE_DISPATCH_POLICY
 
     @classmethod
     @if_aiter_supported
