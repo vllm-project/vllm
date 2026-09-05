@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fusion.quant_activation import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
+    restore_nvfp4_cutlass_padding_cols,
     slice_nvfp4_output,
     swizzle_blockscale,
 )
@@ -18,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_prepare_bf16_fp4_weights,
@@ -111,6 +113,8 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
+    ipc_pre_processed_safe = True
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -126,6 +130,9 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            restore_nvfp4_cutlass_padding_cols(layer)
+            return
         # cutedsl uses the same swizzled + padded layout as cutlass.
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
@@ -177,6 +184,8 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
+    ipc_pre_processed_safe = True
+
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
         convention, pre-quantized blockscales must use the swizzled layout."""
@@ -203,6 +212,9 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            restore_nvfp4_cutlass_padding_cols(layer)
+            return
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )

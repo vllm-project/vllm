@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -149,8 +150,14 @@ class TrtLlmNvFp4ExpertsBase:
         return self.quant_config.g1_alphas * self.quant_config.a2_gscale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        # Skip the in-place activation-scale fold when weights arrive already
+        # post-processed (weight cache IPC): w*_weight_scale_2 was exported
+        # after this mul_, so re-applying it would double-fuse. The derived
+        # params below are recomputed from the already-fused scales, matching
+        # the exporting side.
+        if not is_weights_pre_processed():
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
