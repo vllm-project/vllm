@@ -337,6 +337,12 @@ void reshape_and_cache_nvfp4_dispatch(
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
 
+  // Must be active before get_device_prop() below: that reads the CURRENT
+  // device, and on a heterogeneous multi-GPU worker the current device need
+  // not be key's device until this guard switches to it.
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      key.get_device_index());
+
   // SM120/SM121 (consumer Blackwell) serve NVFP4 KV via the FlashInfer FA2
   // paged reader, which takes the scale-factor strides from the SF tensor
   // itself and reads V scales linearly; the SM100 trtllm-gen reader keeps
@@ -394,8 +400,6 @@ void reshape_and_cache_nvfp4_dispatch(
   dim3 grid(num_tokens);
   dim3 block(num_threads);
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(

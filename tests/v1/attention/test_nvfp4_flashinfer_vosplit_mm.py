@@ -24,7 +24,7 @@ try:
     )
 
     HAS_FI = True
-except Exception:
+except ModuleNotFoundError:
     HAS_FI = False
 
 pytestmark = pytest.mark.skipif(

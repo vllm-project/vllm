@@ -125,15 +125,21 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
     the 512-wide V cache (and, for NVFP4, of its per-16-element scale
     factors).
 
-    The split is dtype-independent (the guard counts only accumulator
-    fragments). For NVFP4 it additionally requires linear (non-swizzled)
-    V scale factors, which the sm12x cache writer stores, so the V data
-    and scale views slice cleanly along the head dim; the trtllm-gen
-    4-token V-scale swizzle does not commute with head-dim slicing.
+    The HEAD_DIM_VO>256 register-budget cap is a property of the FA2
+    kernel specifically (the guard counts only accumulator fragments,
+    independent of KV dtype) — it does not apply to trtllm-gen, which
+    natively handles HEAD_DIM_VO=512 (e.g. nvfp4 KV on sm100). So the
+    split is only needed when we are actually routed through that FA2
+    kernel; every other head_size>256 path (bf16/fp8 Gemma 4, or nvfp4
+    Gemma 4 on sm100 trtllm-gen) must stay single-pass. For NVFP4 the
+    split additionally requires linear (non-swizzled) V scale factors,
+    which the sm12x cache writer stores, so the V data and scale views
+    slice cleanly along the head dim; the trtllm-gen 4-token V-scale
+    swizzle does not commute with head-dim slicing.
     """
-    if head_size <= 256:
+    if head_size <= 256 or not is_fa2_nvfp4:
         return 1
-    if is_fa2_nvfp4 and not _vllm_nvfp4_kv_vosplit_requested():
+    if not _vllm_nvfp4_kv_vosplit_requested():
         raise ValueError(
             f"NVFP4 KV with head_size={head_size} on the SM12x FA2 path "
             "needs the two-pass VO split (the FA2 kernel caps HEAD_DIM_VO "
@@ -141,11 +147,10 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
             "these layers on a different KV dtype."
         )
     split = -(-head_size // 256)  # ceil(head_size / 256)
-    if head_size % split != 0 or (is_fa2_nvfp4 and (head_size // split) % 16 != 0):
+    if head_size % split != 0 or (head_size // split) % 16 != 0:
         raise ValueError(
-            "The VO split needs head_size divisible into <=256-wide chunks"
-            f"{' of whole 16-element scale blocks' if is_fa2_nvfp4 else ''}; "
-            f"got head_size={head_size}."
+            "The VO split needs head_size divisible into <=256-wide chunks "
+            f"of whole 16-element scale blocks; got head_size={head_size}."
         )
     return split
 
@@ -1134,13 +1139,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 None,
             )
             if bidi_mode == "vision" and self.window_left < 0:
+                # Full (non-windowed) vision attention already covers the
+                # whole image span without custom masks; fall back to the
+                # ordinary causal/full-attention routing below instead of
+                # rejecting DCP/sinks for a mm-prefix mode we're not using.
                 self.mm_prefix_enabled = False
-            if self.use_dcp:
+            if self.mm_prefix_enabled and self.use_dcp:
                 raise NotImplementedError(
                     "FlashInfer mm-prefix custom masks are not wired for "
                     "DCP; unset VLLM_FLASHINFER_MM_PREFIX or disable DCP."
                 )
-            if self.has_sinks:
+            if self.mm_prefix_enabled and self.has_sinks:
                 # The mm-prefix groups drive their own planned wrappers via
                 # the plain run() signature, which cannot pass the sink
                 # tensor. Reject the combination here rather than silently
@@ -1243,6 +1252,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and cache_config is not None
             and cache_config.cache_dtype.startswith("nvfp4")
         ):
+            # Gemma 4's 512-wide heads additionally need the two-pass VO
+            # split (see _vo_split_factor), which forces
+            # reorder_batch_threshold=0 so uniform single-token batches run
+            # through the prefill wrapper instead of decode. FlashInfer
+            # prefill plan() is not capture-safe, so build_for_cudagraph_
+            # capture()'s default build() would plan() *during* capture;
+            # refuse capture outright rather than advertise a decode-capture
+            # level this path cannot honour.
+            max_head_size = max(
+                (
+                    spec.head_size
+                    for spec in iter_layer_specs(kv_cache_spec)
+                    if isinstance(spec, AttentionSpec)
+                ),
+                default=0,
+            )
+            if _vo_split_factor(max_head_size, True) > 1:
+                return AttentionCGSupport.NEVER
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         kv_specs = iter_layer_specs(kv_cache_spec)
@@ -1382,6 +1409,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "FlashInfer non-causal attention with NVFP4 KV cache requires "
                     "the FA2 paged reader (consumer Blackwell sm120/sm121); "
                     "trtllm-gen is causal-only."
+                )
+            if self.is_kvcache_nvfp4 and self.window_left >= 0:
+                # The non-causal FA2-NVFP4 path (DFlash-family drafter verify)
+                # has only been validated for full attention; a sliding
+                # window changes which KV positions the wrapper's masking
+                # needs to cover and hasn't been exercised here. Fail loud
+                # instead of silently running verify over the wrong span.
+                raise NotImplementedError(
+                    "FlashInfer non-causal attention with NVFP4 KV cache does "
+                    "not support sliding window attention yet."
                 )
             if self._noncausal_prefill_wrapper is None:
                 if self.has_sinks and current_platform.is_device_capability_family(120):
