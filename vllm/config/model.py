@@ -121,6 +121,40 @@ AttnTypeStr = Literal[
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
+
+def _is_nvfp4_quant_group(group: object) -> bool:
+    """Whether one compressed-tensors config group describes an NVFP4 scheme.
+
+    A group is NVFP4 if its own per-group ``format`` names nvfp4, or if it
+    matches the NVFP4 scheme (4-bit float weights and activations with
+    16-element tensor-group scales), mirroring
+    ``CompressedTensorsConfig._is_nvfp4_format``. The scheme check is
+    deliberately strict so that W4A4-float MXFP4 groups (strategy "group",
+    group_size 32) are not misclassified as NVFP4.
+    """
+    if not isinstance(group, dict):
+        # config_groups may map preset scheme names to target lists; such
+        # configs are not loadable by vLLM, so simply do not match them.
+        return False
+    if "nvfp4" in str(group.get("format") or "").lower():
+        return True
+    weights = group.get("weights") or {}
+    acts = group.get("input_activations") or {}
+    if not (isinstance(weights, dict) and isinstance(acts, dict)):
+        return False
+    return (
+        weights.get("num_bits") == 4
+        and weights.get("type") == "float"
+        and weights.get("strategy") == "tensor_group"
+        and weights.get("group_size") == 16
+        and bool(weights.get("symmetric", True))
+        and acts.get("num_bits") == 4
+        and acts.get("type") == "float"
+        and acts.get("strategy") == "tensor_group"
+        and acts.get("group_size") == 16
+        and bool(acts.get("symmetric", True))
+    )
+
 class ModelConfig:
     """Configuration for the model."""
 
@@ -2167,10 +2201,20 @@ class ModelConfig:
         # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
         # in the quantization config
         quant_config = self.model_arch_config.quantization_config
-        return (
-            self.quantization == "compressed-tensors"
-            and quant_config is not None
-            and "nvfp4" in quant_config.get("format", "").lower()
+        if self.quantization != "compressed-tensors" or quant_config is None:
+            return False
+        fmt = quant_config.get("format", "").lower()
+        if "nvfp4" in fmt:
+            return True
+        # Mixed-precision checkpoints declare per-group schemes, so the
+        # top-level format string never names nvfp4 even when some groups
+        # are. Detect an nvfp4 group so FP4-specific behavior (e.g. the
+        # activation-quant fusion pass) still applies to those layers.
+        if "mixed" not in fmt:
+            return False
+        return any(
+            _is_nvfp4_quant_group(group)
+            for group in (quant_config.get("config_groups") or {}).values()
         )
 
 
