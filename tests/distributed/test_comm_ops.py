@@ -649,6 +649,7 @@ def test_force_fp32_reduction_all_reduce(monkeypatch: pytest.MonkeyPatch) -> Non
     called_dtypes: list[torch.dtype] = []
 
     def fake_all_reduce(x: torch.Tensor) -> torch.Tensor:
+        """Mock all-reduce operation tracking input dtype."""
         called_dtypes.append(x.dtype)
         return x
 
@@ -696,6 +697,7 @@ def test_force_fp32_reduction_reduce_scatter(monkeypatch: pytest.MonkeyPatch) ->
     called_dims: list[int] = []
 
     def fake_reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        """Mock reduce-scatter operation tracking input dtype and dim."""
         called_dtypes.append(x.dtype)
         called_dims.append(dim)
         return x[:1]
