@@ -307,6 +307,9 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
+            enable_mamba_fine_grained_prefix_cache=(
+                self.cache_config.enable_mamba_fine_grained_prefix_cache
+            ),
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -351,6 +354,14 @@ class Scheduler(SchedulerInterface):
             self.need_mamba_block_aligned_split
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
+        )
+        # Opt-in: also stop at the junction, where an eagle sibling resumes. The
+        # manager decides whether it can check-point there (per-group eagle bit,
+        # no MTP re-prefill tail); splitting for a stop it would refuse costs a
+        # forward pass and displaces the block-boundary stop.
+        self.mamba_fine_grained_prefix_cache = (
+            self.mamba_partial_cache_hit
+            and self.kv_cache_manager.mamba_fine_grained_prefix_cache
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -451,6 +462,26 @@ class Scheduler(SchedulerInterface):
             if self.mamba_partial_cache_hit
             else 0
         )
+        if tail_boundary and self.use_eagle_block_drop:
+            # Eagle matches one hash unit past the candidate and drops it, so
+            # nothing proves the prompt's own last hash boundary. Materialize
+            # the state one unit lower, where the hit can actually land. Keyed on
+            # the block-drop bit, not plain use_eagle: this shift exists only to
+            # compensate for the drop, and the Mamba manager's matching gate
+            # reads the same bit (the coordinator is handed use_eagle_block_drop).
+            tail_boundary = max(tail_boundary - self.hash_block_size, 0)
+        junction = request.shared_prefix_boundary
+        # Block-floored: a sub-block junction's state is not separately cacheable.
+        block_floored = start + (junction - start) // block_size * block_size
+        # Past the prompt the manager writes nothing, so fall back to the
+        # block-floored stop rather than dropping it: a resumed request replaying
+        # output tokens can still observe a junction there.
+        junction_stop = (
+            junction
+            if self.mamba_fine_grained_prefix_cache
+            and junction <= request.num_prompt_tokens
+            else block_floored
+        )
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -462,12 +493,9 @@ class Scheduler(SchedulerInterface):
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
-            # Marconi shared-prefix junction, block-floored (a sub-block
-            # junction's state is not separately cacheable): cache its state
-            # so sibling requests sharing the prefix can reuse it.
-            start + (request.shared_prefix_boundary - start) // block_size * block_size
-            if start < request.shared_prefix_boundary < end
-            else 0,
+            # Marconi shared-prefix junction: cache its state so sibling
+            # requests sharing the prefix can reuse it.
+            junction_stop if start < junction < end else 0,
         )
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)

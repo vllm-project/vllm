@@ -192,7 +192,7 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
         )
         assert manager.allocate_new_blocks(request_id, num_tokens, num_tokens) == []
 
-    manager.cache_blocks(request_id, 1024)
+    manager.cache_blocks(request_id, 1024, replay_boundary=0)
     manager.remove_skipped_blocks(request_id, 1024)
     assert manager.get_num_common_prefix_blocks(request_id) == 0
     assert manager.get_num_skipped_tokens(1024) == 0

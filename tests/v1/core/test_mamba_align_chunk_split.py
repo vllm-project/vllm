@@ -94,6 +94,7 @@ def _split(
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
+        mamba_fine_grained_prefix_cache=False,
         hash_block_size=ATTN_BLOCK_SIZE,
         mamba_has_prefill_checkpoint_blocks=(
             num_prefill_checkpoint_blocks > 0 and not use_eagle
@@ -278,7 +279,12 @@ def test_unaligned_resume_never_runs_past_its_block(
     """
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
-    tail_boundary = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    # Under eagle the partial-tail stop sits one hash unit below the prompt's
+    # last hash boundary: eagle matches a unit past its candidate and drops it,
+    # so nothing proves that last boundary.
+    tail_stop = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    if use_eagle:
+        tail_stop -= ATTN_BLOCK_SIZE
 
     pos, ends = resume_at, []
     while pos < prompt_len:
@@ -303,7 +309,7 @@ def test_unaligned_resume_never_runs_past_its_block(
 
     for end in ends[:-1]:
         aligned = end % MAMBA_BLOCK_SIZE == 0
-        assert aligned or (partial_hit and end == tail_boundary), (
+        assert aligned or (partial_hit and end == tail_stop), (
             f"intermediate chunk end {end} is neither block-aligned nor the "
-            f"partial-tail boundary"
+            f"partial-tail stop ({tail_stop})"
         )
