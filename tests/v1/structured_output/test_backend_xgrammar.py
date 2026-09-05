@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for issue #42403.
-
-A request's stop-token set (the generation_config eos list plus any
-user-supplied ``stop_token_ids``) is invisible to xgrammar, which only knows
-the tokenizer's single eos. Such tokens can therefore escape the grammar
-bitmask while the FSM is still mid-object and truncate structured output.
-``compile_grammar`` now forwards ``all_stop_token_ids`` to the matcher as
-``override_stop_tokens`` so xgrammar masks them until the grammar completes.
-"""
 
 import pytest
 from transformers import AutoTokenizer
@@ -24,6 +15,7 @@ VOCAB_SIZE = 50257
 EOS = 50256  # <|endoftext|> -- the tokenizer's only default stop token
 QUOTE = 1  # standalone `"`; opens then closes the JSON string
 LETTER = 55  # `X`: valid string content, not a special/stop token by default
+NEWLINE = 198  # `\n`; a non-stop token used as trailing draft after EOS
 
 
 def _token_allowed(row, token_id: int) -> bool:
@@ -43,7 +35,27 @@ def backend() -> XgrammarBackend:
     )
 
 
+def _completed_object_grammar(backend: XgrammarBackend):
+    """JSON object grammar that has accepted a complete `{"a": "b"}` value."""
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON, '{"type": "object"}'
+    )
+    prompt = backend.tokenizer.encode('{"a": "b"}')
+    assert grammar.accept_tokens("req", prompt)
+    assert not grammar.is_terminated()
+    return grammar
+
+
 def test_request_stop_tokens_gated_to_grammar_terminal(backend: XgrammarBackend):
+    """Extra request stop tokens are masked until the grammar can terminate.
+
+    Regression for #42403: a request's stop-token set (generation_config eos
+    plus user ``stop_token_ids``) is invisible to xgrammar, which only knows
+    the tokenizer's single eos. Such tokens can escape the grammar bitmask
+    while the FSM is still mid-object. ``compile_grammar`` forwards
+    ``all_stop_token_ids`` as ``override_stop_tokens`` so xgrammar masks them
+    until the grammar completes.
+    """
     schema = '{"type": "string"}'
     default = backend.compile_grammar(StructuredOutputOptions.JSON, schema)
     override = backend.compile_grammar(
@@ -80,3 +92,46 @@ def test_request_stop_tokens_gated_to_grammar_terminal(backend: XgrammarBackend)
     assert _token_allowed(bm_override[0], LETTER)
     assert _token_allowed(bm_default[0], EOS)
     assert _token_allowed(bm_override[0], EOS)
+
+
+def test_accept_tokens_stops_at_termination(backend: XgrammarBackend, capfd):
+    """Tokens after a terminating EOS do not reach the matcher.
+
+    Regression for #52767 / #52805: speculative batches can include draft
+    tokens after a stop token. Those must not be forwarded to xgrammar.
+    """
+    grammar = _completed_object_grammar(backend)
+    processed_before = grammar.num_processed_tokens
+
+    assert grammar.accept_tokens("req", [EOS, NEWLINE])
+    assert grammar.is_terminated()
+    assert grammar.num_processed_tokens == processed_before + 1
+    assert "trying to accept new token" not in capfd.readouterr().err
+
+    processed_after_eos = grammar.num_processed_tokens
+    assert grammar.accept_tokens("req", [NEWLINE])
+    assert grammar.num_processed_tokens == processed_after_eos
+    assert "trying to accept new token" not in capfd.readouterr().err
+
+    grammar.reset()
+    assert not grammar.is_terminated()
+    assert grammar.num_processed_tokens == 0
+
+
+def test_validate_tokens_stops_at_termination(backend: XgrammarBackend, capfd):
+    """Validation rolls back after reaching a terminating EOS.
+
+    Regression for #52767 / #52805.
+    """
+    grammar = _completed_object_grammar(backend)
+
+    assert grammar.validate_tokens([EOS, NEWLINE]) == [EOS]
+    assert "trying to accept new token" not in capfd.readouterr().err
+    # Check matcher state directly to verify validation rolled it back.
+    assert not grammar.matcher.is_terminated()
+
+    assert grammar.accept_tokens("req", [EOS])
+    assert grammar.is_terminated()
+
+    assert grammar.validate_tokens([NEWLINE]) == []
+    assert "trying to accept new token" not in capfd.readouterr().err
