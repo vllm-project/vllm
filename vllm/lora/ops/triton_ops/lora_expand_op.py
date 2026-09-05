@@ -33,6 +33,7 @@ def _lora_expand_kernel(
     lora_token_start_loc,
     lora_ids,
     slice_start_loc,
+    slice_active_mask,
     input_d0_stride,
     input_d1_stride,
     input_d2_stride,  # 1
@@ -51,6 +52,7 @@ def _lora_expand_kernel(
     SLICE_NUM: tl.constexpr,
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
+    HAS_SLICE_MASK: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
@@ -67,6 +69,12 @@ def _lora_expand_kernel(
     if lora_id == -1:
         # Early exit for the no-lora case.
         return
+
+    # Early exit for zero-weight slices (same logic as shrink kernel).
+    if HAS_SLICE_MASK:
+        slice_active = tl.load(slice_active_mask + lora_id * SLICE_NUM + slice_id)
+        if slice_active == 0:
+            return
 
     lora_m_size = tl.load(num_tokens_per_lora + lora_idx)
 
@@ -146,6 +154,7 @@ def _lora_expand(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
+    slice_active_mask: torch.Tensor | None = None,
 ) -> None:
     """
     Args:
@@ -245,6 +254,7 @@ def _lora_expand(
 
     # PDL only works when dual-stream is being used.
     use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
+    HAS_SLICE_MASK = slice_active_mask is not None
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -257,6 +267,7 @@ def _lora_expand(
         lora_token_start_loc,
         lora_ids,
         slice_start_tensor,
+        slice_active_mask,
         inputs.stride(0),
         inputs.stride(1),
         inputs.stride(2),
@@ -275,6 +286,7 @@ def _lora_expand(
         NUM_SLICES,
         same_stride,
         use_gdc,
+        HAS_SLICE_MASK,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
@@ -297,6 +309,7 @@ def _lora_expand_fake(
     num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     offset_start: int = 0,
     add_inputs: bool = False,
+    slice_active_mask: torch.Tensor | None = None,
 ) -> None:
     return
 
