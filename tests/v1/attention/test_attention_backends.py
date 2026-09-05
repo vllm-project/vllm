@@ -853,6 +853,31 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [
+        (torch.float16, 1.0),
+        (torch.bfloat16, 1.0),
+        (torch.float8_e4m3fn, 2.0),
+        (torch.float8_e5m2, 2.0),
+    ],
+)
+def test_flashinfer_query_scale_matches_query_dtype(dtype, expected):
+    """Native attention should only apply q_scale when Q is FP8."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class MockLayer:
+        _q_scale_float = 2.0
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+
+    assert impl.get_query_scale(MockLayer, dtype) == expected
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_xqa_draft_masks():
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
