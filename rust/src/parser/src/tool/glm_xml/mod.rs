@@ -5,7 +5,7 @@ use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
-use winnow::token::{literal, rest, take_until, take_while};
+use winnow::token::{literal, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
@@ -31,7 +31,6 @@ type GlmInput<'i> = Partial<&'i str>;
 enum GlmMode {
     Text,
     ToolCall { tool_call_end_scan: MarkerScanState },
-    AfterToolCall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +53,6 @@ enum GlmEvent {
         name: String,
         raw_params: Vec<(String, String)>,
     },
-    IgnoredRest,
 }
 
 /// Tool parser core for GLM XML-style tool calls.
@@ -90,7 +88,7 @@ impl GlmXmlToolParser {
                 };
             }
             GlmEvent::ToolCall { name, raw_params } => {
-                self.mode = GlmMode::AfterToolCall;
+                self.mode = GlmMode::Text;
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
@@ -102,7 +100,6 @@ impl GlmXmlToolParser {
                 });
                 self.emitted_tool_count += 1;
             }
-            GlmEvent::IgnoredRest => {}
         }
         Ok(())
     }
@@ -134,7 +131,6 @@ impl GlmXmlToolParser {
                 GlmMode::ToolCall { .. } => {
                     return Err(parsing_failed!("incomplete GLM MoE tool call"));
                 }
-                GlmMode::AfterToolCall => {}
             }
         }
         let _ = self.reset();
@@ -153,7 +149,6 @@ fn parse_next_glm_event(
         GlmMode::ToolCall { tool_call_end_scan } => {
             tool_call_event(input, separator, tool_call_end_scan)
         }
-        GlmMode::AfterToolCall => after_tool_call_event(input),
     }
 }
 
@@ -170,17 +165,6 @@ fn tool_call_start_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
 /// Parse a safe text run before the next GLM marker.
 fn safe_text_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
     safe_text_len(input, TOOL_CALL_START).map(|len| GlmEvent::Text { len })
-}
-
-/// Parse text after a completed GLM tool call.
-fn after_tool_call_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    ws0.void().parse_next(input)?;
-    alt((tool_call_start_event, ignored_rest_event)).parse_next(input)
-}
-
-/// Parse a trailing rest after GLM tool calls.
-fn ignored_rest_event(input: &mut GlmInput<'_>) -> ModalResult<GlmEvent> {
-    rest.value(GlmEvent::IgnoredRest).parse_next(input)
 }
 
 /// Parse a complete GLM tool call.
@@ -324,7 +308,7 @@ mod tests {
         let chunks = split_by_chars(&output, 11);
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.normal_text(), "\n");
         assert_eq!(output.calls().len(), 2);
         assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(output.calls()[1].name.as_deref(), Some("add"));
@@ -429,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn glm45_streaming_ignores_trailing_text_after_tool_calls() {
+    fn glm45_streaming_preserves_trailing_text_after_tool_calls() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
 
         let output = collect_stream(
@@ -440,7 +424,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.normal_text(), "<|endoftext|>");
         assert_eq!(output.calls().len(), 1);
     }
 }
