@@ -1421,11 +1421,27 @@ class ModelConfig:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size})."
+            valid_tp_sizes = [
+                size
+                for size in range(1, total_num_attention_heads + 1)
+                if total_num_attention_heads % size == 0
+            ]
+            message = (
+                f"Total number of attention heads ({total_num_attention_heads}) "
+                "must be divisible by tensor parallel size "
+                f"({tensor_parallel_size}). Tensor parallelism shards "
+                "attention heads across ranks, so only the following "
+                "`--tensor-parallel-size` values are valid: "
+                f"{valid_tp_sizes}."
             )
+            if self.registry.is_pp_supported_model(self.architectures, self):
+                message += (
+                    f" To use {tensor_parallel_size} GPUs, consider "
+                    "`--pipeline-parallel-size` instead, which shards the "
+                    "model by layers and does not require attention-head "
+                    "divisibility."
+                )
+            raise ValueError(message)
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
