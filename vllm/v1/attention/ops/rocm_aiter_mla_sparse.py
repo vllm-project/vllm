@@ -254,6 +254,18 @@ def indexer_k_quant_and_cache_triton(
     )
 
 
+@functools.lru_cache
+def aiter_indexer_qk_fused_kernel():
+    """The fused indexer prologue kernel, if this AITER build has it."""
+    if not current_platform.is_rocm() or find_spec("aiter") is None:
+        return None
+    try:
+        from aiter import indexer_qk_rope_quant_and_cache
+    except ImportError:
+        return None
+    return indexer_qk_rope_quant_and_cache
+
+
 @triton.jit
 def _cp_gather_indexer_quant_cache_kernel(
     kv_cache_ptr,  # [n_blks,blk_size//tile_blk,head_dim//16B,tile_blk,16B]
