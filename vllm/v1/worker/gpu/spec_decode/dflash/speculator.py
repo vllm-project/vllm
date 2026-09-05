@@ -44,6 +44,17 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
 
+        # Persistent, CUDA-graph-stable buffer for the draft ids' embeddings.
+        # The draft ids are embedded OUTSIDE the compiled drafter forward into
+        # this buffer (see _run_model): embedding in-compile trips a
+        # data-dependent local_scalar_dense in F.embedding -> orphan unbacked
+        # SymInt (PendingUnbackedSymbolNotFound {u0}) at the drafter's AOT
+        # compile, blocking graph mode. Mirrors SpecDecodeBaseProposer's buffer
+        # discipline. See DESIGN-NOTES §10.
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+        )
+
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
 
@@ -252,10 +263,20 @@ class DFlashSpeculator(DraftModelSpeculator):
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
         ):
+            # Embed the draft ids outside the compiled forward into the
+            # CUDA-graph-stable buffer, then pass inputs_embeds (input_ids=None).
+            # Numerically identical to embedding in-compile: the model's forward
+            # would call the same embed_input_ids (incl. any input_embedding_scale
+            # override); only WHERE it runs changes. Keeps F.embedding out of the
+            # @support_torch_compile graph so the drafter AOT-compiles in graph
+            # mode. See DESIGN-NOTES §10.
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
+                self.input_buffers.input_ids[:num_tokens]
+            )
             last_hidden_states = self.model(
-                input_ids=self.input_buffers.input_ids[:num_tokens],
+                input_ids=None,
                 positions=self.input_buffers.positions[:num_tokens],
-                inputs_embeds=None,
+                inputs_embeds=self.inputs_embeds[:num_tokens],
             )
         return last_hidden_states
 
