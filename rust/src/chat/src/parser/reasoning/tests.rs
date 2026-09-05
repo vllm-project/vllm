@@ -15,12 +15,14 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
+    assert!(factory.contains(names::MINIMAX_M2_APPEND_THINK));
     assert!(factory.contains(names::GEMMA4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
+    assert!(factory.list().contains(&names::MINIMAX_M2_APPEND_THINK.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
 }
 
@@ -111,4 +113,17 @@ fn factory_rejects_unknown_parser_names() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("choose from"));
+}
+
+#[test]
+fn factory_creates_minimax_m2_append_think_by_exact_name_only() {
+    let tokenizer = Arc::new(TestTokenizer::new());
+    let factory = ReasoningParserFactory::new();
+    let parser = factory.create(names::MINIMAX_M2_APPEND_THINK, tokenizer).unwrap();
+
+    assert!(parser.preserve_special_tokens());
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMaxAI/MiniMax-M2"),
+        Some(names::MINIMAX_M2)
+    );
 }
