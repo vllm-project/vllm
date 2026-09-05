@@ -34,6 +34,9 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    reconcile_nvfp4_moe_w13_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
@@ -52,6 +55,77 @@ from vllm.platforms import current_platform
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+def test_nvfp4_moe_matching_w13_global_scales_are_unchanged():
+    block_scales = torch.tensor(
+        [[[0.5], [1.0], [1.5], [2.0]]], dtype=torch.float8_e4m3fn
+    )
+    global_scales = torch.tensor([[2.0, 2.0]])
+
+    reconciled_block_scales, reconciled_global_scales = reconcile_nvfp4_moe_w13_scales(
+        block_scales, global_scales
+    )
+
+    assert reconciled_block_scales is block_scales
+    torch.testing.assert_close(reconciled_global_scales, global_scales[:, 0])
+
+
+@pytest.mark.parametrize(
+    ("global_scales", "expected_block_scales", "expected_global_scale"),
+    [
+        ([[1.0, 2.0]], [0.5, 0.5, 1.0, 1.0], [2.0]),
+        ([[4.0, 1.0]], [1.0, 1.0, 0.25, 0.25], [4.0]),
+    ],
+)
+def test_nvfp4_moe_reconciles_each_w13_half(
+    global_scales, expected_block_scales, expected_global_scale
+):
+    block_scales = torch.ones((1, 4, 1), dtype=torch.float8_e4m3fn)
+
+    reconciled_block_scales, reconciled_global_scales = reconcile_nvfp4_moe_w13_scales(
+        block_scales, torch.tensor(global_scales)
+    )
+
+    torch.testing.assert_close(
+        reconciled_block_scales.float().flatten(),
+        torch.tensor(expected_block_scales),
+    )
+    torch.testing.assert_close(
+        reconciled_global_scales, torch.tensor(expected_global_scale)
+    )
+
+
+def test_nvfp4_moe_reconciles_mismatched_w13_global_scales_per_expert():
+    block_scales = torch.tensor(
+        [
+            [[0.5], [1.0], [1.5], [2.0]],
+            [[1.0], [1.5], [2.0], [2.5]],
+            [[0.5], [1.5], [2.5], [3.5]],
+        ],
+        dtype=torch.float8_e4m3fn,
+    )
+    global_scales = torch.tensor([[2.0, 2.0], [4.0, 1.0], [1.0, 3.0]])
+    shard_scales = global_scales[:, :, None, None]
+    effective_scales_before = block_scales.reshape(3, 2, 2, 1).float() * shard_scales
+
+    reconciled_block_scales, reconciled_global_scales = reconcile_nvfp4_moe_w13_scales(
+        block_scales, global_scales
+    )
+    effective_scales_after = reconciled_block_scales.reshape(3, 2, 2, 1).float()
+    effective_scales_after *= reconciled_global_scales[:, None, None, None]
+
+    torch.testing.assert_close(reconciled_global_scales, torch.tensor([2.0, 4.0, 3.0]))
+    assert not torch.allclose(
+        effective_scales_before[2, 1],
+        block_scales.reshape(3, 2, 2, 1)[2, 1].float() * global_scales[2, 0],
+    )
+    torch.testing.assert_close(
+        effective_scales_after,
+        effective_scales_before,
+        rtol=2**-4,
+        atol=0,
+    )
 
 
 def _skip(msg: str) -> NoReturn:
