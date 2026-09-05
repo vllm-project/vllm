@@ -644,6 +644,7 @@ def test_multi_process_tensor_parallel_pipeline_parallel(
 
 
 def test_force_fp32_reduction_all_reduce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify FP32 reduction promotion and dtype restoration for all_reduce."""
     mock_group = Mock()
     called_dtypes: list[torch.dtype] = []
 
@@ -689,6 +690,7 @@ def test_force_fp32_reduction_all_reduce(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_force_fp32_reduction_reduce_scatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify FP32 reduction promotion and dtype restoration for reduce_scatter."""
     mock_group = Mock()
     called_dtypes: list[torch.dtype] = []
     called_dims: list[int] = []
