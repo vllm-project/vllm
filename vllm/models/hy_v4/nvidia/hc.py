@@ -11,7 +11,9 @@ scatters the result back over the channels (``HYV4HCPostLayer``). The final
 NOTE: Each of the three steps has an optional single-kernel HPC replacement
 (``HpcIHCPre`` / ``HpcIHCPost`` / ``HpcIHCHead``). They are only constructed
 when the hpc package is installed, ``VLLM_ENABLE_HPC_OPS=1`` and the shape /
-device constraints hold; otherwise the eager path below runs unchanged.
+device constraints hold. Otherwise the fused Triton ops in ``ops/ihc.py`` run
+on any CUDA-like GPU for bf16/fp16 activations, and the eager torch path below
+(kept as the reference, ``forward_native``) covers everything else.
 TODO: port the cross-layer post+pre fusion (``HpcIHCPostPre``) as well; it
 requires restructuring the decoder-layer forward scheduling.
 """
@@ -22,6 +24,22 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.hpc import HpcIHCHead, HpcIHCPost, HpcIHCPre
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
+
+from .ops.ihc import ihc_head, ihc_post, ihc_pre
+
+_TRITON_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def _triton_ihc_supported(hc_mult: int) -> bool:
+    """Fused Triton iHC kernels: any CUDA-like GPU, power-of-two hc_mult."""
+    return (
+        HAS_TRITON
+        and current_platform.is_cuda_alike()
+        and hc_mult > 0
+        and (hc_mult & (hc_mult - 1)) == 0
+    )
 
 
 class HYV4HCPreLayer(nn.Module):
@@ -81,6 +99,7 @@ class HYV4HCPreLayer(nn.Module):
                 norm_eps=layernorm_epsilon,
                 fallback_op=self,
             )
+        self.use_triton = _triton_ihc_supported(hc_mult)
 
     def reset_parameters(self, init_std: float, base_noise_std: float = 0.0) -> None:
         """Initialize the gate scale and per-channel gate bias."""
@@ -106,7 +125,20 @@ class HYV4HCPreLayer(nn.Module):
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
+        if self.use_triton and x.dtype in _TRITON_DTYPES:
+            return ihc_pre(
+                x,
+                self.hc_fn.weight,
+                self.hc_scale,
+                self.hc_base,
+                self.layernorm_epsilon,
+                self.hc_eps,
+                self.magnitude,
+            )
+        return self.forward_native(x)
 
+    def forward_native(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Eager torch reference for the fused kernels."""
         shape = x.size()  # [num_tokens, hc, d]
         hc = self.hc_mult
         hc_eps = self.hc_eps
@@ -159,6 +191,7 @@ class HYV4HCPostLayer(nn.Module):
         hc_mult = getattr(config, "hc_mult", 0)
         if HpcIHCPost.support(hc_mult, config.hidden_size):
             self.hpc_op = HpcIHCPost(hc_mult=hc_mult, hidden_size=config.hidden_size)
+        self.use_triton = _triton_ihc_supported(hc_mult)
 
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor
@@ -175,7 +208,14 @@ class HYV4HCPostLayer(nn.Module):
         """
         if self.hpc_op is not None:
             return self.hpc_op(x, residual, post)
+        if self.use_triton and x.dtype in _TRITON_DTYPES:
+            return ihc_post(x, residual, post)
+        return self.forward_native(x, residual, post)
 
+    def forward_native(
+        self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor
+    ) -> torch.Tensor:
+        """Eager torch reference for the fused kernel."""
         dtype = x.dtype
         x = x.float()
         residual = residual.float()
@@ -230,6 +270,7 @@ class HYV4HCHeadLayer(nn.Module):
                 norm_eps=config.rms_norm_eps,
                 fallback_op=self,
             )
+        self.use_triton = _triton_ihc_supported(hc_mult)
 
     def reset_parameters(
         self, init_std: float = 6e-3, base_noise_std: float = 0.0
@@ -259,7 +300,19 @@ class HYV4HCHeadLayer(nn.Module):
         """
         if self.hpc_op is not None:
             return self.hpc_op(x)
+        if self.use_triton and x.dtype in _TRITON_DTYPES:
+            return ihc_head(
+                x,
+                self.hc_head_fn.weight,
+                self.hc_head_scale,
+                self.hc_head_base,
+                self.config.rms_norm_eps,
+                self.hc_eps,
+            )
+        return self.forward_native(x)
 
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """Eager torch reference for the fused kernel."""
         shape, x_dtype = x.size(), x.dtype
 
         x = x.flatten(1).float()  # [num_tokens, hc*d]
