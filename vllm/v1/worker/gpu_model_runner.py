@@ -2587,6 +2587,9 @@ class GPUModelRunner(
                 builder,
                 (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
             ):
+                assert ubid is None, (
+                    "UBatching not supported with GDN or linear attn yet"
+                )
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
                 )
