@@ -134,9 +134,19 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
-        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
-        return (state_dtype, torch.float32)
+        conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        if mamba_ssm_cache_dtype == "auto":
+            recurrent_state_dtype = torch.float32
+        elif mamba_ssm_cache_dtype in ("float32", "bfloat16"):
+            recurrent_state_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
+        else:
+            raise ValueError(
+                "KDA recurrent state supports only auto, float32, and bfloat16; "
+                f"got {mamba_ssm_cache_dtype}"
+            )
+        return (conv_state_dtype, recurrent_state_dtype)
 
     @classmethod
     def append_kda_recoverssm_record(

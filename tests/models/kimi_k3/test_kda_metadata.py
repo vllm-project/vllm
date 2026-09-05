@@ -49,6 +49,8 @@ PRUNED_METADATA_FIELDS = {
     "prefill_state_indices",
     "prefill_has_initial_state",
     "spec_sequence_masks",
+    "flashinfer_prefill_query_start_loc",
+    "flashinfer_prefill_seq_order",
 }
 
 
@@ -59,10 +61,10 @@ def _assert_matches_shared_gdn(
     assert actual.recoverssm_context is None
     for field in fields(GDNAttentionMetadata):
         actual_value = getattr(actual, field.name)
-        expected_value = getattr(reference, field.name)
         if field.name in PRUNED_METADATA_FIELDS:
             assert actual_value is None
             continue
+        expected_value = getattr(reference, field.name)
         if (
             field.name in {"spec_token_indx", "non_spec_token_indx"}
             and actual.num_spec_decodes > 0

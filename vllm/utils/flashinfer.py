@@ -264,6 +264,14 @@ flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
     "flashinfer.decode",
     "xqa_batch_decode_with_kv_cache",
 )
+flashinfer_recurrent_kda = _lazy_import_wrapper(
+    "flashinfer.kda",
+    "recurrent_kda",
+)
+flashinfer_fused_kda_decode = _lazy_import_wrapper(
+    "flashinfer.kda_decode",
+    "fused_kda_decode",
+)
 
 
 # Special case for autotune since it returns a context manager
@@ -396,6 +404,28 @@ def has_flashinfer_bf16_fp4() -> bool:
     mod = _get_submodule("flashinfer.gemm")
     return mod is not None and all(
         hasattr(mod, name) for name in ("mm_bf16_fp4", "prepare_bf16_fp4_weights")
+    )
+
+
+@functools.cache
+def has_flashinfer_recurrent_kda() -> bool:
+    """Return whether FlashInfer recurrent KDA prefill is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda")
+    return mod is not None and callable(getattr(mod, "recurrent_kda", None))
+
+
+@functools.cache
+def has_flashinfer_fused_kda_decode() -> bool:
+    """Return whether FlashInfer fused KDA decode is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.kda_decode")
+    return (
+        mod is not None
+        and bool(getattr(mod, "_FUSED_KDA_DECODE_AVAILABLE", False))
+        and callable(getattr(mod, "fused_kda_decode", None))
     )
 
 
@@ -1269,6 +1299,8 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "flashinfer_xqa_batch_decode_with_kv_cache",
+    "flashinfer_recurrent_kda",
+    "flashinfer_fused_kda_decode",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
@@ -1276,6 +1308,8 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_recurrent_kda",
+    "has_flashinfer_fused_kda_decode",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_bf16_fp4",
     "has_flashinfer_b12x_moe",
