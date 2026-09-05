@@ -10,6 +10,7 @@ import torch
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    DeviceConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -696,6 +697,64 @@ def test_fa4_hd256_mm_prefix_deselects_flash_attn():
             )
             is not None
         )
+
+
+@pytest.mark.skip_global_cleanup
+def test_encoder_only_attention_ignores_kv_cache_dtype():
+    """Encoder-only attention has no KV cache, so a global cache_dtype must
+    not be used for backend selection. Regression for #55046."""
+    from vllm.model_executor.layers.attention import encoder_only_attention as eoa
+    from vllm.model_executor.layers.attention.encoder_only_attention import (
+        EncoderOnlyAttention,
+    )
+
+    captured: dict[str, object] = {}
+    fake_backend = MagicMock()
+
+    def fake_get_attn_backend(head_size, dtype, kv_cache_dtype, **kwargs):
+        captured["kv_cache_dtype"] = kv_cache_dtype
+        captured["attn_type"] = kwargs.get("attn_type")
+        return fake_backend
+
+    cache_config = CacheConfig(cache_dtype="bfloat16")
+    with (
+        patch.object(eoa, "get_attn_backend", side_effect=fake_get_attn_backend),
+        patch.object(
+            eoa, "create_encoder_only_attention_backend", return_value=fake_backend
+        ),
+        patch.object(eoa.Attention, "__init__", return_value=None),
+    ):
+        EncoderOnlyAttention(
+            num_heads=8,
+            head_size=128,
+            scale=0.125,
+            cache_config=cache_config,
+        )
+
+    assert captured["kv_cache_dtype"] == "auto"
+    assert captured["attn_type"] == AttentionType.ENCODER_ONLY
+
+
+@pytest.mark.skip_global_cleanup
+def test_encoder_only_backend_selected_with_global_cache_dtype():
+    """A global --kv-cache-dtype bfloat16 must still yield an encoder-only
+    backend, because encoder-only layers select with kv_cache_dtype='auto'."""
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype="bfloat16"),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CpuPlatform()),
+    ):
+        backend = get_attn_backend(
+            128,
+            torch.bfloat16,
+            "auto",
+            attn_type=AttentionType.ENCODER_ONLY,
+        )
+    assert backend.get_name() == "CPU_ATTN"
+    assert backend.supports_attn_type(AttentionType.ENCODER_ONLY)
 
 
 @pytest.mark.skipif(
