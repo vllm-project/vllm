@@ -127,25 +127,11 @@ def build_offloading_config(
 
     canonical_layout = bool(extra_config.get("canonical_layout", False))
 
-    # Only a single non-MLA full-attention group with genuinely head-sharded
-    # pages is parallelism-invariant: replicated latent or GQA heads,
-    # per-token-head scales, CP token sharding, and the V2 model runner's
-    # layout are all excluded.
-    is_parallelism_agnostic = (
-        not vllm_config.use_v2_model_runner
-        and single_group_spec is not None
-        and isinstance(single_group_spec, FullAttentionSpec)
-        and not isinstance(single_group_spec, MLAAttentionSpec)
-        and single_group_spec.num_kv_heads * parallel_config.tensor_parallel_size
-        == vllm_config.model_config.get_total_num_kv_heads()
-        and not single_group_spec.kv_quant_mode.is_per_token_head
-        and parallel_config.decode_context_parallel_size == 1
-        and parallel_config.prefill_context_parallel_size == 1
-    )
-    # Canonical pages are topology-free, so the gate widens to every config
-    # whose mappings derive portable, group by group; certification happens
-    # per layer at registration and create_worker fails closed on this flag.
-    if canonical_layout and not is_parallelism_agnostic:
+    # Direct pages concatenate each worker's layers before the next worker,
+    # so changing TP changes the byte layout even with head-sharded attention.
+    is_parallelism_agnostic = False
+    # Canonical mappings are also certified per layer at worker registration.
+    if canonical_layout:
         tp_size = parallel_config.tensor_parallel_size
         total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
 
