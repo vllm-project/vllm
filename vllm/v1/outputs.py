@@ -188,31 +188,6 @@ class LogprobsTensors(NamedTuple):
         )
 
 
-class TokenIdLogprobsTensors(NamedTuple):
-    """Logprobs for caller-selected token IDs at selected rows."""
-
-    # [num_token_ids]. Fixed for the whole request, so held once instead of
-    # being repeated for every scored row.
-    token_ids: torch.Tensor
-    # [num_rows, num_token_ids]
-    logprobs: torch.Tensor
-
-    def to_cpu_nonblocking(self) -> "TokenIdLogprobsTensors":
-        if self.token_ids.device.type == "cpu":
-            return self
-        return TokenIdLogprobsTensors(
-            self.token_ids.to("cpu", non_blocking=True),
-            self.logprobs.to("cpu", non_blocking=True),
-        )
-
-    @staticmethod
-    def cat(tensors: Sequence["TokenIdLogprobsTensors"]):
-        return TokenIdLogprobsTensors(
-            tensors[0].token_ids,
-            torch.cat([t.logprobs for t in tensors]),
-        )
-
-
 class RoutedExpertsTensors(NamedTuple):
     """Device-side snapshot of routed experts data, pending async D2H.
 
@@ -367,11 +342,11 @@ class ModelRunnerOutput:
         default_factory=dict
     )
 
-    # req_id -> logprobs for caller-selected prompt token IDs. Kept separate from
-    # prompt_logprobs_dict because it has no implicit target/rank columns.
-    prompt_token_id_logprobs_dict: dict[str, TokenIdLogprobsTensors] = field(
-        default_factory=dict
-    )
+    # req_id -> [num_scored_rows, num_token_ids] scores for the caller-selected
+    # prompt token IDs. Kept out of prompt_logprobs_dict because it has no
+    # implicit target/rank columns. The IDs themselves are not echoed back: the
+    # caller supplied them, and their order is preserved.
+    prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None

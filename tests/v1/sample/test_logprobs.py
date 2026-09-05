@@ -1293,6 +1293,70 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         print(f"Test passed with {preemptions} preemptions")
 
 
+def test_prompt_logprob_token_ids_with_chunking_and_preemption(monkeypatch):
+    """Fixed-ID prefill scores stay row-aligned across chunks and preemption.
+
+    A request resumed after preemption re-prefills its prompt plus the tokens
+    it has already generated. Those extra rows are not prompt positions, so
+    the worker must skip the resumed prefill rather than emit a second,
+    misaligned result over them.
+    """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+
+    prompts = [
+        "The following numbers of the sequence "
+        + ", ".join(str(i) for i in range(10))
+        + " are:",
+        "In one word, the capital of France is ",
+    ] + [f"Tell me about the number {i}: " for i in range(32)]
+
+    start = 2
+    candidate_ids = [10, 100, 1000, 10000]
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=40,
+        min_tokens=20,
+        prompt_logprob_token_ids=candidate_ids,
+        prompt_logprob_start=start,
+    )
+
+    with VllmRunner(
+        "Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=48,  # Force prefill chunking
+        num_gpu_blocks_override=33,  # Force preemptions (32 usable + null block)
+        disable_log_stats=False,
+        gpu_memory_utilization=0.25,
+    ) as vllm_model:
+        metrics_before = vllm_model.llm.get_metrics()
+        outputs = vllm_model.llm.generate(prompts, sampling_params)
+
+        for i, output in enumerate(outputs):
+            scores = output.prompt_token_id_logprobs
+            assert scores is not None, f"Output {i} missing fixed-ID scores"
+            expected_shape = (
+                len(output.prompt_token_ids) - 1 - start,
+                len(candidate_ids),
+            )
+            assert scores.shape == expected_shape, (
+                f"Output {i} scored {scores.shape}, expected {expected_shape}"
+            )
+            assert math.isfinite(float(scores.min()))
+            assert float(scores.max()) <= 1e-3, "logprobs must be <= 0"
+
+        metrics_after = vllm_model.llm.get_metrics()
+        preemptions_before = next(
+            (m.value for m in metrics_before if m.name == "vllm:num_preemptions"), 0
+        )
+        preemptions_after = next(
+            (m.value for m in metrics_after if m.name == "vllm:num_preemptions"), 0
+        )
+        assert preemptions_after - preemptions_before > 0, (
+            "Test did not trigger any preemptions"
+        )
+
+
 @large_gpu_mark(min_gb=24)
 def test_token_logprobs_large_batch_int64_row_offset():
     """Regression: logprob kernel row offset (row * vocab_size) must use int64.

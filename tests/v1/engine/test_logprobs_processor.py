@@ -11,6 +11,7 @@ row), the trailing positions are populated with sentinel values
 """
 
 import numpy as np
+import torch
 
 from vllm.logprobs import create_sample_logprobs
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -64,3 +65,23 @@ def test_accepts_exactly_sized_row():
 
     pos = processor.logprobs[0]
     assert set(pos.keys()) == {7, 11, 13}
+
+
+def test_prompt_token_id_logprobs_are_popped_once():
+    """Fixed-ID prompt scores ride exactly one output.
+
+    They arrive whole on the prompt's final prefill chunk. RequestOutputKind
+    .DELTA pops them, as it does prompt logprobs, so a streaming request does
+    not re-attach the same array to every later delta.
+    """
+    processor = _make_processor(num_logprobs=1)
+    assert processor.pop_prompt_token_id_logprobs() is None
+
+    processor._update_prompt_token_id_logprobs(
+        torch.tensor([[-0.5, -1.5], [-2.5, -3.5]], dtype=torch.float32)
+    )
+
+    scores = processor.pop_prompt_token_id_logprobs()
+    assert scores is not None
+    assert scores.tolist() == [[-0.5, -1.5], [-2.5, -3.5]]
+    assert processor.pop_prompt_token_id_logprobs() is None

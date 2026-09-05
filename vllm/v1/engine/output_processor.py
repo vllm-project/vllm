@@ -10,7 +10,6 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from vllm.logprobs import TokenIdLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -168,7 +167,6 @@ class RequestState:
             self.prompt_token_ids, self.prompt_embeds
         )
         self.logprobs_processor = logprobs_processor
-        self.prompt_token_id_logprobs: TokenIdLogprobs | None = None
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
         self.top_p = top_p
@@ -376,8 +374,12 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_token_id_logprobs = (
+                self.logprobs_processor.pop_prompt_token_id_logprobs()
+            )
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_token_id_logprobs = self.logprobs_processor.prompt_token_id_logprobs
 
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
@@ -385,7 +387,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            prompt_token_id_logprobs=self.prompt_token_id_logprobs,
+            prompt_token_id_logprobs=prompt_token_id_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
@@ -706,13 +708,6 @@ class OutputProcessor:
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
-                # The worker accumulates prefill chunks and emits the whole
-                # result once, on the final chunk of the prompt.
-                if (tensors := engine_core_output.prompt_token_id_logprobs) is not None:
-                    req_state.prompt_token_id_logprobs = TokenIdLogprobs(
-                        token_ids=tensors.token_ids.tolist(),
-                        logprobs=tensors.logprobs.numpy(),
-                    )
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(

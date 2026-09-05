@@ -161,7 +161,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             }
             token_id_logprobs = self.model_runner_output.prompt_token_id_logprobs_dict
             self.prompt_token_id_logprobs_dict = {
-                k: v.to_cpu_nonblocking() for k, v in token_id_logprobs.items()
+                k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
             }
             if check_ep_fault:
                 has_fault = get_ep_all2all_manager().query_fault()

@@ -5,8 +5,6 @@ from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import overload
 
-import numpy as np
-
 
 # We use dataclass for now because it is used for
 # openai server output, and msgspec is not serializable.
@@ -27,23 +25,6 @@ class Logprob:
 
 
 LogprobsOnePosition = dict[int, Logprob]
-
-
-@dataclass
-class TokenIdLogprobs:
-    """Logprobs for a caller-specified set of token IDs.
-
-    The token IDs are fixed for the whole request, so they are stored once
-    rather than repeated per scored row.
-
-    Attributes:
-        token_ids: The requested token IDs, in the order they were given.
-        logprobs: `[num_scored_rows, len(token_ids)]` float32 array. Row `i`
-            holds the logprobs of `token_ids` at the i-th scored position.
-    """
-
-    token_ids: list[int]
-    logprobs: np.ndarray
 
 
 @dataclass

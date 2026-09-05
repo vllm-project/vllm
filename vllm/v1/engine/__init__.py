@@ -21,12 +21,7 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import (
-    LogprobsLists,
-    LogprobsTensors,
-    SamplingMaskLists,
-    TokenIdLogprobsTensors,
-)
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -239,7 +234,8 @@ class EngineCoreOutput(
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
     # Keep optional additions at the end to preserve array-like serialization.
-    prompt_token_id_logprobs: TokenIdLogprobsTensors | None = None
+    # [num_scored_rows, num_token_ids], for SamplingParams.prompt_logprob_token_ids.
+    prompt_token_id_logprobs: torch.Tensor | None = None
 
     @property
     def finished(self) -> bool:
