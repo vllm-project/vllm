@@ -521,7 +521,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         # Store the input messages.
         if request.store:
-            self.msg_store[request.request_id] = messages
+            self._store_input_messages(request.request_id, messages)
 
         if request.background:
             created_time = int(time.time())
@@ -598,6 +598,16 @@ class OpenAIServingResponses(GenerateBaseServing):
             tokenizer,
             request_metadata,
         )
+
+    def _store_input_messages(
+        self,
+        request_id: str,
+        messages: list[ChatCompletionMessageParam],
+    ) -> None:
+        # ParsableContext appends typed response items to `messages` during
+        # generation. Keep the stored input history isolated from that mutation
+        # because previous_response_id expects ChatCompletion message mappings.
+        self.msg_store[request_id] = copy(messages)
 
     async def _make_request(
         self,
