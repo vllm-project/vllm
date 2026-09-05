@@ -1,3 +1,7 @@
+#include <optional>
+
+#include <torch/csrc/stable/tensor.h>
+
 #include "cpu_types.hpp"
 
 namespace {
@@ -329,13 +333,14 @@ void rotary_embedding_gptj_impl<c10::Half>(
 }
 };  // namespace
 
-void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                      std::optional<torch::Tensor> key, int64_t head_size,
-                      torch::Tensor& cos_sin_cache, bool is_neox,
-                      int64_t rope_dim_offset, bool inverse) {
-  TORCH_CHECK(rope_dim_offset == 0,
-              "rope_dim_offset != 0 is not supported on CPU");
-  TORCH_CHECK(!inverse, "inverse rotary embedding is not supported on CPU");
+void rotary_embedding(torch::stable::Tensor& positions,
+                      torch::stable::Tensor& query,
+                      std::optional<torch::stable::Tensor> key,
+                      int64_t head_size, torch::stable::Tensor& cos_sin_cache,
+                      bool is_neox, int64_t rope_dim_offset, bool inverse) {
+  STD_TORCH_CHECK(rope_dim_offset == 0,
+                  "rope_dim_offset != 0 is not supported on CPU");
+  STD_TORCH_CHECK(!inverse, "inverse rotary embedding is not supported on CPU");
 
   int num_tokens = positions.numel();
   int rot_dim = cos_sin_cache.size(1);
@@ -344,20 +349,22 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
   int64_t key_stride = key.has_value() ? key->stride(-2) : 0;
   int64_t query_stride = query.stride(-2);
 
-  VLLM_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "rotary_embedding_impl", [&] {
         CPU_KERNEL_GUARD_IN(rotary_embedding_impl)
         if (is_neox) {
           rotary_embedding_impl(
-              positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
-              cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride,
+              positions.const_data_ptr<int64_t>(),
+              query.mutable_data_ptr<scalar_t>(),
+              key.has_value() ? key->mutable_data_ptr<scalar_t>() : nullptr,
+              cos_sin_cache.const_data_ptr<scalar_t>(), rot_dim, query_stride,
               key_stride, num_heads, num_kv_heads, head_size, num_tokens);
         } else {
           rotary_embedding_gptj_impl(
-              positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
-              key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
-              cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride,
+              positions.const_data_ptr<int64_t>(),
+              query.mutable_data_ptr<scalar_t>(),
+              key.has_value() ? key->mutable_data_ptr<scalar_t>() : nullptr,
+              cos_sin_cache.const_data_ptr<scalar_t>(), rot_dim, query_stride,
               key_stride, num_heads, num_kv_heads, head_size, num_tokens);
         }
 
