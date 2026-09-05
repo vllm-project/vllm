@@ -163,6 +163,13 @@ def resolve_tokenizer_args(
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
+    if tokenizer_mode == "hf":
+        if kwargs.pop("mistral_format", False):
+            raise ValueError(
+                "mistral_format=True is not supported with tokenizer_mode='hf'"
+            )
+        kwargs["mistral_format"] = False
+
     return tokenizer_mode, tokenizer_name, args, kwargs
 
 
