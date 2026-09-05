@@ -248,6 +248,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
@@ -271,6 +272,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -294,6 +296,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": not IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -317,6 +320,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
+            "enable_sp_moe": not IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -1491,10 +1495,11 @@ class VllmConfig:
         pass_config = self.compilation_config.pass_config
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
-        if pass_config.enable_sp:
+        if pass_config.enable_sp or pass_config.enable_sp_moe:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning_once("Sequence Parallelism requires TP>1, disabling")
                 pass_config.enable_sp = False
+                pass_config.enable_sp_moe = False
                 pass_config.fuse_gemm_comms = False
             else:
                 if pass_config.sp_min_token_num is None:
@@ -1517,6 +1522,7 @@ class VllmConfig:
                         "set pass_config.sp_min_token_num manually."
                     )
                     pass_config.enable_sp = False
+                    pass_config.enable_sp_moe = False
                     pass_config.fuse_gemm_comms = False
 
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
