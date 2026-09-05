@@ -68,6 +68,7 @@ def matmul_kernel_persistent(
     C_LARGE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
+    """Persistent GEMM with optional bias and IEEE input precision for FP32."""
     start_pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -113,7 +114,7 @@ def matmul_kernel_persistent(
             b = tl.load(
                 b_ptrs, mask=offs_k_for_mask[:, None] < K - ki * BLOCK_SIZE_K, other=0.0
             )
-            accumulator = tl.dot(a, b, accumulator)
+            accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
 
         tile_id_c += NUM_SMS
         pid_m, pid_n = _compute_pid(
@@ -467,7 +468,7 @@ def bmm_kernel(
             mask=b_mask,
             other=0.0,
         )
-        accumulator = tl.dot(a, b, accumulator)
+        accumulator = tl.dot(a, b, accumulator, input_precision="ieee")
 
     # c_m / c_n: [BLOCK_SIZE_M] / [BLOCK_SIZE_N], row/col indices for C
     c_m = offs_m

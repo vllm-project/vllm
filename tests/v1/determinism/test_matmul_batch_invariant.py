@@ -9,7 +9,7 @@ item doesn't change based on other items in the batch).
 
 import pytest
 import torch
-from utils import skip_unsupported
+from utils import skip_if_not_cuda, skip_unsupported
 
 from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
 from vllm.model_executor.determinism.batch_invariant_configs import (
@@ -27,6 +27,8 @@ DEVICE_TYPE = current_platform.device_type
     [
         # 2D x 2D
         ((32, 64), (64, 16)),
+        # Long reduction with a narrow output, as in a routing projection.
+        ((512, 3072), (3072, 16)),
         # 2D x 3D
         ((64, 16), (4, 16, 32)),
         # 3D x 2D
@@ -51,8 +53,16 @@ DEVICE_TYPE = current_platform.device_type
         ((1, 2, 4, 32, 64), (1, 2, 4, 64, 16)),
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_matmul_correctness(a_shape, b_shape, dtype):
+@pytest.mark.parametrize(
+    "dtype,transpose_b",
+    [
+        (torch.float16, False),
+        (torch.bfloat16, False),
+        pytest.param(torch.float32, False, marks=skip_if_not_cuda),
+        pytest.param(torch.float32, True, marks=skip_if_not_cuda),
+    ],
+)
+def test_matmul_correctness(a_shape, b_shape, dtype, transpose_b):
     """
     Compare matmul_batch_invariant against torch.matmul for various shapes.
     """
@@ -61,9 +71,17 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
     torch.manual_seed(42)
     a = torch.rand(a_shape, dtype=dtype, device=device)
     b = torch.rand(b_shape, dtype=dtype, device=device)
+    if transpose_b:
+        b = b.transpose(-2, -1).contiguous().transpose(-2, -1)
 
-    # Standard implementation (CUDA ops)
-    standard_output = torch.matmul(a, b)
+    # Reference implementation
+    if dtype == torch.float32:
+        # A CPU FP64 reference is independent of the GPU's TF32 settings.
+        standard_output = torch.matmul(a.cpu().double(), b.cpu().double()).to(
+            device=device, dtype=dtype
+        )
+    else:
+        standard_output = torch.matmul(a, b)
 
     # Batch-invariant implementation (Triton)
     triton_output = matmul_batch_invariant(a, b)
@@ -72,8 +90,10 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
     # Use looser tolerance for bfloat16 due to its lower precision
     if dtype == torch.bfloat16:
         rtol, atol = 1e-1, 1e-1  # 10% relative tolerance for bfloat16
+    elif dtype == torch.float16:
+        rtol, atol = 1e-2, 1e-2  # 1% for float16
     else:
-        rtol, atol = 1e-2, 1e-2  # 1% for float16/float32
+        rtol, atol = 1e-5, 1e-5  # Reject TF32 truncation of FP32 inputs.
 
     torch.testing.assert_close(
         triton_output,
@@ -85,25 +105,39 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
 
 
 @skip_unsupported
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_matmul_batch_invariance(dtype):
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float16,
+        torch.bfloat16,
+        pytest.param(torch.float32, marks=skip_if_not_cuda),
+    ],
+)
+@pytest.mark.parametrize("batched_b", [False, True], ids=["mm", "bmm"])
+def test_matmul_batch_invariance(dtype, batched_b):
     """
     Verify that the result for one item is bitwise identical regardless
-    of what other items are in the batch.
+    of what other items are in the batch, for both MM and BMM.
     """
 
     device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(42)
     a_single = torch.rand((1, 64, 32), dtype=dtype, device=device)
-    b = torch.rand((32, 128), dtype=dtype, device=device)
+    b_shape = (1, 32, 128) if batched_b else (32, 128)
+    b_single = torch.rand(b_shape, dtype=dtype, device=device)
 
-    standard_output = matmul_batch_invariant(a_single, b)
+    standard_output = matmul_batch_invariant(a_single, b_single)
 
     a_batch = torch.rand((8, 64, 32), dtype=dtype, device=device)
     a_batch[3] = a_single[0]
+    if batched_b:
+        b_batch = torch.rand((8, 32, 128), dtype=dtype, device=device)
+        b_batch[3] = b_single[0]
+    else:
+        b_batch = b_single
 
-    batch_output = matmul_batch_invariant(a_batch, b)
+    batch_output = matmul_batch_invariant(a_batch, b_batch)
     batch_output_a = batch_output[3]
 
     assert torch.equal(standard_output[0], batch_output_a)
