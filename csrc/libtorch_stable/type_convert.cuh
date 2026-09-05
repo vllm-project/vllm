@@ -192,5 +192,29 @@ struct alignas(16) _f16Vec {
     }
     return result;
   }
+
+  /* Sum of squares of the elementwise FP32 sum (data[i] + other.data[i]).
+     The sum is kept in FP32, matching the native IR which computes
+     x.float() + residual.float() before squaring. */
+  __device__ float sum_squares(const _f16Vec<scalar_t, width>& other) const {
+    float result = 0.0f;
+    if constexpr (width % 2 == 0) {
+#pragma unroll
+      for (int i = 0; i < width; i += 2) {
+        float2 z = Converter::convert(T2{data[i], data[i + 1]});
+        float2 r = Converter::convert(T2{other.data[i], other.data[i + 1]});
+        float x = z.x + r.x;
+        float y = z.y + r.y;
+        result += x * x + y * y;
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < width; ++i) {
+        float x = Converter::convert(data[i]) + Converter::convert(other.data[i]);
+        result += x * x;
+      }
+    }
+    return result;
+  }
 };
 }  // namespace vllm
