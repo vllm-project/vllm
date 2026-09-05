@@ -326,3 +326,47 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             torch.testing.assert_close(
                 cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
             )
+
+
+def test_copy_kv_cache_blocks_overlaid_views_copy_whole_block():
+    """Hybrid overlays: a Mamba state view and an attention view of one tensor
+    share a base address but span different bytes per block, and several such
+    tensors live in one allocation (so the whole-storage fast path is off).
+    The copy must cover the attention span even though the narrow Mamba view
+    is encountered first; otherwise the pages past the Mamba state size in
+    the destination block keep whatever they held before."""
+    num_blocks = 4
+    num_tensors = 2
+    block_stride = 64  # bytes per scheduler block in every tensor
+    state_bytes = 24  # Mamba state occupies only the leading bytes of a block
+    tensor_bytes = num_blocks * block_stride
+    raw = torch.arange(num_tensors * tensor_bytes, dtype=torch.int32).to(torch.uint8)
+    storage = raw.untyped_storage()
+
+    caches: list[torch.Tensor] = []
+    for tensor_idx in range(num_tensors):
+        base = tensor_idx * tensor_bytes
+        mamba = torch.empty(0, dtype=torch.int8)
+        mamba.set_(storage)
+        mamba = mamba.as_strided(
+            (num_blocks, 1, 1, state_bytes), (block_stride, 1, 1, 1), base
+        )
+        # 2 kernel pages of 8 int16 per scheduler block cover the whole block.
+        attn = torch.empty(0, dtype=torch.int16)
+        attn.set_(storage)
+        attn = attn.as_strided((num_blocks * 2, 1, 8, 2), (16, 16, 2, 1), base // 2)
+        assert mamba.data_ptr() == attn.data_ptr()
+        caches += [mamba, attn]
+
+    expected = raw.view(num_tensors, num_blocks, block_stride).clone()
+    expected[:, 2] = expected[:, 0]
+
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    torch.testing.assert_close(
+        raw.view(num_tensors, num_blocks, block_stride), expected
+    )
