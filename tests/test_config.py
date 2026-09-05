@@ -55,6 +55,45 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    ("is_mm_prefix_lm", "is_multimodal_model", "expected"),
+    [
+        pytest.param(True, True, True, id="multimodal-prefix-lm"),
+        pytest.param(False, True, False, id="multimodal-causal"),
+        pytest.param(True, False, False, id="text-prefix-lm"),
+        pytest.param(None, True, False, id="missing-model-config"),
+    ],
+)
+def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
+    is_mm_prefix_lm: bool | None,
+    is_multimodal_model: bool,
+    expected: bool,
+) -> None:
+    from vllm.platforms.rocm import RocmPlatform
+
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            worker_cls="test-worker",
+        ),
+        model_config=(
+            None
+            if is_mm_prefix_lm is None
+            else SimpleNamespace(is_mm_prefix_lm=is_mm_prefix_lm)
+        ),
+        scheduler_config=SimpleNamespace(
+            is_multimodal_model=is_multimodal_model,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    RocmPlatform.check_and_update_config(config)
+
+    assert config.scheduler_config.disable_chunked_mm_input is expected
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

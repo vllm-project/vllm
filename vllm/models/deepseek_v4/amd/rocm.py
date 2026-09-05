@@ -106,13 +106,18 @@ def _combine_topk_swa_indices_kernel(
     query_start_loc_ptr,
     seq_lens_ptr,
     gather_lens_ptr,
+    left_visible_ptr,
+    right_visible_ptr,
     M,
     N,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
+    SWA_WIDTH: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    PADDED_SWA_WIDTH: tl.constexpr,
+    HAS_IMAGE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -131,7 +136,20 @@ def _combine_topk_swa_indices_kernel(
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        if HAS_IMAGE:
+            left = tl.load(left_visible_ptr + token_idx)
+            right = tl.load(right_visible_ptr + token_idx)
+        else:
+            left = 0
+            right = 0
+        left_add = tl.maximum(left - (WINDOW_SIZE - 1), 0)
+        # Prefix caching can resume inside an image span. Do not generate
+        # indices outside the SWA rows present in the gathered workspace.
+        swa_start = tl.maximum(
+            tl.maximum(pos - (WINDOW_SIZE - 1) - left_add, 0), gather_start
+        )
+        swa_end = tl.minimum(pos + right + 1, seq_len)
+        swa_len = tl.maximum(swa_end - swa_start, 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -149,14 +167,14 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        swa_offset = tl.arange(0, PADDED_SWA_WIDTH)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
             + topk_len
             + swa_offset,
-            M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start,
-            mask=swa_offset < swa_len,
+            M * batch_idx + N + swa_offset + swa_start - gather_start,
+            mask=(swa_offset < swa_len) & (swa_offset < SWA_WIDTH),
         )
 
         tl.store(combined_lens_ptr + token_idx, topk_len + swa_len)
@@ -172,12 +190,21 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    max_image_tokens: int = 0,
+    left_visible: torch.Tensor | None = None,
+    right_visible: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if (left_visible is None) != (right_visible is None):
+        raise ValueError("left_visible and right_visible must be provided together")
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
+    has_image = left_visible is not None
+    # Keep the row shape fixed for a vision model even when a particular batch
+    # has no image.
+    swa_width = window_size + max_image_tokens
     combined_topk = (
-        (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
+        (topk + swa_width + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
         * _SPARSE_PREFILL_TOPK_ALIGNMENT
     )
@@ -201,13 +228,18 @@ def combine_topk_swa_indices(
         query_start_loc,
         seq_lens,
         gather_lens,
+        left_visible if left_visible is not None else topk_indices,
+        right_visible if right_visible is not None else topk_indices,
         M,
         N,
         TOP_K=topk,
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
+        SWA_WIDTH=swa_width,
         TOPK_WIDTH=topk_indices.shape[-1],
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+        PADDED_SWA_WIDTH=triton.next_power_of_2(swa_width),
+        HAS_IMAGE=has_image,
     )
     return combined_indices, combined_lens
 
@@ -910,6 +942,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
+        left_visible = swa_metadata.prefill_left_visible
+        right_visible = swa_metadata.prefill_right_visible
+        if left_visible is not None:
+            left_visible = left_visible[num_decode_tokens:]
+            assert right_visible is not None
+            right_visible = right_visible[num_decode_tokens:]
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -988,6 +1026,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 top_k,
                 M,
                 N,
+                max_image_tokens=self.max_image_tokens,
+                left_visible=(
+                    left_visible[query_start:query_end]
+                    if left_visible is not None
+                    else None
+                ),
+                right_visible=(
+                    right_visible[query_start:query_end]
+                    if right_visible is not None
+                    else None
+                ),
             )
             rocm_sparse_attn_prefill(
                 q=q[query_start:query_end],
