@@ -109,11 +109,6 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
   } else {
     static_assert(sizeof(WideT) % sizeof(T) == 0);
     constexpr int items_per_scalar = sizeof(WideT) / sizeof(T);
-    // TODO: it's UB
-    union {
-      WideT scalar;
-      T array[items_per_scalar];
-    } wide;
 
     int skip_cnt =
         (reinterpret_cast<size_t>(in) % sizeof(WideT))
@@ -127,11 +122,23 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
     const idxT len_cast = (len - skip_cnt) / items_per_scalar;
 
     for (idxT i = thread_rank; i < len_cast; i += num_threads) {
-      wide.scalar = in_cast[i];
+      WideT wide_val = in_cast[i];
+
+      T tmp[items_per_scalar];
+
+      const unsigned char* src =
+          reinterpret_cast<const unsigned char*>(&wide_val);
+      unsigned char* dst = reinterpret_cast<unsigned char*>(tmp);
+
+#pragma unroll
+      for (size_t b = 0; b < sizeof(WideT); ++b) {
+        dst[b] = src[b];
+      }
+
       const idxT real_i = skip_cnt + i * items_per_scalar;
 #pragma unroll
       for (int j = 0; j < items_per_scalar; ++j) {
-        f(wide.array[j], real_i + j);
+        f(tmp[j], real_i + j);
       }
     }
 
