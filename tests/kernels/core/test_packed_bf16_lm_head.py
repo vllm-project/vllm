@@ -16,8 +16,8 @@ from vllm.model_executor.kernels.linear.unquantized.packed_bf16_lm_head import (
     choose_launch_config,
     pack_bf16_weight,
 )
-from vllm.platforms import current_platform
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 
 requires_cuda = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="the packed lm-head kernel is CUDA-only"
@@ -34,21 +34,24 @@ def test_lm_head_backend_config_normalizes_and_validates():
 
 
 def _unpack_bits(tensors: tuple[torch.Tensor, ...], numel: int) -> torch.Tensor:
-    sign_mantissa, exponent_nibbles, base_exponent, fallback_slot, fallback = (
-        tensors
-    )
+    sign_mantissa, exponent_nibbles, base_exponent, fallback_slot, fallback = tensors
     linear = torch.arange(sign_mantissa.numel(), device=sign_mantissa.device)
     block = linear // 256
     pair = exponent_nibbles[linear // 2].to(torch.int32)
     delta = (pair >> ((linear & 1) * 4)) & 0xF
     sm = sign_mantissa.to(torch.int32)
-    bits = ((sm & 0x80) << 8) | (
-        (base_exponent[block].to(torch.int32) + delta) << 7
-    ) | (sm & 0x7F)
+    bits = (
+        ((sm & 0x80) << 8)
+        | ((base_exponent[block].to(torch.int32) + delta) << 7)
+        | (sm & 0x7F)
+    )
     slots = fallback_slot[block].to(torch.int64)
-    fallback_values = fallback.flatten()[
-        slots.clamp_min(0) * 256 + linear.remainder(256)
-    ].to(torch.int32) & 0xFFFF
+    fallback_values = (
+        fallback.flatten()[slots.clamp_min(0) * 256 + linear.remainder(256)].to(
+            torch.int32
+        )
+        & 0xFFFF
+    )
     return torch.where(slots >= 0, fallback_values, bits)[:numel].to(torch.int32)
 
 
@@ -95,9 +98,7 @@ def test_single_token_projection_matches_torch(monkeypatch, n, k):
 
     assert packed is not None
     plan, tensors = packed
-    sign_mantissa, exponent_nibbles, base_exponent, fallback_slot, fallback = (
-        tensors
-    )
+    sign_mantissa, exponent_nibbles, base_exponent, fallback_slot, fallback = tensors
     launch = choose_launch_config(k)
     actual = _packed_bf16_lm_head_impl(
         x,
@@ -116,6 +117,8 @@ def test_single_token_projection_matches_torch(monkeypatch, n, k):
 
 
 class _FallbackMethod:
+    interface_marker = "wrapped interface"
+
     def apply(self, layer, x, bias=None):
         del layer, bias
         return x + 1
@@ -130,6 +133,31 @@ def test_method_falls_back_for_non_cuda_input():
     torch.testing.assert_close(method.apply(layer, x), x + 1)
 
 
+def test_method_preserves_wrapped_interface():
+    """The decorator exposes attributes implemented by its fallback."""
+    method = LosslessPackedLMHeadMethod(_FallbackMethod())  # type: ignore[arg-type]
+
+    assert method.interface_marker == "wrapped interface"
+
+
+def test_batch_invariant_mode_skips_packed_state(monkeypatch):
+    """Batch-invariant execution must always retain the stock linear path."""
+
+    class _PackedStateMustNotBeRead:
+        @property
+        def _vllm_lossless_lm_head_meta(self):
+            raise AssertionError("packed state was inspected")
+
+    monkeypatch.setattr(packed_bf16_lm_head.envs, "VLLM_BATCH_INVARIANT", True)
+
+    assert (
+        packed_bf16_lm_head._try_apply_packed_weight(
+            _PackedStateMustNotBeRead(), torch.zeros(1, 4), None
+        )
+        is None
+    )
+
+
 def test_parallel_lm_head_default_is_not_wrapped():
     """The default configuration does not alter the lm-head method."""
     config = VllmConfig(kernel_config=KernelConfig(lm_head_backend="torch"))
@@ -142,12 +170,8 @@ def test_parallel_lm_head_default_is_not_wrapped():
 @requires_cuda
 def test_parallel_lm_head_wraps_eligible_method_when_requested():
     """An eligible CUDA BF16 head receives the requested method decorator."""
-    config = VllmConfig(
-        kernel_config=KernelConfig(lm_head_backend="lossless_packed")
-    )
+    config = VllmConfig(kernel_config=KernelConfig(lm_head_backend="lossless_packed"))
     with set_current_vllm_config(config):
-        head = ParallelLMHead(
-            64, 16, params_dtype=torch.bfloat16, disable_tp=True
-        )
+        head = ParallelLMHead(64, 16, params_dtype=torch.bfloat16, disable_tp=True)
 
     assert isinstance(head.quant_method, LosslessPackedLMHeadMethod)
