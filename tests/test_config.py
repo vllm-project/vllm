@@ -2316,6 +2316,50 @@ def test_renderer_num_workers_with_mm_cache():
     assert config.renderer_num_workers == 1
 
 
+# A tiny public fixture: a 2-layer target at the repo root and a 1-layer draft
+# under DFlash/. The differing layer count is what makes the assertions below
+# distinguish "read the subfolder's config" from "read the root's config".
+SUBFOLDER_FIXTURE = "poolside/spec-decoding-subfolder-fixture"
+
+
+def test_speculative_config_subfolder_reads_the_draft_config():
+    """A draft bundled in a subfolder must load its own config, not the root's.
+
+    Without `subfolder` the repository root's config.json is used, which for a
+    bundled draft belongs to a different model (the target), so the draft is
+    built with the wrong architecture and shape.
+    """
+    target_model_config = ModelConfig(SUBFOLDER_FIXTURE)
+    speculative_config = SpeculativeConfig(
+        model=SUBFOLDER_FIXTURE,
+        subfolder="DFlash",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.subfolder == "DFlash"
+    # The draft has 1 layer; the target at the repo root has 2.
+    assert draft_model_config.hf_config.num_hidden_layers == 1
+    assert target_model_config.hf_config.num_hidden_layers == 2
+
+
+def test_speculative_config_without_subfolder_reads_the_root_config():
+    """Control: omitting `subfolder` keeps the previous behaviour."""
+    target_model_config = ModelConfig(SUBFOLDER_FIXTURE)
+    speculative_config = SpeculativeConfig(
+        model=SUBFOLDER_FIXTURE,
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.subfolder is None
+    assert draft_model_config.hf_config.num_hidden_layers == 2
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig(

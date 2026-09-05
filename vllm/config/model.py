@@ -203,6 +203,10 @@ class ModelConfig:
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
+    subfolder: str | None = None
+    """The subfolder within the model repository or directory that holds the
+    weights. A Hub repo id may contain at most one `/`, so `org/repo/subdir`
+    cannot be expressed as an id."""
     code_revision: str | None = None
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
@@ -633,6 +637,9 @@ class ModelConfig:
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
+            # The config must come from the same place as the weights: the
+            # repo root usually holds a different model's config.json.
+            **({"subfolder": self.subfolder} if self.subfolder else {}),
         )
         self.hf_config = hf_config
         if dict_overrides:

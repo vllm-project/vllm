@@ -384,6 +384,9 @@ class SpeculativeConfig:
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
+    subfolder: str | None = None
+    """The subfolder within `model` that holds the draft weights, for a draft
+    bundled inside its target's repository rather than published separately."""
     method: SpeculativeMethod | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
@@ -1249,6 +1252,7 @@ class SpeculativeConfig:
                     )
                 self.draft_model_config = ModelConfig(
                     model=self.model,
+                    subfolder=self.subfolder,
                     runner="draft",
                     tokenizer=(
                         self.model
