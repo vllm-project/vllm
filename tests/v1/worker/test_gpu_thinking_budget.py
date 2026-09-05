@@ -42,6 +42,14 @@ class MockDistinctEndReasoningConfig:
     natural_reasoning_end_token_ids = [END]
 
 
+class MockLoopBreakReasoningConfig(MockReasoningConfig):
+    loop_break_max_pattern_size = 8
+    loop_break_min_pattern_size = 2
+    loop_break_min_count = 3
+    loop_break_min_reasoning_tokens = 16
+    loop_break_check_interval = 1
+
+
 def _make_req_states(tokens: list[int], prompt_len: int = 1) -> RequestState:
     req_states = RequestState(
         max_num_reqs=4,
@@ -299,3 +307,345 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+# --- Reasoning loop breaking -------------------------------------------------
+
+
+class MockShortPatternReasoningConfig(MockReasoningConfig):
+    loop_break_max_pattern_size = 2
+    loop_break_min_pattern_size = 2
+    loop_break_min_count = 3
+    loop_break_min_reasoning_tokens = 4
+    loop_break_check_interval = 1
+
+
+class MockIntervalReasoningConfig(MockReasoningConfig):
+    loop_break_max_pattern_size = 2
+    loop_break_min_pattern_size = 2
+    loop_break_min_count = 2
+    loop_break_min_reasoning_tokens = 4
+    loop_break_check_interval = 8
+
+
+def _filler(n: int, base: int = 10) -> list[int]:
+    """``n`` distinct non-repeating tokens, clear of the marker token ids."""
+    assert base + n <= START
+    return list(range(base, base + n))
+
+
+def _append_committed(req_states: RequestState, at: int, tokens: list[int]) -> None:
+    """Commit ``tokens`` the way ``post_update`` does after a sampling step."""
+    req_states.all_token_ids.stage_write(3, at, tokens)
+    req_states.total_len.stage_write_elem(3, at + len(tokens))
+    req_states.apply_staged_writes()
+
+
+def _loop_break_state(
+    tokens: list[int],
+    config=None,
+    params: SamplingParams | None = None,
+) -> tuple[RequestState, ThinkingBudgetState]:
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(
+        req_states, config if config is not None else MockLoopBreakReasoningConfig()
+    )
+    state.add_request(3, params if params is not None else SamplingParams())
+    state.apply_staged_writes()
+    return req_states, state
+
+
+def test_v2_loop_break_forces_end_on_repeating_reasoning_tail():
+    """The whole point: a request with no thinking budget at all is forced out
+    of reasoning once its open section ends in an exact repeat."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens)
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[tokens[-1]], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_ignores_non_periodic_reasoning():
+    tokens = [1, START, *_filler(26)]
+    _, state = _loop_break_state(tokens)
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[tokens[-1]], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_loop_break_waits_for_the_reasoning_floor():
+    """A short section repeats constantly at the start of generation; the floor
+    is what keeps that from ending reasoning immediately."""
+    tokens = [1, START, 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens)
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[8], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_loop_break_ignores_repetition_outside_reasoning():
+    """A repeating answer must not force a second end sequence."""
+    tokens = [1, START, *_filler(20), END, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens)
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[8], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_loop_break_pattern_may_not_span_the_section_start():
+    """The tail is clamped to the section start, so a repeat that only closes
+    by reaching back past ``<think>`` is not a reasoning loop."""
+    spanning = [1, 7, 8, 7, 8, START, 7, 8, 7, 8]
+    _, state = _loop_break_state(spanning, config=MockShortPatternReasoningConfig())
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0)
+
+    # Same tail, entirely inside the section: the control that proves the
+    # negative above comes from the clamp and not from the detector.
+    contained = [1, START, 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(contained, config=MockShortPatternReasoningConfig())
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_honours_the_check_interval():
+    tokens = [1, START, 7, 8, 7, 8]
+    req_states, state = _loop_break_state(tokens, config=MockIntervalReasoningConfig())
+
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0), "detection ran before the interval elapsed"
+
+    _append_committed(req_states, len(tokens), [7, 8, 7, 8])
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_keeps_forcing_until_the_end_lands():
+    """A forced end token can be rejected under speculative decoding. The flag
+    is sticky, so the next step forces it again instead of resuming the loop."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    req_states, state = _loop_break_state(tokens)
+
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert out[0, END] == pytest.approx(1.0e9)
+
+    # The forced end was not accepted; a plain token was committed instead.
+    _append_committed(req_states, len(tokens), [9])
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[9],
+        local_pos=[0],
+    )
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_rearms_after_the_section_closes():
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    req_states, state = _loop_break_state(tokens)
+
+    _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert state.loop_break_fired[3].item() == 1
+
+    _append_committed(req_states, len(tokens), [END])
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[END],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0)
+    assert state.loop_break_fired[3].item() == 0
+
+
+def test_v2_loop_break_per_request_opt_out():
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(
+        tokens, params=SamplingParams(thinking_loop_break=False)
+    )
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[8], local_pos=[0])
+
+    assert torch.all(out == 0)
+    assert state.loop_break_fired[3].item() == -1
+
+
+def test_v2_loop_break_opt_in_cannot_enable_an_unconfigured_server():
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(
+        tokens,
+        config=MockReasoningConfig(),
+        params=SamplingParams(thinking_loop_break=True),
+    )
+
+    assert not state.loop_break_enabled
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[8], local_pos=[0])
+
+    assert torch.all(out == 0)
+
+
+def test_v2_loop_break_rejects_a_degenerate_min_count():
+    """``min_count`` below 2 makes the tail comparison vacuously true, so it has
+    to disable the feature rather than fire on every request."""
+
+    class Degenerate(MockReasoningConfig):
+        loop_break_max_pattern_size = 8
+        loop_break_min_pattern_size = 2
+        loop_break_min_count = 1
+
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens, config=Degenerate())
+
+    assert not state.loop_break_enabled
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0)
+
+
+def test_v2_loop_break_survives_a_plain_sampling_request():
+    """A loop-break-only request sets none of the usual logits-processing flags,
+    so the sampler's fast path must still be opened for it."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    sampler = Sampler(
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        device=DEVICE,
+        req_states=req_states,
+        reasoning_config=MockLoopBreakReasoningConfig(),
+    )
+    sampler.add_request(
+        req_idx=3,
+        prompt_len=1,
+        sampling_params=SamplingParams(temperature=0.0),
+    )
+    sampler.apply_staged_writes()
+
+    assert sampler.needs_logits_processing[3]
+
+    idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
+    out = sampler.apply_sampling_params(
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        idx_mapping.clone(),
+        idx_mapping,
+        idx_mapping.cpu().numpy(),
+        torch.tensor([len(tokens) - 1], dtype=torch.int32, device=DEVICE),
+        torch.tensor([tokens[-1]], dtype=torch.int32, device=DEVICE),
+        torch.tensor([0], dtype=torch.int32, device=DEVICE),
+    )
+
+    assert out[0, END].item() == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_coexists_with_a_thinking_budget():
+    """Loop breaking must not disturb the budget countdown it shares state
+    with, and must still fire for a request that also carries a budget."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(
+        tokens, params=SamplingParams(thinking_token_budget=10_000)
+    )
+
+    assert state.use_thinking_budget[3]
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert out[0, END] == pytest.approx(1.0e9)
+
+
+def test_v2_loop_break_does_not_leak_into_a_reused_slot():
+    """Request slots are recycled; a fired flag left behind would force the end
+    sequence for whoever lands in the slot next."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens)
+    _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert state.loop_break_fired[3].item() == 1
+
+    # The next occupant carries a budget, so the forcing kernel still runs for
+    # it; only the cleared flag keeps it out of a forced end it never asked for.
+    state.add_request(
+        3,
+        SamplingParams(thinking_token_budget=10_000, thinking_loop_break=False),
+    )
+    state.apply_staged_writes()
+    out = _apply(
+        state,
+        torch.zeros((1, VOCAB_SIZE), device=DEVICE),
+        input_ids=[8],
+        local_pos=[0],
+    )
+    assert torch.all(out == 0)
+
+
+class MockLoopBreakMultiTokenEndConfig(MockMultiTokenEndReasoningConfig):
+    loop_break_max_pattern_size = 8
+    loop_break_min_pattern_size = 2
+    loop_break_min_count = 3
+    loop_break_min_reasoning_tokens = 16
+    loop_break_check_interval = 1
+
+
+def test_v2_loop_break_continues_the_multi_token_end_marker():
+    """A loop break reaches the same forced-end state the budget path uses, so
+    it writes the whole end sequence across draft positions rather than
+    restarting it at every step."""
+    tokens = [1, START, *_filler(20), 7, 8, 7, 8, 7, 8]
+    _, state = _loop_break_state(tokens, config=MockLoopBreakMultiTokenEndConfig())
+
+    logits = torch.zeros((2, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[tokens[-1], END_A], local_pos=[0, 1])
+
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert out[0, END_B] == 0
+    assert out[1, END_B] == pytest.approx(1.0e9)

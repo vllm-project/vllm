@@ -317,6 +317,30 @@ for output in outputs:
     print("text:", output.outputs[0].text)
 ```
 
+## Reasoning Loop Breaking
+
+Reasoning models can fall into an exact repeating token cycle inside the reasoning section and burn tokens until `max_tokens` or a `thinking_token_budget`. Reasoning loop breaking detects such cycles and forces `reasoning_end_str` as soon as one is confirmed, so the model exits the loop and answers from the reasoning it already has. Thinking is never disabled, and the request is not terminated — unlike `repetition_detection` (a sampling parameter), which finishes the whole request when a pattern repeats anywhere in the output.
+
+Enable it server-side on `ReasoningConfig`, which also supplies the reasoning delimiters. Detection semantics match `RepetitionDetectionParams`: a pattern of `loop_break_min_pattern_size..loop_break_max_pattern_size` tokens repeated `loop_break_min_count` consecutive times triggers the break. Detection is scoped to the current reasoning section, starts after `loop_break_min_reasoning_tokens` reasoning tokens, and runs every `loop_break_check_interval` accepted reasoning tokens. It is integrated with the thinking-budget enforcement machinery and therefore works with speculative decoding.
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
+  --reasoning-config '{
+    "reasoning_start_str": "<think>",
+    "reasoning_end_str": "I have to give the solution based on the reasoning directly now.</think>",
+    "loop_break_max_pattern_size": 128,
+    "loop_break_min_pattern_size": 4,
+    "loop_break_min_count": 4
+  }'
+```
+
+`reasoning_end_str` must carry a transition phrase *before* the reasoning end token, as shown. A bare `"</think>"` is not enough: the break fires, but with nothing steering the model past the loop it resumes the same cycle inside the answer. Measured on Qwen3.8-27B-NVFP4 at temperature 0, 10 runs per arm across two hosts in reversed order: a bare `"</think>"` looped 10/10, the phrase-before-tag form answered correctly 10/10, and the server log confirms the break fired in both arms at an identical reasoning length, so the difference is entirely in what the forced string steers toward.
+
+Keep the reasoning end token last. A string ending in anything else, including a trailing space after the token, steers the model toward that trailing text and leaks reasoning into the answer instead of ending it.
+
+Tune on total repeated length, not pattern size. A cycle of period `p` is only detected at candidate lengths divisible by `p`, so raising `loop_break_min_pattern_size` can hide a shorter cycle when no multiple of its period falls inside the configured range: a three-token cycle is missed at `loop_break_min_pattern_size: 4` with `loop_break_max_pattern_size: 4`, and caught once the range reaches 6. A single repeated token has period 1 and matches at every length, which is why twelve identical separator tokens still satisfy `loop_break_min_pattern_size: 4` with `loop_break_min_count: 3`. What a break costs a benign repeat is `k * loop_break_min_count` tokens, where `k` is the first candidate length in the range that the cycle divides, and a break can only fire once the reasoning section has passed `loop_break_min_reasoning_tokens` and on a step where the `loop_break_check_interval` scan runs. Raise `loop_break_min_count` if separator runs, ellipses, or long enumerations are being cut short. Individual requests can opt out with the `thinking_loop_break: false` sampling parameter; `null` (the default) follows the server configuration.
+
 ## Automatic `enable_thinking` Activation
 
 Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
