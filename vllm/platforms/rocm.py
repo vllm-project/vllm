@@ -598,6 +598,26 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # When the global kv_cache_dtype is turboquant_*, page-size unification
+        # pads skip-layer (native-dtype) pages to the TQ page size. Padded pages
+        # require a num-blocks-first cache layout (indexes_kv_by_block_stride=
+        # True). ROCM_ATTN, ROCM_AITER_FA, and ROCM_AITER_UNIFIED_ATTN all use
+        # a kv-first (2, num_blocks, ...) shape and cannot handle padded pages.
+        # Exclude all kv-first backends so TRITON_ATTN (num-blocks-first) is
+        # selected for native-dtype skip-layers instead.
+        global_cache_dtype = getattr(
+            getattr(vllm_config, "cache_config", None), "cache_dtype", None
+        )
+        if isinstance(global_cache_dtype, str) and global_cache_dtype.startswith(
+            "turboquant_"
+        ):
+            for _kv_first in (
+                AttentionBackendEnum.ROCM_ATTN,
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            ):
+                if _kv_first in backend_priorities:
+                    backend_priorities.remove(_kv_first)
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
@@ -623,6 +643,18 @@ class RocmPlatform(Platform):
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
+
+        # TurboQuant KV cache must always route to the TURBOQUANT backend,
+        # regardless of any forced backend override (e.g. Gemma4's TRITON_ATTN
+        # override for heterogeneous head dims). TURBOQUANT supports any head
+        # size and is the only backend that can decode turboquant_* caches.
+        # Sliding-window layers never reach here with a turboquant dtype: they
+        # have kv_cache_dtype reset to "auto" in Attention.__init__ because
+        # TurboQuantAttentionBackend only supports full (non-sliding) attention.
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.info_once("Using TurboQuant attention backend on ROCm.")
+            return AttentionBackendEnum.TURBOQUANT.get_path()
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:

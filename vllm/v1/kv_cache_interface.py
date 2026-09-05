@@ -541,6 +541,52 @@ class FullAttentionSpec(AttentionSpec):
         return merged_spec
 
 
+@dataclass(frozen=True, kw_only=True)
+class TQFullAttentionSpec(FullAttentionSpec):
+    """KV cache spec for TurboQuant full-attention layers.
+
+    Extends FullAttentionSpec with a per-head slot size (``tq_slot_size``) that
+    tracks the actual TQ-packed bytes per head per token.  This allows
+    ``unify_kv_cache_spec_page_size`` to compute the correct padded slot size
+    when layers with different head dimensions share the same block pool
+    (e.g. Gemma4 head_dim=256 vs global_head_dim=512).
+    """
+
+    tq_slot_size: int = 0  # packed bytes per (head, token) in the TQ cache
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        if self.tq_slot_size > 0:
+            return self.block_size * self.num_kv_heads * self.tq_slot_size
+        return super().real_page_size_bytes
+
+    def largest_block_size_within(
+        self, max_page: int, supported_sizes: list[int]
+    ) -> int:
+        """Return the largest supported block_size whose real_page <= max_page.
+
+        Used by unify_kv_cache_spec_page_size to maximize block_size when
+        page_size_padded is applied, reducing blocks_per_request for TQ groups.
+        Falls back to the current block_size if nothing larger fits.
+        """
+        if not supported_sizes or self.tq_slot_size <= 0:
+            return self.block_size
+        per_token = self.num_kv_heads * self.tq_slot_size
+        best = self.block_size
+        for s in sorted(supported_sizes):
+            if s * per_token <= max_page:
+                best = s
+        return best
+
+    @classmethod
+    def merge(cls, specs: list) -> TQFullAttentionSpec:
+        merged = super().merge(specs)
+        assert all(s.tq_slot_size == specs[0].tq_slot_size for s in specs), (
+            "All TQ layers in the same KV cache group must use the same tq_slot_size."
+        )
+        return replace(merged, tq_slot_size=specs[0].tq_slot_size)
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return
