@@ -273,6 +273,22 @@ def test_batch_memcpy_without_triton(monkeypatch):
         torch.testing.assert_close(dst, src)
 
 
+@pytest.mark.skip_global_cleanup
+def test_batch_memcpy_without_triton_rejects_device_pointers(monkeypatch):
+    """Device pointer tensors must not go through host memmove."""
+    from vllm.v1.worker import mamba_utils
+
+    monkeypatch.setattr(mamba_utils, "HAS_TRITON", False)
+    monkeypatch.setattr(mamba_utils, "batch_memcpy_kernel", object())
+
+    src_ptrs = torch.empty(1, dtype=torch.uint64, device="meta")
+    dst_ptrs = torch.empty(1, dtype=torch.uint64, device="meta")
+    sizes = torch.empty(1, dtype=torch.int64, device="meta")
+
+    with pytest.raises(RuntimeError, match="requires Triton"):
+        batch_memcpy(src_ptrs, dst_ptrs, sizes)
+
+
 def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")

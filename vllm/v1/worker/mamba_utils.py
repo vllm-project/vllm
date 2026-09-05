@@ -663,6 +663,14 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     assert sizes.shape[0] == batch
 
     if not HAS_TRITON or not hasattr(batch_memcpy_kernel, "__getitem__"):
+        # Host memmove is only valid for CPU addresses. do_mamba_copy_block
+        # passes device pointer tensors on GPU runners.
+        if any(t.device.type != "cpu" for t in (src_ptrs, dst_ptrs)):
+            raise RuntimeError(
+                "Mamba state copy requires Triton when the pointer tensors "
+                "are on device memory. The CPU fallback uses host memmove "
+                "and cannot copy GPU (or other device) addresses."
+            )
         from vllm.utils.cpu_triton_utils import _batch_memcpy_impl
 
         _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes)
