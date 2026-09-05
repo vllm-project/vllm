@@ -2210,12 +2210,9 @@ class VllmConfig:
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
-            if (
-                self.parallel_config.tensor_parallel_size > 1
-                and (
-                    self.compilation_config.pass_config.enable_sp
-                    or self.compilation_config.pass_config.enable_sp_moe
-                )
+            if self.parallel_config.tensor_parallel_size > 1 and (
+                self.compilation_config.pass_config.enable_sp
+                or self.compilation_config.pass_config.enable_sp_moe
             ):
                 # Sequence parallelism only captures TP-divisible sizes, so a
                 # wider non-divisible decode batch cannot be captured under SP.
@@ -2617,12 +2614,9 @@ class VllmConfig:
             unsupported.append("stock torch.compile")
 
         if (
-            (
-                self.compilation_config.pass_config.enable_sp
-                or self.compilation_config.pass_config.enable_sp_moe
-            )
-            and self.parallel_config.tensor_parallel_size > 1
-        ):
+            self.compilation_config.pass_config.enable_sp
+            or self.compilation_config.pass_config.enable_sp_moe
+        ) and self.parallel_config.tensor_parallel_size > 1:
             unsupported.append("sequence parallelism")
 
         # V2 does not implement the external_launcher (torchrun) PP-output
