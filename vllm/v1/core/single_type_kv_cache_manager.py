@@ -88,6 +88,7 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
+        self.num_reserved_blocks = 0
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
@@ -2020,6 +2021,7 @@ class SinkFullAttentionManager(FullAttentionManager):
         scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        needs_kv_cache_zeroing: bool = False,
     ):
         super().__init__(
             kv_cache_spec=kv_cache_spec,
@@ -2029,11 +2031,13 @@ class SinkFullAttentionManager(FullAttentionManager):
             scheduler_block_size=scheduler_block_size,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            needs_kv_cache_zeroing=needs_kv_cache_zeroing,
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
         num_sink_block = sink_len // self.block_size
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
+        self.num_reserved_blocks = num_sink_block
 
 
 def get_manager_for_kv_cache_spec(

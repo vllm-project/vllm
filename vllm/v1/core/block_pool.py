@@ -767,7 +767,7 @@ class BlockPool:
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, num_reserved_blocks: int = 0) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalid prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
@@ -777,11 +777,14 @@ class BlockPool:
             False otherwise.
         """
         num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
+        # The null block and model-level reserved blocks, such as static sink
+        # blocks, remain allocated for the lifetime of the cache manager.
+        expected_used_blocks = 1 + num_reserved_blocks
+        if num_used_blocks != expected_used_blocks:
             logger.warning(
                 "Failed to reset prefix cache because some "
                 "blocks (%d) are not freed yet",
-                num_used_blocks - 1,
+                num_used_blocks - expected_used_blocks,
             )
             return False
 
