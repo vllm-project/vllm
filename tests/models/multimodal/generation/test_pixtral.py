@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 from mistral_common.multimodal import download_image
 from mistral_common.protocol.instruct.chunk import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -14,11 +16,45 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.multimodal import MultiModalConfig
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.distributed.parallel_state import (
+    graph_capture,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
 from vllm.inputs import MultiModalDataBuiltins
 from vllm.logprobs import Logprob, SampleLogprobs
-from vllm.model_executor.models.pixtral import _make_packed_sequence_metadata
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
+from vllm.model_executor.models.pixtral import (
+    PATCH_MERGE,
+    PatchMerger,
+    PixtralForConditionalGeneration,
+    VisionEncoderArgs,
+    VisionLanguageAdapter,
+    VisionTransformer,
+    _flatten_pixtral_image_patches,
+    _make_packed_sequence_metadata,
+    _pad_pixtral_cumulative_seqlens,
+    _pad_pixtral_flashinfer_cu_seqlens,
+    _pad_pixtral_sequence_lengths,
+    get_sub_grids,
+    position_meshgrid_from_sizes,
+)
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph import (
+    BudgetGraphMetadata,
+    EncoderCudaGraphManager,
+)
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -112,6 +148,22 @@ def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
 SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 LIMIT_MM_PER_PROMPT = dict(image=4)
 
+_CUDA_GRAPH_TOKEN_BUDGET = 17
+_CUDA_GRAPH_MAX_BATCH_SIZE = 4
+_TINY_VISION_HIDDEN_SIZE = 128
+
+_IS_BLACKWELL_OR_NEWER = (
+    torch.cuda.is_available() and current_platform.has_device_capability(100)
+)
+_requires_cuda = pytest.mark.skipif(
+    not current_platform.is_cuda() or not torch.cuda.is_available(),
+    reason="Pixtral encoder CUDA graph coverage requires a CUDA GPU",
+)
+_requires_two_gpus = pytest.mark.skipif(
+    not current_platform.is_cuda() or torch.accelerator.device_count() < 2,
+    reason="Pixtral TP=2 CUDA graph coverage requires two CUDA GPUs",
+)
+
 MAX_MODEL_LEN = [8192, 65536]
 
 FIXTURES_PATH = VLLM_PATH / "tests/models/fixtures"
@@ -126,6 +178,7 @@ FIXTURE_LOGPROBS_CHAT = {
 OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
 
 
+@_requires_cuda
 @pytest.mark.parametrize(
     "backend",
     [
@@ -155,6 +208,742 @@ def test_packed_sequence_metadata(backend: AttentionBackendEnum) -> None:
         assert max_seqlen.item() == expected_max_seqlen
         assert cu_seqlens.tolist() == [0, 4, 10]
         assert sequence_lengths is None
+
+
+def test_pixtral_encoder_cudagraph_patch_layout() -> None:
+    patch_size = 4
+    images = [torch.randn(3, 8, 12), torch.randn(3, 4, 8)]
+    patch_conv = torch.nn.Conv2d(3, 5, patch_size, stride=patch_size, bias=False)
+
+    expected = torch.cat(
+        [
+            patch_conv(image.unsqueeze(0)).flatten(2).permute(0, 2, 1)
+            for image in images
+        ],
+        dim=1,
+    ).squeeze(0)
+    patches = _flatten_pixtral_image_patches(images, patch_size)
+    actual = patch_conv(patches).flatten(1)
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_position_meshgrid_from_sizes_matches_ij_meshgrid() -> None:
+    grid_sizes = [(2, 3), (1, 4), (3, 1)]
+    expected = torch.cat(
+        [
+            torch.stack(
+                torch.meshgrid(
+                    torch.arange(height),
+                    torch.arange(width),
+                    indexing="ij",
+                ),
+                dim=-1,
+            ).reshape(-1, 2)
+            for height, width in grid_sizes
+        ]
+    )
+    actual = position_meshgrid_from_sizes(grid_sizes)
+    torch.testing.assert_close(actual, expected)
+    actual_on_cpu = position_meshgrid_from_sizes(grid_sizes, device=torch.device("cpu"))
+    torch.testing.assert_close(actual_on_cpu, expected)
+    assert position_meshgrid_from_sizes([]).shape == (0, 2)
+
+
+def test_pixtral_encoder_cudagraph_patch_merge_layout() -> None:
+    grid_sizes = [(2, 4), (4, 2)]
+    hidden_size = 3
+    patch_merger = PatchMerger.__new__(PatchMerger)
+    torch.nn.Module.__init__(patch_merger)
+    patch_merger.spatial_merge_size = 2
+    features = torch.arange(
+        sum(height * width for height, width in grid_sizes) * hidden_size,
+        dtype=torch.float32,
+    ).view(-1, hidden_size)
+
+    indices = patch_merger.make_merge_indices(grid_sizes, torch.device("cpu"))
+    actual = features[indices].permute(0, 2, 1).reshape(indices.shape[0], -1)
+    expected = torch.cat(
+        [
+            grid.view(-1, grid.shape[-1]).t()
+            for grid in get_sub_grids(features, grid_sizes, spatial_merge_size=2)
+        ]
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_pixtral_supports_encoder_cudagraph() -> None:
+    assert supports_encoder_cudagraph(PixtralForConditionalGeneration)
+
+
+def test_pixtral_encoder_cudagraph_pads_attention_tail() -> None:
+    src_cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+    dst_cu_seqlens = torch.empty(6, dtype=torch.int32)
+    _pad_pixtral_cumulative_seqlens(
+        dst_cu_seqlens,
+        src_cu_seqlens,
+        input_capacity=8,
+    )
+
+    assert dst_cu_seqlens.tolist() == [0, 2, 5, 5, 5, 8]
+
+    src_sequence_lengths = torch.tensor([2, 3, 0, 0], dtype=torch.int32)
+    dst_sequence_lengths = torch.empty(8, dtype=torch.int32)
+    _pad_pixtral_sequence_lengths(
+        dst_sequence_lengths, src_sequence_lengths, input_capacity=8
+    )
+
+    assert dst_sequence_lengths.tolist() == [2, 3, 0, 0, 0, 0, 0, 3]
+
+    full_src_cu_seqlens = torch.tensor([0, 3, 8], dtype=torch.int32)
+    _pad_pixtral_cumulative_seqlens(
+        dst_cu_seqlens,
+        full_src_cu_seqlens,
+        input_capacity=8,
+    )
+    assert dst_cu_seqlens.tolist() == [0, 3, 8, 8, 8, 8]
+
+    full_src_sequence_lengths = torch.tensor([3, 5, 0, 0], dtype=torch.int32)
+    _pad_pixtral_sequence_lengths(
+        dst_sequence_lengths,
+        full_src_sequence_lengths,
+        input_capacity=8,
+    )
+    assert dst_sequence_lengths.tolist() == [3, 5, 0, 0, 0, 0, 0, 0]
+
+
+def test_pixtral_encoder_cudagraph_pads_flashinfer_offsets() -> None:
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    src_cu_seqlens = torch.cat((src_qko, src_v))
+    dst_cu_seqlens = torch.empty_like(src_cu_seqlens)
+
+    _pad_pixtral_flashinfer_cu_seqlens(
+        dst_cu_seqlens,
+        src_cu_seqlens,
+        input_capacity=8,
+        flashinfer_offset_scale=4,
+    )
+
+    assert dst_cu_seqlens[:9].tolist() == [0, 8] + [20] * 6 + [32]
+    assert dst_cu_seqlens[9:].tolist() == [0, 24] + [60] * 6 + [96]
+
+
+def test_pixtral_encoder_cudagraph_pads_flashinfer_short_src() -> None:
+    # Replay of 2 images pads to FlashInfer bucket 8 (9 offsets/section).
+    # Capture with max_batch_size >= 8 pads to bucket 16 (17 offsets/section).
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    src_cu_seqlens = torch.cat((src_qko, src_v))
+    dst_cu_seqlens = torch.empty(34, dtype=torch.int32)
+
+    _pad_pixtral_flashinfer_cu_seqlens(
+        dst_cu_seqlens,
+        src_cu_seqlens,
+        input_capacity=8,
+        flashinfer_offset_scale=4,
+    )
+
+    assert dst_cu_seqlens[:17].tolist() == [0, 8] + [20] * 14 + [32]
+    assert dst_cu_seqlens[17:].tolist() == [0, 24] + [60] * 14 + [96]
+
+
+def _make_tiny_pixtral_encoder(
+    backend: AttentionBackendEnum,
+    merge_size: int,
+    vllm_config,
+) -> PixtralForConditionalGeneration:
+    multimodal_config = MultiModalConfig(mm_encoder_attn_backend=backend)
+    vllm_config.model_config = SimpleNamespace(
+        multimodal_config=multimodal_config,
+    )
+    vision_args = VisionEncoderArgs(
+        hidden_size=_TINY_VISION_HIDDEN_SIZE,
+        num_channels=3,
+        image_size=64,
+        patch_size=4,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        rope_theta=10_000,
+        image_token_id=10,
+        adapter_bias=True,
+        spatial_merge_size=merge_size,
+        add_pre_mm_projector_layer_norm=merge_size > 1,
+        mm_projector_id=PATCH_MERGE if merge_size > 1 else "",
+    )
+
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        text_config=SimpleNamespace(hidden_size=_TINY_VISION_HIDDEN_SIZE)
+    )
+    model.model_config = SimpleNamespace(max_model_len=8192)
+    model.multimodal_config = multimodal_config
+    model.vision_args = vision_args
+    model._encoder_cudagraph_input_capacities = {}
+
+    with set_default_torch_dtype(torch.bfloat16):
+        model.vision_encoder = VisionTransformer(
+            vision_args,
+            prefix="vision_encoder",
+        )
+        model.pre_mm_projector_norm = (
+            RMSNorm(vision_args.hidden_size, eps=1e-5) if merge_size > 1 else None
+        )
+        model.patch_merger = (
+            PatchMerger(
+                vision_encoder_dim=vision_args.hidden_size,
+                spatial_merge_size=merge_size,
+            )
+            if merge_size > 1
+            else None
+        )
+        model.vision_language_adapter = VisionLanguageAdapter(
+            vision_args,
+            dim=_TINY_VISION_HIDDEN_SIZE,
+        )
+
+    model.to(device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name.endswith(".bias"):
+                param.zero_()
+            elif param.ndim == 1:
+                param.fill_(1)
+            else:
+                torch.nn.init.normal_(param, mean=0, std=0.02)
+    model.requires_grad_(False)
+    model.eval()
+    attention = model.vision_encoder.transformer.layers[0].attention.attn
+    assert attention.attn_backend == backend
+    return model
+
+
+def _make_pixtral_encoder_cudagraph_manager(
+    model: PixtralForConditionalGeneration,
+    token_budgets: list[int] | None = None,
+) -> EncoderCudaGraphManager:
+    manager = object.__new__(EncoderCudaGraphManager)
+    manager.token_budgets = sorted(token_budgets or [_CUDA_GRAPH_TOKEN_BUDGET])
+    manager.path_token_budgets = {"default": manager.token_budgets}
+    manager.max_batch_size = _CUDA_GRAPH_MAX_BATCH_SIZE
+    manager.max_frames_per_batch = 0
+    manager.use_dp = False
+    manager.budget_graphs = {"default": {}}
+    manager.graph_pool = None
+    manager.graph_hits = 0
+    manager.graph_misses = 0
+    manager.log_stats_interval = 100
+    manager.model = model
+    manager.config = model.get_encoder_cudagraph_config()
+    manager.device = torch.device("cuda")
+    manager.dtype = torch.bfloat16
+    return manager
+
+
+def _make_pixtral_images(
+    output_grid_sizes: list[tuple[int, int]],
+    merge_size: int,
+) -> list[torch.Tensor]:
+    patch_size = 4
+    return [
+        torch.randn(
+            3,
+            height * merge_size * patch_size,
+            width * merge_size * patch_size,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        for height, width in output_grid_sizes
+    ]
+
+
+def _get_eager_pixtral_outputs(
+    model: PixtralForConditionalGeneration,
+    mm_kwargs: dict[str, Any],
+) -> tuple[torch.Tensor, ...]:
+    output_sizes = [
+        spec.output_tokens for spec in model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    ]
+    with torch.inference_mode():
+        output = model.encoder_eager_forward(mm_kwargs)
+    return torch.split(output, output_sizes)
+
+
+def _assert_pixtral_outputs_close(
+    actual: list[torch.Tensor],
+    expected: tuple[torch.Tensor, ...],
+) -> None:
+    assert len(actual) == len(expected)
+    for actual_item, expected_item in zip(actual, expected):
+        assert actual_item.shape == expected_item.shape
+        # Graph and eager run the same kernels on the same inputs, so they
+        # should agree far more tightly than a generic bf16 tolerance.
+        torch.testing.assert_close(
+            actual_item,
+            expected_item,
+            atol=2e-3,
+            rtol=2e-3,
+        )
+
+
+def _assert_pixtral_cudagraph_padding_zeroed(
+    graph: BudgetGraphMetadata,
+    model: PixtralForConditionalGeneration,
+    mm_kwargs: dict[str, Any],
+) -> None:
+    """Verify that replay zeroed every unused model input row."""
+    specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    input_rows = sum(spec.input_size for spec in specs)
+    output_rows = sum(spec.output_tokens for spec in specs)
+
+    for key in ("pixel_values", "freqs_cis"):
+        padding = graph.input_buffers[key][input_rows:]
+        assert padding.numel() > 0
+        assert torch.count_nonzero(padding).item() == 0
+
+    if "merge_indices" in graph.input_buffers:
+        padding = graph.input_buffers["merge_indices"][output_rows:]
+        assert padding.numel() > 0
+        assert torch.count_nonzero(padding).item() == 0
+
+
+@_requires_cuda
+@pytest.mark.parametrize(
+    "backend",
+    [AttentionBackendEnum.FLASH_ATTN, AttentionBackendEnum.FLASHINFER],
+    ids=["flash-attn", "flashinfer"],
+)
+@pytest.mark.parametrize("merge_size", [1, 2], ids=["pixtral", "ministral"])
+def test_pixtral_encoder_cudagraph_matches_eager(
+    backend: AttentionBackendEnum,
+    merge_size: int,
+    default_vllm_config,
+    dist_init,
+) -> None:
+    if backend == AttentionBackendEnum.FLASHINFER and not _IS_BLACKWELL_OR_NEWER:
+        pytest.skip("Pixtral FlashInfer CUDA graph coverage requires SM100 or newer")
+
+    torch.manual_seed(0)
+    model = _make_tiny_pixtral_encoder(
+        backend,
+        merge_size,
+        default_vllm_config,
+    )
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+
+    expected_cu_seqlens_padding = (
+        PixtralForConditionalGeneration._pad_encoder_cudagraph_flashinfer_cu_seqlens
+        if backend == AttentionBackendEnum.FLASHINFER
+        else PixtralForConditionalGeneration._pad_encoder_cudagraph_cumulative_seqlens
+    )
+    assert (
+        manager.config.padding_logics["cu_seqlens"].__func__
+        is expected_cu_seqlens_padding
+    )
+
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    graph = manager.budget_graphs["default"][_CUDA_GRAPH_TOKEN_BUDGET]
+    output_capacity = 20
+    assert graph.output_buffer.shape == (
+        output_capacity,
+        _TINY_VISION_HIDDEN_SIZE,
+    )
+    assert graph.input_buffers["pixel_values"].shape[0] == (
+        output_capacity * merge_size**2
+    )
+    if merge_size > 1:
+        assert graph.input_buffers["merge_indices"].shape == (
+            output_capacity,
+            merge_size**2,
+        )
+    else:
+        assert "merge_indices" not in graph.input_buffers
+
+    mm_kwargs = {
+        "images": _make_pixtral_images(
+            [(1, 1), (1, 2), (2, 1), (2, 2), (1, 3)],
+            merge_size,
+        )
+    }
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    _assert_pixtral_cudagraph_padding_zeroed(graph, model, mm_kwargs)
+    assert manager.graph_hits == 5
+    assert manager.graph_misses == 0
+
+    replay_kwargs = {
+        "images": _make_pixtral_images([(1, 1)], merge_size),
+    }
+    replay_expected = _get_eager_pixtral_outputs(model, replay_kwargs)
+    replay_actual = manager.execute(replay_kwargs)
+    _assert_pixtral_outputs_close(replay_actual, replay_expected)
+    _assert_pixtral_cudagraph_padding_zeroed(graph, model, replay_kwargs)
+    assert manager.graph_hits == 6
+    assert manager.graph_misses == 0
+
+
+@_requires_two_gpus
+def test_pixtral_encoder_cudagraph_tp2_matches_eager() -> None:
+    world_size = 2
+    mp.spawn(
+        _run_pixtral_encoder_cudagraph_tp2,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def _run_pixtral_encoder_cudagraph_tp2(
+    local_rank: int,
+    world_size: int,
+    master_port: int,
+) -> None:
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+    try:
+        with set_current_vllm_config(vllm_config):
+            init_distributed_environment()
+            initialize_model_parallel(tensor_model_parallel_size=world_size)
+            assert get_tensor_model_parallel_world_size() == world_size
+
+            torch.manual_seed(0)
+            model = _make_tiny_pixtral_encoder(
+                AttentionBackendEnum.FLASH_ATTN,
+                merge_size=1,
+                vllm_config=vllm_config,
+            )
+            manager = _make_pixtral_encoder_cudagraph_manager(model)
+            mm_kwargs = {"images": _make_pixtral_images([(2, 2)], merge_size=1)}
+            expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+
+            with graph_capture(device=device):
+                manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+            actual = manager.execute(mm_kwargs)
+            _assert_pixtral_outputs_close(actual, expected)
+            assert manager.graph_hits == 1
+            assert manager.graph_misses == 0
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_budget_boundary_and_fallback(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    torch.manual_seed(0)
+    merge_size = 2
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    exact_budget_kwargs = {
+        "images": _make_pixtral_images([(1, 1), (2, 4), (2, 4)], merge_size)
+    }
+    exact_budget_expected = _get_eager_pixtral_outputs(model, exact_budget_kwargs)
+    exact_budget_actual = manager.execute(exact_budget_kwargs)
+    _assert_pixtral_outputs_close(exact_budget_actual, exact_budget_expected)
+    assert manager.graph_hits == 3
+    assert manager.graph_misses == 0
+
+    oversized_kwargs = {
+        "images": _make_pixtral_images([(3, 6)], merge_size),
+    }
+    oversized_expected = _get_eager_pixtral_outputs(model, oversized_kwargs)
+    oversized_actual = manager.execute(oversized_kwargs)
+    _assert_pixtral_outputs_close(oversized_actual, oversized_expected)
+    assert manager.graph_hits == 3
+    assert manager.graph_misses == 1
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_mixed_graph_and_eager(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    torch.manual_seed(0)
+    merge_size = 2
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    mm_kwargs = {
+        "images": _make_pixtral_images([(1, 1), (3, 6)], merge_size),
+    }
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    assert manager.graph_hits == 1
+    assert manager.graph_misses == 1
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_splits_on_token_budget(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    torch.manual_seed(0)
+    merge_size = 2
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    mm_kwargs = {
+        "images": _make_pixtral_images([(2, 5), (2, 5)], merge_size),
+    }
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    assert manager.graph_hits == 2
+    assert manager.graph_misses == 0
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_multi_budget_capacity_map(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    torch.manual_seed(0)
+    merge_size = 1
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+    manager = _make_pixtral_encoder_cudagraph_manager(
+        model, token_budgets=[8, _CUDA_GRAPH_TOKEN_BUDGET]
+    )
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    assert set(manager.budget_graphs["default"]) == {8, _CUDA_GRAPH_TOKEN_BUDGET}
+    capacity_ptrs = list(model._encoder_cudagraph_input_capacities)
+    assert len(capacity_ptrs) >= 2
+    assert len(set(capacity_ptrs)) == len(capacity_ptrs)
+    assert manager._find_smallest_fitting_budget_given_tokens(4) == 8
+    assert manager._find_smallest_fitting_budget_given_tokens(12) == (
+        _CUDA_GRAPH_TOKEN_BUDGET
+    )
+
+    small_kwargs = {"images": _make_pixtral_images([(2, 2)], merge_size)}
+    small_expected = _get_eager_pixtral_outputs(model, small_kwargs)
+    small_actual = manager.execute(small_kwargs)
+    _assert_pixtral_outputs_close(small_actual, small_expected)
+    assert manager.graph_hits == 1
+    assert manager.graph_misses == 0
+
+    large_kwargs = {
+        "images": _make_pixtral_images([(2, 2), (2, 4)], merge_size),
+    }
+    large_expected = _get_eager_pixtral_outputs(model, large_kwargs)
+    large_actual = manager.execute(large_kwargs)
+    _assert_pixtral_outputs_close(large_actual, large_expected)
+    assert manager.graph_hits == 3
+    assert manager.graph_misses == 0
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_survives_recapture(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    """Capture, release, capture again -- the sequence the model runner runs.
+
+    Memory profiling captures encoder graphs with a throwaway manager and
+    clears them, then the real manager captures again against the same model.
+    ``_encoder_cudagraph_input_capacities`` is keyed by buffer address and is
+    never cleared, so a second capture must re-register its own buffers before
+    any replay reads them.
+    """
+    torch.manual_seed(0)
+    merge_size = 2
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        merge_size,
+        default_vllm_config,
+    )
+
+    profiling_manager = _make_pixtral_encoder_cudagraph_manager(model)
+    profiling_manager.capture(graph_pool=current_platform.graph_pool_handle())
+    profiling_manager.clear()
+
+    manager = _make_pixtral_encoder_cudagraph_manager(model)
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+
+    graph_meta = manager.budget_graphs["default"][_CUDA_GRAPH_TOKEN_BUDGET]
+    input_capacity = graph_meta.input_buffers["pixel_values"].shape[0]
+    capacities = model._encoder_cudagraph_input_capacities
+    for key in ("cu_seqlens", "sequence_lengths"):
+        buf = graph_meta.input_buffers.get(key)
+        if buf is not None:
+            assert capacities[buf.data_ptr()] == input_capacity
+
+    mm_kwargs = {
+        "images": _make_pixtral_images([(1, 1), (1, 2)], merge_size),
+    }
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    assert manager.graph_misses == 0
+
+
+@_requires_cuda
+def test_pixtral_encoder_cudagraph_manager_init_uses_budget_range(
+    default_vllm_config,
+    dist_init,
+) -> None:
+    torch.manual_seed(0)
+    model = _make_tiny_pixtral_encoder(
+        AttentionBackendEnum.FLASH_ATTN,
+        1,
+        default_vllm_config,
+    )
+    compilation_config = default_vllm_config.compilation_config
+    compilation_config.encoder_cudagraph_token_budgets = [_CUDA_GRAPH_TOKEN_BUDGET]
+    compilation_config.encoder_cudagraph_max_vision_items_per_batch = 0
+    default_vllm_config.scheduler_config.max_num_batched_tokens = 8192
+
+    min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
+        default_vllm_config
+    )
+    assert (min_budget, max_budget) == (3136, 8192)
+
+    manager = EncoderCudaGraphManager(
+        default_vllm_config,
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
+        model=model,
+    )
+    assert manager.token_budgets == [_CUDA_GRAPH_TOKEN_BUDGET]
+    expected_batch_size = min(max_budget // min_budget, _CUDA_GRAPH_TOKEN_BUDGET)
+    assert manager.max_batch_size == expected_batch_size
+    assert manager.config.modalities == ["image"]
+    assert (
+        manager.config.padding_logics["cu_seqlens"].__func__
+        is PixtralForConditionalGeneration._pad_encoder_cudagraph_cumulative_seqlens
+    )
+    assert (
+        manager.config.padding_logics["sequence_lengths"].__func__
+        is PixtralForConditionalGeneration._pad_encoder_cudagraph_sequence_lengths
+    )
+
+    manager.capture(graph_pool=current_platform.graph_pool_handle())
+    mm_kwargs = {"images": _make_pixtral_images([(1, 1)], merge_size=1)}
+    expected = _get_eager_pixtral_outputs(model, mm_kwargs)
+    actual = manager.execute(mm_kwargs)
+    _assert_pixtral_outputs_close(actual, expected)
+    assert manager.graph_hits == 1
+    assert manager.graph_misses == 0
+
+
+@pytest.mark.parametrize(
+    "use_data_parallel,tp_size,expected_divisor",
+    [
+        (False, 1, 1),
+        (False, 2, 2),
+        # The ViT data-parallel path replicates the encoder, so TP does not
+        # shard the hidden dimension and the offsets must not be divided.
+        (True, 2, 1),
+    ],
+)
+def test_pixtral_encoder_cudagraph_flashinfer_offset_scale_follows_tp(
+    use_data_parallel: bool,
+    tp_size: int,
+    expected_divisor: int,
+    monkeypatch,
+) -> None:
+    """FlashInfer offsets are byte-strides, so they must track the TP shard."""
+    hidden_size = 128
+    input_capacity = 8
+
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_args = SimpleNamespace(hidden_size=hidden_size)
+
+    src_qko = torch.tensor([0, 8] + [20] * 7, dtype=torch.int32)
+    src_v = torch.tensor([0, 24] + [60] * 7, dtype=torch.int32)
+    src_cu_seqlens = torch.cat((src_qko, src_v))
+    dst_cu_seqlens = torch.empty_like(src_cu_seqlens)
+    model._encoder_cudagraph_input_capacities = {
+        dst_cu_seqlens.data_ptr(): input_capacity
+    }
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.pixtral.is_vit_use_data_parallel",
+        lambda: use_data_parallel,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.pixtral.get_tensor_model_parallel_world_size",
+        lambda: tp_size,
+    )
+    model._pad_encoder_cudagraph_flashinfer_cu_seqlens(dst_cu_seqlens, src_cu_seqlens)
+
+    expected = torch.empty_like(src_cu_seqlens)
+    _pad_pixtral_flashinfer_cu_seqlens(
+        expected,
+        src_cu_seqlens,
+        input_capacity,
+        hidden_size // expected_divisor,
+    )
+    assert dst_cu_seqlens.tolist() == expected.tolist()
+
+
+@pytest.mark.parametrize(
+    "merge_size,scheduler_max,model_max,expected",
+    [
+        (1, 4096, 8192, (256, 4096)),
+        (2, 4096, 8192, (64, 4096)),
+        (1, 8192, 4096, (256, 4096)),
+        (2, 32, 64, (32, 32)),
+    ],
+)
+def test_pixtral_encoder_cudagraph_budget_range(
+    merge_size: int,
+    scheduler_max: int,
+    model_max: int,
+    expected: tuple[int, int],
+) -> None:
+    model = PixtralForConditionalGeneration.__new__(PixtralForConditionalGeneration)
+    torch.nn.Module.__init__(model)
+    model.vision_args = SimpleNamespace(
+        patch_size=14,
+        spatial_merge_size=merge_size,
+    )
+    model.patch_merger = object() if merge_size > 1 else None
+    model.model_config = SimpleNamespace(max_model_len=model_max)
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=scheduler_max)
+    )
+
+    assert model.get_encoder_cudagraph_budget_range(vllm_config) == expected
 
 
 # For the test author to store golden output in JSON
@@ -249,7 +1038,10 @@ def test_chat(
 
 @large_gpu_test(min_gb=16)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
+def test_chat_consolidated(
+    vllm_runner, dtype: str, local_asset_server, monkeypatch
+) -> None:
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
         FIXTURE_LOGPROBS_CHAT[MINISTRAL_3B_ID]
     )
@@ -261,7 +1053,17 @@ def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
         config_format="mistral",
         max_model_len=8192,
         limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
+        compilation_config={
+            "cudagraph_mm_encoder": True,
+            "encoder_cudagraph_token_budgets": [4096],
+            "encoder_cudagraph_max_vision_items_per_batch": 4,
+        },
     ) as vllm_model:
+        engine_core = vllm_model.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        encoder_cudagraph_manager = model_runner.encoder_cudagraph_manager
+        assert encoder_cudagraph_manager is not None
+
         outputs = []
         urls_all = [local_asset_server.url_for(u) for u in IMG_URLS]
         msgs = [
@@ -272,6 +1074,9 @@ def test_chat_consolidated(vllm_runner, dtype: str, local_asset_server) -> None:
         for msg in msgs:
             output = vllm_model.llm.chat(msg, sampling_params=SAMPLING_PARAMS)
             outputs.extend(output)
+
+        assert encoder_cudagraph_manager.graph_hits >= len(IMG_URLS)
+        assert encoder_cudagraph_manager.graph_misses == 0
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
     for i in range(len(logprobs)):
