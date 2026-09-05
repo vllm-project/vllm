@@ -27,6 +27,13 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             tools: list[dict[str, Any]] | None = None,
             **kwargs,
         ) -> str | list[int]:
+            """Encode messages using the DeepSeek V3.2 chat format.
+
+            Request-level tools are attached to the leading system or
+            developer message so the prompt reads
+            ``{content}\\n\\n## Tools …`` instead of placing tools before
+            the system prompt.
+            """
             thinking = kwargs.get("thinking", False)
             enable_thinking = kwargs.get("enable_thinking", False)
             thinking = thinking or enable_thinking
@@ -77,12 +84,15 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             return prompt_str
 
         def num_special_tokens_to_add(self) -> int:
+            """Return the number of special tokens added by ``encode``."""
             return len(self.encode(""))
 
         def get_added_vocab(self) -> dict[str, int]:
+            """Return a copy of the added-vocabulary mapping."""
             return added_vocab.copy()
 
         def __reduce__(self):
+            """Support pickling by reconstructing via the wrapper factory."""
             return get_deepseek_v32_tokenizer, (tokenizer,)
 
     _DeepseekV32Tokenizer.__name__ = f"DSV32{tokenizer.__class__.__name__}"
@@ -94,5 +104,6 @@ def get_deepseek_v32_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 class DeepseekV32Tokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
+        """Load a pretrained tokenizer and wrap it for DeepSeek V3.2."""
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v32_tokenizer(tokenizer))

@@ -5,6 +5,8 @@ from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
 
 
 class FakeHfTokenizer:
+    """Minimal tokenizer stub that records encode calls."""
+
     vocab_size = 100
 
     def get_added_vocab(self) -> dict[str, int]:
@@ -21,6 +23,7 @@ class FakeHfTokenizer:
 
 
 def _tokenizer():
+    """Build a wrapped DeepSeek V3.2 tokenizer from the fake stub."""
     return get_deepseek_v32_tokenizer(FakeHfTokenizer())
 
 
@@ -56,6 +59,21 @@ def test_deepseek_v32_tools_render_after_the_system_prompt():
     assert prompt.index("SYSTEM_MARKER") < prompt.index("## Tools")
     assert "SYSTEM_MARKER\n\n## Tools" in prompt
 
+
+def test_deepseek_v32_tools_render_after_developer_prompt():
+    """Request-level tools attach to a leading developer message the same
+    way they attach to a system message."""
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "developer", "content": "DEV_MARKER"},
+            {"role": "user", "content": "Weather?"},
+        ],
+        tools=_ONE_TOOL,
+        tokenize=False,
+    )
+
+    assert prompt.count("## Tools") == 1
+    assert prompt.index("DEV_MARKER") < prompt.index("## Tools")
 
 
 def test_deepseek_v32_tools_still_rendered_without_a_leading_system_message():
