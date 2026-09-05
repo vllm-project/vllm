@@ -103,6 +103,44 @@ def test_mamba_speculative_block_relocation_requires_exclusive_ownership():
         manager._relocate_speculative_block([pinned_block], 0)
 
 
+def test_mamba_retirement_crosses_null_gaps():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    old, committed, in_flight = pool.get_new_blocks(3)
+    manager.req_to_blocks["r"] = [old, pool.null_block, committed, in_flight]
+
+    # The state at token 12 and the following in-flight state must survive.
+    for _ in range(2):
+        manager.remove_skipped_blocks("r", processed_computed_tokens=12)
+        assert manager.req_to_blocks["r"] == [
+            pool.null_block,
+            pool.null_block,
+            committed,
+            in_flight,
+        ]
+        assert old.ref_cnt == 0
+        assert committed.ref_cnt == in_flight.ref_cnt == 1
+        assert pool.get_num_free_blocks() == 5
+
+    manager.free("r")
+    manager.req_to_blocks["r"] = pool.get_new_blocks(2)
+    manager.remove_skipped_blocks("r", processed_computed_tokens=5)
+    assert manager.req_to_blocks["r"][0].is_null
+    assert manager.req_to_blocks["r"][1].ref_cnt == 1
+
+
 def get_sliding_window_manager(
     sliding_window_spec,
     block_pool,
