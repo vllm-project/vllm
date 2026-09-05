@@ -942,6 +942,10 @@ class KimiK3LowLatencyEmbeddingMethod(
 
 
 def _enable_kda_projection_overlap(module: nn.Module) -> bool:
+    if current_platform.is_device_capability(90):
+        # On Hopper, throws with "libNVVM compilation failed".
+        return False
+
     from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 
     if envs.VLLM_BATCH_INVARIANT:
