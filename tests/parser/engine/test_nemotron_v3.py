@@ -22,8 +22,11 @@ from tests.parser.engine.streaming_helpers import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.parser.nemotron_v3 import NemotronV3Parser
+from vllm.parser.parser_manager import ParserManager
 
 _THINK_START_ID = 50
 _THINK_END_ID = 51
@@ -46,6 +49,25 @@ def _make_request(**chat_template_kwargs):
     request.include_reasoning = True
     request.chat_template_kwargs = chat_template_kwargs or None
     return request
+
+
+def _weather_tool() -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name="get_current_weather",
+            description="Get current weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "state": {"type": "string"},
+                    "unit": {"type": "string"},
+                },
+                "required": ["city"],
+            },
+        ),
+    )
 
 
 @pytest.fixture
@@ -128,6 +150,61 @@ class TestNonStreamingToolCalls:
         assert result.tool_calls[0].function.name == "get_weather"
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"city": "Tokyo"}
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {
+                "type": "function",
+                "function": {"name": "get_current_weather"},
+            },
+        ],
+    )
+    def test_required_and_named_tool_choice_parse_xml_after_reasoning(
+        self, tool_choice
+    ):
+        """Regression: Nemotron V3 must not send Qwen XML to JSON parsing."""
+        tool_payload = _weather_tool().model_dump(mode="json", exclude_none=True)
+        request = ChatCompletionRequest(
+            model="model",
+            messages=[],
+            tools=[tool_payload],
+            tool_choice=tool_choice,
+        )
+        tool = request.tools[0]
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_coder",
+            reasoning_parser_name="nemotron_v3",
+            enable_auto_tools=True,
+            model_name="model",
+        )
+        parser = parser_cls(make_mock_tokenizer(_VOCAB), [tool])
+        model_output = (
+            "The user asked for weather.</think>\n"
+            "<tool_call>\n"
+            "<function=get_current_weather>\n"
+            "<parameter=city>Dallas</parameter>\n"
+            "<parameter=state>TX</parameter>\n"
+            "<parameter=unit>fahrenheit</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+
+        reasoning, content, tool_calls = parser.parse(
+            model_output, request, enable_auto_tools=True
+        )
+
+        assert reasoning == "The user asked for weather."
+        assert content is None
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_current_weather"
+        assert json.loads(tool_calls[0].arguments) == {
+            "city": "Dallas",
+            "state": "TX",
+            "unit": "fahrenheit",
+        }
 
     def test_parallel_tool_calls(self, parser):
         text = (
