@@ -131,7 +131,7 @@ def init_attn_backend(
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     # Phase 3: create metadata builders and determine cudagraph support.
-    attn_backend_workspace: torch.Tensor | None = None
+    attn_backend_workspace: object | None = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
@@ -151,9 +151,17 @@ def init_attn_backend(
             # buffer is written serially, as it already is across steps.
             for builder in group.metadata_builders:
                 if attn_backend_workspace is None:
-                    if hasattr(builder, "_get_workspace_buffer"):
+                    # The state carries the registered wrappers with it, so
+                    # prefer it over the bare buffer when the builder has one.
+                    if hasattr(builder, "get_workspace_buffer_state"):
+                        attn_backend_workspace = builder.get_workspace_buffer_state()
+                    elif hasattr(builder, "_get_workspace_buffer"):
                         attn_backend_workspace = builder._get_workspace_buffer()
-                elif hasattr(builder, "set_workspace_buffer"):
+                elif hasattr(builder, "set_workspace_buffer_state"):
+                    builder.set_workspace_buffer_state(attn_backend_workspace)
+                elif isinstance(attn_backend_workspace, torch.Tensor) and hasattr(
+                    builder, "set_workspace_buffer"
+                ):
                     builder.set_workspace_buffer(attn_backend_workspace)
     attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
     return attn_groups, attn_cg_support_info, kernel_block_sizes

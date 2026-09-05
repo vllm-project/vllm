@@ -89,9 +89,17 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    is_residual_scattered_for_sp,
+    requires_persistent_attention_workspace_profiling,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import (
+    get_num_workspace_ubatches,
+    init_workspace_manager,
+    is_workspace_manager_initialized,
+    lock_workspace,
+)
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
@@ -452,8 +460,9 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
-        # DSpark target and draft CUDA graphs retain workspace views concurrently.
-        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        # Initialize workspace manager. DSpark target and draft CUDA graphs
+        # retain workspace views concurrently, so they need separate lanes.
+        num_ubatches = get_num_workspace_ubatches(self.vllm_config.parallel_config)
         init_workspace_manager(
             self.device,
             num_ubatches,
@@ -557,11 +566,30 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        workspace_lease = None
+        profile_persistent_workspace = (
+            requires_persistent_attention_workspace_profiling(self.vllm_config)
+        )
+        try:
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                if profile_persistent_workspace:
+                    workspace_lease = self.model_runner.prepare_profiling_workspace()
+                self.model_runner.profile_run()
+
+                # Release profiling-only owners before rebuilding the minimal KV
+                # state for CUDA graph-pool measurement; the global shared arenas
+                # stay live and are included in profile_result.total_consumed.
+                if workspace_lease is not None:
+                    workspace_lease.release()
+                    workspace_lease = None
+                    gc.collect()
+                    torch.accelerator.empty_cache()
+        finally:
+            if workspace_lease is not None:
+                workspace_lease.release()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
@@ -574,7 +602,11 @@ class Worker(WorkerBase):
             current_platform.is_cuda_alike()
             and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
-            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory(
+                persistent_workspace_profiled=profile_persistent_workspace
+            )
+        if profile_persistent_workspace:
+            self.model_runner.record_persistent_attention_workspace_profile()
 
         # Respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
@@ -605,10 +637,14 @@ class Worker(WorkerBase):
             )
 
         self.total_consumed = profile_result.total_consumed
-        self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.transient_peak_headroom
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.cudagraph_memory_persistent_estimate = getattr(
+            self.model_runner, "cudagraph_memory_persistent_estimate", 0
+        )
+        self.cudagraph_memory_graph_pool_estimate = getattr(
+            self.model_runner, "cudagraph_memory_graph_pool_estimate", 0
+        )
 
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
@@ -741,6 +777,8 @@ class Worker(WorkerBase):
                 tag="kv_cache"
             ),
         )
+        if requires_persistent_attention_workspace_profiling(self.vllm_config):
+            self.model_runner.reserve_persistent_attention_workspace()
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -790,6 +828,14 @@ class Worker(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
+        # Reserve first, so the kernel warmup below runs against the arena the
+        # profiling sized rather than growing one of its own.
+        profile_persistent_workspace = (
+            requires_persistent_attention_workspace_profiling(self.vllm_config)
+        )
+        if profile_persistent_workspace:
+            self.model_runner.reserve_persistent_attention_workspace()
+
         if self.use_v2_model_runner:
             # A workspace resize after capture frees what the graphs point at.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
@@ -804,15 +850,23 @@ class Worker(WorkerBase):
             and self.cudagraph_memory_estimate > 0
         ):
             GiB = lambda b: round(b / GiB_bytes, 2)
-            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+            graph_pool_estimate = self.cudagraph_memory_graph_pool_estimate
+            if graph_pool_estimate == 0:
+                graph_pool_estimate = self.cudagraph_memory_estimate
+            diff = abs(cuda_graph_memory_bytes - graph_pool_estimate)
             logger.info(
                 "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
                 "difference: %s GiB (%.1f%%).",
                 GiB(cuda_graph_memory_bytes),
-                GiB(self.cudagraph_memory_estimate),
+                GiB(graph_pool_estimate),
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
             )
+            if self.cudagraph_memory_persistent_estimate > 0:
+                logger.info(
+                    "CUDA graph persistent memory: %s GiB (estimated).",
+                    GiB(self.cudagraph_memory_persistent_estimate),
+                )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -829,11 +883,17 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+            cuda_graph_memory_for_sizing = cuda_graph_memory_bytes
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                cuda_graph_memory_for_sizing = max(
+                    cuda_graph_memory_for_sizing,
+                    self.cudagraph_memory_estimate,
+                )
 
             non_kv_cache_memory = (
                 self.total_consumed
                 + self.peak_activation_memory
-                + cuda_graph_memory_bytes
+                + cuda_graph_memory_for_sizing
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
@@ -856,7 +916,8 @@ class Worker(WorkerBase):
                 f"Actual usage is {format_gib(self.total_consumed)} "
                 f"GiB for consumed memory (weights + non-torch), "
                 f"{format_gib(self.peak_activation_memory)} GiB "
-                f"for peak activation, and {format_gib(cuda_graph_memory_bytes)} "
+                f"for peak activation, and "
+                f"{format_gib(cuda_graph_memory_for_sizing)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
@@ -893,6 +954,15 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        # Every warmup that can size a workspace has run by now. A completed
+        # capture locks it itself, but capture_model() returns early when both
+        # capture modes are disabled and is skipped entirely under
+        # enforce_eager, so those paths would otherwise start serving with the
+        # workspace still growable past the capacity KV sizing was told to
+        # expect. Locking here keeps the sampler warmup above free to grow it.
+        if is_workspace_manager_initialized():
+            lock_workspace()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
