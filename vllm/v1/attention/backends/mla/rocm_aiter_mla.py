@@ -101,6 +101,30 @@ def _fp8_mla_prefill_supported() -> bool:
     return True
 
 
+def _asm_prefill_backend_active(vllm_config: VllmConfig) -> bool:
+    """True when the dedicated AITER ASM MLA prefill backend owns prefill.
+
+    If true, all prefill-related PS ASM logic will be disabled in the AITER MLA backend,
+    including pre-reservation of workspace buffers which can cause OOMs due to
+    currently pessimistic PS metadata bounds in AITER. It's safe to disable this logic
+    since all prefill related logic is handled by the AITER ASM prefill backend instead.
+    """
+    try:
+        from vllm.v1.attention.backends.mla.prefill.registry import (
+            MLAPrefillBackendEnum,
+        )
+        from vllm.v1.attention.backends.mla.prefill.selector import (
+            get_mla_prefill_backend,
+        )
+
+        return (
+            get_mla_prefill_backend(vllm_config)
+            is MLAPrefillBackendEnum.AITER_ASM.get_class()
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @functools.lru_cache(maxsize=1)
 def _aiter_mla_native_h24_reducer_supported() -> bool:
     """Whether AITER's JIT reducer supports the native H24/512 shape."""
@@ -525,10 +549,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn, so the gate
         # is the same head-count predicate the decode path uses.
+        # Only use it if the dedicated AITER ASM prefill backend is inactive.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and (not _asm_prefill_backend_active(vllm_config))
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -1474,15 +1500,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels. Only runs when the
         # KV cache is FP8. Head counts that are not a multiple of 16 are
         # replicate-padded up to one (see _mla_fp8_prefill_attn).
+        # Only use it if the dedicated AITER ASM prefill backend is inactive.
         from vllm.utils.torch_utils import is_quantized_kv_cache
 
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_num_heads(self.num_heads)
+            and (not _asm_prefill_backend_active(vllm_config))
         )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
