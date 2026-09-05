@@ -48,6 +48,11 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # KLD mode: path and key for reference logits in safetensors
+    target_token_ids: list[int] | None = None
+    reference_logits_path: str | None = None
+    reference_logits_key: str | None = None
+
     @classmethod
     def from_request(
         cls,
@@ -74,6 +79,9 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            target_token_ids=request.target_token_ids,
+            reference_logits_path=request.reference_logits_path,
+            reference_logits_key=request.reference_logits_key,
         )
 
     @property
