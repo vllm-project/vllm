@@ -68,6 +68,7 @@ def matmul_kernel_persistent(
     C_LARGE: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
+    """Persistent GEMM with optional bias and IEEE input precision for FP32."""
     start_pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)

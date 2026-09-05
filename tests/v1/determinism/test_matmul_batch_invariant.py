@@ -113,24 +113,31 @@ def test_matmul_correctness(a_shape, b_shape, dtype, transpose_b):
         pytest.param(torch.float32, marks=skip_if_not_cuda),
     ],
 )
-def test_matmul_batch_invariance(dtype):
+@pytest.mark.parametrize("batched_b", [False, True], ids=["mm", "bmm"])
+def test_matmul_batch_invariance(dtype, batched_b):
     """
     Verify that the result for one item is bitwise identical regardless
-    of what other items are in the batch.
+    of what other items are in the batch, for both MM and BMM.
     """
 
     device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(42)
     a_single = torch.rand((1, 64, 32), dtype=dtype, device=device)
-    b = torch.rand((32, 128), dtype=dtype, device=device)
+    b_shape = (1, 32, 128) if batched_b else (32, 128)
+    b_single = torch.rand(b_shape, dtype=dtype, device=device)
 
-    standard_output = matmul_batch_invariant(a_single, b)
+    standard_output = matmul_batch_invariant(a_single, b_single)
 
     a_batch = torch.rand((8, 64, 32), dtype=dtype, device=device)
     a_batch[3] = a_single[0]
+    if batched_b:
+        b_batch = torch.rand((8, 32, 128), dtype=dtype, device=device)
+        b_batch[3] = b_single[0]
+    else:
+        b_batch = b_single
 
-    batch_output = matmul_batch_invariant(a_batch, b)
+    batch_output = matmul_batch_invariant(a_batch, b_batch)
     batch_output_a = batch_output[3]
 
     assert torch.equal(standard_output[0], batch_output_a)
