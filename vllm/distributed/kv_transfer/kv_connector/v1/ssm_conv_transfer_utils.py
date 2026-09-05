@@ -18,7 +18,6 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -136,9 +135,6 @@ def derive_mamba_conv_split(
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
 
