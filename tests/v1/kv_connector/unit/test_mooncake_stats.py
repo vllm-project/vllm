@@ -34,8 +34,8 @@ def test_record_transfer_and_reduce():
     # avg = (1 + 2) / 2 = 1.5 ms
     assert reduced["Avg xfer time (ms)"] == 1.5
     assert reduced["Avg MB per transfer"] == 1.5
-    # 3 MB total / 3 ms total = 1000 MB/s
-    assert reduced["Throughput (MB/s)"] == 1000.0
+    # mean(1 MB / 0.001 s, 2 MB / 0.002 s) = mean(1000, 1000) = 1000 MB/s
+    assert reduced["Avg per-transfer throughput (MB/s)"] == 1000.0
     assert reduced["Avg number of descriptors"] == 5.0
     assert reduced["Num failed transfers"] == 0
     assert reduced["Num failed recvs"] == 0
@@ -279,3 +279,58 @@ def test_expired_request_bumps_counter():
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
     assert "tid1" not in worker.reqs_need_send
+
+
+def test_reduce_overlapping_transfers_throughput():
+    """
+    Regression test: the old formula ``total_mb / sum(durations)`` understates
+    throughput when transfers overlap concurrently.
+
+    Concretely:
+      Transfer A: 4 MB in 1 s  → per-link rate = 4 MB/s
+      Transfer B: 2 MB in 2 s  → per-link rate = 1 MB/s
+
+    Old formula:  (4+2) MB / (1+2) s = 2.000 MB/s   ← wrong under overlap
+    New formula:  mean(4, 1)          = 2.500 MB/s   ← correct per-link avg
+
+    The two results differ, so this test would have failed on the old code.
+    """
+    import pytest
+
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=1.0, total_bytes=4 * 2**20, num_descs=4)
+    stats.record_transfer(duration_s=2.0, total_bytes=2 * 2**20, num_descs=4)
+
+    reduced = stats.reduce()
+    throughput = reduced["Avg per-transfer throughput (MB/s)"]
+
+    # New (correct) value: mean(4 MB/s, 1 MB/s) = 2.5 MB/s
+    assert throughput == pytest.approx(2.5, rel=1e-3)
+
+    # Verify the old formula would have given a different (wrong) answer.
+    old_formula_result = (4 + 2) / (1 + 2)  # = 2.0
+    assert throughput != pytest.approx(old_formula_result, rel=1e-3)
+
+
+def test_reduce_key_name_is_updated():
+    """The old 'Throughput (MB/s)' key must not appear; new key must."""
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=0.001, total_bytes=2**20, num_descs=1)
+    reduced = stats.reduce()
+    assert "Avg per-transfer throughput (MB/s)" in reduced
+    assert "Throughput (MB/s)" not in reduced
+
+
+def test_reduce_ignores_zero_duration_transfer():
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=0.0, total_bytes=0, num_descs=0)
+    stats.record_transfer(duration_s=1.0, total_bytes=2 * 2**20, num_descs=1)
+    reduced = stats.reduce()
+    assert reduced["Avg per-transfer throughput (MB/s)"] == 2.0
+
+
+def test_reduce_returns_zero_when_all_durations_are_zero():
+    stats = MooncakeKVConnectorStats()
+    stats.record_transfer(duration_s=0.0, total_bytes=0, num_descs=0)
+    reduced = stats.reduce()
+    assert reduced["Avg per-transfer throughput (MB/s)"] == 0
