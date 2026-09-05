@@ -12,8 +12,9 @@ from transformers.activations import ACT2CLS
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_AND_MUL_REGISTRY
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
-from vllm.model_executor.models.transformers.fusers.base import StackedFuser
+from vllm.model_executor.models.transformers.fusers.merged_column import (
+    MergedColumnParallelFuser,
+)
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
     find_node,
@@ -28,7 +29,7 @@ from vllm.model_executor.models.transformers.utils import (
     log_replacement,
     replace_linear_class,
 )
-from vllm.model_executor.models.utils import ShardId, maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,55 +47,57 @@ ACT_AND_MUL_NAMES = frozenset(_ACTIVATION_AND_MUL_REGISTRY.keys())
 
 
 @dataclass
-class GLUFuser(StackedFuser):
+class GLUFuser(MergedColumnParallelFuser):
     """Fuser for the GLU pattern `act(gate(x)) * up(x)`."""
 
     act_name: str
-    gate_name: str
-    up_name: str
     down_name: str | None
     merged_name: ClassVar[str] = "gate_up_proj"
-    merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
 
     @property
-    def shards(self) -> list[tuple[str, ShardId]]:
-        return [(self.gate_name, 0), (self.up_name, 1)]
+    def gate_name(self) -> str:
+        return self.linear_names[0]
 
-    @classmethod
-    def _is_act_of_gate(cls, node: fx.Node, module: nn.Module) -> bool:
-        """Is node `act(gate(x))` where `gate` is linear and `act` is not linear."""
-        return (
-            node.op == "call_module"
-            and not is_linear(node, module)
-            and len(node.args) == 1
-            and isinstance(node.args[0], fx.Node)
-            and is_linear(node.args[0], module)
-        )
+    @property
+    def up_name(self) -> str:
+        return self.linear_names[1]
 
-    @classmethod
+    @staticmethod
     def _get_glu_nodes(
-        cls, graph: fx.Graph, module: nn.Module
+        linears: list[fx.Node], module: nn.Module
     ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node] | None:
-        """Search graph for the GLU pattern `act(gate(x)) * up(x)`."""
-        for mul in graph.nodes:
-            if (
-                mul.op == "call_function"
-                and mul.target == operator.mul
-                and len(mul.args) == 2
-                and all(isinstance(arg, fx.Node) for arg in mul.args)
-            ):
-                a, b = mul.args
-                if cls._is_act_of_gate(a, module) and is_linear(b, module):
-                    act, gate, up = a, a.args[0], b
-                elif cls._is_act_of_gate(b, module) and is_linear(a, module):
-                    act, gate, up = b, b.args[0], a
-                else:
+        """Find the GLU pattern `act(gate(x)) * up(x)` among sibling linears.
+
+        The siblings need not be exactly the gate and the up projection: a
+        module may run other projections on the same input (e.g. a router).
+        """
+        for gate in linears:
+            act = next(
+                (
+                    node
+                    for node in gate.users
+                    if node.op == "call_module"
+                    and not is_linear(node, module)
+                    and node.args == (gate,)
+                ),
+                None,
+            )
+            if act is None:
+                continue
+            for up in linears:
+                if up is gate:
                     continue
-                if (
-                    all(len(args) == 1 for args in (gate.args, up.args))
-                    and isinstance(x := gate.args[0], fx.Node)
-                    and x is up.args[0]
-                ):
+                mul = next(
+                    (
+                        node
+                        for node in act.users
+                        if node.op == "call_function"
+                        and node.target == operator.mul
+                        and node.args in ((act, up), (up, act))
+                    ),
+                    None,
+                )
+                if mul is not None:
                     return act, gate, up, mul
         return None
 
@@ -118,26 +121,23 @@ class GLUFuser(StackedFuser):
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "GLUFuser | None":
-        if (glu_nodes := cls._get_glu_nodes(graph, module)) is None:
+        """Fuse the gate and up projections of the module's (only) GLU."""
+        groups = cls.sibling_groups(graph, module)
+        glu_nodes = next(
+            filter(None, (cls._get_glu_nodes(group, module) for group in groups)), None
+        )
+        if glu_nodes is None:
             return None
         act_node, gate_node, up_node, mul_node = glu_nodes
 
-        gate = module.get_submodule(gate_node.target)
-        up = module.get_submodule(up_node.target)
-        # Shapes must be compatible for a single merged GEMM.
-        if gate.in_features == up.in_features and (gate.bias is None) == (
-            up.bias is None
-        ):
-            predicate = lambda n: is_linear(n, module) and peel(n.args[0]) is mul_node
-            down_node = find_node(graph, predicate)
-            return cls(
-                source_cls=type(module).__name__,
-                act_name=act_node.target,
-                gate_name=gate_node.target,
-                up_name=up_node.target,
-                down_name=down_node.target if down_node is not None else None,
-            )
-        return None
+        predicate = lambda n: is_linear(n, module) and peel(n.args[0]) is mul_node
+        down_node = find_node(graph, predicate)
+        return cls(
+            source_cls=type(module).__name__,
+            linear_names=(str(gate_node.target), str(up_node.target)),
+            act_name=str(act_node.target),
+            down_name=None if down_node is None else str(down_node.target),
+        )
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace `act(gate(x)) * up(x)` with `act(gate_up(x))` in source."""
@@ -166,6 +166,12 @@ class GLUFuser(StackedFuser):
         self.fused_forward = compile_forward(funcdef, fn)
 
     def validate(self, module: nn.Module, vllm_config: "VllmConfig") -> bool:
+        if not super().validate(module, vllm_config):
+            return False
+        gate = module.get_submodule(self.gate_name)
+        up = module.get_submodule(self.up_name)
+        if gate.out_features != up.out_features:
+            return False
         act = module.get_submodule(self.act_name)
         if self._get_act_and_mul_name(act) is None:
             logger.debug("No AndMul equivalent for %s; skipping fusion", type(act))
@@ -177,30 +183,8 @@ class GLUFuser(StackedFuser):
     ) -> None:
         quant_config = vllm_config.quant_config
         act_fn = self._get_act_and_mul(module.get_submodule(self.act_name))
-        gate = module.get_submodule(self.gate_name)
-        up = module.get_submodule(self.up_name)
-        merged = MergedColumnParallelLinear(
-            input_size=gate.in_features,
-            output_sizes=[gate.out_features, up.out_features],
-            bias=gate.bias is not None,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, self.merged_name),
-            return_bias=False,
-        )
-        logger.debug(
-            "%s: %s, %s: %s -> %s: %s",
-            self.gate_name,
-            gate,
-            self.up_name,
-            up,
-            self.merged_name,
-            merged,
-        )
-        setattr(module, self.merged_name, merged)
+        super().update_attrs(module, prefix, vllm_config)
         setattr(module, self.act_name, act_fn)
-        # Drop the consumed submodules so their (meta) params are not expected.
-        delattr(module, self.gate_name)
-        delattr(module, self.up_name)
         # If there is a down projection, we know it must be rowwise.
         if self.down_name is not None:
             down_prefix = maybe_prefix(prefix, self.down_name)

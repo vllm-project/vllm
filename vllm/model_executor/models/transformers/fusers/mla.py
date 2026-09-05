@@ -131,7 +131,7 @@ class MLAFuser(StackedFuser):
     kv_b_proj_name: str
     o_proj_name: str | None
     merged_name: ClassVar[str] = "fused_qkv_a_proj"
-    merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
+    merged_cls_name: ClassVar[str] = "MergedColumnParallelLinear"
 
     @property
     def has_q_lora(self) -> bool:
