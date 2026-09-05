@@ -9,6 +9,14 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/config
+  - vllm/engine/arg_utils.py
+  - vllm/utils/argparse_utils.py
+  - tools/vllm
+  - tools/generate_cli_help.py
+  - pyproject.toml
+  - setup.py
+  - MANIFEST.in
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
   - tests/entrypoints/launchers

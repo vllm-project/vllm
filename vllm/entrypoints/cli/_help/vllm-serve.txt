@@ -1,0 +1,80 @@
+usage: vllm serve [model_tag] [options]
+
+Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+
+Config Groups:
+  positional arguments    
+  options                 
+  Frontend                Arguments for the OpenAI-compatible frontend server.
+  ModelConfig             Configuration for the model.
+  LoadConfig              Configuration for loading the model weights.
+  AttentionConfig         Configuration for attention mechanisms in vLLM.
+  MambaConfig             Configuration for Mamba SSM backends.
+  StructuredOutputsConfig Dataclass which contains structured outputs config for the engine.
+  ParallelConfig          Configuration for the distributed execution.
+  CacheConfig             Configuration for the KV cache.
+  OffloadConfig           Configuration for model weight offloading to reduce GPU memory usage.
+  MultiModalConfig        Controls the behavior of multimodal models.
+  LoRAConfig              Configuration for LoRA.
+  ObservabilityConfig     Configuration for observability - metrics and tracing.
+  SchedulerConfig         Scheduler configuration.
+  CompilationConfig       Configuration for compilation.
+  
+      You must pass CompilationConfig to VLLMConfig constructor.
+      VLLMConfig's post_init does further initialization. If used outside of the
+      VLLMConfig, some fields will be left in an improper state.
+  
+      It contains PassConfig, which controls the custom fusion/transformation passes.
+      The rest has three parts:
+  
+      - Top-level Compilation control:
+          - [`mode`][vllm.config.CompilationConfig.mode]
+          - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+          - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+          - [`backend`][vllm.config.CompilationConfig.backend]
+          - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+          - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+          - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
+      - CudaGraph capture:
+          - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
+          - [`cudagraph_capture_sizes`]
+          [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+          - [`max_cudagraph_capture_size`]
+          [vllm.config.CompilationConfig.max_cudagraph_capture_size]
+          - [`cudagraph_num_of_warmups`]
+          [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+          - [`cudagraph_copy_inputs`]
+          [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+      - Inductor compilation:
+          - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+          - [`compile_ranges_endpoints`]
+              [vllm.config.CompilationConfig.compile_ranges_endpoints]
+          - [`inductor_compile_config`]
+          [vllm.config.CompilationConfig.inductor_compile_config]
+          - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
+          - custom inductor passes
+  
+      Why we have different sizes for cudagraph and inductor:
+      - cudagraph: a cudagraph captured for a specific size can only be used
+          for the same size. We need to capture all the sizes we want to use.
+      - inductor: a graph compiled by inductor for a general shape can be used
+          for different sizes. Inductor can also compile for specific sizes,
+          where it can have more information to optimize the graph with fully
+          static shapes. However, we find the general shape compilation is
+          sufficient for most cases. It might be beneficial to compile for
+          certain small batchsizes, where inductor is good at optimizing.
+      
+  KernelConfig            Configuration for kernel selection and warmup behavior.
+  VllmConfig              Dataclass which contains all vllm-related configuration. This
+      simplifies passing around the distinct configurations in the codebase.
+      
+
+For full list:            vllm serve --help=all
+For a section:            vllm serve --help=ModelConfig    (case-insensitive)
+For a flag:               vllm serve --help=max-model-len  (_ or - accepted)
+Documentation:            https://docs.vllm.ai

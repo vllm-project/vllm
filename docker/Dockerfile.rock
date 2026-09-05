@@ -313,6 +313,7 @@ ENV TRITON_KERNELS_SRC_DIR=/opt/rocm-triton-kernels
 # but it still participates in the BuildKit cache key for this RUN step.
 COPY setup.py CMakeLists.txt ./
 COPY tools/build_rust.py tools/build_rust.py
+COPY tools/vllm tools/vllm
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
