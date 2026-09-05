@@ -1064,12 +1064,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
+            trace_token_suffix = None
+            if (
+                self.is_last_pp_rank
+                and sampling_params is not None
+                and self.sampler is not None
+            ):
+                trace_token_suffix = self.sampler.get_trace_token_suffix(
+                    prompt_len,
+                    len(new_req_data.prefill_token_ids),
+                    sampling_params,
+                )
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                future_token_ids=trace_token_suffix,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:

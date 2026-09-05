@@ -4,7 +4,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -23,25 +23,33 @@ class TraceReplayState:
         self.max_num_reqs = req_states.max_num_reqs
         self.device = req_states.device
         self.req_states = req_states
-        self.trace_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, req_states.max_model_len),
-            dtype=torch.int32,
-            device=self.device,
-            uva_instead_of_gpu=True,
-        )
         self.trace_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         trace = sampling_params.trace_decode_token_ids
         if trace is not None:
             self.trace_len.np[req_idx] = len(trace)
-            self.trace_token_ids.stage_write(req_idx, 0, trace)
         else:
             self.trace_len.np[req_idx] = 0
 
+    def get_token_suffix(
+        self,
+        prompt_len: int,
+        prefill_len: int,
+        sampling_params: SamplingParams,
+    ) -> list[int]:
+        """Return unconsumed trace tokens to append to all_token_ids."""
+        trace = sampling_params.trace_decode_token_ids
+        if trace is None:
+            return []
+        trace_offset = prefill_len - prompt_len
+        assert 0 <= trace_offset <= len(trace)
+        remaining_trace = trace[trace_offset:]
+        assert prefill_len + len(remaining_trace) <= self.req_states.max_model_len
+        return remaining_trace
+
     def apply_staged_writes(self) -> None:
         self.trace_len.copy_to_uva()
-        self.trace_token_ids.apply_write()
 
     def apply_trace(
         self,
@@ -51,7 +59,7 @@ class TraceReplayState:
         apply_trace_tokens(
             sampled,
             idx_mapping,
-            self.trace_token_ids.gpu,
+            self.req_states.all_token_ids.gpu,
             self.trace_len.gpu,
             self.req_states.total_len.gpu,
             self.req_states.prompt_len.gpu,
@@ -62,8 +70,8 @@ class TraceReplayState:
 def _trace_replay_kernel(
     sampled_ptr,  # [num_reqs], int64, mutated in place
     idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx
-    trace_token_ids_ptr,  # [max_num_reqs, max_model_len], int32
-    trace_token_ids_stride,
+    all_token_ids_ptr,  # [max_num_reqs, max_model_len], int32
+    all_token_ids_stride,
     trace_len_ptr,  # [max_num_reqs], int32
     total_len_ptr,  # [max_num_reqs], int32
     prompt_len_ptr,  # [max_num_reqs], int32
@@ -80,14 +88,13 @@ def _trace_replay_kernel(
     # The token being sampled now is output token number
     # (total_len - prompt_len): total_len reflects tokens committed through the
     # previous step (post_update runs after sampling).
-    step = tl.load(total_len_ptr + req_state_idx) - tl.load(
-        prompt_len_ptr + req_state_idx
-    )
+    prompt_len = tl.load(prompt_len_ptr + req_state_idx)
+    step = tl.load(total_len_ptr + req_state_idx) - prompt_len
     if step < 0 or step >= trace_len:
         return
 
     token_id = tl.load(
-        trace_token_ids_ptr + req_state_idx * trace_token_ids_stride + step
+        all_token_ids_ptr + req_state_idx * all_token_ids_stride + prompt_len + step
     )
     tl.store(sampled_ptr + batch_idx, token_id.to(tl.int64))
 
@@ -95,7 +102,7 @@ def _trace_replay_kernel(
 def apply_trace_tokens(
     sampled: torch.Tensor,
     idx_mapping: torch.Tensor,
-    trace_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     trace_len: torch.Tensor,
     total_len: torch.Tensor,
     prompt_len: torch.Tensor,
@@ -105,8 +112,8 @@ def apply_trace_tokens(
     _trace_replay_kernel[(num_reqs,)](
         sampled,
         idx_mapping,
-        trace_token_ids,
-        trace_token_ids.stride(0),
+        all_token_ids,
+        all_token_ids.stride(0),
         trace_len,
         total_len,
         prompt_len,

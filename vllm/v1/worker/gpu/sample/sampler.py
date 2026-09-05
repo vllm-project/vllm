@@ -65,6 +65,18 @@ class Sampler:
             not return_sampling_mask and flashinfer_sampler_supported()
         )
 
+    def get_trace_token_suffix(
+        self,
+        prompt_len: int,
+        prefill_len: int,
+        sampling_params: SamplingParams,
+    ) -> list[int] | None:
+        if self.trace_replay_state is None:
+            return None
+        return self.trace_replay_state.get_token_suffix(
+            prompt_len, prefill_len, sampling_params
+        )
+
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
