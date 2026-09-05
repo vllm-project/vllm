@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for vllm.entrypoints.openai.responses.harmony."""
 
+import json
+
 import pytest
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -9,6 +11,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
+from openai.types.responses.response_function_web_search import ActionFind
 from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
@@ -95,6 +98,30 @@ class TestResponsePreviousInputToHarmony:
 
 class TestHarmonyToResponseOutput:
     """Tests for harmony_to_response_output function."""
+
+    def test_browser_find_action_uses_find_in_page_type(self):
+        """Browser `find` tool calls must emit the `find_in_page` action type.
+
+        The OpenAI SDK's `ActionFind` model only accepts
+        ``Literal["find_in_page"]`` (see openai-python
+        `response_function_web_search.py`), so emitting ``type="find"`` raised
+        a Pydantic ValidationError on every `browser.find` call.
+        See https://github.com/vllm-project/vllm/issues/55295.
+        """
+        message = Message.from_role_and_content(
+            Role.ASSISTANT,
+            json.dumps({"url": "https://example.com", "pattern": "vllm"}),
+        )
+        message = message.with_recipient("browser.find").with_channel("commentary")
+
+        output_items = harmony_to_response_output(message, frozenset())
+
+        assert len(output_items) == 1
+        item = output_items[0]
+        assert isinstance(item, ResponseFunctionWebSearch)
+        assert isinstance(item.action, ActionFind)
+        assert item.action.type == "find_in_page"
+        assert item.action.pattern == "vllm"
 
     @pytest.mark.parametrize("incomplete", [False, True])
     def test_commentary_with_no_recipient_creates_message(self, incomplete):

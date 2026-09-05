@@ -293,7 +293,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
         action = ActionFind(
             pattern=browser_call.get("pattern", ""),
             url=f"cursor:{browser_call.get('url', '')}",
-            type="find",
+            type="find_in_page",
         )
     else:
         raise ValueError(f"Unknown browser action: {recipient}")

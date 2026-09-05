@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
+from openai_harmony import Message, Role
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -8,7 +12,9 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingState,
     _StateType,
+    emit_browser_tool_events,
     split_delta,
 )
 
@@ -18,6 +24,29 @@ def _make_tool_call(
 ) -> DeltaToolCall:
     fn = DeltaFunctionCall(name=name, arguments=arguments)
     return DeltaToolCall(index=index, function=fn)
+
+
+def test_emit_browser_find_event_uses_find_in_page_type():
+    """Streaming `browser.find` events must emit the `find_in_page` action type.
+
+    `ActionFind` in the OpenAI SDK only accepts ``Literal["find_in_page"]``,
+    so emitting ``type="find"`` raised a ValidationError when building the SSE
+    events. See https://github.com/vllm-project/vllm/issues/55295.
+    """
+    previous_item = Message.from_role_and_content(
+        Role.ASSISTANT,
+        json.dumps({"url": "https://example.com", "pattern": "vllm"}),
+    )
+    previous_item = previous_item.with_recipient("browser.find").with_channel(
+        "commentary"
+    )
+
+    events = emit_browser_tool_events(previous_item, StreamingState())
+
+    added = [e for e in events if e.type == "response.output_item.added"]
+    assert len(added) == 1
+    assert added[0].item.action.type == "find_in_page"
+    assert added[0].item.action.pattern == "vllm"
 
 
 class TestSplitDelta:
