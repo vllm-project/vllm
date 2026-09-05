@@ -449,7 +449,9 @@ def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
 
     verify(prompt_logprob_token_ids=[1, 2, 3, 4])
 
-    with pytest.raises(VLLMValidationError, match="prompt_logprob_token_ids"):
+    # The message names the value to raise max_logprobs to, since the default
+    # of 20 rejects any realistic candidate set.
+    with pytest.raises(VLLMValidationError, match=r"max_logprobs.*at least 5"):
         verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
 
 

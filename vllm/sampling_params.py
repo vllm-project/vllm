@@ -897,7 +897,7 @@ class SamplingParams(
                 raise VLLMValidationError(
                     f"Requested prompt_logprob_token_ids of length {n}, "
                     f"which is greater than max allowed: {max_logprobs}. "
-                    f"Raise --max-logprobs to score more candidates.",
+                    f"Set max_logprobs (--max-logprobs) to at least {n}.",
                     parameter="prompt_logprob_token_ids",
                     value=n,
                 )
