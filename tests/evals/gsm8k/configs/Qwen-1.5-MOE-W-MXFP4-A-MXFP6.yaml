@@ -1,5 +1,0 @@
-model_name: "fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3"
-accuracy_threshold: 0.4405
-num_questions: 50
-num_fewshot: 5
-server_args: "--enforce-eager --max-model-len 4096"
