@@ -89,6 +89,18 @@ class BroadcastGLU(NoDownGLU):
         self.gate_proj = nn.Linear(16, 1, bias=False)
 
 
+class ExtraProjGLU(GLUMLP):
+    """A third linear on the same input (e.g. a router) -> gate/up still fuse."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = nn.Linear(16, 4, bias=False)
+
+    def forward(self, x):
+        gated = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return gated, self.router(x)
+
+
 class UntraceableMLP(GLUMLP):
     """Data-dependent control flow *before* the GLU -> no match."""
 
@@ -177,6 +189,8 @@ class ReversedFakeAttention(FakeAttention):
 
 
 class FourParallelLinears(nn.Module):
+    """Four same-input projections of different widths -> one merged linear."""
+
     def __init__(self):
         super().__init__()
         self.proj_a = nn.Linear(8, 4)
@@ -440,6 +454,19 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     # Fusion is in place: the module keeps its class and other attributes
     assert fused is real and type(fused) is mlp_cls
     torch.testing.assert_close(fused(x), expected, atol=1e-5, rtol=1e-5)
+
+
+def test_glu_fuses_alongside_unrelated_projections():
+    """Sibling linears the GLU does not consume must not block the fusion."""
+    with torch.device("meta"):
+        fuser = get_fuser(ExtraProjGLU(), GLUFuser)
+    assert fuser is not None
+    assert (fuser.gate_name, fuser.up_name) == ("gate_proj", "up_proj")
+    real = ExtraProjGLU()
+    x = torch.randn(4, 16)
+    expected = real(x)
+    fused = _apply_glu_fuser_with_stubs(real, fuser)
+    torch.testing.assert_close(fused(x), expected)
 
 
 def test_glu_identifies_down_projection():

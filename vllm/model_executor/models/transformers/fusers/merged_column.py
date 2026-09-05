@@ -29,7 +29,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class MergedColumnParallelFuser(StackedFuser):
-    """Fuse any number of same-input linears into one merged projection."""
+    """Fuse any number of same-input linears into one merged projection.
+
+    Deliberately absent from `fuser.FUSERS`: which sibling linears may share a
+    column-parallel GEMM is a semantic question, so subclasses opt in (fusing
+    every group blindly would replace head-aware QKV sharding, for one).
+    """
 
     linear_names: tuple[str, ...]
     merged_name: ClassVar[str] = "merged_proj"
@@ -40,10 +45,14 @@ class MergedColumnParallelFuser(StackedFuser):
         return [(name, index) for index, name in enumerate(self.linear_names)]
 
     @classmethod
-    def match(
-        cls, graph: fx.Graph, module: nn.Module
-    ) -> "MergedColumnParallelFuser | None":
-        """Find a unique group of sibling linears reading the same input."""
+    def sibling_groups(cls, graph: fx.Graph, module: nn.Module) -> list[list[fx.Node]]:
+        """Groups of sibling linears reading the same input, each fusable.
+
+        A group whose members are not distinct direct children is dropped: the
+        source rewrite addresses each projection as `self.<name>` exactly once.
+        """
+        if hasattr(module, cls.merged_name):
+            return []
         by_input: dict[fx.Node, list[fx.Node]] = {}
         for node in graph.nodes:
             if (
@@ -54,10 +63,24 @@ class MergedColumnParallelFuser(StackedFuser):
             ):
                 by_input.setdefault(node.args[0], []).append(node)
         groups = [nodes for nodes in by_input.values() if len(nodes) >= 2]
-        if len(groups) != 1 or hasattr(module, cls.merged_name):
-            return None
-        names = tuple(node.target for node in groups[0])
+        return [group for group in groups if cls._names(group) is not None]
+
+    @staticmethod
+    def _names(group: list[fx.Node]) -> tuple[str, ...] | None:
+        names = tuple(str(node.target) for node in group)
         if len(set(names)) != len(names) or any("." in name for name in names):
+            return None
+        return names
+
+    @classmethod
+    def match(
+        cls, graph: fx.Graph, module: nn.Module
+    ) -> "MergedColumnParallelFuser | None":
+        """Fuse the module's sibling linears when there is only one such group."""
+        groups = cls.sibling_groups(graph, module)
+        if len(groups) != 1:
+            return None
+        if (names := cls._names(groups[0])) is None:
             return None
         # Semantic subclasses add their own fields after reusing this match.
         return MergedColumnParallelFuser(
