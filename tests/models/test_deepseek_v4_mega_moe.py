@@ -39,6 +39,53 @@ def test_deepseek_v4_mega_moe_expert_mapping():
     ]
 
 
+def test_dspark_skips_unregistered_expert_weight(monkeypatch):
+    dspark = SimpleNamespace(
+        model=SimpleNamespace(
+            layers=[SimpleNamespace(ffn=SimpleNamespace(use_mega_moe=True))],
+            confidence_head=None,
+        ),
+        config=SimpleNamespace(
+            n_routed_experts=1,
+            num_attention_heads=1,
+            expert_dtype="fp4",
+        ),
+        pad_shared_expert=False,
+        named_parameters=lambda: [],
+        _remap_dspark_name=lambda name: name,
+        process_weights_after_loading=lambda: None,
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark."
+        "make_deepseek_v4_expert_params_mapping",
+        lambda _: [
+            (
+                "experts.routed_experts.w13_",
+                "experts.0.w1.",
+                0,
+                "w1",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark."
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4.nvidia.dspark."
+        "get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+
+    loaded = DSparkDeepseekV4ForCausalLM.load_weights(
+        dspark,
+        [("model.layers.0.ffn.experts.0.w1.scale", torch.ones(1))],
+    )
+
+    assert loaded == set()
+
+
 def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():
     raw = torch.tensor([0, 126, 127, 128], dtype=torch.uint8)
 
