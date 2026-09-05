@@ -115,6 +115,11 @@ class RequestOutput:
                           For encoder/decoder models, this is the
                           decoder input prompt token ids.
         prompt_logprobs: The log probabilities to return per prompt token.
+        prompt_token_id_logprobs: `[num_scored_rows, len(
+            prompt_logprob_token_ids)]` float32 array of logprobs for the
+            requested token IDs, in the order they were requested. Rows are
+            causal source rows, so row i predicts token i + 1, and only the
+            requested rows are returned.
         outputs: The output sequences of the request.
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
@@ -145,6 +150,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         num_cache_creation_tokens: int | None = None,
         *,
+        prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -159,6 +165,7 @@ class RequestOutput:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
+        self.prompt_token_id_logprobs = prompt_token_id_logprobs
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
@@ -176,6 +183,8 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if next_output.prompt_token_id_logprobs is not None:
+            self.prompt_token_id_logprobs = next_output.prompt_token_id_logprobs
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -209,6 +218,7 @@ class RequestOutput:
             f"encoder_prompt={self.encoder_prompt!r}, "
             f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"prompt_token_id_logprobs={self.prompt_token_id_logprobs}, "
             f"outputs={self.outputs}, "
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "

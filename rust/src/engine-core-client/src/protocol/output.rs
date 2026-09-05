@@ -131,6 +131,11 @@ pub struct EngineCoreOutput {
     /// the Rust frontend does not yet surface it in responses.
     #[serde(default)]
     pub spec_decode_metrics: Option<OpaqueValue>,
+    /// Scores for the token IDs named by `SamplingParams.prompt_logprob_token_ids`,
+    /// emitted once on the prompt's final prefill chunk. Opaque here; the Rust
+    /// frontend does not yet surface it in responses.
+    #[serde(default)]
+    pub prompt_token_id_logprobs: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -441,6 +446,7 @@ mod tests {
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
+                            prompt_token_id_logprobs: None,
                         },
                     ],
                     scheduler_stats: None,
