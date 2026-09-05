@@ -660,7 +660,6 @@ def get_pip_packages(run_lambda, patterns=None):
         if pip_available:
             cmd = [sys.executable, "-mpip", "list", "--format=freeze"]
         elif is_uv_venv():
-            print("uv is set")
             cmd = ["uv", "pip", "list", "--format=freeze"]
         else:
             raise RuntimeError(
@@ -668,6 +667,8 @@ def get_pip_packages(run_lambda, patterns=None):
             )
 
         out = run_and_read_all(run_lambda, cmd)
+        if out is None:
+            return None
         return "\n".join(
             line for line in out.splitlines() if any(name in line for name in patterns)
         )
