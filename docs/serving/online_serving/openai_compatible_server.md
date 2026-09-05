@@ -134,39 +134,15 @@ completion = client.chat.completions.create(
 )
 ```
 
-The `X-KV-Cache-Report-Mode` request header selects KV cache event reporting
-without adding fields to the request body. It accepts `incremental` (the default)
-or `full`. With KV cache events enabled, `full` also reports reused prefix-cache
-blocks. The header does not enable event publishing; configure `--kv-events-config`
-on the server.
+Use `extra_headers={"X-KV-Cache-Report-Mode": "full"}` to select KV cache event
+reporting. Accepted values are `incremental` (default) and `full`, which also
+reports reused prefix-cache blocks. Event publishing requires `--kv-events-config`.
+An explicit body `vllm_xargs.kv_cache_report_mode` takes precedence. Invalid header
+values are ignored.
 
-```python
-completion = client.chat.completions.create(
-    model="NousResearch/Meta-Llama-3-8B-Instruct",
-    messages=[{"role": "user", "content": "Hello!"}],
-    extra_headers={"X-KV-Cache-Report-Mode": "full"},
-)
-```
-
-An explicit `vllm_xargs.kv_cache_report_mode` in the body takes precedence over
-the header. The token-in/token-out API uses `sampling_params.extra_args` for
-this body parameter (`sampling_params.vllm_xargs` in the Rust frontend).
-Invalid header values are ignored, preserving the body value or the default mode.
-
-The Python frontend supports this header on Chat Completions, Completions,
-Responses, Anthropic Messages, Cohere Chat, batched chat, render/generate,
-generative scoring, and audio transcription/translation. Beam search preserves
-the mode across its internal generation requests. Realtime audio accepts the
-header on the WebSocket handshake and applies it to each utterance.
-
-The Rust frontend supports the header on Chat Completions, Completions,
-render/generate, and as `x-kv-cache-report-mode` metadata on both gRPC generation
-methods. Invalid report-mode metadata is ignored. Offline Python uses
-`SamplingParams.extra_args`; JSONL batch requests use `vllm_xargs` in each request
-body. Neither has HTTP request headers.
-
-The Python `--grpc` entrypoint delegates generation to `smg-grpc-servicer`.
-Metadata support on that path requires a corresponding change in that package.
+Realtime audio uses the WebSocket handshake header. Rust gRPC uses
+`x-kv-cache-report-mode` metadata; Python `--grpc` requires separate support in
+`smg-grpc-servicer`.
 
 ## API Reference
 
