@@ -18,9 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
-from pydantic import ConfigDict, Field, model_validator
-
 import vllm.envs as envs
+from pydantic import ConfigDict, Field, model_validator
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
@@ -54,8 +53,8 @@ from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
-
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
     from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PretrainedConfig = Any
@@ -2968,10 +2967,17 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
         ):
-            raise ValueError(
-                "--use-replayssm is incompatible with KV connectors "
-                "(P/D disaggregation, KV cache offload)"
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
             )
+
+            if not KVConnectorFactory.supports_kda_recoverssm_config(
+                self.kv_transfer_config
+            ):
+                raise ValueError(
+                    "--use-replayssm requires a KV connector that explicitly "
+                    "supports KDA target-state transport"
+                )
         return self
 
 

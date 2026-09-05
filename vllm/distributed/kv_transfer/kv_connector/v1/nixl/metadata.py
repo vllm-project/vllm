@@ -5,13 +5,14 @@
 from dataclasses import dataclass
 from typing import Any
 
+from vllm.logger import init_logger
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -46,8 +47,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
+#  11: Add KDA target-state and DSpark context transport policies
 #
-NIXL_CONNECTOR_VERSION: int = 10
+NIXL_CONNECTOR_VERSION: int = 11
 
 
 @dataclass
@@ -162,12 +164,15 @@ def compute_nixl_compatibility_hash(
     Returns:
         SHA-256 hex digest
     """
-    from vllm import __version__ as vllm_version
     from vllm.config.utils import hash_factors
+
+    from vllm import __version__ as vllm_version
 
     model_config = vllm_config.model_config
     cache_config = vllm_config.cache_config
     is_hma_enabled = not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
 
     factors = {
         # Version compatibility
@@ -184,6 +189,10 @@ def compute_nixl_compatibility_hash(
         "cache_dtype": str(cache_config.cache_dtype),
         "is_hma_enabled": is_hma_enabled,
         "speculative_config": _get_speculative_compatibility_factors(vllm_config),
+        "kda_transport_policy": extra_config.get("kda_transport_policy"),
+        "dspark_context_transport_policy": extra_config.get(
+            "dspark_context_transport_policy"
+        ),
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
     }
