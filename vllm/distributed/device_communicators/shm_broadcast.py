@@ -34,6 +34,7 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.cpu_resource_utils import check_cgroup_memory_available
 from vllm.utils.network_utils import (
     get_ip,
     get_open_zmq_inproc_path,
@@ -224,26 +225,37 @@ class SpinCondition:
 SHM_PATH = "/dev/shm"
 
 
-def check_shm_free_space(required_bytes: int, shm_path: str = SHM_PATH) -> None:
-    """Raise if ``shm_path`` cannot fit a ``required_bytes`` shared segment.
+def check_shm_free_space(
+    required_bytes: int,
+    shm_path: str = SHM_PATH,
+    *,
+    allocation_name: str = "shared-memory allocation",
+) -> None:
+    """Raise if SHM or the cgroup cannot fit a shared segment.
 
     Args:
         required_bytes: Size of the shared-memory segment to be created.
-        shm_path: Mount point backing POSIX shared memory; skipped if absent.
+        shm_path: Mount point backing POSIX shared memory; its filesystem
+            check is skipped if absent.
+        allocation_name: Human-readable name used for cgroup errors.
 
     Raises:
-        RuntimeError: If ``required_bytes`` exceeds the free space.
+        RuntimeError: If the SHM filesystem or cgroup has insufficient space.
     """
-    if not os.path.isdir(shm_path):
-        return
-    free_bytes = shutil.disk_usage(shm_path).free
-    if required_bytes <= free_bytes:
-        return
-    mib = 1 << 20
-    raise RuntimeError(
-        f"Insufficient space in {shm_path}: {required_bytes / mib:.0f} MiB "
-        f"required, {free_bytes / mib:.0f} MiB free. Increase {shm_path} "
-        "(e.g. --shm-size or --ipc=host)."
+    if os.path.isdir(shm_path):
+        free_bytes = shutil.disk_usage(shm_path).free
+        if required_bytes > free_bytes:
+            mib = 1 << 20
+            raise RuntimeError(
+                f"Insufficient space in {shm_path} for {allocation_name}: "
+                f"{required_bytes / mib:.0f} MiB required, "
+                f"{free_bytes / mib:.0f} MiB free. Increase {shm_path} "
+                "(e.g. --shm-size or --ipc=host)."
+            )
+
+    check_cgroup_memory_available(
+        required_bytes,
+        allocation_name,
     )
 
 
