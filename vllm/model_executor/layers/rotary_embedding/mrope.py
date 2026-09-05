@@ -7,6 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import RotaryEmbeddingBase
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
@@ -236,6 +237,62 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return torch.where(is_width, x[2], result)
 
 
+def _mrope_apply(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    cos_sin = cos_sin_cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+    query_out, key_out = triton_mrope(
+        query,
+        key,
+        cos,
+        sin,
+        [mrope_section_t, mrope_section_h, mrope_section_w],
+        head_size,
+        rotary_dim,
+        mrope_interleaved,
+        is_neox_style,
+    )
+    if query_out.data_ptr() != query.data_ptr():
+        query.copy_(query_out.view_as(query))
+    if key_out.data_ptr() != key.data_ptr():
+        key.copy_(key_out.view_as(key))
+
+
+def _mrope_apply_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    head_size: int,
+    rotary_dim: int,
+    mrope_section_t: int,
+    mrope_section_h: int,
+    mrope_section_w: int,
+    mrope_interleaved: bool,
+    is_neox_style: bool,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mrope",
+    op_func=_mrope_apply,
+    mutates_args=["query", "key"],
+    fake_impl=_mrope_apply_fake,
+)
+
+
 class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
@@ -412,6 +469,35 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         )
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if positions.ndim == 2:
+            assert key is not None
+            assert self.mrope_section
+            query_shape = query.shape
+            key_shape = key.shape
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            torch.ops.vllm.mrope(
+                positions,
+                query,
+                key,
+                cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                self.mrope_section[0],
+                self.mrope_section[1],
+                self.mrope_section[2],
+                self.mrope_interleaved,
+                self.is_neox_style,
+            )
+            return query.reshape(query_shape), key.reshape(key_shape)
+        return super().forward_hip(positions, query, key)
 
     def forward_cpu(
         self,
