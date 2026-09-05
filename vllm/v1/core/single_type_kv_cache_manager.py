@@ -844,10 +844,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        num_reqs = len(self.req_to_blocks)
+        # Cascade attention cannot benefit from a single allocated request.
+        if num_reqs <= 1:
+            return 0
+
         blocks = self.req_to_blocks[running_request_id]
         num_common_blocks = 0
         for block in blocks:
-            if block.ref_cnt == len(self.req_to_blocks):
+            if block.ref_cnt == num_reqs:
                 num_common_blocks += 1
             else:
                 break

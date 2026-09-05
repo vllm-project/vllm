@@ -199,6 +199,73 @@ def test_circular_buffer_allocates_one_block_for_the_request_lifetime():
     assert manager.req_to_blocks[request_id] == blocks
 
 
+def get_full_attention_manager(full_attention_spec, block_pool):
+    return FullAttentionManager(
+        full_attention_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=full_attention_spec.block_size,
+    )
+
+
+def test_full_attention_skips_common_prefix_scan_for_single_request():
+    block_size = 2
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    manager = get_full_attention_manager(spec, block_pool)
+
+    class NonIterableBlockTable(list[KVCacheBlock]):
+        def __iter__(self):
+            raise AssertionError("single-request block table should not be scanned")
+
+    manager.req_to_blocks["request"] = NonIterableBlockTable(
+        [KVCacheBlock(1, ref_cnt=1)]
+    )
+
+    assert manager.get_num_common_prefix_blocks("request") == 0
+
+
+def test_full_attention_counts_common_prefix_for_multiple_requests():
+    block_size = 2
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    manager = get_full_attention_manager(spec, block_pool)
+
+    shared_blocks = [
+        KVCacheBlock(1, ref_cnt=2),
+        KVCacheBlock(2, ref_cnt=2),
+    ]
+    manager.req_to_blocks["request-1"] = [
+        *shared_blocks,
+        KVCacheBlock(3, ref_cnt=1),
+    ]
+    manager.req_to_blocks["request-2"] = [
+        *shared_blocks,
+        KVCacheBlock(4, ref_cnt=1),
+    ]
+
+    assert manager.get_num_common_prefix_blocks("request-1") == 2
+
+
 def test_sliding_window_records_new_blocks_for_zeroing():
     block_size = 2
     spec = SlidingWindowSpec(
