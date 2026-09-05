@@ -46,6 +46,16 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        """Whether positional offload scans can follow this block table.
+
+        True means already-scanned indices will not be reused for a different
+        token range. Managers may still null blocks that left their retention
+        window, as long as the cursor's positional history remains valid.
+        """
+        return True
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -1388,6 +1398,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        # Align-mode Mamba can null interior states and relocate speculative
+        # blocks in place. Other modes retain positional identity.
+        return self.mamba_cache_mode != "align"
 
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs

@@ -151,6 +151,9 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        self.group_block_sizes = tuple(
+            manager.block_size for manager in self.single_type_managers
+        )
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -578,6 +581,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         super().__init__(
             kv_cache_config,
@@ -602,7 +606,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Only groups that participate in prefix caching must satisfy the
         # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
         # tail, block_size=kpool) are scratch buffers and excluded.
-        group_block_sizes = [
+        cacheable_block_sizes = [
             manager.block_size
             for manager, group in zip(
                 self.single_type_managers, kv_cache_config.kv_cache_groups
@@ -610,10 +614,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.kv_cache_spec.prefix_cacheable
         ]
         assert all(
-            block_size % hash_block_size == 0 for block_size in group_block_sizes
+            block_size % hash_block_size == 0 for block_size in cacheable_block_sizes
         ), (
             "Each KV cache group's real block_size must be divisible by "
-            f"hash_block_size. block_sizes={group_block_sizes}, "
+            f"hash_block_size. block_sizes={cacheable_block_sizes}, "
             f"hash_block_size={hash_block_size}"
         )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
@@ -642,7 +646,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
             for g in kv_cache_config.kv_cache_groups
         )
-        self.enable_partial_hash_hits = has_partial_mamba_group
+        self.enable_partial_hash_hits = (
+            allow_partial_hash_hits and has_partial_mamba_group
+        )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -958,6 +964,7 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -1001,4 +1008,5 @@ def get_kv_cache_coordinator(
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
         num_prefill_lookahead=num_prefill_lookahead,
+        allow_partial_hash_hits=allow_partial_hash_hits,
     )
