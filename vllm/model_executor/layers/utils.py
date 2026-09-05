@@ -257,6 +257,56 @@ def use_aiter_triton_gemm(n, m, k, dtype):
     )
 
 
+# A weight row stride that is a multiple of the aliasing period makes the multi-row
+# global loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by
+# one cache line dodges the collision and keeps each row aligned. Maps a GPU arch to
+# its (aliasing period, cache line) in bytes; an arch absent from this table is not
+# known to alias and is left alone.
+CACHE_ALIASING_GEOMETRY: dict[str, tuple[int, int]] = {
+    "gfx11": (2048, 128),
+}
+
+
+def cache_aliasing_pad_elems(k: int, element_size: int, gcn_arch: str) -> int:
+    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing, or 0
+    when the stride does not alias or the arch is not known to alias.
+
+    Args:
+        k: Number of elements per weight row.
+        element_size: Size of one element in bytes.
+        gcn_arch: GCN arch of the target GPU, e.g. ``"gfx1151"``.
+
+    Returns:
+        The number of elements to add to the row stride.
+    """
+    for arch, (period, cache_line) in CACHE_ALIASING_GEOMETRY.items():
+        if gcn_arch.startswith(arch):
+            if (k * element_size) % period != 0:
+                return 0
+            return cache_line // element_size
+    return 0
+
+
+def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
+    """Offset a dense weight's row stride so it stops aliasing.
+
+    Returns a view with the original shape whose row stride is one cache line
+    wider, or ``weight`` unchanged when the pad does not apply.
+    """
+    from vllm.platforms.rocm import get_gcn_arch
+
+    if not (envs.VLLM_ROCM_LINEAR_PADDING and current_platform.is_rocm()):
+        return weight
+    if weight.dim() != 2 or not weight.is_contiguous():
+        return weight
+    pad = cache_aliasing_pad_elems(
+        weight.shape[1], weight.element_size(), get_gcn_arch()
+    )
+    if pad == 0:
+        return weight
+    return torch.nn.functional.pad(weight, (0, pad))[..., :-pad]
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -284,9 +334,9 @@ def rocm_unquantized_gemm_impl(
     ) <= 128 * 1024 * 12  # deterministic
     fits_wvsplitkrc &= CuNeeded <= cu_count
 
-    skinny_operands_compatible = weight.is_contiguous() and (
-        bias is None or bias.is_contiguous()
-    )
+    bias_compatible = bias is None or bias.is_contiguous()
+    skinny_operands_compatible = weight.is_contiguous() and bias_compatible
+    wvsplitk_operands_compatible = weight.stride(1) == 1 and bias_compatible
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -311,7 +361,11 @@ def rocm_unquantized_gemm_impl(
     # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
     # partial last tile). Some whitelisted shapes have K=2880 (e.g. gpt-oss-120b
     # hidden), so skip aiter there and fall back to the torch GEMM path below.
-    if use_aiter_triton_gemm(n, m, k, x.dtype) and not (on_gfx1250() and k % 256 != 0):
+    if (
+        use_aiter_triton_gemm(n, m, k, x.dtype)
+        and weight.is_contiguous()
+        and not (on_gfx1250() and k % 256 != 0)
+    ):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
@@ -323,7 +377,7 @@ def rocm_unquantized_gemm_impl(
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and skinny_operands_compatible
+        and wvsplitk_operands_compatible
     )
 
     if use_skinny:
@@ -334,11 +388,17 @@ def rocm_unquantized_gemm_impl(
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])
-        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+        elif (
+            m % 4 == 0
+            and n == 1
+            and k <= 8192
+            and bias is None
+            and skinny_operands_compatible
+        ):
             out = ops.LLMM1(weight, x_view, 4)
             return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    if rocm_aiter_ops.is_tgemm_enabled():
+    if rocm_aiter_ops.is_tgemm_enabled() and weight.is_contiguous():
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
