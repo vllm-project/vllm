@@ -573,6 +573,58 @@ def test_explicit_b12x_nvfp4_selection(
     assert selected_activation_keys == [expected_activation_key]
 
 
+def test_auto_b12x_nvfp4_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+        FlashInferCuteDSLBatchedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (
+        FlashInferCuteDSLExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
+        FlashInferExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
+        TrtLlmNvFp4ExpertsModular,
+        TrtLlmNvFp4ExpertsMonolithic,
+    )
+
+    mock_unsupported = lambda *args, **kwargs: (False, "mocked unsupported")
+    monkeypatch.setattr(
+        TrtLlmNvFp4ExpertsMonolithic, "is_supported_config", mock_unsupported
+    )
+    monkeypatch.setattr(
+        TrtLlmNvFp4ExpertsModular, "is_supported_config", mock_unsupported
+    )
+    monkeypatch.setattr(
+        FlashInferCuteDSLExperts, "is_supported_config", mock_unsupported
+    )
+    monkeypatch.setattr(
+        FlashInferCuteDSLBatchedExperts, "is_supported_config", mock_unsupported
+    )
+    monkeypatch.setattr(FlashInferExperts, "is_supported_config", mock_unsupported)
+    monkeypatch.setattr(CutlassExpertsFp4, "is_supported_config", mock_unsupported)
+    monkeypatch.setattr(
+        B12xExperts, "is_supported_config", lambda *args, **kwargs: (True, None)
+    )
+
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "auto"
+
+    backend, experts_cls = select_nvfp4_moe_backend(
+        config,
+        weight_key=kNvfp4Static,
+        activation_key=kNvfp4Dynamic,
+    )
+
+    assert backend == NvFp4MoeBackend.B12X
+    assert experts_cls is B12xExperts
+
+
 @pytest.mark.parametrize(
     "force_a16,expected_quant_dtype", [(False, "nvfp4"), (True, None)]
 )
