@@ -84,7 +84,43 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     if (chunk_size > max_chunk_elements) chunk_size = max_chunk_elements;
 
     size_t smem_size = P::kFixedSmemLarge + chunk_size * sizeof(uint32_t);
+    // The large path publishes per-CTA counts and sorts the row
+    // in CTA 0's chunk buffer.
+    STD_TORCH_CHECK(ctas_per_group <= P::kDetMaxCtasPerGroup,
+                    "persistent_topk: ctas_per_group ", ctas_per_group,
+                    " exceeds ", P::kDetMaxCtasPerGroup);
+    STD_TORCH_CHECK(chunk_size >= static_cast<uint32_t>(TopK),
+                    "persistent_topk: chunk_size ", chunk_size,
+                    " smaller than TopK ", TopK);
     if (smem_size < P::kSmemMedium) smem_size = P::kSmemMedium;
+    // Let det_select_row keep the row's keys in shared memory
+    // (single-CTA rows are <= RADIX_THRESHOLD); capped by the device optin.
+    {
+      const uint32_t det_rows = std::min<uint32_t>(
+          static_cast<uint32_t>(max_seq_len), P::RADIX_THRESHOLD);
+      const size_t det_want =
+          P::det_select_row_bytes<TopK, P::kThreadsPerBlock>(
+              det_rows);  // same expression as the kernel
+      // The kernel also owns static __shared__ storage (the large path's
+      // BlockScan scratch); the dynamic request must leave room for it.
+      cudaFuncAttributes fa{};
+      cudaError_t fa_err =
+          (vec_size == 4)
+              ? cudaFuncGetAttributes(&fa, P::persistent_topk_kernel<TopK, 4>)
+          : (vec_size == 2)
+              ? cudaFuncGetAttributes(&fa, P::persistent_topk_kernel<TopK, 2>)
+              : cudaFuncGetAttributes(&fa, P::persistent_topk_kernel<TopK, 1>);
+      STD_TORCH_CHECK(fa_err == cudaSuccess,
+                      "persistent_topk: cudaFuncGetAttributes failed: ",
+                      cudaGetErrorString(fa_err));
+      const size_t dyn_cap =
+          static_cast<size_t>(max_smem_per_block) - fa.sharedSizeBytes;
+      if (det_want > smem_size) smem_size = std::min(det_want, dyn_cap);
+      STD_TORCH_CHECK(smem_size <= dyn_cap, "persistent_topk: dynamic smem ",
+                      smem_size, " exceeds ", dyn_cap, " (optin ",
+                      max_smem_per_block, " - static ", fa.sharedSizeBytes,
+                      ")");
+    }
 
     // Query occupancy for the instantiation that will actually launch;
     // overestimating it deadlocks the cooperative barrier.
@@ -203,6 +239,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
         workspace.mutable_data_ptr<uint8_t>());
     params.ctas_per_group = ctas_per_group;
     params.max_seq_len = static_cast<uint32_t>(max_seq_len);
+    params.det_smem_bytes = static_cast<uint32_t>(smem_size);
 
   #define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                     \
     do {                                                                      \
