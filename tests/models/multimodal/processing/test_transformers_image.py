@@ -321,7 +321,7 @@ _MODEL_ID = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 _SCOPED_SIZE = {"height": 768, "width": 768}
 
 
-def _probe_num_image_tokens(mm_processor_kwargs) -> list[int]:
+def _probe_num_image_tokens(mm_processor_kwargs, request_kwargs=None) -> list[int]:
     """The per-image token counts vLLM predicts for a single image."""
     from vllm.config import ModelConfig
     from vllm.model_executor.models.transformers.multimodal import (
@@ -342,7 +342,7 @@ def _probe_num_image_tokens(mm_processor_kwargs) -> list[int]:
     mm_processor = LegacyMultiModalProcessor(info, MultiModalDummyInputsBuilder(info))
     image = ImageAsset("cherry_blossom").pil_image
     mm_items = mm_processor.info.parse_mm_data({"image": image})
-    tokens = mm_processor._get_num_multimodal_tokens(mm_items, {})
+    tokens = mm_processor._get_num_multimodal_tokens(mm_items, request_kwargs or {})
     return list(tokens["num_image_tokens"])
 
 
@@ -362,3 +362,21 @@ def test_scoped_images_kwargs_reach_the_token_count():
 
     scoped = _probe_num_image_tokens({"images_kwargs": {"size": _SCOPED_SIZE}})
     assert scoped == flat
+
+
+def test_request_mm_processor_kwargs_reach_the_token_count():
+    """Per-request ``mm_processor_kwargs`` must reach vLLM's own token count too.
+
+    The request overrides build the HF processor that produces the features, so
+    a token count that only merges the model-config overrides predicts a
+    different number of placeholder tokens than the processor actually emits.
+    """
+    stock = _probe_num_image_tokens(None)
+    flat = _probe_num_image_tokens({"size": _SCOPED_SIZE})
+    assert flat != stock
+
+    for request_kwargs in (
+        {"size": _SCOPED_SIZE},
+        {"images_kwargs": {"size": _SCOPED_SIZE}},
+    ):
+        assert _probe_num_image_tokens(None, request_kwargs) == flat
