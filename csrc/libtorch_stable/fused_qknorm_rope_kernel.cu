@@ -237,9 +237,10 @@ __global__ void fusedQKNormRopeKernel(
     T_cache const* cos_ptr = cache_ptr;
     T_cache const* sin_ptr = cache_ptr + embed_dim;
     int const rotary_lanes = rotary_dim / numElemsPerThread;  // rotary range
-    if (laneId < rotary_lanes) {
-      if constexpr (interleave) {
-        // Perform interleaving. Use pre-computed cos/sin values.
+    if constexpr (interleave) {
+      // GPT-J / interleaved: no cross-lane exchange, so the partial guard is
+      // safe.
+      if (laneId < rotary_lanes) {
 #pragma unroll
         for (int i = 0; i < numElemsPerThread / 2; ++i) {
           int const idx0 = 2 * i;
@@ -259,16 +260,21 @@ __global__ void fusedQKNormRopeKernel(
           elements[idx0] = val0 * cos_val - val1 * sin_val;
           elements[idx1] = val0 * sin_val + val1 * cos_val;
         }
-      } else {
-        // Before data exchange with in warp, we need to sync.
-        __syncwarp();
-        int pairOffset = (rotary_dim / 2) / numElemsPerThread;
-        // Get the data from the other half of the warp. Use pre-computed
-        // cos/sin values.
+      }
+    } else {
+      // NeoX rotates dim d with dim d + rotary_dim/2, i.e. lane laneId
+      // exchanges with lane laneId ^ pairOffset via __shfl_xor_sync. Under
+      // partial rope only lanes [0, rotary_lanes) rotate, but the shuffle is a
+      // warp collective and must be issued by EVERY lane in the mask: naming
+      // absent lanes (when rotary_lanes < warpSize) is undefined behavior that
+      // desynchronizes the warp. So all lanes participate in the shuffle with
+      // the full mask, and only the rotary lanes consume the shuffled value /
+      // touch the cos/sin cache.
+      int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
-        for (int i = 0; i < numElemsPerThread; i++) {
-          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
-
+      for (int i = 0; i < numElemsPerThread; i++) {
+        elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+        if (laneId < rotary_lanes) {
           if (laneId < pairOffset) {
             elements2[i] = -elements2[i];
           }
@@ -281,8 +287,6 @@ __global__ void fusedQKNormRopeKernel(
 
           elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
         }
-        // __shfl_xor_sync does not provide memfence. Need to sync again.
-        __syncwarp();
       }
     }
     // Store.
@@ -484,8 +488,10 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
       if (k == 0) cp_async_wait_group<0>();
 
       // === Part 2: RoPE using cos/sin from shared memory. ===
-      if (laneId < rotary_lanes) {
-        if constexpr (interleave) {
+      if constexpr (interleave) {
+        // GPT-J / interleaved: no cross-lane exchange, so the partial guard is
+        // safe.
+        if (laneId < rotary_lanes) {
 #pragma unroll
           for (int i = 0; i < numElemsPerThread / 2; ++i) {
             int const idx0 = 2 * i;
@@ -499,12 +505,21 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             elements[idx0] = val0 * cos_val - val1 * sin_val;
             elements[idx1] = val0 * sin_val + val1 * cos_val;
           }
-        } else {
-          __syncwarp();
-          int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
+        }
+      } else {
+        // NeoX rotates dim d with dim d + rotary_dim/2 (lane laneId ^
+        // pairOffset). Under partial rope only lanes [0, rotary_lanes) rotate,
+        // but the shuffle is a warp collective and must be issued by EVERY lane
+        // in the mask: naming absent lanes (rotary_lanes < warpSize) is UB that
+        // desynchronizes the warp and corrupts the NEXT head's warpReduceSum in
+        // this multi-head- per-warp kernel. So all lanes shuffle with the full
+        // mask; only the rotary lanes consume the shuffled value / touch the
+        // cos/sin cache.
+        int const pairOffset = (rotary_dim / 2) / numElemsPerThread;
 #pragma unroll
-          for (int i = 0; i < numElemsPerThread; i++) {
-            elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+        for (int i = 0; i < numElemsPerThread; i++) {
+          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);
+          if (laneId < rotary_lanes) {
             if (laneId < pairOffset) elements2[i] = -elements2[i];
             int dim_idx = laneId * numElemsPerThread + i;
             dim_idx = (dim_idx * 2) % rotary_dim;
@@ -513,7 +528,6 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
             float const sin_val = CacheConverter::convert(sin_smem[half_dim]);
             elements[i] = elements[i] * cos_val + elements2[i] * sin_val;
           }
-          __syncwarp();
         }
       }
 
@@ -639,7 +653,7 @@ void launchFusedQKNormRopeNTokenHeads(
   int const totalQKHeads = num_heads_q + num_heads_k;
   // Grid: one warp per (token, head_chunk); same token → reuse cos/sin in smem.
   int const head_chunks_per_token =
-      (totalQKHeads + token_heads_per_warp - 1) / token_heads_per_warp;
+      common::divUp(totalQKHeads, token_heads_per_warp);
   int const total_warps = num_tokens * head_chunks_per_token;
   int const gridSize = common::divUp(total_warps, warpsPerBlock);
   dim3 gridDim(gridSize);
