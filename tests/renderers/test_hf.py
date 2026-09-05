@@ -371,6 +371,7 @@ def test_resolve_chat_template_kwargs_with_template_name():
         ("fixie-ai/ultravox-v0_5-llama-3_2-1b", "string"),
         ("Qwen/Qwen2-Audio-7B-Instruct", "openai"),
         ("meta-llama/Llama-Guard-3-1B", "openai"),
+        ("XiaomiMiMo/MiMo-V2.5-Pro", "openai"),
     ],
 )
 def test_resolve_content_format_hf_defined(model, expected_format):

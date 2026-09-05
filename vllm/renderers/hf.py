@@ -400,6 +400,25 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
         varname for _, varname in _iter_nodes_assign_messages_item(root)
     ]
 
+    # Track macro parameters that receive message.content as an argument.
+    # Some templates (e.g. MiMo-V2.5) pass message.content into a macro via
+    # a parameter named something other than "content" (e.g. "message_content"),
+    # then loop over that parameter inside the macro body.
+    macro_content_params: set[str] = set()
+    for macro_node in root.find_all(jinja2.nodes.Macro):
+        # Find calls to this macro where message.content is passed
+        for call_node in root.find_all(jinja2.nodes.Call):
+            if (
+                isinstance(call_node.node, jinja2.nodes.Name)
+                and call_node.node.name == macro_node.name
+            ):
+                for i, arg in enumerate(call_node.args):
+                    if i < len(macro_node.args) and any(
+                        _is_var_or_elems_access(arg, varname, "content")
+                        for varname in message_varnames
+                    ):
+                        macro_content_params.add(macro_node.args[i].name)
+
     # Search for {%- for content in message['content'] -%} loops
     # or {%- for item in content -%} loops
     for loop_ast in root.find_all(jinja2.nodes.For):
@@ -412,9 +431,12 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 yield loop_ast, loop_target.name
                 break
 
-        if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
-            assert isinstance(loop_target, jinja2.nodes.Name)
-            yield loop_ast, loop_target.name
+        if isinstance(loop_iter, jinja2.nodes.Name):
+            # Check for loops over a variable literally named "content" or
+            # over a macro parameter that receives message.content
+            if loop_iter.name == "content" or loop_iter.name in macro_content_params:
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
