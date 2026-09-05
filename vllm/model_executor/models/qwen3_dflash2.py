@@ -17,6 +17,7 @@ from .qwen3_dflash import (
     DFlashQwen3ForCausalLM,
     DFlashQwen3Model,
 )
+from .qwen3_next import Qwen3NextSparseMoeBlock
 from .utils import maybe_prefix
 
 
@@ -102,6 +103,39 @@ class DFlashGroupedConv(nn.Module):
 
 
 class DFlash2Qwen3DecoderLayer(DFlashQwen3DecoderLayer):
+    def build_mlp(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> nn.Module:
+        draft_ffn_type = getattr(config, "draft_ffn_type", "dense")
+        if draft_ffn_type == "dense":
+            return super().build_mlp(
+                vllm_config=vllm_config,
+                config=config,
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+        if draft_ffn_type != "moe":
+            raise ValueError(f"Unsupported DFlash2 draft_ffn_type: {draft_ffn_type!r}")
+        if vllm_config.parallel_config.enable_eplb:
+            # `Qwen3NextSparseMoeBlock` picks up `enable_eplb` and the redundant
+            # expert count from the target's parallel config, but the DFlash2
+            # drafter does not implement the `MixtureOfExperts` lifecycle that
+            # drives rearrangement. Refuse rather than run half-managed.
+            raise NotImplementedError(
+                "EPLB is not supported for DFlash2 MoE draft models."
+            )
+        return Qwen3NextSparseMoeBlock(
+            vllm_config=vllm_config,
+            config=config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,

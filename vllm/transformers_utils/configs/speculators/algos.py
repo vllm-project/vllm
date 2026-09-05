@@ -153,6 +153,26 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
         if config_dict.get(key) is not None:
             pre_trained_config["dflash_config"][key] = config_dict[key]
 
+    draft_ffn_type = config_dict.get("draft_ffn_type", "dense")
+    pre_trained_config["draft_ffn_type"] = draft_ffn_type
+    if draft_ffn_type == "dense":
+        return
+    if draft_ffn_type != "moe":
+        raise ValueError(f"Unsupported DFlash2 draft_ffn_type: {draft_ffn_type!r}")
+
+    required_moe_fields = (
+        "num_experts",
+        "num_experts_per_tok",
+        "moe_intermediate_size",
+        "shared_expert_intermediate_size",
+    )
+    missing = [key for key in required_moe_fields if config_dict.get(key) is None]
+    if missing:
+        raise ValueError(f"DFlash2 MoE config is missing required fields: {missing}")
+    for key in required_moe_fields:
+        pre_trained_config[key] = config_dict[key]
+    pre_trained_config["norm_topk_prob"] = config_dict.get("norm_topk_prob", True)
+
 
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
