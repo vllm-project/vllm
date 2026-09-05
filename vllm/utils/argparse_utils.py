@@ -577,7 +577,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # Supports both flat configs and nested dicts
         processed_args: list[str] = []
 
-        config: dict[str, Any] = {}
+        config: Any = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -587,6 +587,18 @@ class FlexibleArgumentParser(ArgumentParser):
                 file_path,
             )
             raise ex
+
+        # An empty (or comments-only) YAML document is parsed as ``None``.
+        # Treat it as an empty configuration rather than raising a confusing
+        # ``AttributeError`` later in this method.
+        if config is None:
+            config = {}
+
+        if not isinstance(config, dict):
+            raise ValueError(
+                "Config file must contain a YAML mapping at the top level. "
+                f"Got {type(config).__name__} instead in {file_path}."
+            )
 
         for key, value in config.items():
             if isinstance(value, bool):
