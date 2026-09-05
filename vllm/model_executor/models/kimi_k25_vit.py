@@ -30,6 +30,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.layers.rotary_embedding.vision import (
+    apply_fused_qk_complex_rope,
+    can_use_fused_qk_complex_rope,
+)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
@@ -464,10 +468,13 @@ class MoonViTEncoderLayer(nn.Module):
 
         _apply_rope_input_validation(xq, rope_freqs_cis)
         _apply_rope_input_validation(xk, rope_freqs_cis)
-        rope_cos = rope_freqs_cis.real.contiguous()
-        rope_sin = rope_freqs_cis.imag.contiguous()
-        xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
-        xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
+        if can_use_fused_qk_complex_rope(xq, xk, rope_freqs_cis):
+            xq, xk = apply_fused_qk_complex_rope(xq, xk, rope_freqs_cis)
+        else:
+            rope_cos = rope_freqs_cis.real.contiguous()
+            rope_sin = rope_freqs_cis.imag.contiguous()
+            xq = self.apply_rotary_emb(xq, rope_cos, rope_sin)
+            xk = self.apply_rotary_emb(xk, rope_cos, rope_sin)
 
         if max_seqlen is None:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
