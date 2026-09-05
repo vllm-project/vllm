@@ -86,6 +86,7 @@ class KimiK3ToolParser(ToolParser):
         self.tools_close = "<|close|>tools<|sep|>"
         self.response_open = "<|open|>response<|sep|>"
         self.response_close = "<|close|>response<|sep|>"
+        self.message_close = "<|close|>message<|sep|>"
 
         # Regexes operate on detokenized text. The XTML markers reach us as the
         # literal strings <|open|>/<|close|>/<|sep|>. adjust_request keeps them
@@ -283,10 +284,12 @@ class KimiK3ToolParser(ToolParser):
         body_start = m_open.end() if m_open is not None else 0
         m_tools = self._tools_open_re.search(current_text, body_start)
         m_rclose = self._response_close_re.search(current_text, body_start)
+        m_mclose = self._message_close_re.search(current_text, body_start)
         tools_start = m_tools.start() if m_tools else -1
         response_end = m_rclose.start() if m_rclose else -1
+        message_end = m_mclose.start() if m_mclose else -1
 
-        candidates = [i for i in (tools_start, response_end) if i != -1]
+        candidates = [i for i in (tools_start, response_end, message_end) if i != -1]
         if candidates:
             sendable_idx = min(candidates)
         else:
@@ -294,6 +297,7 @@ class KimiK3ToolParser(ToolParser):
                 _partial_tag_overlap(current_text, self.response_open),
                 _partial_tag_overlap(current_text, self.response_close),
                 _partial_tag_overlap(current_text, self.tools_open),
+                _partial_tag_overlap(current_text, self.message_close),
             )
             sendable_idx = len(current_text) - overlap
 
