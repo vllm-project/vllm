@@ -22,6 +22,9 @@ from vllm.models.qwen4_exp.common.ple import (
     compute_ple_shard_overlap,
     copy_ple_embedding_shard_,
 )
+from vllm.models.qwen4_exp.amd.ple_layer import (
+    Qwen4ExpNGramEmbedding as Qwen4ExpNGramEmbeddingAMD,
+)
 from vllm.models.qwen4_exp.nvidia.ple_layer import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLEFp8EmbeddingMethod,
@@ -169,6 +172,82 @@ def test_ngram_embedding_loads_fp8_shards_and_global_scale() -> None:
         module.ngram_embedding.weight_scale,
         weight_scale.float(),
     )
+
+
+def _make_amd_ngram_embedding_for_load_test() -> Qwen4ExpNGramEmbeddingAMD:
+    module = Qwen4ExpNGramEmbeddingAMD.__new__(Qwen4ExpNGramEmbeddingAMD)
+    nn.Module.__init__(module)
+    module.split_ngram_parts = 2
+    module.register_buffer("layer_multipliers", torch.zeros(1, dtype=torch.long))
+    module.register_buffer("ngram_heads_offsets", torch.zeros(1, dtype=torch.long))
+    module.register_buffer("ngram_heads_vocab_sizes", torch.zeros(1, dtype=torch.long))
+    module.ngram_embedding = SimpleNamespace(
+        org_vocab_size=8,
+        embedding_dim=2,
+        weight=nn.Parameter(torch.full((4, 2), -1.0)),
+        shard_indices=SimpleNamespace(
+            org_vocab_start_index=2,
+            org_vocab_end_index=6,
+        ),
+    )
+    _set_test_embedding_weight_loader(module.ngram_embedding)
+    return module
+
+
+def _amd_fp8_shards() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    shard_0 = torch.arange(8, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
+    shard_1 = (
+        torch.arange(8, 16, dtype=torch.float32).reshape(4, 2).to(torch.float8_e4m3fn)
+    )
+    weight_scale = torch.tensor([0.25], dtype=torch.bfloat16)
+    return shard_0, shard_1, weight_scale
+
+
+def test_amd_ngram_embedding_loads_fp8_shards_with_folded_scale() -> None:
+    """FP8 shards are dequantized to bf16 with the global scale folded in."""
+    module = _make_amd_ngram_embedding_for_load_test()
+    shard_0, shard_1, weight_scale = _amd_fp8_shards()
+
+    # a single-pass generator, as delivered by AutoWeightsLoader
+    loaded = module.load_weights(
+        iter(
+            [
+                ("ngram_embedding.shard_0.weight", shard_0),
+                ("ngram_embedding.shard_1.weight", shard_1),
+                ("ngram_embedding.weight_scale", weight_scale),
+            ]
+        )
+    )
+
+    assert loaded == {"ngram_embedding.weight"}
+    expected = torch.cat((shard_0[2:4], shard_1[0:2])).float() * 0.25
+    torch.testing.assert_close(module.ngram_embedding.weight, expected)
+
+
+def test_amd_ngram_embedding_fp8_scale_cached_across_split_calls() -> None:
+    """The PLE weights may be split across several load_weights calls (one per
+    consecutive checkpoint-file group); the scale arrives in only one of them
+    and must be reused, otherwise the later shards load as raw FP8."""
+    module = _make_amd_ngram_embedding_for_load_test()
+    shard_0, shard_1, weight_scale = _amd_fp8_shards()
+
+    loaded_first = module.load_weights(
+        iter(
+            [
+                ("ngram_embedding.shard_0.weight", shard_0),
+                ("ngram_embedding.weight_scale", weight_scale),
+            ]
+        )
+    )
+    assert loaded_first == {"ngram_embedding.weight"}
+
+    loaded_second = module.load_weights(
+        iter([("ngram_embedding.shard_1.weight", shard_1)])
+    )
+    assert loaded_second == {"ngram_embedding.weight"}
+
+    expected = torch.cat((shard_0[2:4], shard_1[0:2])).float() * 0.25
+    torch.testing.assert_close(module.ngram_embedding.weight, expected)
 
 
 def _make_fp8_embedding_layer(
