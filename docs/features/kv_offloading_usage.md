@@ -124,7 +124,8 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `fs`. |
-| `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
+| `root_dir` | yes | — | Base directory, or an ordered comma-separated list of directories with `path_sharding: "by_block_hash"`; vLLM creates subdirectories beneath each one (see [On-Disk Layout](#on-disk-layout)). |
+| `path_sharding` | no | unspecified | Set to `by_block_hash` to distribute complete logical blocks deterministically across multiple `root_dir` paths. |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
@@ -132,9 +133,37 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
+For whole-block path sharding, provide comma-separated roots and select the
+stable block-hash strategy:
+
+```json
+{
+  "type": "fs",
+  "root_dir": "/mnt/ps-1/kv,/mnt/ps-2/kv,/mnt/ps-3/kv,/mnt/ps-4/kv",
+  "path_sharding": "by_block_hash",
+  "n_read_threads": 64,
+  "n_write_threads": 64
+}
+```
+
+Each logical block remains one complete file containing every TP worker's KV
+region. Its content hash modulo the number of roots selects one root. Batches
+are grouped by selected root and submitted as parallel I/O tasks, allowing a
+single request containing many blocks to use multiple storage paths. Changing
+the number or order of roots changes the mapping and makes blocks under the old
+mapping unavailable until they are stored again.
+
+The FS tier probes O_DIRECT support independently for each root with a
+page-sized transfer from a page-aligned buffer. Each read or write uses direct
+I/O only when that root passes the probe and the transfer size and host buffer
+address meet that validated alignment. An unaligned operation falls back to
+buffered I/O without changing other roots or operations. The `statvfs` block
+size is recorded for diagnostics but is not treated as a strict direct-I/O
+alignment because NFS can report its preferred transfer size there.
+
 #### On-Disk Layout
 
-Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
+Under each `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
 
 Inside that subdirectory, blocks are sharded across hash-prefix subdirectories to limit directory fan-out:
 
