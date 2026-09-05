@@ -84,6 +84,44 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == []  # Empty list
         assert sampling_params.extra_args == {}  # Empty dict
 
+    @pytest.mark.parametrize(
+        ("include", "top_logprobs", "expected"),
+        [
+            (["message.output_text.logprobs"], None, 0),
+            (("message.output_text.logprobs",), None, 0),
+            (["message.output_text.logprobs"], 0, 0),
+            (None, None, None),
+        ],
+    )
+    def test_logprobs_normalizes_null_top_logprobs(
+        self, include, top_logprobs, expected
+    ):
+        data = {
+            "model": "test-model",
+            "input": "test input",
+            "include": include,
+            "tool_choice": "none",
+            "top_logprobs": top_logprobs,
+        }
+        original = data.copy()
+
+        request = ResponsesRequest.model_validate(data)
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert data == original
+        assert request.top_logprobs == expected
+        assert sampling_params.logprobs == expected
+
+    def test_omitted_top_logprobs_stays_unset(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            include=["message.output_text.logprobs"],
+        )
+
+        assert request.top_logprobs == 0
+        assert "top_logprobs" not in request.model_fields_set
+
     def test_seed_bounds_validation(self):
         """Test that seed values outside torch.long bounds are rejected."""
         # Test seed below minimum
