@@ -124,3 +124,69 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestEmitSimpleToolCallDone:
+    """Regression test: arguments.done must always be emitted, even when
+    no argument deltas were streamed (e.g. zero-arg tool calls like
+    get_current_time())."""
+
+    def test_arguments_done_emitted_without_prior_deltas(self):
+        from dataclasses import dataclass, field
+
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            _StateType,
+            emit_simple_tool_call_done,
+        )
+
+        @dataclass
+        class FakeState:
+            output_index: int = 0
+            current_item_id: str = "fc_test"
+            accumulated_text: str = ""
+            tool_call_id: str = "call_test"
+            tool_call_name: str = "get_time"
+            tool_call_namespace: str | None = None
+            has_emitted_tool_call_delta: bool = False
+            current_state: _StateType = field(
+                default_factory=lambda: _StateType.TOOL_CALL
+            )
+
+        state = FakeState()
+        events = emit_simple_tool_call_done(state)
+
+        types = [e.type for e in events]
+        assert "response.function_call_arguments.done" in types
+        assert "response.output_item.done" in types
+
+    def test_arguments_done_emitted_with_prior_deltas(self):
+        from dataclasses import dataclass, field
+
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            _StateType,
+            emit_simple_tool_call_done,
+        )
+
+        @dataclass
+        class FakeState:
+            output_index: int = 0
+            current_item_id: str = "fc_test"
+            accumulated_text: str = '{"city": "Paris"}'
+            tool_call_id: str = "call_test"
+            tool_call_name: str = "get_weather"
+            tool_call_namespace: str | None = None
+            has_emitted_tool_call_delta: bool = True
+            current_state: _StateType = field(
+                default_factory=lambda: _StateType.TOOL_CALL
+            )
+
+        state = FakeState()
+        events = emit_simple_tool_call_done(state)
+
+        types = [e.type for e in events]
+        assert "response.function_call_arguments.done" in types
+        assert "response.output_item.done" in types
+        done_event = next(
+            e for e in events if e.type == "response.function_call_arguments.done"
+        )
+        assert done_event.arguments == '{"city": "Paris"}'
