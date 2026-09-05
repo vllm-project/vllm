@@ -680,13 +680,16 @@ class Scheduler(SchedulerInterface):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                        # Record the index of the preemption victim to
-                        # maintain accurate loop state.
+                    else:
+                        preempted_req = self.running[-1]
+
+                    # A deferred free cannot satisfy this allocation retry.
+                    if self._should_defer_request_block_free(preempted_req):
+                        break
+
+                    if self.policy == SchedulingPolicy.PRIORITY:
                         victim_index = self.running.index(preempted_req)
                         del self.running[victim_index]
-                        # Decrement the loop cursor if the removed request
-                        # preceded the current iteration, preventing the
-                        # silent omission of the subsequent request.
                         if victim_index < req_index:
                             req_index -= 1
 
@@ -2528,15 +2531,16 @@ class Scheduler(SchedulerInterface):
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
+    def _should_defer_request_block_free(self, request: Request) -> bool:
+        return (
+            self.defer_block_free and request.last_sched_seq > self.processed_step_seq
+        )
+
     def _free_request_blocks(self, request: Request):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
-        if not self.defer_block_free or (
-            # Last scheduled step already processed: no in-flight write remains
-            # (always the case for a normal finish), so free now.
-            request.last_sched_seq <= self.processed_step_seq
-        ):
+        if not self._should_defer_request_block_free(request):
             self.kv_cache_manager.free(request)
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
