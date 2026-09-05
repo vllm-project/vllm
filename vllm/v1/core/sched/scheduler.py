@@ -590,6 +590,17 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            if (
+                self.ec_connector is not None
+                and request.mm_features
+                and not self.ec_connector.ensure_cache_available(
+                    request,
+                    request.num_computed_tokens - request.num_output_placeholders,
+                )
+            ):
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -919,13 +930,7 @@ class Scheduler(SchedulerInterface):
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
-                    if (
-                        self.ec_connector is not None
-                        and request.mm_features
-                        and not self.ec_connector.ensure_cache_available(
-                            request, num_computed_tokens
-                        )
-                    ):
+                    if self._ec_transfer_pending(request, num_computed_tokens):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
@@ -940,10 +945,17 @@ class Scheduler(SchedulerInterface):
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                    # after async KV recvs are completed.
+                    # after async KV recvs are completed. A streaming-input
+                    # session resumes here too, carrying whatever media its
+                    # latest chunk added, so this branch needs the same gate.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
+                    if self._ec_transfer_pending(request, num_computed_tokens):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -2136,6 +2148,10 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+        if self.ec_connector is not None:
+            # An encoder input the connector can no longer obtain. Failing is
+            # retryable: re-issuing the request re-runs the encode.
+            error_req_ids.update(self.ec_connector.take_unavailable_requests())
 
         if error_req_ids:
             error_reqs = self.finish_requests(
@@ -2232,6 +2248,16 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
+    def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
+        """Whether an encoder input this request needs is still in transit."""
+        return (
+            self.ec_connector is not None
+            and bool(request.mm_features)
+            and not self.ec_connector.ensure_cache_available(
+                request, num_computed_tokens
+            )
+        )
+
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
         return status in (
@@ -2318,7 +2344,7 @@ class Scheduler(SchedulerInterface):
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self._free_encoder_input(request, input_id)
             elif (
                 start_pos + num_tokens + spec_lookahead
                 <= request.num_computed_tokens - request.num_output_placeholders
@@ -2326,7 +2352,12 @@ class Scheduler(SchedulerInterface):
                 # Processed, stored in the decoder KV cache, and far enough past
                 # the placeholder range (plus the drafter's look-ahead) that no
                 # rejection or drafter gather can reference it.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self._free_encoder_input(request, input_id)
+
+    def _free_encoder_input(self, request: Request, input_id: int) -> None:
+        self.encoder_cache_manager.free_encoder_input(request, input_id)
+        if self.ec_connector is not None:
+            self.ec_connector.update_state_after_free(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(

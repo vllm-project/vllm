@@ -7,6 +7,7 @@ Owns the mmap region and the embedding cache, and handles the producer
 for the ECCPUConnector.
 """
 
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -184,7 +185,10 @@ class ECCPUScheduler:
         return entry is not None and entry.ready
 
     def ensure_cache_available(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         if not self._nixl_enabled:
             return True  # CPU offload never blocks.
