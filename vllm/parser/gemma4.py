@@ -335,10 +335,19 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
+            (ParserState.REASONING, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
+            # Bare call: emitted without <|tool_call> prefix (e.g. immediately after <channel|>)
+            (ParserState.CONTENT, "CALL_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
             ),
             (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
                 ParserState.CONTENT,
