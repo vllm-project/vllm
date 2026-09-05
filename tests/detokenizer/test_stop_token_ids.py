@@ -9,10 +9,14 @@ set stop_terminated (the engine-core flag used for EOS and stop ids).
 """
 
 import pytest
+from transformers import AutoTokenizer
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
+from vllm.v1.engine.detokenizer import (
+    BaseIncrementalDetokenizer,
+    FastIncrementalDetokenizer,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -28,6 +32,7 @@ def _make_request(
     stop_token_ids: list[int] | None = None,
     include_stop_str_in_output: bool = False,
     min_tokens: int = 0,
+    prompt_token_ids: list[int] | None = None,
 ) -> EngineCoreRequest:
     params = SamplingParams(
         stop=stop,
@@ -37,7 +42,7 @@ def _make_request(
     )
     return EngineCoreRequest(
         request_id="test",
-        prompt_token_ids=[],
+        prompt_token_ids=prompt_token_ids or [],
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
@@ -175,3 +180,41 @@ def test_stop_strings_still_truncate_when_stop_token_ids_set():
     assert result == "cd"
     assert detok.output_text == "ab"
     assert detok.output_token_ids == _ids("abcdeZ")
+
+
+def test_fast_incremental_detokenizer_skips_stop_token_id():
+    """Inherited FastIncrementalDetokenizer path uses the same skip-before-decode
+    update(), so DecodeStream must not see the excluded stop token."""
+    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+    hello_id, world_id, extra_id = tokenizer.encode(
+        "hello world extra", add_special_tokens=False
+    )
+    req = _make_request(
+        stop_token_ids=[world_id],
+        include_stop_str_in_output=False,
+        prompt_token_ids=[hello_id],
+    )
+    detok = FastIncrementalDetokenizer(tokenizer, req)
+
+    detok.update([world_id, extra_id], stop_terminated=False)
+    assert "world" not in detok.output_text.lower()
+    assert "extra" not in detok.output_text.lower()
+    assert detok.output_token_ids == [world_id, extra_id]
+
+
+def test_fast_incremental_detokenizer_keeps_stop_drops_suffix():
+    tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+    hello_id, world_id, extra_id = tokenizer.encode(
+        "hello world extra", add_special_tokens=False
+    )
+    req = _make_request(
+        stop_token_ids=[world_id],
+        include_stop_str_in_output=True,
+        prompt_token_ids=[hello_id],
+    )
+    detok = FastIncrementalDetokenizer(tokenizer, req)
+
+    detok.update([world_id, extra_id], stop_terminated=False)
+    assert "world" in detok.output_text.lower()
+    assert "extra" not in detok.output_text.lower()
+    assert detok.output_token_ids == [world_id, extra_id]
