@@ -1152,6 +1152,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.spec_decoding_stats, engine_idx
                 )
 
+            if scheduler_stats.spec_decode_scheduled_k is not None:
+                self.spec_decoding_prom.observe_scheduled_k(
+                    scheduler_stats.spec_decode_scheduled_k, engine_idx
+                )
+
             if scheduler_stats.kv_connector_stats is not None:
                 self.kv_connector_prom.observe(
                     scheduler_stats.kv_connector_stats, engine_idx
