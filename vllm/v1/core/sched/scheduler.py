@@ -34,6 +34,7 @@ from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    create_encoder_cache_manager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -250,8 +251,8 @@ class Scheduler(SchedulerInterface):
                 if self.is_encoder_decoder
                 else EncoderCacheManager
             )
-        self.encoder_cache_manager = manager_cls_obj.create_manager(
-            cache_size=encoder_cache_size, vllm_config=vllm_config
+        self.encoder_cache_manager = create_encoder_cache_manager(
+            manager_cls_obj, cache_size=encoder_cache_size, vllm_config=vllm_config
         )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
