@@ -546,7 +546,9 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
 
         if self.use_spec_decode:
             num_accepted_tokens = torch.diff(m.query_start_loc)
-            num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
+
+            num_decode_draft_tokens_cpu = torch.diff(m.query_start_loc_cpu).sub_(1)
+            assert num_decode_draft_tokens_cpu.shape == num_accepted_tokens.shape
             return self.build(
                 0,
                 m,
