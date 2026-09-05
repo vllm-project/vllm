@@ -818,6 +818,9 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
+                    cache_config.cache_dtype
+                ),
             ).page_size_bytes
         elif cache_config.cache_dtype.startswith("turboquant_"):
             # TQ has a packed K|V layout; the standard FullAttentionSpec
