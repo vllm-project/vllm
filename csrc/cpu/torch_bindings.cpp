@@ -66,18 +66,18 @@ at::Tensor convert_weight_packed(at::Tensor& weight);
 
 at::Tensor convert_scale_packed(at::Tensor& scale);
 
-at::Tensor fused_experts_cpu(
-    at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
-    at::Tensor& topk_weights, at::Tensor& topk_ids, bool inplace,
-    int64_t moe_comp_method, const std::optional<at::Tensor>& w1_scale,
-    const std::optional<at::Tensor>& w2_scale,
-    const std::optional<at::Tensor>& w1_zero,
-    const std::optional<at::Tensor>& w2_zero,
-    const std::optional<std::vector<int64_t>> block_size,
-    const std::optional<at::Tensor>& w1_bias,
-    const std::optional<at::Tensor>& w2_bias,
-    const std::optional<double>& alpha, const std::optional<double>& limit,
-    bool is_vnni);
+void fused_experts_cpu(at::Tensor& out, at::Tensor& hidden_states,
+                       at::Tensor& w1, at::Tensor& w2, at::Tensor& topk_weights,
+                       at::Tensor& topk_ids, int64_t moe_comp_method,
+                       const std::optional<at::Tensor>& w1_scale,
+                       const std::optional<at::Tensor>& w2_scale,
+                       const std::optional<at::Tensor>& w1_zero,
+                       const std::optional<at::Tensor>& w2_zero,
+                       const std::optional<std::vector<int64_t>> block_size,
+                       const std::optional<at::Tensor>& w1_bias,
+                       const std::optional<at::Tensor>& w2_bias,
+                       const std::optional<double>& alpha,
+                       const std::optional<double>& limit, bool is_vnni);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -123,6 +123,99 @@ void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
 void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,
                               const at::Tensor& k_pe, at::Tensor& kv_cache,
                               const at::Tensor& slot_mapping);
+
+// Adapted from sglang: DeepSeek-V4 mHC gating kernels
+std::tuple<at::Tensor, at::Tensor, at::Tensor> hc_pre_fused_cpu(
+    at::Tensor& x, at::Tensor& hc_fn, at::Tensor& hc_scale, at::Tensor& hc_base,
+    int64_t hc_mult, int64_t sinkhorn_iters, double rms_eps, double hc_eps);
+
+at::Tensor hc_post_fused_cpu(at::Tensor& x, at::Tensor& residual,
+                             at::Tensor& post, at::Tensor& comb);
+
+at::Tensor hc_head_fused_cpu(at::Tensor& x, at::Tensor& hc_fn,
+                             at::Tensor& hc_scale, at::Tensor& hc_base,
+                             double hc_eps, double norm_eps);
+
+// Adapted from sglang: DeepSeek-V4 fp8_ds_mla cache-write kernel
+at::Tensor fused_qnorm_rope_kv_insert_cpu(at::Tensor& q, at::Tensor& kv,
+                                          at::Tensor& positions,
+                                          at::Tensor& swa_kv_cache_2d,
+                                          at::Tensor& slot_mapping,
+                                          at::Tensor& cos_sin_cache,
+                                          int64_t q_head_padded, double eps,
+                                          int64_t cache_block_size);
+
+// vLLM-native: DeepSeek-V4 sparse MQA attention kernel for the fp8_ds_mla
+// cache layout (SWA window + optional compressed top-k index sets).
+void flash_mla_with_kvcache_cpu(
+    at::Tensor& out, at::Tensor& q, at::Tensor& window_cache_2d,
+    at::Tensor& window_slots, int64_t window_block_size,
+    at::Tensor& compressed_cache_2d, at::Tensor& compressed_slots,
+    int64_t compressed_block_size, at::Tensor& attn_sink, double scale);
+
+// Adapted from sglang: DeepSeek-V4 compressor state-cache write + fused
+// compress+RMSNorm+quant+RoPE+store kernels.
+void save_partial_states_cpu(at::Tensor& kv, at::Tensor& score, at::Tensor& ape,
+                             at::Tensor& positions, at::Tensor& state_cache,
+                             at::Tensor& slot_mapping);
+
+void compress_norm_rope_store_cpu(
+    at::Tensor& state_cache, at::Tensor& gather_slots, at::Tensor& positions,
+    at::Tensor& kv_slot_mapping, at::Tensor& rms_norm_weight,
+    double rms_norm_eps, at::Tensor& cos_sin_cache, at::Tensor& kv_cache_2d,
+    int64_t kv_cache_block_size, int64_t compress_ratio);
+
+// head_dim=128 indexer-compressor variant of the above (single fp8 quant
+// block + raw fp32 scale -- matches the paged indexer K-cache layout
+// fp8_paged_mqa_logits_cpu/topk_transform_512_cpu read).
+void compress_norm_rope_store_indexer_cpu(
+    at::Tensor& state_cache, at::Tensor& gather_slots, at::Tensor& positions,
+    at::Tensor& kv_slot_mapping, at::Tensor& rms_norm_weight,
+    double rms_norm_eps, at::Tensor& cos_sin_cache, at::Tensor& kv_cache_2d,
+    int64_t kv_cache_block_size, int64_t compress_ratio);
+
+// Adapted from sglang: DeepSeek-V4 sparse indexer paged MQA-logits +
+// top-512 transform kernels (DECODE path -- reads the paged K-cache
+// directly via `page_table`, whole batch in one call).
+at::Tensor fp8_paged_mqa_logits_cpu(at::Tensor& q_fp8, at::Tensor& kvcache_fp8,
+                                    at::Tensor& weight, at::Tensor& seq_lens,
+                                    at::Tensor& page_table, int64_t block_size,
+                                    int64_t max_seq_len);
+
+void topk_transform_512_cpu(at::Tensor& scores, at::Tensor& seq_lens,
+                            at::Tensor& page_tables,
+                            at::Tensor& out_page_indices, int64_t page_size,
+                            const std::optional<at::Tensor>& out_raw_indices);
+
+// Adapted from sglang: DeepSeek-V4 MoE routing kernels (flat biased top-k and
+// hash-routed-layer top-k).
+std::tuple<at::Tensor, at::Tensor> biased_topk_cpu(
+    at::Tensor& hidden_states, at::Tensor& gating_output,
+    at::Tensor& correction_bias, int64_t topk, bool renormalize,
+    std::string scoring_func, int64_t num_fused_shared_experts,
+    std::optional<double> routed_scaling_factor,
+    bool apply_routed_scaling_factor_on_output);
+
+std::tuple<at::Tensor, at::Tensor> hash_topk_cpu(
+    at::Tensor& gating_output, at::Tensor& tid2eid, int64_t topk,
+    std::string scoring_func, int64_t num_fused_shared_experts,
+    int64_t num_experts, double routed_scaling_factor);
+
+// vLLM-native: DeepSeek-V4 sparse indexer Q-side RoPE + FP8 quant kernel
+// (fp8 path only; MXFP4 stays on triton-cpu).
+void fused_indexer_q_rope_quant_cpu(at::Tensor& positions, at::Tensor& index_q,
+                                    at::Tensor& index_q_cos_sin_cache,
+                                    at::Tensor& index_q_fp8,
+                                    at::Tensor& index_weights,
+                                    double index_weights_softmax_scale,
+                                    double index_weights_head_scale,
+                                    at::Tensor& index_weights_out);
+
+// vLLM-native: inverse GPT-J RoPE for DeepSeek-V4 CPU attention's `_o_proj`
+// output de-rotation.
+at::Tensor inverse_gptj_rope_o_proj_cpu(at::Tensor& o, at::Tensor& positions,
+                                        at::Tensor& cos_sin_cache,
+                                        int64_t rope_dim);
 
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
@@ -516,13 +609,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("convert_scale_packed(Tensor! scale) -> Tensor");
   ops.impl("convert_scale_packed", torch::kCPU, &convert_scale_packed);
   ops.def(
-      "fused_experts_cpu(Tensor hidden_states, Tensor w1, Tensor w2, Tensor "
-      "topk_weights, Tensor topk_ids, bool "
-      "inplace, int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
+      "fused_experts_cpu(Tensor(a0!) out, Tensor hidden_states, Tensor w1, "
+      "Tensor w2, Tensor topk_weights, Tensor topk_ids, "
+      "int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
       "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, "
       "Tensor? w1_bias, Tensor? w2_bias, float? alpha, float? limit, "
       "bool is_vnni) -> "
-      "Tensor");
+      "()");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
       "int8_scaled_mm_with_quant(Tensor mat1, Tensor mat2, Tensor scales2, "
@@ -584,6 +677,110 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "concat_and_cache_mla_cpu(Tensor kv_c_normed, Tensor k_pe, "
       "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
   ops.impl("concat_and_cache_mla_cpu", torch::kCPU, &concat_and_cache_mla_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 mHC gating kernels
+  ops.def(
+      "hc_pre_fused_cpu(Tensor x, Tensor hc_fn, Tensor hc_scale, "
+      "Tensor hc_base, int hc_mult, int sinkhorn_iters, float rms_eps, "
+      "float hc_eps) -> (Tensor, Tensor, Tensor)");
+  ops.impl("hc_pre_fused_cpu", torch::kCPU, &hc_pre_fused_cpu);
+
+  ops.def(
+      "hc_post_fused_cpu(Tensor x, Tensor residual, Tensor post, "
+      "Tensor comb) -> Tensor");
+  ops.impl("hc_post_fused_cpu", torch::kCPU, &hc_post_fused_cpu);
+
+  ops.def(
+      "hc_head_fused_cpu(Tensor x, Tensor hc_fn, Tensor "
+      "hc_scale, Tensor hc_base, float hc_eps, float norm_eps) -> "
+      "Tensor");
+  ops.impl("hc_head_fused_cpu", torch::kCPU, &hc_head_fused_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 fp8_ds_mla cache-write kernel
+  ops.def(
+      "fused_qnorm_rope_kv_insert_cpu(Tensor q, Tensor kv, Tensor positions, "
+      "Tensor(a!) swa_kv_cache_2d, Tensor slot_mapping, Tensor "
+      "cos_sin_cache, int q_head_padded, float eps, int cache_block_size) "
+      "-> Tensor");
+  ops.impl("fused_qnorm_rope_kv_insert_cpu", torch::kCPU,
+           &fused_qnorm_rope_kv_insert_cpu);
+
+  // vLLM-native: DeepSeek-V4 sparse MQA attention kernel
+  ops.def(
+      "flash_mla_with_kvcache_cpu(Tensor(a!) out, Tensor q, Tensor "
+      "window_cache_2d, Tensor window_slots, int window_block_size, Tensor "
+      "compressed_cache_2d, Tensor compressed_slots, int "
+      "compressed_block_size, Tensor attn_sink, float scale) -> ()");
+  ops.impl("flash_mla_with_kvcache_cpu", torch::kCPU,
+           &flash_mla_with_kvcache_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 compressor kernels
+  ops.def(
+      "save_partial_states_cpu(Tensor kv, Tensor score, Tensor ape, "
+      "Tensor positions, Tensor(a!) state_cache, Tensor slot_mapping) "
+      "-> ()");
+  ops.impl("save_partial_states_cpu", torch::kCPU, &save_partial_states_cpu);
+
+  ops.def(
+      "compress_norm_rope_store_cpu(Tensor state_cache, Tensor "
+      "gather_slots, Tensor positions, Tensor kv_slot_mapping, Tensor "
+      "rms_norm_weight, float rms_norm_eps, Tensor cos_sin_cache, "
+      "Tensor(a!) kv_cache_2d, int kv_cache_block_size, int compress_ratio) "
+      "-> ()");
+  ops.impl("compress_norm_rope_store_cpu", torch::kCPU,
+           &compress_norm_rope_store_cpu);
+
+  ops.def(
+      "compress_norm_rope_store_indexer_cpu(Tensor state_cache, Tensor "
+      "gather_slots, Tensor positions, Tensor kv_slot_mapping, Tensor "
+      "rms_norm_weight, float rms_norm_eps, Tensor cos_sin_cache, "
+      "Tensor(a!) kv_cache_2d, int kv_cache_block_size, int compress_ratio) "
+      "-> ()");
+  ops.impl("compress_norm_rope_store_indexer_cpu", torch::kCPU,
+           &compress_norm_rope_store_indexer_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 sparse indexer paged MQA-logits kernel
+  // (DECODE path)
+  ops.def(
+      "fp8_paged_mqa_logits_cpu(Tensor q_fp8, Tensor kvcache_fp8, Tensor "
+      "weight, Tensor seq_lens, Tensor page_table, int block_size, int "
+      "max_seq_len) -> Tensor");
+  ops.impl("fp8_paged_mqa_logits_cpu", torch::kCPU, &fp8_paged_mqa_logits_cpu);
+
+  ops.def(
+      "topk_transform_512_cpu(Tensor scores, Tensor seq_lens, Tensor "
+      "page_tables, Tensor(a!) out_page_indices, int page_size, Tensor(b!)? "
+      "out_raw_indices) -> ()");
+  ops.impl("topk_transform_512_cpu", torch::kCPU, &topk_transform_512_cpu);
+
+  ops.def(
+      "fused_indexer_q_rope_quant_cpu(Tensor positions, Tensor index_q, "
+      "Tensor index_q_cos_sin_cache, Tensor(a!) index_q_fp8, Tensor "
+      "index_weights, float index_weights_softmax_scale, float "
+      "index_weights_head_scale, Tensor(b!) index_weights_out) -> ()");
+  ops.impl("fused_indexer_q_rope_quant_cpu", torch::kCPU,
+           &fused_indexer_q_rope_quant_cpu);
+
+  // Adapted from sglang: DeepSeek-V4 MoE routing kernels
+  ops.def(
+      "biased_topk_cpu(Tensor hidden_states, Tensor gating_output, Tensor "
+      "correction_bias, int topk, bool renormalize, str scoring_func, int "
+      "num_fused_shared_experts, float? routed_scaling_factor, bool "
+      "apply_routed_scaling_factor_on_output) -> (Tensor, Tensor)");
+  ops.impl("biased_topk_cpu", torch::kCPU, &biased_topk_cpu);
+
+  ops.def(
+      "hash_topk_cpu(Tensor gating_output, Tensor tid2eid, int topk, str "
+      "scoring_func, int num_fused_shared_experts, int num_experts, float "
+      "routed_scaling_factor) -> (Tensor, Tensor)");
+  ops.impl("hash_topk_cpu", torch::kCPU, &hash_topk_cpu);
+
+  // vLLM-native: inverse GPT-J RoPE for _o_proj's output de-rotation
+  ops.def(
+      "inverse_gptj_rope_o_proj_cpu(Tensor o, Tensor positions, Tensor "
+      "cos_sin_cache, int rope_dim) -> Tensor");
+  ops.impl("inverse_gptj_rope_o_proj_cpu", torch::kCPU,
+           &inverse_gptj_rope_o_proj_cpu);
 #endif
 
 #if (defined(__AVX512BF16__) && defined(__AVX512F__) && \

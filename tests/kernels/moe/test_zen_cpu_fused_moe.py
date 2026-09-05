@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for ZenTorch CPU fused MoE dispatch and forward."""
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -27,8 +25,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     CPUUnquantizedExperts,
-    select_experts,
 )
+from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -95,18 +93,19 @@ def _make_layer_and_config(
 
 
 @pytest.mark.parametrize("act", ZENTORCH_ACT)
-def test_zen_cpu_fused_moe_dispatches_to_zentorch(act: MoEActivation):
-    """When zentorch MoE is supported, experts select the zentorch path."""
-    layer, moe_config = _make_layer_and_config(act)
-    w13_before = layer.w13_weight.detach().clone()
-    w2_before = layer.w2_weight.detach().clone()
+def test_zen_cpu_fused_moe_config_supported(act: MoEActivation):
+    """CPUUnquantizedExperts is selected when zentorch MoE is supported."""
+    _, moe_config = _make_layer_and_config(act)
+    assert is_zentorch_moe_config_supported(moe_config)
 
-    experts = CPUUnquantizedExperts(moe_config, FusedMoEQuantConfig.make())
-    experts.process_weights_after_loading(layer)
-
-    assert experts._use_zentorch is True
-    torch.testing.assert_close(layer.w13_weight, w13_before)
-    torch.testing.assert_close(layer.w2_weight, w2_before)
+    supported, reason = CPUUnquantizedExperts.is_supported_config(
+        CPUUnquantizedExperts,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+    assert supported, reason
 
 
 def test_zen_cpu_fused_moe_config_supported_unaligned_intermediate():
@@ -169,25 +168,33 @@ def test_zen_cpu_fused_moe_forward(
     experts.process_weights_after_loading(layer)
     assert experts._use_zentorch is True
 
-    topk_weight, topk_ids = select_experts(
-        hidden_states=input,
-        router_logits=router_logits,
-        top_k=topk_num,
-        use_grouped_topk=False,
-        renormalize=False,
-    )
+    w13_before = layer.w13_weight.detach().clone()
+    w2_before = layer.w2_weight.detach().clone()
 
-    output = experts.apply(
+    topk_weight, topk_ids = _softmax_topk(router_logits, topk_num, False)
+
+    output = torch.empty_like(input)
+    experts.apply(
+        output=output,
         hidden_states=input,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
-        router_logits=router_logits,
+        topk_weights=topk_weight,
+        topk_ids=topk_ids,
         activation=act,
         global_num_experts=expert_num,
         expert_map=None,
         a1q_scale=None,
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
         apply_router_weight_on_input=False,
     )
+
+    # zentorch needs no prepacking; weights are consumed as loaded.
+    torch.testing.assert_close(layer.w13_weight, w13_before)
+    torch.testing.assert_close(layer.w2_weight, w2_before)
 
     ref_output = ref_fused_moe(
         input,
@@ -202,20 +209,3 @@ def test_zen_cpu_fused_moe_forward(
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-
-
-def test_zen_cpu_fused_moe_skips_without_activation():
-    """Layers without an activation attribute fall back from zentorch."""
-    layer = SimpleNamespace()
-    moe_config = _make_moe_config(
-        expert_num=8,
-        hidden_size=128,
-        intermediate_size=128,
-        topk_num=4,
-        dtype=torch.bfloat16,
-        act=MoEActivation.SILU,
-    )
-    experts = CPUUnquantizedExperts(moe_config, FusedMoEQuantConfig.make())
-    experts.process_weights_after_loading(layer)
-
-    assert experts._use_zentorch is False

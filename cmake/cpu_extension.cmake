@@ -523,7 +523,14 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
-        "csrc/cpu/sgl-kernels/mla_cache.cpp")
+        "csrc/cpu/sgl-kernels/mla_cache.cpp"
+        "csrc/cpu/sgl-kernels/mhc.cpp"
+        "csrc/cpu/sgl-kernels/store_cache.cpp"
+        "csrc/cpu/sgl-kernels/flash_mla.cpp"
+        "csrc/cpu/sgl-kernels/compressor.cpp"
+        "csrc/cpu/sgl-kernels/paged_mqa_logits.cpp"
+        "csrc/cpu/sgl-kernels/topk.cpp"
+        "csrc/cpu/sgl-kernels/indexer.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"
