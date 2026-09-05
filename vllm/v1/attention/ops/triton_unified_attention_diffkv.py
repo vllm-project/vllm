@@ -46,6 +46,15 @@ logger = init_logger(__name__)
 
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
+# Debug overrides for the 2D/3D launch choice below, both defaulting to the
+# automatic behaviour. The 3D (split-KV) grid is taken only for decode-only
+# batches, so on hardware where the two geometries do not behave alike there is
+# otherwise no way to put decode on the same launch prefill uses. Two knobs
+# rather than one because forcing 2D also changes TILE_SIZE, which would
+# conflate the grid with the tile size when bisecting.
+force_2d = envs.VLLM_DIFFKV_FORCE_2D
+tile_size_override = envs.VLLM_DIFFKV_TILE_SIZE
+
 
 @triton.jit
 def kernel_unified_attention_diffkv(
@@ -440,11 +449,14 @@ def unified_attention_diffkv(
         or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
+        or force_2d
     )
 
     # Tile size: 32 for prefill-class kernels.  Decode (small Q) prefers
     # smaller tiles to expose more parallelism along the KV dim.
     tile_size = 32 if not use_3d else (16 if q.element_size() >= 2 else 32)
+    if tile_size_override is not None:
+        tile_size = tile_size_override
 
     grid: tuple[Any, ...]
     if use_3d:
