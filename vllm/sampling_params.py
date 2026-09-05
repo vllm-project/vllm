@@ -270,8 +270,9 @@ class SamplingParams(
     output will not contain the stop strings."""
     stop_token_ids: list[int] | None = None
     """Token IDs that stop the generation when they are generated. The returned
-    output will contain the stop tokens unless the stop tokens are special
-    tokens."""
+    output includes the stop token text when include_stop_str_in_output is
+    True. Special-token stop ids are omitted when skip_special_tokens is
+    True."""
     ignore_eos: bool = False
     """Whether to ignore the EOS token and continue generating
     tokens after the EOS token is generated."""
@@ -313,7 +314,7 @@ class SamplingParams(
     spaces_between_special_tokens: bool = True
     """Whether to add spaces between special tokens in the output."""
     include_stop_str_in_output: bool = False
-    """Whether to include the stop strings in output text."""
+    """Whether to include stop strings and stop token text in output."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
     stream_interval: int | None = None
     """Number of newly generated tokens to batch into each streamed

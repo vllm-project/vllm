@@ -81,6 +81,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop = params.stop
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
+        self.stop_token_ids = set(params.stop_token_ids or [])
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
@@ -105,13 +106,14 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             # Skip detokenization if no new token ids.
             return None
 
-        if stop_terminated and not self.include_stop_str_in_output:
-            # If stop-terminated, exclude last token from detokenization
-            # based on include_stop_str_in_output parameter.
-            skipped_stop_token_id = new_token_ids[-1]
-            new_token_ids = new_token_ids[:-1]
-        else:
-            skipped_stop_token_id = None
+        skipped_stop_token_ids: list[int] = []
+        if not self.include_stop_str_in_output:
+            skip_from = self._stop_token_skip_index(new_token_ids, stop_terminated)
+            if skip_from is not None:
+                # Exclude the matched stop token (and anything after it) from
+                # detokenization so its text is not emitted, including deltas.
+                skipped_stop_token_ids = new_token_ids[skip_from:]
+                new_token_ids = new_token_ids[:skip_from]
 
         # 1) Detokenize the new token ids incrementally.
         stop_check_offset = len(self.output_text)
@@ -122,9 +124,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
 
-        if skipped_stop_token_id is not None:
-            # Cleanup after skipping detokenization.
-            self.token_ids.append(skipped_stop_token_id)
+        if skipped_stop_token_ids:
+            # Keep stop token ids in the sequence metadata.
+            self.token_ids.extend(skipped_stop_token_ids)
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -141,6 +143,26 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                     self.output_text = self.output_text[:truncate_to]
 
         return stop_string
+
+    def _stop_token_skip_index(
+        self, new_token_ids: list[int], stop_terminated: bool
+    ) -> int | None:
+        """Return the index of the first token that should not be detokenized.
+
+        Stop token ids are excluded even when ``stop_terminated`` is false.
+        Engine-core EOS/stop finishes also set ``stop_terminated``, which
+        skips the last token (typically EOS).
+        """
+        if (
+            self.stop_token_ids
+            and self.num_output_tokens() + len(new_token_ids) > self.min_tokens
+        ):
+            for i, token_id in enumerate(new_token_ids):
+                if token_id in self.stop_token_ids:
+                    return i
+        if stop_terminated:
+            return len(new_token_ids) - 1
+        return None
 
     @abstractmethod
     def decode_next(self, next_token_id: int) -> str:
