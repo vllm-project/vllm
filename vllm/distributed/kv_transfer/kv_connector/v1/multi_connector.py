@@ -289,10 +289,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.clear_connector_metadata()
         super().clear_connector_metadata()
 
-    def prepare_forward(self, **kwargs: Any) -> None:
-        for c in self._connectors:
-            c.prepare_forward(**kwargs)
-
     def shutdown(self):
         exception: Exception | None = None
         for c in self._connectors:

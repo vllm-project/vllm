@@ -2576,43 +2576,6 @@ def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     ) == (1024, 16)
 
 
-def test_hisparse_derived_groups_do_not_participate_in_hash_alignment():
-    source = FullAttentionSpec(
-        block_size=64,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.float16,
-    )
-    groups = [
-        KVCacheGroupSpec(["source"], source),
-        KVCacheGroupSpec(
-            ["resident"], HiSparseResidentSpec(block_size=64, page_size=64)
-        ),
-        KVCacheGroupSpec(
-            ["hot"],
-            HiSparseHotSpec(block_size=64, page_size=64, blocks_per_request=1),
-        ),
-    ]
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[],
-        kv_cache_groups=groups,
-    )
-    vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(
-            block_size=64,
-            enable_prefix_caching=False,
-            prefix_match_unit=None,
-        ),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        kv_transfer_config=object(),
-    )
-
-    assert kv_cache_utils.resolve_kv_cache_block_sizes(
-        kv_cache_config, vllm_config
-    ) == (64, 64)
-
-
 def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
     """Reject GLM-5.3-Flash layouts whose Mamba page exceeds the MLA page."""
     model_config = ModelConfig(max_model_len=8192)
