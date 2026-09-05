@@ -5,10 +5,14 @@ Test (piecewise) compilation with a simple model where multiple submodules
 are compiled and graph captured separately.
 """
 
+from pathlib import Path
+
 import pytest
 import torch
 from torch import nn
+from transformers import OPTConfig
 
+import vllm.envs as envs
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
@@ -16,11 +20,16 @@ from vllm.config import (
     CompilationConfig,
     CompilationMode,
     CUDAGraphMode,
+    ModelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.spec_decode.ngram_proposer_gpu import NgramProposerGPU
 
 from ...utils import create_new_process_for_each_test
 
@@ -102,6 +111,15 @@ class CompiledAttention(nn.Module):
 class CompiledAttentionTwo(CompiledAttention):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.attn(x) + x
+
+
+@support_torch_compile
+class CacheBackbone(nn.Module):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + 7
 
 
 @ignore_torch_compile
@@ -324,3 +342,58 @@ def test_multi_graph_piecewise_compile(
 
     # Expect bitwise equivalence using inductor w/ and w/o cudagraph
     assert torch.equal(outputs[0], outputs[2])
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@create_new_process_for_each_test("spawn")
+def test_ngram_gpu_uses_separate_compile_cache(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
+
+    model_dir = tmp_path / "model"
+    OPTConfig(
+        architectures=["OPTForCausalLM"],
+        hidden_size=16,
+        ffn_dim=32,
+        num_attention_heads=1,
+        num_hidden_layers=1,
+        max_position_embeddings=16,
+        vocab_size=32,
+    ).save_pretrained(model_dir)
+    model_config = ModelConfig(model=str(model_dir), max_model_len=16)
+    speculative_config = SpeculativeConfig(
+        method="ngram_gpu",
+        num_speculative_tokens=3,
+        prompt_lookup_min=1,
+        prompt_lookup_max=3,
+    )
+    scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        speculative_config=speculative_config,
+        scheduler_config=scheduler_config,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.NONE,
+        ),
+    )
+
+    with set_current_vllm_config(vllm_config):
+        backbone = CacheBackbone(vllm_config=vllm_config).eval().cuda()
+        backbone_input = torch.arange(4, device="cuda").unsqueeze(0)
+        with set_forward_context(None, vllm_config):
+            backbone_output = backbone(backbone_input)
+
+        proposer = NgramProposerGPU(vllm_config, torch.device("cuda"))
+
+    assert torch.equal(backbone_output, backbone_input + 7)
+    assert proposer.kernel.compiled
+
+    cache_dir = Path(vllm_config.compilation_config.cache_dir) / "rank_0_0"
+    assert (cache_dir / "backbone" / "vllm_compile_cache.py").is_file()
+    assert (cache_dir / "ngram_gpu_kernel" / "vllm_compile_cache.py").is_file()
