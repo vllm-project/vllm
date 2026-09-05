@@ -34,6 +34,52 @@ def f2(x):
     return x
 
 
+def test_import_kernels_does_not_retain_the_import_error(monkeypatch):
+    """The vllm._C ImportError must be collectable after import_kernels.
+
+    ``logger.warning_once`` caches its arguments forever (``lru_cache``). If
+    the live ImportError is passed as a format argument, the cache retains it
+    and — through ``__traceback__`` — every frame on the raising path.
+    ``import_kernels`` runs inside ``LLM.__init__``, so on platforms without
+    compiled ``vllm._C`` kernels this pinned the ``LLM`` instance itself: it
+    could never be garbage collected and its EngineCore only exited with the
+    interpreter. See #54096.
+    """
+    import gc
+    import weakref
+
+    from vllm.platforms.interface import Platform
+
+    blocked = ("vllm._C", "vllm._moe_C_stable_libtorch")
+    exc_refs = []
+
+    class _TrackedModuleNotFoundError(ModuleNotFoundError):
+        pass  # python-level subclass; supports weak references
+
+    class _BlockKernelImports:
+        def find_spec(self, name, path=None, target=None):
+            if name in blocked:
+                exc = _TrackedModuleNotFoundError(f"No module named '{name}' (test)")
+                exc_refs.append(weakref.ref(exc))
+                raise exc
+            return None
+
+    for mod in blocked:
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_BlockKernelImports()] + sys.meta_path)
+
+    Platform.import_kernels()
+
+    assert exc_refs, "the blocked import was never attempted"
+    gc.collect()
+    leaked = [ref for ref in exc_refs if ref() is not None]
+    assert not leaked, (
+        "ImportError retained after import_kernels; a cached reference "
+        "(e.g. a live exception passed to logger.warning_once) pins its "
+        "traceback and every local on the raising path"
+    )
+
+
 def test_trace_function_call():
     fd, path = tempfile.mkstemp()
     cur_dir = os.path.dirname(__file__)
