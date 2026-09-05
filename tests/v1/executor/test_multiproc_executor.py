@@ -36,6 +36,23 @@ class _PayloadLifetimeCheckingQueue:
         raise _ExitWorkerLoop
 
 
+class _AsyncOutputLifetimeCheckingQueue:
+    def __init__(self) -> None:
+        self.output_ref: weakref.ReferenceType[_RpcPayload] | None = None
+        self.dequeue_count = 0
+
+    def get(self):
+        self.dequeue_count += 1
+        if self.dequeue_count == 1:
+            output = _RpcPayload()
+            self.output_ref = weakref.ref(output)
+            return output
+
+        assert self.output_ref is not None
+        assert self.output_ref() is None
+        raise _ExitWorkerLoop
+
+
 def test_worker_rpc_payload_released_before_next_dequeue():
     queue = _PayloadLifetimeCheckingQueue()
     worker_proc: Any = WorkerProc.__new__(WorkerProc)
@@ -46,6 +63,19 @@ def test_worker_rpc_payload_released_before_next_dequeue():
 
     with pytest.raises(_ExitWorkerLoop):
         worker_proc.worker_busy_loop()
+
+    assert queue.dequeue_count == 2
+
+
+def test_async_output_released_before_next_dequeue():
+    queue = _AsyncOutputLifetimeCheckingQueue()
+    worker_proc: Any = WorkerProc.__new__(WorkerProc)
+    worker_proc.async_output_queue = queue
+    worker_proc.worker = SimpleNamespace()
+    worker_proc.enqueue_output = lambda output: None
+
+    with pytest.raises(_ExitWorkerLoop):
+        worker_proc.async_output_busy_loop()
 
     assert queue.dequeue_count == 2
 
