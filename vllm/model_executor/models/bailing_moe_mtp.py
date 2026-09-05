@@ -111,7 +111,6 @@ class BailingMoeV25MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
