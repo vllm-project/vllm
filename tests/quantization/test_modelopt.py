@@ -248,6 +248,68 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mixed_precision_dispatches_fp8_block_scales_moe():
+    """FP8_BLOCK_SCALES routed experts must reach a block-quantised Fp8MoEMethod.
+
+    Without a branch for it, get_quant_method falls through to None, the expert
+    layer is built unquantised and never registers weight_scale_inv, and loading
+    a checkpoint that carries one dies with:
+
+        AttributeError: Layer ... has no parameter 'w2_weight_scale_inv'
+
+    See https://github.com/vllm-project/vllm/issues/55496. The block size comes
+    from the layer's own group_size, and weight_block_size is what makes
+    Fp8MoEMethod name its scales weight_scale_inv.
+    """
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mlp.experts": {
+                "quant_algo": "FP8_BLOCK_SCALES",
+                "group_size": 128,
+            }
+        }
+    )
+    layer = Mock(spec=RoutedExperts)
+    layer.__class__ = RoutedExperts
+    layer.moe_config = MagicMock()
+
+    # Constructing the real method selects a device-specific kernel backend,
+    # which is not what this test is about: assert the dispatch decision and the
+    # block size handed to it.
+    with patch(
+        "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod"
+    ) as mock_moe:
+        method = config.get_quant_method(
+            layer, prefix="model.layers.0.mlp.experts"
+        )
+
+    assert method is mock_moe.return_value
+    quant_config = mock_moe.call_args.args[0]
+    assert quant_config.weight_block_size == [128, 128]
+    assert quant_config.is_checkpoint_fp8_serialized
+
+
+def test_modelopt_mixed_precision_fp8_block_scales_defaults_block_size():
+    """An entry without group_size falls back to the 128 ModelOpt always emits."""
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    config = _mixed_precision_config(
+        {"model.layers.0.mlp.experts": {"quant_algo": "FP8_BLOCK_SCALES"}}
+    )
+    layer = Mock(spec=RoutedExperts)
+    layer.__class__ = RoutedExperts
+    layer.moe_config = MagicMock()
+
+    with patch(
+        "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod"
+    ) as mock_moe:
+        config.get_quant_method(layer, prefix="model.layers.0.mlp.experts")
+
+    assert mock_moe.call_args.args[0].weight_block_size == [128, 128]
+
+
 def test_modelopt_mixed_precision_resolves_declared_packed_projection():
     config = _mixed_precision_config(
         {
