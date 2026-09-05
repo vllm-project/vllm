@@ -60,6 +60,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -1180,8 +1181,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # grid_thw fields are registered keep_on_cpu; restore the on-device
         # placement that HF get_image_features implementations expect.
         for key, value in kwargs.items():
-            if isinstance(value, torch.Tensor):
-                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
+            if isinstance(value, torch.Tensor) and value.is_cpu:
+                kwargs[key] = async_tensor_h2d(value, pixel_values.device)
 
         # The underlying HuggingFace `get_image_features` implementations
         # contain model-internal syncs (e.g. Idefics3 filters all-zero

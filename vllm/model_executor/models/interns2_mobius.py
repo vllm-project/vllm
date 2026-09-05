@@ -476,7 +476,7 @@ class InternS2MobiusForConditionalGeneration(InternS2PreviewForConditionalGenera
         if getattr(config, "image_token_index", None) is None:
             config.image_token_index = config.image_token_id
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config

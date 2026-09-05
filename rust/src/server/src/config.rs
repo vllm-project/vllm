@@ -3,12 +3,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{
@@ -157,6 +158,48 @@ impl TlsConfig {
     }
 }
 
+/// One LoRA adapter to load before the server accepts traffic.
+///
+/// Mirrors `LoRAModulePath` in vllm/entrypoints/openai/models/protocol.py,
+/// which is also the JSON shape the Python supervisor forwards in
+/// `--args-json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoraModulePath {
+    /// Public model id the adapter is served under.
+    pub name: String,
+    /// Local path or Hugging Face repo id of the adapter.
+    pub path: String,
+    /// Base model reported as `parent` in `/v1/models`; defaults to the
+    /// primary served model name.
+    #[serde(default)]
+    pub base_model_name: Option<String>,
+    #[serde(default)]
+    pub is_3d_lora_weight: bool,
+}
+
+impl FromStr for LoraModulePath {
+    type Err = String;
+
+    /// Accept the two CLI forms Python's `LoRAParserAction` accepts:
+    /// `name=path`, or a JSON object with the struct's fields.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if !value.trim_start().starts_with('{') {
+            let (name, path) = value
+                .split_once('=')
+                .filter(|(name, path)| !name.is_empty() && !path.is_empty())
+                .ok_or_else(|| format!("expected `name=path`, got `{value}`"))?;
+            return Ok(Self {
+                name: name.to_string(),
+                path: path.to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            });
+        }
+        serde_json::from_str(value)
+            .map_err(|e| format!("expected `name=path` or a JSON object: {e}"))
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -192,6 +235,9 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// LoRA adapters loaded at startup, in order. Startup fails if any of
+    /// them cannot be loaded.
+    pub lora_modules: Vec<LoraModulePath>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
@@ -289,4 +335,67 @@ impl fmt::Debug for RedactedApiKeys<'_> {
 
 fn fmt_redacted_api_keys(api_keys: &[String], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     fmt::Debug::fmt(&RedactedApiKeys(api_keys), f)
+}
+
+#[cfg(test)]
+mod lora_module_path_tests {
+    use super::LoraModulePath;
+
+    #[test]
+    fn parses_name_equals_path() {
+        let module: LoraModulePath = "alice=charent/self_cognition_Alice".parse().unwrap();
+        assert_eq!(
+            module,
+            LoraModulePath {
+                name: "alice".to_string(),
+                path: "charent/self_cognition_Alice".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_json_object() {
+        let module: LoraModulePath =
+            r#"{"name": "alice", "path": "/adapters/alice", "base_model_name": "base", "is_3d_lora_weight": true}"#
+                .parse()
+                .unwrap();
+        assert_eq!(
+            module,
+            LoraModulePath {
+                name: "alice".to_string(),
+                path: "/adapters/alice".to_string(),
+                base_model_name: Some("base".to_string()),
+                is_3d_lora_weight: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_name_equals_path_with_comma() {
+        let module: LoraModulePath = "alice=/adapters/a,b".parse().unwrap();
+        assert_eq!(module.name, "alice");
+        assert_eq!(module.path, "/adapters/a,b");
+    }
+
+    #[test]
+    fn json_object_optional_fields_default() {
+        let module: LoraModulePath = r#"{"name": "a", "path": "org/a"}"#.parse().unwrap();
+        assert_eq!(module.base_model_name, None);
+        assert!(!module.is_3d_lora_weight);
+    }
+
+    #[test]
+    fn rejects_empty_name_or_path() {
+        assert!("=org/a".parse::<LoraModulePath>().is_err());
+        assert!("a=".parse::<LoraModulePath>().is_err());
+    }
+
+    #[test]
+    fn rejects_bare_path_and_bad_json() {
+        assert!("org/a".parse::<LoraModulePath>().is_err());
+        assert!(r#"{"name": "a"}"#.parse::<LoraModulePath>().is_err());
+        assert!(r#"[{"name": "a", "path": "org/a"}]"#.parse::<LoraModulePath>().is_err());
+    }
 }

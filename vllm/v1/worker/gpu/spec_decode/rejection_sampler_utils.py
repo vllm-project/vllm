@@ -837,6 +837,7 @@ def _resample_kernel(
         0,  # logits_cache_stride_1
         None,  # logits_cache_col_ptr
         vocab_size,
+        IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )

@@ -60,6 +60,31 @@ def to_cute_dynamic_m(
 
 
 @dsl_user_op
+def fma_f32_bf16(
+    a: BFloat16,
+    b: BFloat16,
+    acc: Float32,
+    *,
+    loc=None,
+    ip=None,
+) -> Float32:
+    a_bits = llvm.bitcast(T.i16(), a.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    b_bits = llvm.bitcast(T.i16(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    result = llvm.inline_asm(
+        T.f32(),
+        [a_bits, b_bits, acc.ir_value(loc=loc, ip=ip)],
+        "fma.rn.f32.bf16 $0, $1, $2, $3;",
+        "=f,h,h,f",
+        has_side_effects=False,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return Float32(result)
+
+
+@dsl_user_op
 def load_global_u32x4(
     pointer: cute.Pointer,
     *,
@@ -82,6 +107,104 @@ def load_global_u32x4(
         f"{opcode} {{$0, $1, $2, $3}}, [$4];",
         "=r,=r,=r,=r,l",
         has_side_effects=volatile,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    packed = vector.from_elements(
+        ir.VectorType.get([4], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(4)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(packed, 4, Uint32)
+
+
+def _make_top16_bf16_finalize_asm() -> str:
+    lines = [
+        "{",
+        ".reg .pred _valid<16>;",
+        ".reg .s32 _index<16>;",
+        ".reg .b32 _weight_words<8>;",
+        ".reg .b16 _weights<16>;",
+        ".reg .b32 _data<64>;",
+        ".reg .b16 _lo, _hi;",
+        ".reg .f32 _acc<8>;",
+        ".reg .u64 _address<16>;",
+        "ld.global.v4.u32 {_index0, _index1, _index2, _index3}, [$5];",
+        "ld.global.v4.u32 {_index4, _index5, _index6, _index7}, [$5+16];",
+        "ld.global.v4.u32 {_index8, _index9, _index10, _index11}, [$5+32];",
+        "ld.global.v4.u32 {_index12, _index13, _index14, _index15}, [$5+48];",
+        "ld.global.v4.u32 "
+        "{_weight_words0, _weight_words1, _weight_words2, "
+        "_weight_words3}, [$6];",
+        "ld.global.v4.u32 "
+        "{_weight_words4, _weight_words5, _weight_words6, "
+        "_weight_words7}, [$6+16];",
+    ]
+    for pair in range(8):
+        lines.append(
+            f"mov.b32 {{_weights{2 * pair}, _weights{2 * pair + 1}}}, "
+            f"_weight_words{pair};"
+        )
+    for element in range(8):
+        lines.append(f"mov.f32 _acc{element}, 0f00000000;")
+    for route in range(16):
+        data = 4 * route
+        lines.extend(
+            [
+                f"setp.ge.s32 _valid{route}, _index{route}, 0;",
+                f"@_valid{route} mad.wide.s32 _address{route}, "
+                f"_index{route}, 7168, $4;",
+                f"@_valid{route} ld.global.v4.u32 "
+                f"{{_data{data}, _data{data + 1}, _data{data + 2}, "
+                f"_data{data + 3}}}, [_address{route}];",
+            ]
+        )
+    for route in range(16):
+        for pair in range(4):
+            data = 4 * route + pair
+            element = 2 * pair
+            lines.extend(
+                [
+                    f"@_valid{route} mov.b32 {{_lo, _hi}}, _data{data};",
+                    f"@_valid{route} fma.rn.f32.bf16 _acc{element}, _lo, "
+                    f"_weights{route}, _acc{element};",
+                    f"@_valid{route} fma.rn.f32.bf16 _acc{element + 1}, _hi, "
+                    f"_weights{route}, _acc{element + 1};",
+                ]
+            )
+    for pair in range(4):
+        lines.append(f"cvt.rn.bf16x2.f32 ${pair}, _acc{2 * pair + 1}, _acc{2 * pair};")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+_TOP16_BF16_FINALIZE_ASM = _make_top16_bf16_finalize_asm()
+
+
+@dsl_user_op
+def finalize_top16_bf16(
+    gemm2_vector: cute.Pointer,
+    route_indices: cute.Pointer,
+    route_weights: cute.Pointer,
+    *,
+    loc=None,
+    ip=None,
+):
+    """Finalize one Kimi K3 top-16 vector with wide metadata loads."""
+
+    addresses = [
+        pointer.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+        for pointer in (gemm2_vector, route_indices, route_weights)
+    ]
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        addresses,
+        _TOP16_BF16_FINALIZE_ASM,
+        "=r,=r,=r,=r,l,l,l",
+        has_side_effects=False,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
         loc=loc,
@@ -160,6 +283,24 @@ def store_global_u32(
         ],
         "st.global.u32 [$0], $1;",
         "l,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def stmc_bf16x8(address: Int64, packed, *, loc=None, ip=None) -> None:
+    """Publish eight BF16 values through an NVLS multicast mapping."""
+
+    words = [packed[i].ir_value(loc=loc, ip=ip) for i in range(4)]
+    llvm.inline_asm(
+        None,
+        [address.ir_value(loc=loc, ip=ip), *words],
+        "multimem.st.relaxed.sys.global.v4.bf16x2 [$0], {$1, $2, $3, $4};",
+        "l,r,r,r,r",
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
@@ -275,6 +416,48 @@ def store_shared_cluster_f32(
         asm_dialect=llvm.AsmDialect.AD_ATT,
         loc=loc,
         ip=ip,
+    )
+
+
+@dsl_user_op
+def load_shared_f32x2(pointer: cute.Pointer, *, loc=None, ip=None):
+    """Load two aligned FP32 DSM partials from local shared memory."""
+
+    address = Int32(pointer.toint(loc=loc, ip=ip))
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 2),
+        [address.ir_value(loc=loc, ip=ip)],
+        "ld.shared.v2.f32 {$0, $1}, [$2];",
+        "=f,=f,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return tuple(
+        Float32(llvm.extractvalue(T.f32(), out, [i], loc=loc, ip=ip)) for i in range(2)
+    )
+
+
+@dsl_user_op
+def load_shared_f32x4(pointer: cute.Pointer, *, loc=None, ip=None):
+    """Load four aligned FP32 DSM partials from local shared memory."""
+
+    address = Int32(pointer.toint(loc=loc, ip=ip))
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * 4),
+        [address.ir_value(loc=loc, ip=ip)],
+        "ld.shared.v4.f32 {$0, $1, $2, $3}, [$4];",
+        "=f,=f,=f,=f,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return tuple(
+        Float32(llvm.extractvalue(T.f32(), out, [i], loc=loc, ip=ip)) for i in range(4)
     )
 
 

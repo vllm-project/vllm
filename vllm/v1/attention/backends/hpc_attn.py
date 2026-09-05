@@ -19,6 +19,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -216,8 +217,13 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         if num_prefills > 0:
             qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
             prefill_start = num_decodes
-            qo_indptr_prefill_cpu = (
-                qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
+            qo_indptr_prefill_cpu = torch.empty(
+                num_prefills + 1, dtype=torch.int32, pin_memory=PIN_MEMORY
+            )
+            torch.subtract(
+                qo_indptr_cpu[prefill_start:],
+                qo_indptr_cpu[prefill_start],
+                out=qo_indptr_prefill_cpu,
             )
             qo_indptr = qo_indptr_prefill_cpu.to(self.device, non_blocking=True)
 

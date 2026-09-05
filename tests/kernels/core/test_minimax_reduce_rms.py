@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MiniMax QK RMS-norm: NCCL reference vs Lamport fused kernel."""
+"""Tests for MiniMax QK RMS-norm fused all-reduce kernels and fallbacks."""
+
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -9,6 +11,7 @@ from torch.multiprocessing import spawn
 
 from tests.kernels.utils import opcheck
 from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.layers.minimax_rms_norm import (
     MiniMaxText01RMSNormTP,
@@ -122,6 +125,116 @@ def _worker_forward_qk(
     torch.testing.assert_close(fused_k, ref_k, atol=3e-2, rtol=3e-2)
 
     cleanup_dist_env_and_memory()
+
+
+@ensure_current_vllm_config()
+def _worker_forward_qk_rocm_aiter(
+    local_rank: int,
+    world_size: int,
+    port: str,
+    hidden_q_full: int,
+    hidden_k_full: int,
+    seed: int,
+    eps: float,
+) -> None:
+    """Compare the ROCm AITER fusion with the eager TP implementation."""
+    device = torch.device(f"cuda:{local_rank}")
+    torch.accelerator.set_device_index(device)
+    init_test_distributed_environment(
+        world_size, 1, local_rank, port, local_rank=local_rank
+    )
+
+    try:
+        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+        assert aiter_ar is not None, "AITER custom all-reduce was not initialized"
+        assert not aiter_ar.disabled, "AITER custom all-reduce is disabled"
+        assert hasattr(aiter_ar.aiter_ca, "custom_fused_qknorm_ar")
+
+        hq = hidden_q_full // world_size
+        hk = hidden_k_full // world_size
+        test_cases = (
+            (1, torch.bfloat16),
+            (128, torch.bfloat16),
+            (333, torch.bfloat16),
+            (1, torch.float16),
+            (128, torch.float16),
+            (333, torch.float16),
+        )
+
+        for num_tokens, dtype in test_cases:
+            q_norm = MiniMaxText01RMSNormTP(hidden_q_full, eps=eps).cuda()
+            k_norm = MiniMaxText01RMSNormTP(hidden_k_full, eps=eps).cuda()
+
+            set_random_seed(seed)
+            q_weight = torch.randn(hidden_q_full, dtype=dtype, device="cuda")
+            k_weight = torch.randn(hidden_k_full, dtype=dtype, device="cuda")
+            q_norm.weight = nn.Parameter(
+                q_weight[local_rank * hq : (local_rank + 1) * hq]
+            )
+            k_norm.weight = nn.Parameter(
+                k_weight[local_rank * hk : (local_rank + 1) * hk]
+            )
+
+            torch.manual_seed(seed + num_tokens + local_rank)
+            qkv = torch.randn(num_tokens, hq + hk + hk, dtype=dtype, device="cuda")
+
+            ref_q, ref_k = rms_norm_tp._minimax_qk_norm_tp_eager(
+                qkv.clone(),
+                q_norm.weight,
+                k_norm.weight,
+                hq,
+                hk,
+                world_size,
+                eps,
+            )
+
+            with (
+                patch.object(rms_norm_tp, "_MINIMAX_FUSED_AR_RMS_QK", None),
+                patch.object(
+                    rms_norm_tp,
+                    "_minimax_qk_norm_tp_fallback",
+                    side_effect=AssertionError(
+                        "ROCm AITER test unexpectedly used the fallback"
+                    ),
+                ),
+            ):
+                fused_q, fused_k, fused_v = MiniMaxText01RMSNormTP.forward_qkv(
+                    q_norm, k_norm, qkv.clone(), hq, hk
+                )
+
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(fused_q, ref_q, atol=3e-2, rtol=3e-2)
+            torch.testing.assert_close(fused_k, ref_k, atol=3e-2, rtol=3e-2)
+            assert torch.equal(fused_v, qkv[:, hq + hk :])
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="ROCm required",
+)
+def test_minimax_reduce_rms_qk_rocm_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MiniMax TP QK path dispatches to AITER and matches eager RMSNorm."""
+    assert is_aiter_found_and_supported(), "AITER requires ROCm CDNA3 or newer"
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "1")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "NONE")
+
+    world_size = 2
+    if current_platform.device_count() < world_size:
+        pytest.skip("Need at least two GPUs")
+
+    spawn(
+        _worker_forward_qk_rocm_aiter,
+        args=(world_size, str(get_open_port()), 6144, 1024, 42, 1e-6),
+        nprocs=world_size,
+        join=True,
+    )
 
 
 @pytest.mark.skipif(

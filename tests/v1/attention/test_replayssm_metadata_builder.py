@@ -16,6 +16,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.config.mamba import MambaBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -187,34 +188,47 @@ REPLAYSSM_BUILD_CASES = {
 }
 
 
-def _make_mamba_spec(buffer_len: int) -> MambaSpec:
-    # Five-tensor ReplaySSM page; the builder only reads shapes[4][0] (bc groups).
+def _make_mamba_spec(
+    buffer_len: int,
+    mamba_backend: MambaBackendEnum,
+) -> MambaSpec:
+    ring_buffer_len = buffer_len + (
+        1 if mamba_backend == MambaBackendEnum.FLASHINFER else 0
+    )
+    shapes = (
+        (1, 1),
+        (1, 1, 1),
+        (1, ring_buffer_len, 1),
+        (1, ring_buffer_len),
+        (1, ring_buffer_len, 1),
+    )
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=(
-            (1, 1),
-            (1, 1, 1),
-            (1, buffer_len, 1),
-            (1, buffer_len),
-            (1, buffer_len, 1),
-        ),
+        shapes=shapes,
         dtypes=(torch.float32,),
     )
 
 
 def _create_replayssm_builder(
-    buffer_len: int, mamba_cache_mode: str = "none"
+    buffer_len: int,
+    mamba_cache_mode: str = "none",
+    *,
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
 ) -> MockMambaBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
     )
     # Set the flags after construction to skip validate_mamba_cached_kernel
-    # (it requires a Triton backend) on the mock model.
+    # (it requires a real SupportsReplaySSM model) on the mock model.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.mamba_config.backend = mamba_backend
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len), ["layer0"], vllm_config, DEVICE
+        _make_mamba_spec(buffer_len, mamba_backend),
+        ["layer0"],
+        vllm_config,
+        DEVICE,
     )
 
 
@@ -254,3 +268,23 @@ def test_resumed_request_differs_from_fresh():
 
     assert meta.write_pos_d.tolist()[:2] == [5, 0]
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
+
+
+def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
+    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+        pytest.skip("FlashInfer does not expose ReplaySSM scratch allocation")
+
+    builder = _create_replayssm_builder(16, mamba_backend=MambaBackendEnum.FLASHINFER)
+    case = REPLAYSSM_BUILD_CASES["fresh_decode"]
+    meta = _build(builder, case)
+
+    assert meta.write_pos_d is None
+    assert meta.is_flush_d is None
+    assert meta.bc_pre_scratch is None
+    assert meta.replayssm_scratch is not None
+    assert [tensor.shape for tensor in meta.replayssm_scratch] == [
+        (1, 1, 32, 8),
+        (1, 1, 16),
+        (1, 1, 32, 8),
+    ]

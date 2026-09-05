@@ -36,7 +36,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.mla import MLAModules
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -63,6 +63,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
+from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -438,7 +439,7 @@ class KimiMLAAttention(nn.Module):
             topk_indices_buffer=None,
             g_proj=getattr(self, "g_proj", None),
         )
-        self.mla_attn = MultiHeadLatentAttentionWrapper(
+        self.mla_attn = KimiK3MultiHeadLatentAttentionWrapper(
             self.hidden_size,
             self.num_local_heads,
             self.scaling,

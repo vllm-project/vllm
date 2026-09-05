@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from fractions import Fraction
+from functools import cached_property
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
@@ -53,6 +54,7 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_4BIT_NC = 7
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
+    NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
 
     @property
     def is_per_token_head(self) -> bool:
@@ -87,6 +89,11 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
+    # Must precede the ``nvfp4`` prefix test below, which would otherwise match.
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        # Page size is keyed on cache_dtype_str in the MLA specs, not
+        # nvfp4_kv_cache_full_dim.
+        return KVQuantMode.NVFP4_DS_MLA
     if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
@@ -148,6 +155,11 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        """Whether this spec's group participates in prefix caching."""
+        return True
 
     @property
     def num_heads(self) -> int:
@@ -212,9 +224,10 @@ class KVCacheSpec:
         """
         Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
         """
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All layers in the same KV cache group must be the same."
-        )
+        if not all(spec == specs[0] for spec in specs[1:]):
+            raise AssertionError(
+                "All layers in the same KV cache group must be the same."
+            )
         return copy.deepcopy(specs[0])
 
     def is_uniform_with_collection(
@@ -544,7 +557,10 @@ class MLAAttentionSpec(FullAttentionSpec):
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
-    # Marks draft groups that flatten a non-causal query block into decode rows.
+    storage_block_size: int | None = None
+    """Token width used to view storage when it differs from the kernel block."""
+    # Group capability enabled when any member flattens a non-causal query block
+    # into decode rows. Runtime metadata still selects causal vs. non-causal mode.
     non_causal_multi_token_decode: bool = False
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -561,13 +577,16 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
+        storage_block_size_set = set(spec.storage_block_size for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
+            and len(storage_block_size_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, and model version."
+            "quantization method, tokens per state, model version, and storage "
+            "block size."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -581,6 +600,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
+            storage_block_size=storage_block_size_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),
@@ -742,6 +762,38 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class CircularBufferSpec(AttentionSpec):
+    """One block per request holding the raw keys of the token group that
+    is still being compressed.
+
+    ``block_size`` is the ring capacity. It must exceed the compression ratio
+    by the speculative lookahead: a speculative step stores all of its rows,
+    drafts included, before acceptance is known, while the next step still
+    reads the open group's committed keys from the ring.
+    """
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # The ring occupies one block per request for its whole lifetime.
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, CircularBufferSpec) for spec in kv_cache_specs.values()
+        )
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
     """Sliding window attention with MLA cache format."""
 
@@ -807,10 +859,32 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class KpoolTailSpec(SlidingWindowSpec):
+    """One-block circular scratch cache for a kpool indexer's raw tail."""
+
+    def max_admission_blocks_per_request(
+        self, max_in_flight_tokens: int, max_model_len: int
+    ) -> int:
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return 1
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
-    dtypes: tuple[torch.dtype]
+    dtypes: tuple[torch.dtype, ...]
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -818,6 +892,9 @@ class MambaSpec(KVCacheSpec):
     num_prefill_checkpoint_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
+    # False: the state is sharded across TP ranks (e.g. GDN). True: every TP
+    # rank holds the full state (e.g. the replicated PLE conv state).
+    tp_replicated: bool = False
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -825,6 +902,10 @@ class MambaSpec(KVCacheSpec):
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        return self.state_content_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -869,6 +950,8 @@ class MambaSpec(KVCacheSpec):
             isinstance(spec, MambaSpec)
             and spec.num_speculative_blocks == self.num_speculative_blocks
             and spec.num_prefill_checkpoint_blocks == self.num_prefill_checkpoint_blocks
+            and spec.page_size_bytes == self.page_size_bytes
+            and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )
 
@@ -960,6 +1043,15 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     kv_cache_specs: dict[str, KVCacheSpec]
 
     @property
+    def prefix_cacheable(self) -> bool:
+        return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def first_spec(self) -> KVCacheSpec:
+        """Return the first spec in the group."""
+        return next(iter(self.kv_cache_specs.values()))
+
+    @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
 
@@ -1011,8 +1103,9 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         else:
             return None
 
-    # NOTE: below util functions are only used by DeepseekV4 for now.
-    def get_num_layer_tuples(self) -> int:
+    def get_max_layers_per_page_size(self) -> int:
+        """Max number of layers sharing a page size. For a balanced bucket
+        this equals the number of repetitions of the layer pattern."""
         return Counter(
             spec.page_size_bytes for spec in self.kv_cache_specs.values()
         ).most_common(1)[0][1]
@@ -1143,6 +1236,8 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
     # Whether this group contains EAGLE/MTP draft attention layers.
     is_eagle_group: bool = False
+    # Whether this group is part of the externally transferable KV state.
+    enable_kv_transfer: bool = True
 
 
 @dataclass
@@ -1168,9 +1263,49 @@ class KVCacheConfig:
     kv_cache_layout: str | None = None
     """The KV cache layout resolved by the engine core, adopted by all workers."""
 
+    @cached_property
+    def transfer_group_ids(self) -> tuple[int, ...]:
+        """IDs of cache groups that participate in external KV transfer."""
+        return tuple(
+            group_id
+            for group_id, group in enumerate(self.kv_cache_groups)
+            if group.enable_kv_transfer
+        )
+
+    @cached_property
+    def transfer_groups(self) -> tuple[KVCacheGroupSpec, ...]:
+        """Cache groups that participate in external KV transfer."""
+        return tuple(
+            self.kv_cache_groups[group_id] for group_id in self.transfer_group_ids
+        )
+
+    @cached_property
+    def transfer_group_index_by_layer(self) -> dict[str, int]:
+        """Transfer-group tuple index for each participating layer."""
+        return {
+            layer_name: group_index
+            for group_index, group in enumerate(self.transfer_groups)
+            for layer_name in group.layer_names
+        }
+
+    def select_transfer_block_ids(
+        self, block_ids: Sequence[list[int]]
+    ) -> tuple[list[int], ...]:
+        """Select block IDs for externally transferable cache groups."""
+        if len(block_ids) != len(self.kv_cache_groups):
+            raise ValueError(
+                f"Expected {len(self.kv_cache_groups)} KV cache groups, "
+                f"got {len(block_ids)}."
+            )
+        return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
+
     @property
     def has_mamba_layers(self) -> bool:
-        return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
+        return any(
+            isinstance(spec, MambaSpec)
+            for group in self.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        )
 
     @property
     def has_mixed_precision_kv_cache(self) -> bool:

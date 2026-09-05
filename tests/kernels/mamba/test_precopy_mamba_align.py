@@ -366,7 +366,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
         input_batch=scalar_case[1],
         requests=scalar_case[2],
         forward_context={},
-        mamba_state_copy_funcs=(),
+        mamba_state_copy_funcs={},
         copy_bufs=scalar_copy_bufs,
     )
 
@@ -384,7 +384,7 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
         input_batch=fused_case[1],
         requests=fused_case[2],
         forward_context={},
-        mamba_state_copy_funcs=(),
+        mamba_state_copy_funcs={},
         copy_bufs=fused_copy_bufs,
         align_ctx=ctx,
     )

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,13 +16,16 @@ from vllm.compilation.passes.utility.fix_functionalization import (
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
+    ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
 )
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     _is_torch_equal_or_newer,
     is_torch_equal,
@@ -495,6 +499,451 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+def _mock_config_for_cudagraph_sizes(
+    max_num_seqs: int,
+    num_speculative_tokens: int,
+    max_num_batched_tokens: int,
+    compilation_config: CompilationConfig,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+) -> MagicMock:
+    """Mock VllmConfig wired up enough to run `_set_cudagraph_sizes`.
+
+    `num_speculative_tokens` and `uniform_decode_query_len` are filled in by
+    calling the real property functions, so the tests below cover the
+    derivation from `speculative_config` and not just the arithmetic
+    downstream of it.
+    """
+    config = MagicMock(spec=VllmConfig)
+    config.compilation_config = compilation_config
+    config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+    config.parallel_config = ParallelConfig()
+    config.model_config = MagicMock()
+    config.model_config.enforce_eager = False
+    config.performance_mode = None
+    config.diffusion_config = None
+    schedule = num_speculative_tokens_per_batch_size
+    config.speculative_config = (
+        SimpleNamespace(
+            num_speculative_tokens=num_speculative_tokens,
+            num_speculative_tokens_per_batch_size=schedule,
+            uses_dynamic_speculative_decoding=lambda: schedule is not None,
+        )
+        if num_speculative_tokens
+        else None
+    )
+    config.num_speculative_tokens = VllmConfig.num_speculative_tokens.fget(config)
+    config.uniform_decode_query_len = VllmConfig.uniform_decode_query_len.fget(config)
+    return config
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "num_speculative_tokens", "widest_is_captured"),
+    [
+        # No speculation: the 2x headroom under the platform ceiling, unchanged.
+        (8, 0, True),
+        (32, 0, True),
+        # Speculating, but the widest decode batch still fits under the ceiling.
+        (64, 7, True),
+        (256, 1, True),
+        # Wider decode batches must not raise the memory-safety ceiling.
+        (32, 16, False),
+        (64, 16, False),
+        # Exact H200 regressions: DFlash (2176) and suffix decoding (6400).
+        (128, 16, False),
+        (256, 24, False),
+        # Widest decode batch off the capture stride, above the ceiling.
+        (33, 16, False),
+        # ... and off the stride while below it, where the ceiling stands but
+        # the generated sizes would otherwise stop at 400.
+        (24, 16, True),
+    ],
+)
+def test_default_cudagraph_capture_size_respects_platform_ceiling(
+    max_num_seqs, num_speculative_tokens, widest_is_captured
+):
+    """Uniform decode coverage must not raise the platform default ceiling.
+
+    A decode step presents up to `max_num_seqs * (1 + num_speculative_tokens)`
+    tokens. Off-stride sizes within the platform ceiling are captured exactly.
+    Larger batches fall back to eager execution instead of expanding the
+    default capture range and risking OOM during engine initialization.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    decode_query_len = 1 + num_speculative_tokens
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    token_grid_max = min(
+        max_num_seqs * decode_query_len * 2,
+        default_max_graph_size,
+    )
+    widest_uniform_decode = max_num_seqs * decode_query_len
+    assert compilation_config.max_cudagraph_capture_size == token_grid_max
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
+    assert (
+        widest_uniform_decode in compilation_config.cudagraph_capture_sizes
+    ) is widest_is_captured
+
+
+def test_default_cudagraph_capture_sizes_keep_all_sizes_bounded():
+    """Keep both token and uniform-decode grids under the platform default.
+
+    This guards both the measured 581 versus 100 capture-count regression and
+    the graph-memory regression from capturing shapes up to 8704 tokens.
+    """
+    max_num_seqs = 512
+    decode_query_len = 17
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        default_max_graph_size = (
+            1024 if current_platform.is_device_capability_family(100) else 512
+        )
+        VllmConfig._set_cudagraph_sizes(config)
+
+    token_grid_max = min(max_num_seqs * decode_query_len * 2, default_max_graph_size)
+    token_grid = [size for size in [1, 2, 4] if size <= token_grid_max]
+    token_grid += list(range(8, min(token_grid_max + 1, 256), 8))
+    token_grid += list(range(256, token_grid_max + 1, 16))
+
+    max_request_count = min(max_num_seqs, default_max_graph_size)
+    request_counts = [count for count in [1, 2, 4] if count <= max_request_count]
+    request_counts += list(range(8, min(max_request_count + 1, 256), 8))
+    request_counts += list(range(256, max_request_count + 1, 16))
+    request_counts.append(max_request_count)
+    expected_sizes = sorted(
+        set(
+            token_grid
+            + [
+                count * decode_query_len
+                for count in request_counts
+                if count * decode_query_len <= default_max_graph_size
+            ]
+        )
+    )
+
+    assert compilation_config.cudagraph_capture_sizes == expected_sizes
+    assert all(
+        size <= default_max_graph_size
+        for size in compilation_config.cudagraph_capture_sizes
+    )
+
+
+def test_cudagraph_capture_sizes_respect_sequence_parallelism():
+    """Sequence-parallel capture sizes stay divisible by tensor parallel size."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    compilation_config.pass_config.enable_sp = True
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=32,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+    )
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=2)
+    config.update_sizes_for_sequence_parallelism = lambda sizes: (
+        VllmConfig.update_sizes_for_sequence_parallelism(config, sizes)
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    assert all(size % 2 == 0 for size in compilation_config.cudagraph_capture_sizes)
+    assert 544 not in compilation_config.cudagraph_capture_sizes
+    assert compilation_config.max_cudagraph_capture_size == 512
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+def test_real_vllm_config_caps_widest_ngram_decode_batch():
+    """Real config post-init preserves the default capture ceiling."""
+    model_config = ModelConfig(model="facebook/opt-125m")
+    speculative_config = SpeculativeConfig(
+        prompt_lookup_min=1,
+        prompt_lookup_max=1,
+        num_speculative_tokens=16,
+        method="ngram",
+    )
+    scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=32,
+        max_num_batched_tokens=32768,
+    )
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        config = VllmConfig(
+            model_config=model_config,
+            speculative_config=speculative_config,
+            scheduler_config=scheduler_config,
+            compilation_config=compilation_config,
+        )
+
+    assert 544 not in config.compilation_config.cudagraph_capture_sizes
+    assert (
+        config.compilation_config.max_cudagraph_capture_size
+        == config.compilation_config.cudagraph_capture_sizes[-1]
+        == 512
+    )
+
+
+@pytest.mark.parametrize("max_num_seqs", [8, 32, 256, 300, 512, 600, 1024, 2048])
+def test_default_cudagraph_capture_size_unchanged_without_speculation(max_num_seqs):
+    """Without speculation the default must reproduce the historical formula.
+
+    The platform ceiling bounds a request count, and without speculation a
+    request is one token, so `min(max_num_seqs, ceiling) * 1` can never lift it.
+    The result must match `min(max_num_seqs * 2, ceiling)` bit for bit.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=1_000_000,
+        compilation_config=compilation_config,
+    )
+
+    with patch.object(
+        current_platform,
+        "is_device_capability_family",
+        return_value=False,
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    assert compilation_config.max_cudagraph_capture_size == min(
+        max_num_seqs * 2,
+        default_max_graph_size,
+    )
+
+
+def test_single_speculative_token_does_not_raise_default_capture_size():
+    """One speculative token must not raise the default capture ceiling.
+
+    MTP at depth 1 gives a query length of 2, so 300 requests is a 600-token
+    decode batch against the platform's token ceiling. The widest batch falls
+    back to eager execution rather than expanding the capture range.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=300,
+        num_speculative_tokens=1,
+        max_num_batched_tokens=1_000_000,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    token_grid_max = min(300 * 2 * 2, default_max_graph_size)
+    assert compilation_config.max_cudagraph_capture_size == token_grid_max
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
+    assert 600 not in compilation_config.cudagraph_capture_sizes
+
+
+def test_default_cudagraph_capture_size_caps_tokens():
+    """The ceiling remains a platform-bounded token count.
+
+    `max_num_seqs` and speculative width must not push the default capture range
+    above the platform's memory-safety guard.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=1024,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=1_000_000,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    assert compilation_config.max_cudagraph_capture_size == default_max_graph_size
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
+    assert all(
+        size <= default_max_graph_size
+        for size in compilation_config.cudagraph_capture_sizes
+    )
+
+
+def _widest_covered_request_count(capture_sizes, query_len, max_num_seqs):
+    """Widest request count `CudaGraphManager` can build a decode graph for.
+
+    Mirrors `_init_candidates`: a capture size is rounded up to a multiple of
+    the tier's query length, then dropped once the implied request count runs
+    past `max_num_seqs`.
+    """
+    reachable = [
+        cdiv(size, query_len)
+        for size in capture_sizes
+        if cdiv(size, query_len) <= max_num_seqs
+    ]
+    return max(reachable, default=0)
+
+
+def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
+    """Each scheduled draft width needs sizes over the range it applies to.
+
+    Dynamic speculative decoding picks the width from the batch size, so
+    scaling by the widest one alone leaves the narrower tiers short: sizes
+    built from query length 17 round up to multiples of 3 that imply more
+    requests than the scheduler can run, and coverage stops at 227 of 256.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=128,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        # 16 draft tokens up to a batch of 16, then 2 out to 128. Both
+        # tier maxima fit under the 512-token default capture ceiling.
+        num_speculative_tokens_per_batch_size=[(1, 16, 16), (17, 128, 2)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    # The wide tier only ever runs to a batch of 16, the narrow one to 128.
+    assert _widest_covered_request_count(sizes, 17, 128) >= 16
+    assert _widest_covered_request_count(sizes, 3, 128) == 128
+
+
+def test_dynamic_decode_capture_clamps_configured_width():
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=16,
+        num_speculative_tokens=3,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=[(1, 16, 5)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert _widest_covered_request_count(sizes, 4, 16) == 16
+    assert 6 not in sizes
+
+
+def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=17,
+        num_speculative_tokens=4,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=[(1, 2, 4), (5, 5, 1)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert 20 in sizes
+    assert 34 in sizes
+
+
+def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
+    """Decode coverage does not override the `max_num_batched_tokens` clamp.
+
+    A batch wider than the token budget cannot be scheduled in the first place,
+    so there is no decode step of that size to capture a graph for.
+    """
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=32,
+        num_speculative_tokens=16,
+        max_num_batched_tokens=512,
+        compilation_config=compilation_config,
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    # The token budget still clamps the final capture size.
+    default_max_graph_size = (
+        1024 if current_platform.is_device_capability_family(100) else 512
+    )
+    decode_query_len = 17
+    token_grid_max = min(
+        32 * decode_query_len * 2,
+        default_max_graph_size,
+    )
+    widest_capturable_decode = min(
+        32 * decode_query_len,
+        512,
+    )
+    expected_max_size = max(token_grid_max, widest_capturable_decode)
+    assert compilation_config.max_cudagraph_capture_size == expected_max_size
+    assert (
+        compilation_config.max_cudagraph_capture_size
+        == compilation_config.cudagraph_capture_sizes[-1]
+    )
+    assert 544 not in compilation_config.cudagraph_capture_sizes
 
 
 @pytest.mark.skipif(

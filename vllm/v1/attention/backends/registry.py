@@ -77,6 +77,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
         "FlashInferMLASparseSM120Backend"
     )
+    FLASHINFER_MLA_SPARSE_SM90 = (
+        "vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm90."
+        "FlashInferMLASparseSM90Backend"
+    )
     TRITON_MLA = "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend"
     CUTLASS_MLA = "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend"
     FLASHMLA = "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend"
@@ -94,6 +98,7 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_FLASHMLA_SPARSE_DSV4 = (
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
     )
+    B12X = "vllm.v1.attention.backends.b12x.B12xPagedAttentionBackend"
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     FLASH_ATTN_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashattn_mla_sparse.FlashAttnMLASparseBackend"

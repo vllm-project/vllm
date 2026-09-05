@@ -199,6 +199,193 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         connector.connector_worker = None
 
 
+def test_register_kv_caches_scales_attention_len_to_kernel_block(monkeypatch):
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+    )
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(
+        vllm_config.cache_config.block_size
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        factor = 4
+        worker._physical_blocks_per_logical_kv_block = factor
+
+        fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        physical_page_bytes = fa_spec.page_size_bytes // factor
+        fa_cache = torch.empty(
+            kv_cache_config.num_blocks * factor,
+            physical_page_bytes,
+            dtype=torch.uint8,
+        )
+
+        worker.register_kv_caches({"model.layers.0.self_attn": fa_cache})
+
+        assert worker.block_len_per_layer == [physical_page_bytes]
+        assert worker.kv_block_len_per_layer == [physical_page_bytes]
+
+        worker.shutdown()
+        worker.shutdown = noop_shutdown
+        connector.connector_worker = None
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_uses_non_overlapping_physical_pages():
+    kv_cache_config = make_hybrid_gdn_kv_cache_config(block_size=16)
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker.shutdown = noop_shutdown
+    worker.use_mla = False
+    worker.engine = SimpleNamespace(batch_register_memory=lambda *_: 0)
+    worker.is_kv_consumer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
+    worker.kv_cache_config = kv_cache_config
+    worker._layer_specs = {
+        layer_name: group.kv_cache_spec
+        for group in kv_cache_config.kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    worker._layer_group_indices = {
+        layer_name: group_index
+        for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+        for layer_name in group.layer_names
+    }
+
+    ratio = 4
+    worker._physical_blocks_per_logical_kv_block = ratio
+    fa_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    physical_page_bytes = fa_spec.page_size_bytes // ratio
+    fa_cache = torch.empty(
+        kv_cache_config.num_blocks * ratio,
+        physical_page_bytes,
+        dtype=torch.uint8,
+    )
+    worker.register_kv_caches({"model.layers.0.self_attn": fa_cache})
+
+    local_regions = worker._get_transfer_regions(
+        worker.kv_caches_base_addr,
+        worker.block_len_per_layer,
+        worker.kv_block_len_per_layer,
+        worker.registered_layer_names,
+        worker.registered_layer_indices,
+        worker.registered_group_indices,
+    )
+    remote_base_addr = 0x100000
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=remote_base_addr,
+            block_len=physical_page_bytes,
+            kv_block_len=physical_page_bytes,
+            group_index=0,
+        )
+    ]
+
+    local_logical_block = 2
+    remote_logical_block = 5
+    transfer_id = "xfer-physical-attention-pages"
+    send_meta = SendBlockMeta(
+        p_req_id="p-physical-attention-pages",
+        transfer_id=transfer_id,
+        local_block_ids=[[local_logical_block], []],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={
+            "d-physical-attention-pages": (
+                transfer_id,
+                [[remote_logical_block], []],
+            )
+        },
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        [("d-physical-attention-pages", send_meta)],
+        xfer_meta,
+        local_regions,
+        remote_regions,
+    )
+
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [
+        fa_cache.data_ptr() + local_logical_block * ratio * physical_page_bytes
+    ]
+    assert dst_ptrs == [
+        remote_base_addr + remote_logical_block * ratio * physical_page_bytes
+    ]
+    assert lengths == [ratio * physical_page_bytes]
+
+    def split_contiguous_blocks(src_ids, dst_ids):
+        return [[block_id] for block_id in src_ids], [
+            [block_id] for block_id in dst_ids
+        ]
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+        "mooncake_connector.group_concurrent_contiguous",
+        side_effect=split_contiguous_blocks,
+    ):
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            [("d-physical-attention-pages", send_meta)],
+            xfer_meta,
+            local_regions,
+            remote_regions,
+        )
+
+    expected_src_ptrs = [
+        fa_cache.data_ptr()
+        + (local_logical_block * ratio + offset) * physical_page_bytes
+        for offset in range(ratio)
+    ]
+    expected_dst_ptrs = [
+        remote_base_addr + (remote_logical_block * ratio + offset) * physical_page_bytes
+        for offset in range(ratio)
+    ]
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == expected_src_ptrs
+    assert dst_ptrs == expected_dst_ptrs
+    assert lengths == [physical_page_bytes] * ratio
+    assert all(
+        next_ptr - ptr == physical_page_bytes
+        for ptr, next_ptr in zip(src_ptrs, src_ptrs[1:])
+    )
+    assert all(
+        next_ptr - ptr == physical_page_bytes
+        for ptr, next_ptr in zip(dst_ptrs, dst_ptrs[1:])
+    )
+
+
 def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
     monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
     vllm_config = create_vllm_config(

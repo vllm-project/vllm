@@ -171,7 +171,7 @@ _DECODE_QUERY_LEN = 3
 def _create_decode_vllm_config(
     capture_sizes: list[int],
     num_speculative_tokens: int = 0,
-    dynamic_spec_num_tokens: list[int] | None = None,
+    dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
     compilation_config = CompilationConfig(
         cudagraph_mode="FULL_AND_PIECEWISE",
@@ -185,16 +185,12 @@ def _create_decode_vllm_config(
     vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=8)
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.num_speculative_tokens = num_speculative_tokens
-    if dynamic_spec_num_tokens is None:
+    if dynamic_spec_schedule is None:
         vllm_config.speculative_config = None
     else:
         speculative_config = MagicMock()
         speculative_config.uses_dynamic_speculative_decoding.return_value = True
-        # Each entry is (range_start, range_end, num_speculative_tokens); only
-        # the third element is read by the manager.
-        speculative_config.num_speculative_tokens_per_batch_size = [
-            (0, 0, n) for n in dynamic_spec_num_tokens
-        ]
+        speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
         vllm_config.speculative_config = speculative_config
     return vllm_config
 
@@ -204,7 +200,7 @@ def _make_spec_decode_manager(
     decode_query_len: int = _DECODE_QUERY_LEN,
     capture_sizes: list[int] | None = None,
     num_speculative_tokens: int = 0,
-    dynamic_spec_num_tokens: list[int] | None = None,
+    dynamic_spec_schedule: list[tuple[int, int, int]] | None = None,
 ) -> gpu_cudagraph_utils.CudaGraphManager:
     monkeypatch.setattr(
         gpu_cudagraph_utils,
@@ -220,7 +216,7 @@ def _make_spec_decode_manager(
         vllm_config=_create_decode_vllm_config(
             capture_sizes or [1, 2, 4, 8, 16, 24],
             num_speculative_tokens=num_speculative_tokens,
-            dynamic_spec_num_tokens=dynamic_spec_num_tokens,
+            dynamic_spec_schedule=dynamic_spec_schedule,
         ),
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -343,7 +339,9 @@ def test_dynamic_spec_decode_shared_token_count_stays_reachable(monkeypatch):
         decode_query_len=4,
         capture_sizes=[2, 4, 6, 8],
         num_speculative_tokens=3,
-        dynamic_spec_num_tokens=[0, 1, 2, 3],  # -> decode_query_lens [1, 2, 3, 4]
+        # max_num_seqs is 8, and K narrows as the batch grows, so the schedule
+        # covers K 3, 2, 1 and 0, giving decode_query_lens [1, 2, 3, 4].
+        dynamic_spec_schedule=[(1, 2, 3), (3, 4, 2), (5, 6, 1), (7, 8, 0)],
     )
 
     full_descs = manager._capture_descs[CUDAGraphMode.FULL]

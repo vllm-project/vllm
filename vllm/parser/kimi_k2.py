@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.openai.engine.protocol import DeltaFunctionCall, DeltaToolCall
+from vllm.entrypoints.generate.base.protocol import DeltaFunctionCall, DeltaToolCall
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (

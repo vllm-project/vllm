@@ -150,6 +150,7 @@ pub struct HuggingFaceTokenizer {
     backend: Backend,
     special_token_ids: Arc<[u32]>,
     added_vocab: Box<[(String, u32)]>,
+    vocab_size: usize,
 }
 
 impl HuggingFaceTokenizer {
@@ -174,10 +175,13 @@ impl HuggingFaceTokenizer {
             ids.dedup();
             Arc::from(ids)
         };
+        // HF materializes the merged vocabulary to count it, so cache the result.
+        let vocab_size = tokenizer.get_vocab_size(true);
         Self {
             backend: Backend::Hf(Box::new(tokenizer)),
             special_token_ids,
             added_vocab,
+            vocab_size,
         }
     }
 
@@ -205,6 +209,7 @@ impl HuggingFaceTokenizer {
             Arc::from(ids)
         };
         let byte_level = tokenizer.decoder().is_some_and(is_byte_level_only);
+        let vocab_size = tokenizer.vocab_size();
         let backend = if byte_level {
             Backend::FastokensByteLevel(Box::new(tokenizer))
         } else {
@@ -214,6 +219,7 @@ impl HuggingFaceTokenizer {
             backend,
             special_token_ids,
             added_vocab,
+            vocab_size,
         }
     }
 
@@ -299,10 +305,7 @@ impl Tokenizer for HuggingFaceTokenizer {
     }
 
     fn vocab_size(&self) -> usize {
-        match &self.backend {
-            Backend::Hf(t) => t.get_vocab_size(true),
-            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.vocab_size(),
-        }
+        self.vocab_size
     }
 
     fn id_to_token(&self, id: u32) -> Option<String> {
@@ -549,6 +552,20 @@ mod tests {
         for fused in [false, true] {
             assert_ordinary_matches_added_empty(HuggingFaceTokenizer::new_fastokens, fused);
         }
+    }
+
+    #[test]
+    fn hf_vocab_size_counts_added_tokens() {
+        let mut tokenizer = tiny_bpe_tokenizer();
+        tokenizer.add_special_tokens(&[AddedToken::from("<|im_end|>", true)]);
+        let expected = tokenizer.get_vocab_size(true);
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        tokenizer.save(&path, false).expect("save tokenizer json");
+
+        let wrapper = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        assert_eq!(wrapper.vocab_size(), expected);
     }
 
     #[test]

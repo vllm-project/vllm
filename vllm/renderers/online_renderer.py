@@ -18,7 +18,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.parser.harmony_utils import (
     build_harmony_preamble,
     extract_instructions_from_messages,
@@ -27,6 +26,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve import create_error_response
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,

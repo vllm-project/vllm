@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.dots_tool_parser import DotsToolParser
 

@@ -29,7 +29,7 @@ use axum::body::Body;
 use axum::http::Request;
 pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
-    HttpListenerMode, TlsConfig,
+    HttpListenerMode, LoraModulePath, TlsConfig,
 };
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -86,7 +86,7 @@ fn grpc_bind_host(listener_mode: &HttpListenerMode) -> &str {
 }
 
 /// Build the shared application state for one configured model and one engine
-/// client.
+/// client, including any static LoRA adapters from `--lora-modules`.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     // If no served names are specified, fall back to the backend model path so
     // that the API always has at least one valid model ID. Use the same primary
@@ -139,7 +139,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone());
 
-    Ok(Arc::new(
+    let state = Arc::new(
         AppState::new(served_model_names, chat)
             .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
@@ -147,7 +147,31 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
             .with_profiler(config.profiler.clone()),
-    ))
+    );
+
+    // Load operator-configured static LoRA adapters before serving, failing
+    // startup on any error like Python's `init_static_loras` does.
+    load_static_loras(&state, &config.lora_modules).await?;
+
+    Ok(state)
+}
+
+async fn load_static_loras(state: &AppState, modules: &[LoraModulePath]) -> Result<()> {
+    for module in modules {
+        let request = state.load_static_lora(module).await.with_context(|| {
+            format!(
+                "failed to load LoRA adapter `{}` from --lora-modules",
+                module.name
+            )
+        })?;
+        info!(
+            lora_name = %request.lora_name,
+            lora_int_id = request.lora_int_id,
+            lora_path = %request.lora_path,
+            "loaded static LoRA adapter"
+        );
+    }
+    Ok(())
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is
@@ -182,7 +206,8 @@ where
         .transpose()
         .context("invalid TLS configuration")?;
 
-    // Also check shutdown during the (potentially long) startup handshake.
+    // Also check shutdown during the (potentially long) startup handshake and
+    // static LoRA loading.
     let state = tokio::select! {
         result = build_state(&config) => result?,
         _ = shutdown.cancelled() => return Ok(()),

@@ -43,19 +43,23 @@ def _fused_q_kv_rmsnorm_kernel(
         weight_ptr = kv_weight_ptr
         row_out = kv_out_ptr + token_idx * kv_out_stride
 
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
-
     # RMSNorm in fp32 throughout — matches csrc/layernorm_kernels.cu's
     # `(scalar_t)(x * s_variance * w)` and DeepseekV4's compressor kernel, which
     # keep x, rrms, and w all in fp32 and perform a single cast at store.
     block = tl.arange(0, BLOCK_SIZE)
     mask = block < SIZE
+    # The weight load does not depend on the producer's output, so issue it
+    # before the PDL wait: gamma streams in while the producer finishes,
+    # leaving a single dependent global round trip (x) after the wait.
+    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
+
+    if launch_pdl:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
     x = tl.load(row_in + block, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(x * x, axis=0) / SIZE
     rrms = tl.rsqrt(variance + eps)
-    w = tl.load(weight_ptr + block, mask=mask, other=0.0).to(tl.float32)
     y = x * rrms * w
     tl.store(row_out + block, y.to(row_out.dtype.element_ty), mask=mask)
 
@@ -77,8 +81,15 @@ def fused_q_kv_rmsnorm(
     q_size = qr.shape[1]
     kv_size = kv.shape[1]
     num_tokens = qr.shape[0]
-    qr_out = torch.empty_like(qr)
-    kv_out = torch.empty_like(kv)
+    # Allocate packed outputs rather than empty_like: qr/kv are typically
+    # column slices of a fused qkv_a projection, and for num_tokens == 1
+    # empty_like preserves the parent's row stride (torch keeps strides of
+    # size-1 dims), e.g. (2112, 1) for a [1, 1536] q slice. Downstream
+    # dispatchers that require packed row-major inputs (e.g. the Kimi-K3
+    # low-latency GEMM's _is_packed_row_major check) then reject the tensor
+    # and silently fall back to cuBLAS on every decode step.
+    qr_out = torch.empty(qr.shape, dtype=qr.dtype, device=qr.device)
+    kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
     if num_tokens == 0:
         return qr_out, kv_out
 
@@ -99,5 +110,8 @@ def fused_q_kv_rmsnorm(
         KV_SIZE=kv_size,
         BLOCK_SIZE=block_size,
         launch_pdl=current_platform.is_arch_support_pdl(),
+        # One vectorized 128-bit access per thread for K3/DSv4-sized rows,
+        # instead of a serial per-thread chain at the default 4 warps.
+        num_warps=8 if block_size >= 2048 else 4,
     )
     return qr_out, kv_out

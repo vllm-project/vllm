@@ -483,7 +483,7 @@ class TieringOffloadingManager(OffloadingManager):
                 job_metadata = TransferJob(
                     job_id=job_id,
                     keys=entry.keys,
-                    block_ids=np.array(entry.block_ids, dtype=np.int64),
+                    block_ids=np.array(entry.block_ids, dtype=np.int32),
                     is_promotion=True,
                     req_context=entry.req_context,
                 )
@@ -927,7 +927,26 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def shutdown(self) -> None:
-        """Shutdown all tiers and release resources."""
-        for tier in self.secondary_tiers:
-            tier.shutdown()
+        """Shut down secondary tiers before releasing primary resources.
+
+        Every secondary tier is given a shutdown attempt. If any shutdown
+        fails, preserve the primary mmap because a failed tier may still use it.
+        """
+        shutdown_error: Exception | None = None
+        for tier_idx, tier in enumerate(self.secondary_tiers):
+            try:
+                tier.shutdown()
+            except Exception as exc:
+                shutdown_error = exc
+                logger.exception(
+                    "Failed to shut down secondary tier #%d "
+                    "(tier_type=%s, impl_class=%s)",
+                    tier_idx,
+                    tier.tier_type,
+                    type(tier).__name__,
+                )
+
+        if shutdown_error is not None:
+            raise shutdown_error
+
         self.primary_tier.shutdown()

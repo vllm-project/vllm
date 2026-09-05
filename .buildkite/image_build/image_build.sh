@@ -160,6 +160,42 @@ print_bake_config() {
     (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
 }
 
+record_buildkit_trace() (
+    local metadata_file="$1"
+    local helper=".buildkite/scripts/ci-otel/ci_otel.py"
+    local trace_file="${BUILD_TMP_DIR}/buildkit-trace.json"
+    local build_ref record_id
+
+    if [[ "${BUILDKITE:-}" != "true" || ! -f "${helper}" ]] ||
+        ! command -v timeout >/dev/null 2>&1 ||
+        ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    build_ref="$(timeout 3s python3 "${helper}" build-ref "${metadata_file}" "${TARGET}" 2>/dev/null)" || {
+        echo "vLLM CI OTel: BuildKit metadata unavailable; trace skipped" >&2
+        return 0
+    }
+    record_id="${build_ref##*/}"
+    if [[ -z "${record_id}" ]]; then
+        return 0
+    fi
+
+    echo "--- :mag: Recording BuildKit trace"
+    if ! timeout 20s docker buildx history trace "${record_id}" >"${trace_file}"; then
+        echo "vLLM CI OTel: BuildKit history trace unavailable; upload skipped" >&2
+        return 0
+    fi
+
+    export CI_INFRA_BUILDX_REF="${build_ref}"
+    export CI_INFRA_OTEL_SPOOL_DIR="${BUILD_TMP_DIR}/otel-spans"
+    timeout 5s python3 "${helper}" record-buildkit "${trace_file}" || {
+        echo "vLLM CI OTel: BuildKit trace conversion skipped" >&2
+        return 0
+    }
+    timeout 5s python3 "${helper}" flush ||
+        echo "vLLM CI OTel: BuildKit trace upload skipped" >&2
+)
+
 #################################
 #         Main Script           #
 #################################
@@ -269,7 +305,18 @@ export PARENT_COMMIT
 print_bake_config
 
 echo "--- :docker: Building ${TARGET}"
-docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
+BUILD_TMP_DIR="$(mktemp -d)"
+trap 'rm -rf -- "${BUILD_TMP_DIR}"' EXIT
+BUILD_METADATA_FILE="${BUILD_TMP_DIR}/build-metadata.json"
+BUILD_STATUS=0
+docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" \
+    --progress plain --metadata-file "${BUILD_METADATA_FILE}" "${TARGET}" || BUILD_STATUS=$?
+
+record_buildkit_trace "${BUILD_METADATA_FILE}" || true
+
+if [[ "${BUILD_STATUS}" -ne 0 ]]; then
+    exit "${BUILD_STATUS}"
+fi
 
 echo "--- :white_check_mark: Build complete"
 

@@ -9,6 +9,8 @@ use winnow::stream::{FindSlice, Offset, Partial, Stream};
 
 use crate::tool::{Result, ToolParserError};
 
+pub(crate) mod recursion;
+
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
 ///

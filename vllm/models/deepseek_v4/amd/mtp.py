@@ -335,11 +335,10 @@ class DeepSeekV4MTP(nn.Module):
         loaded_params: set[str] = set()
 
         def _resolve_scale_name(name: str) -> str:
-            # Quark checkpoints name FP8 block scales ``.weight_scale``,
-            # but block-FP8 layers register them as ``.weight_scale_inv``
-            # while MXFP4 experts register ``.weight_scale``. Auto-detect:
-            # rename to ``_inv`` only when that variant exists and the plain
-            # one does not.
+            # Quark checkpoints and QuarkW8A8Fp8PerBlock use ``.weight_scale``.
+            # Native block-FP8 layers register ``.weight_scale_inv``. Rename
+            # to ``_inv`` only when that variant exists and the plain one
+            # does not.
             if name.endswith(".weight_scale") and name not in params_dict:
                 inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
                 if inv in params_dict:

@@ -215,7 +215,10 @@ class EncoderRunner:
             num_computed_tokens = num_computed_tokens + draft_lookahead
 
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens,
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
 
         # Whether to gather media embeddings this step.
