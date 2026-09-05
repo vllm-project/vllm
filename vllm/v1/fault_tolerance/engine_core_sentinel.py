@@ -5,7 +5,7 @@
 import json
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 import time
 
 import msgspec
@@ -26,6 +26,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.engine.core import EngineCoreProc
 
 logger = init_logger(__name__)
@@ -86,33 +87,23 @@ class EngineCoreSentinel:
         )
 
         engine = self.engine
+        scheduler = cast(Scheduler, engine.scheduler)
         ft_config = self.parallel_config.fault_tolerance_config
-        skipped_reqs = list(engine.scheduler.skipped_waiting)
-        if skipped_reqs:
-            skipped_req_ids = [req.request_id for req in skipped_reqs]
-            aborted = engine.scheduler.finish_requests(
-                skipped_req_ids, RequestStatus.FINISHED_ABORTED
-            )
-            for req in aborted:
-                engine.scheduler._free_request_blocks(req)
-                engine.scheduler.requests.pop(req.request_id, None)
-            engine._send_abort_outputs(aborted)
+        #self._clear_contaminated_blocks()
 
         if ft_config.resume_requests_after_recovery:
             timestamp = time.monotonic()
-            while engine.scheduler.running:
-                request = engine.scheduler.running.pop()
-                engine.scheduler._preempt_request(request, timestamp)
-                request.num_stale_output_tokens = 0
+            while scheduler.running:
+                request = scheduler.running.pop()
+                scheduler._preempt_request(request, timestamp)
                 request.num_in_flight_tokens = 0
-            engine.scheduler.prev_step_scheduled_req_ids.clear()
+                request.num_stale_output_tokens = 0
+            scheduler.prev_step_scheduled_req_ids.clear()
         else:
-            aborted = engine.scheduler.finish_requests(
-                None, RequestStatus.FINISHED_ABORTED
-            )
+            aborted = scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
             engine._send_abort_outputs(aborted)
-        if engine.batch_queue is not None:
-            engine.batch_queue.clear()
+
+        self._clean_batch_queue()
         if (
             hasattr(engine.model_executor, "is_failed")
             and engine.model_executor.is_failed
@@ -128,6 +119,66 @@ class EngineCoreSentinel:
             exc_info=exc,
         )
         self._push_status()
+
+    def _clean_batch_queue(self) -> None:
+        """Drain the batch queue instead of clearing it directly.
+
+        The pending futures may hold kv_connector_output that must be
+        consumed (worker-side connectors use get-and-clear semantics),
+        otherwise KV transfer progress would be lost.
+        Note: we don't call scheduler.update_from_output() here; we only
+        update the KV transfer state via the kv_connector_output.
+        """
+        engine = self.engine
+        if engine.batch_queue is None:
+            return
+        scheduler = cast(Scheduler, engine.scheduler)
+
+        while engine.batch_queue:
+            future, _, _ = engine.batch_queue.pop()
+            try:
+                model_output = future.result()
+            except Exception as e:
+                # Failed step: kv_connector_output has already been merged
+                # into the executor's KVOutputAggregator (in get_response),
+                # so it is safe to drop the exception here.
+                logger.warning(
+                    "[FT] Dropping exception from batch queue during fault "
+                    "handling: %s",
+                    e,
+                )
+                continue
+            if model_output is not None:
+                scheduler.ft_update_kv_xfer_finished(
+                    model_output.kv_connector_output
+                )
+
+    def _clear_contaminated_blocks(self) -> None:
+        """Evict KV blocks possibly contaminated by the failed step."""
+
+        scheduler = cast(Scheduler, self.engine.scheduler)
+        kv_cache_manager = scheduler.kv_cache_manager
+        dirty_block_ids: set[int] = set()
+
+        for request in scheduler.running:
+            num_written = request.num_in_flight_tokens
+            if num_written <= 0:
+                continue
+            start = max(request.num_computed_tokens - num_written, 0)
+            end = request.num_computed_tokens - 1
+
+            for mgr in kv_cache_manager.coordinator.single_type_managers:
+                blocks = mgr.req_to_blocks.get(request.request_id)
+                if not blocks:
+                    continue
+                blk_start = start // mgr.block_size
+                blk_end = end // mgr.block_size
+                for blk in blocks[blk_start : blk_end + 1]:
+                    if not blk.is_null:
+                        dirty_block_ids.add(blk.block_id)
+
+        if dirty_block_ids:
+            kv_cache_manager.evict_blocks(dirty_block_ids)
 
     def _push_status(self):
         """Push current health to the client so it can refresh its cache."""

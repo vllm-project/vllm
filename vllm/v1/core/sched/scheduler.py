@@ -2740,6 +2740,20 @@ class Scheduler(SchedulerInterface):
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
 
+    def ft_update_kv_xfer_finished(
+        self, kv_connector_output: KVConnectorOutput | None
+    ) -> None:
+        """Fault tolerance: update KV transfer state from kv_connector_output.
+
+        Unlike update_from_output(), this only updates the KV transfer state
+        (e.g. frees blocks of finished-sending requests, marks requests whose
+        KV has been fully received), without consuming other fields of the
+        model runner output.
+        """
+        if kv_connector_output is None:
+            return
+        self._update_from_kv_xfer_finished(kv_connector_output)
+
     def _update_requests_with_invalid_blocks(
         self,
         requests: Iterable[Request],
