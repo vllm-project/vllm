@@ -30,6 +30,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import PriorityRequestQueue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
@@ -6339,3 +6340,113 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+def test_priority_scheduling_preemption_victim_least_preempted():
+    """Test that under KV block pressure, the scheduler selects the
+    least preempted running request as victim, and that preempted requests
+    make forward progress upon re-admission.
+    """
+    block_size = 16
+    num_blocks = 6
+    num_tokens = block_size * 2
+
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    requests = create_requests_with_priority(
+        num_requests=2,
+        priorities=[1, 1],
+        arrival_times=[1.0, 2.0],
+        num_tokens=num_tokens,
+        req_ids=["r1", "r2"],
+    )
+    r1, r2 = requests[0], requests[1]
+
+    r1.num_preemptions = 1
+    r2.num_preemptions = 0
+
+    scheduler.add_request(r1)
+    scheduler.add_request(r2)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+    assert len(scheduler.running) == 2
+
+    # Decode step: both generate a token -> both now have 33 tokens (needs 3rd block)
+    model_output = ModelRunnerOutput(
+        req_ids=["r1", "r2"],
+        req_id_to_index={"r1": 0, "r2": 1},
+        sampled_token_ids=[[100], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # 2nd schedule
+    output = scheduler.schedule()
+
+    assert scheduler.requests["r2"].status == RequestStatus.PREEMPTED, (
+        "'r2' (0 preemptions) to be chosen as victim"
+    )
+    assert any(r.request_id == "r1" for r in scheduler.running), (
+        "'r1' (1 preemption) should be protected and continue running"
+    )
+    assert scheduler.requests["r2"].num_preemptions == 1
+
+    scheduler.finish_requests("r1", RequestStatus.FINISHED_STOPPED)
+
+    # 3rd schedule: r2 should be re-admitted and continue decoding
+    output = scheduler.schedule()
+    assert scheduler.requests["r2"].status == RequestStatus.RUNNING
+    assert any(r.request_id == "r2" for r in scheduler.running)
+
+
+def test_priority_queue_preemption_readmission_order():
+    """Test that PriorityRequestQueue pops preempted requests before fresh requests
+    of the same priority, and respects the cap of 3."""
+
+    queue = PriorityRequestQueue()
+
+    req_fresh = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        req_ids=["fresh"],
+    )[0]
+
+    req_preempted = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[10.0],
+        req_ids=["preempted"],
+    )[0]
+    req_preempted.num_preemptions = 1
+    req_preempted.status = RequestStatus.PREEMPTED
+
+    queue.add_request(req_fresh)
+    queue.prepend_request(req_preempted)
+
+    assert queue.pop_request().request_id == "preempted"
+    assert queue.pop_request().request_id == "fresh"
+
+
+def test_priority_queue_starvation_cap():
+    """Verify that the preemption sort key boost is capped at 3."""
+    req_3 = create_requests_with_priority(
+        num_requests=1, priorities=[5], req_ids=["r3"]
+    )[0]
+    req_3.num_preemptions = 3
+
+    req_10 = create_requests_with_priority(
+        num_requests=1, priorities=[5], req_ids=["r10"]
+    )[0]
+    req_10.num_preemptions = 10
+
+    assert req_3.sort_key[1] == -3
+    assert req_10.sort_key[1] == -3
