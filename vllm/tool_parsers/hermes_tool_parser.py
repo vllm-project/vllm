@@ -138,6 +138,25 @@ class Hermes2ProToolParser(ToolParser):
             return content
         return None
 
+    @staticmethod
+    def _find_end_token_outside_string(text: str, end_token: str, start: int) -> int:
+        """Return the next end_token outside a JSON string."""
+        in_string = False
+        escaped = False
+
+        for i in range(start, len(text)):
+            char = text[i]
+            if escaped:
+                escaped = False
+            elif in_string and char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = not in_string
+            elif not in_string and text.startswith(end_token, i):
+                return i
+
+        return -1
+
     def _extract_tool_call_jsons(self, text: str) -> list[tuple[str, bool]]:
         """Extract (json_text, is_complete) for each <tool_call> region."""
         results: list[tuple[str, bool]] = []
@@ -147,7 +166,9 @@ class Hermes2ProToolParser(ToolParser):
             if start == -1:
                 break
             json_start = start + len(self.tool_call_start_token)
-            json_end = text.find(self.tool_call_end_token, json_start)
+            json_end = self._find_end_token_outside_string(
+                text, self.tool_call_end_token, json_start
+            )
             if json_end != -1:
                 results.append((text[json_start:json_end].strip(), True))
                 pos = json_end + len(self.tool_call_end_token)
