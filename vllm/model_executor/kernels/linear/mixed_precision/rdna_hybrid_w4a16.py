@@ -77,7 +77,7 @@ def _triton_w4a16_skinny_fmt_kernel(
     a_ptr,  # [M, K]  fp16/bf16 activations
     b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
     scales_ptr,  # [N, K//G]  fp16/bf16 scales (skinny layout)
-    zp_ptr,  # [N, K//G]  fp16/bf16 raw zero-points (when HAS_ZP=True)
+    zp_ptr,  # [N//8, K//G]  int32 zero-points (when HAS_ZP=True)
     c_ptr,  # [M, N]  fp16/bf16 output
     # Dimensions
     M,
@@ -103,8 +103,9 @@ def _triton_w4a16_skinny_fmt_kernel(
                | (val[1]<<16) | (val[3]<<20) | (val[5]<<24) | (val[7]<<28)
 
     Scales are [N, K//G] (skinny layout, NOT transposed).
-    When HAS_ZP=True, raw zero-points zp_raw are loaded from zp_ptr [N, K//G]
-    and subtracted directly: (nibble - zp_raw) * scale.
+    When HAS_ZP=True, zp_ptr holds [N//8, K//G] int32 with row n's raw
+    zero-point at word[n//8] bits 4*(n%8), and dequant is
+    (nibble - zp_raw) * scale.
     When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
     """
     pid_m = tl.program_id(0)
@@ -148,9 +149,10 @@ def _triton_w4a16_skinny_fmt_kernel(
         scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         if HAS_ZP:
-            zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
-            zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
-            b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+            zp_ptrs = zp_ptr + (offs_n // 8) * num_groups + g_idx
+            zp_word = tl.load(zp_ptrs, mask=scale_mask, other=0)
+            zp_raw = (zp_word >> (4 * (offs_n % 8))) & 0xF
+            b_fp = (b - zp_raw[:, None]).to(scales.dtype) * scales[:, None]
         else:
             b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
 
@@ -192,7 +194,7 @@ def triton_w4a16_skinny_fmt_gemm(
     scales: torch.Tensor,  # [N, K//G] fp16/bf16
     group_size: int,
     zp_bias: int = 8,
-    zp: torch.Tensor | None = None,  # [N, K//G] per-group zero-points
+    zp: torch.Tensor | None = None,  # [N//8, K//G] int32 zero-points
 ) -> torch.Tensor:
     """
     Fused W4A16 GEMM reading from skinny weight format [N, K//8].
@@ -203,8 +205,8 @@ def triton_w4a16_skinny_fmt_gemm(
         scales:     Per-group scales [N, K//G], same dtype as a.
         group_size: Quantization group size (resolved from -1 to K by caller).
         zp_bias:    Constant zero bias (default 8 for unsigned int4).
-        zp:         Raw per-group zero-points [N, K//G] (asymmetric),
-                    stored as zp_raw in activation dtype. When provided,
+        zp:         Raw per-group zero-points [N//8, K//G] int32, row n at
+                    word[n//8] bits 4*(n%8) (asymmetric). When provided,
                     dequant is (nibble - zp_raw) * scale.
 
     Returns:
@@ -225,8 +227,9 @@ def triton_w4a16_skinny_fmt_gemm(
     )
     if zp is not None:
         assert zp.is_contiguous(), "Zero-points must be contiguous"
-        assert zp.shape == (N, num_groups), (
-            f"zp shape mismatch: {zp.shape} vs ({N}, {num_groups})"
+        assert N % 8 == 0, f"N must be divisible by 8 for packed zp, got {N}"
+        assert zp.shape == (N // 8, num_groups), (
+            f"zp shape mismatch: {zp.shape} vs ({N // 8}, {num_groups})"
         )
     has_zp = zp is not None
 
@@ -381,7 +384,10 @@ def _rdna_hybrid_w4a16_apply_impl(
     cu_count: int,
     group_size: int,
 ) -> torch.Tensor:
-    """Dispatch between skinny GEMM and Triton based on batch size M."""
+    """Dispatch between skinny GEMM and Triton based on batch size M.
+
+    ``w_zp`` is [N//8, K//G] int32 for asymmetric layers, None for symmetric.
+    """
     import vllm._custom_ops as ops
 
     M = x_2d.shape[0]
@@ -523,10 +529,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             assert self.w_zp_name is not None
             w_zp_raw = getattr(layer, self.w_zp_name)
             permute_param_layout_(w_zp_raw, input_dim=1, output_dim=0, packed_dim=0)
-            zp_unpacked = unpack_quantized_values_into_int32(
-                w_zp_raw.data, c.weight_type, packed_dim=0
-            )
-            w_zp = zp_unpacked.to(c.act_type).contiguous()
+            w_zp = w_zp_raw.data.contiguous()
             self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
