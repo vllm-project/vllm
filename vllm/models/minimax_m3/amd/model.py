@@ -334,6 +334,7 @@ class MiniMaxM3MoE(nn.Module):
         config: PretrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -455,6 +456,7 @@ class MiniMaxM3MoE(nn.Module):
             ),
             fuse_shared_experts=self.is_fused_shared_expert_enabled,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.experts",
         )
 
@@ -1074,20 +1076,29 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 class MiniMaxM3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        *,
+        vllm_config: VllmConfig,
         prefix: str,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         force_sparse_attn: bool = False,
         force_moe: bool = False,
+        is_mtp_block: bool = False,
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        if is_mtp_block:
+            assert vllm_config.speculative_config is not None
+            config = vllm_config.speculative_config.draft_model_config.hf_config
+        else:
+            config = vllm_config.model_config.hf_text_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.hidden_size = config.hidden_size
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_id = int(prefix.split(sep=".")[-1])
         self.layer_id = layer_id
+
+        self.fuse_input_allreduce = False
 
         is_sparse_attention_layer = (
             force_sparse_attn or layer_id in _sparse_attention_layer_ids(config)
@@ -1113,12 +1124,18 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Dense layers store the FFN under `mlp`; MoE layers under
         # `block_sparse_moe` -- matching the checkpoint's naming.
+        # MTP consumes the output directly and pipeline stages cannot defer a
+        # collective across their boundary, so those paths keep the reduction.
+        reduce_results = (
+            is_mtp_block or vllm_config.parallel_config.pipeline_parallel_size > 1
+        )
         self.is_moe_layer = force_moe or _is_moe_layer(config, layer_id)
         if self.is_moe_layer:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
+                reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         else:
@@ -1126,6 +1143,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 config=config,
                 intermediate_size=config.dense_intermediate_size,
                 quant_config=quant_config,
+                reduce_results=reduce_results,
                 prefix=f"{prefix}.mlp",
             )
 
@@ -1142,13 +1160,24 @@ class MiniMaxM3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        capture_aux: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        if self.fuse_input_allreduce and residual is not None:
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        aux_hidden_state = residual.clone() if capture_aux else None
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -1159,7 +1188,26 @@ class MiniMaxM3DecoderLayer(nn.Module):
         )
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
+        if aux_hidden_state is not None:
+            return hidden_states, residual, aux_hidden_state
         return hidden_states, residual
+
+    @property
+    def ffn_all_reduce_deferred(self) -> bool:
+        """Whether this layer leaves its FFN output TP-partial."""
+        if self.is_moe_layer:
+            return self.block_sparse_moe.experts.moe_config.skip_final_all_reduce
+        return not self.mlp.down_proj.reduce_results
+
+
+def _configure_cross_layer_allreduce(
+    layers: nn.ModuleList, start_layer: int, end_layer: int
+) -> bool:
+    prev_defers = False
+    for idx, layer in enumerate(layers[start_layer:end_layer]):
+        layer.fuse_input_allreduce = idx > 0 and prev_defers
+        prev_defers = layer.ffn_all_reduce_deferred
+    return prev_defers
 
 
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
@@ -1169,7 +1217,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
 
@@ -1204,10 +1251,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniMaxM3DecoderLayer(
-                config,
-                prefix,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
+                prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
@@ -1224,6 +1269,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
+        )
+
+        # Pair each deferred FFN reduction with the next local RMSNorm.
+        self.fuse_final_norm_allreduce = _configure_cross_layer_allreduce(
+            self.layers, self.start_layer, self.end_layer
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1247,20 +1297,31 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        # EAGLE3 is not yet compatible with pipeline parallel
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            hidden_states, residual = layer(positions, hidden_states, residual)
-            self._maybe_add_hidden_state(
-                aux_hidden_states, idx + 1, hidden_states, residual
-            )
+        aux_hidden_states: list[torch.Tensor] = []
+        for idx in range(self.start_layer, self.end_layer):
+            layer = self.layers[idx]
+            if idx in self.aux_hidden_state_layers:
+                hidden_states, residual, aux_hidden_state = layer(
+                    positions, hidden_states, residual, capture_aux=True
+                )
+                aux_hidden_states.append(aux_hidden_state)
+            else:
+                hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.fuse_final_norm_allreduce:
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, residual = self.norm(hidden_states, residual)
+
+        if self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(residual.clone())
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

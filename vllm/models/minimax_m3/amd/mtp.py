@@ -59,7 +59,6 @@ class MiniMaxM3MultiTokenPredictorLayer(nn.Module):
 
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.enorm = MiniMAXGemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -72,12 +71,11 @@ class MiniMaxM3MultiTokenPredictorLayer(nn.Module):
             prefix=f"{prefix}.eh_proj",
         )
         self.transformer_layer = MiniMaxM3DecoderLayer(
-            config=config,
+            vllm_config=vllm_config,
             prefix=prefix,
-            cache_config=cache_config,
-            quant_config=quant_config,
             force_sparse_attn=True,
             force_moe=True,
+            is_mtp_block=True,
         )
         self.final_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps

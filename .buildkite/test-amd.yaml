@@ -123,9 +123,10 @@ steps:
   - tests/models/test_utils.py
   - tests/models/test_vision.py
   - tests/models/test_adapters.py
+  - tests/models/test_minimax_m3_amd_deferred_allreduce.py
   - tests/models/transformers/fusers/
   commands:
-  - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
+  - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/test_minimax_m3_amd_deferred_allreduce.py models/transformers/fusers/
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
   timeout_in_minutes: 90
