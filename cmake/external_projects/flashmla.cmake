@@ -186,6 +186,15 @@ if(FLASH_MLA_ARCHS)
     if(VLLM_GPU_LANG STREQUAL "CUDA")
         target_compile_definitions(_flashmla_extension_C PRIVATE USE_CUDA)
     endif()
+
+    # FlashMLA's sources use M_LOG2E from <cmath>. MSVC's UCRT only defines the
+    # M_* constants when _USE_MATH_DEFINES is set before <cmath> is first
+    # included, so define it for both targets on MSVC. Scoped to MSVC so the
+    # compile flags (and build caches) on other platforms stay unchanged.
+    if(MSVC)
+        target_compile_definitions(_flashmla_C PRIVATE _USE_MATH_DEFINES)
+        target_compile_definitions(_flashmla_extension_C PRIVATE _USE_MATH_DEFINES)
+    endif()
 else()
     message(STATUS "FlashMLA will not compile: unsupported CUDA architecture ${CUDA_ARCHS}")
     # Create empty targets for setup.py on unsupported systems
