@@ -46,6 +46,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HYV3Config": "vllm.transformers_utils.configs.hy_v3",
     "HYV4Config": "vllm.transformers_utils.configs.hy_v4",
     "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
+    "Spark3Config": "vllm.transformers_utils.configs.spark3",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
@@ -181,6 +182,7 @@ __all__ = [
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
     "Step3p5Config",
+    "Spark3Config",
     "QianfanOCRConfig",
     "QianfanOCRVisionConfig",
     "Qwen3ASRConfig",
