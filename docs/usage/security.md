@@ -584,11 +584,23 @@ Scope the salt to the isolation boundary you need:
 - **Per-group sharing**: A shared random salt for users who are allowed to benefit from each other's cached prefixes, such as users within the same organization.
 - **No salt**: Omitting `cache_salt` preserves the default behavior where all requests can share cached prefixes. This is appropriate for single-tenant deployments or when prefix privacy is not a concern.
 
+### Where the salt must come from
+
+Derive the salt in a trusted component, not in the client. `cache_salt` is an ordinary request-body field, so in a self-hosted deployment the caller can set it to any value, including another tenant's. Entropy does not help against this: an adversary who supplies a known salt is not guessing it.
+
+A gateway or proxy that terminates tenant identity should derive the salt from the authenticated principal (for example `HMAC(K, principal_id)` with a server-held `K`) and discard any client-supplied `cache_salt` rather than honoring or merging it. A salt the caller controls is not an isolation boundary regardless of its length.
+
+### Verifying isolation
+
+A misconfigured salt is hard to notice from latency alone, because a cross-tenant cache hit and a same-tenant cache hit are indistinguishable by TTFT. Check the server's own counters instead: `vllm:prefix_cache_queries` and `vllm:prefix_cache_hits` report tokens queried against and served from the prefix cache.
+
+When testing an isolation boundary, assert both directions: two requests with *different* salts must not raise the hit counter, and two requests with the *same* salt must. Asserting only the first passes even when prefix caching is disabled entirely, or when the salt reaches nothing and no request ever hits.
+
 ### Recommendations
 
-- **Multi-tenant deployments**: Set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce.
+- **Multi-tenant deployments**: Have the serving layer set `cache_salt` on every request, using a secret scoped to the tenant boundary you want to enforce. Do not rely on clients to set it.
 - **Single-tenant deployments**: Cache salting is unnecessary and can be omitted to maximize cache hit rates.
-- Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. Choose the granularity of your salt values to balance privacy against performance.
+- Salting reduces cache efficiency, since cached blocks are only reusable by requests with the same salt. The cost falls on prefixes that would otherwise have been served from another tenant's cache entry; prefixes a tenant reuses under its own salt are unaffected. As one data point, on A100-SXM4-80GB with Qwen2.5-7B-Instruct and a 2119-token shared prefix, TTFT was 32.8 ms when the prefix was already cached and 149.6 ms when it was not, a factor of about 4.6 ([measurement details](https://arxiv.org/abs/2608.09225)). Choose the granularity of your salt values to balance privacy against performance.
 
 ## Multimodal Media UUID Security
 
