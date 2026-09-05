@@ -233,10 +233,10 @@ def _dequantize_and_gather_k_kernel(
     k_cache_ptr,
     seq_lens_ptr,
     block_table_ptr,
+    block_table_stride,
     offset,
     gather_lens_ptr,
     # Constants
-    max_blocks_per_seq: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
     bf16_dim: tl.constexpr,  # 64
     scale_dim: tl.constexpr,  # 8
@@ -270,7 +270,7 @@ def _dequantize_and_gather_k_kernel(
         pos_in_block = pos % cache_block_size
 
         # Get physical block index from block table
-        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        block_table_row_ptr = block_table_ptr + batch_idx * block_table_stride
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
@@ -370,9 +370,9 @@ def dequantize_and_gather_k_cache_triton(
         k_cache,
         seq_lens,
         block_table,
+        block_table.stride(0),
         offset,
         gather_lens,
-        max_blocks_per_seq=block_table.shape[-1],
         fp8_dim=TOKEN_FP8_DIM,
         bf16_dim=TOKEN_BF16_DIM,
         scale_dim=TOKEN_SCALE_DIM,
