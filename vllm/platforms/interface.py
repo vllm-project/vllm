@@ -606,6 +606,50 @@ class Platform:
         return None
 
     @classmethod
+    def _find_kv_dtype_backend(
+        cls, vllm_config: "VllmConfig", kv_cache_dtype: str
+    ) -> "type[AttentionBackend] | None":
+        """Backend of the first non-SSM layer serving ``kv_cache_dtype``.
+
+        ``_find_non_ssm_backend`` returns whichever backend the *first* layer
+        happens to use. With ``--kv-cache-dtype-skip-layers`` that layer may be
+        an unquantized one served by a different backend, whose
+        ``customize_spec`` is a no-op for the quantized primary's packing.
+        """
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        for layer in attn_layers.values():
+            if getattr(layer, "kv_cache_dtype", None) != kv_cache_dtype:
+                continue
+            b = layer.get_attn_backend()
+            if not b.is_ssm():
+                return b
+        return None
+
+    @classmethod
+    def _has_sliding_window_layer(cls, vllm_config: "VllmConfig") -> bool:
+        """Whether any attention layer will produce a ``SlidingWindowSpec``."""
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+        return any(
+            getattr(layer, "sliding_window", None) for layer in attn_layers.values()
+        )
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         """
         Ensure block_size is compatible with the attention backend.
@@ -687,7 +731,23 @@ class Platform:
         if not model_config:
             return
 
-        def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
+        # The backend that serves the primary dtype owns the primary's packing,
+        # and it is not necessarily ``backend_cls``: with skip layers the first
+        # layer is often an unquantized one on another backend. Pricing the
+        # primary through that backend silently returns the *dense* page (e.g.
+        # 2*head_size bytes/head for TurboQuant instead of its packed slot),
+        # which oversizes the shared page and leaves it a non-multiple of the
+        # primary page -- exactly what ``unify`` cannot reconcile.
+        primary_backend = (
+            cls._find_kv_dtype_backend(vllm_config, cache_config.cache_dtype)
+            or backend_cls
+        )
+
+        def per_token_page_bytes(
+            dtype: "torch.dtype",
+            cache_dtype: str,
+            backend: "type[AttentionBackend] | None" = None,
+        ) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
             spec = FullAttentionSpec(
                 block_size=1,
@@ -697,14 +757,16 @@ class Platform:
                 kv_quant_mode=get_kv_quant_mode(cache_dtype),
             )
             # The backend owns its packing
-            return backend_cls.customize_spec(spec).page_size_bytes
+            return (backend or backend_cls).customize_spec(spec).page_size_bytes
 
         primary_dtype = (
             STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
             if cache_config.cache_dtype != "auto"
             else model_config.dtype
         )
-        primary_page = per_token_page_bytes(primary_dtype, cache_config.cache_dtype)
+        primary_page = per_token_page_bytes(
+            primary_dtype, cache_config.cache_dtype, primary_backend
+        )
 
         # Per-token page of every higher-precision padded spec sharing the pool.
         padded_pages: list[int] = []
@@ -758,8 +820,21 @@ class Platform:
         shared_page = cache_config.block_size * primary_page
         if cache_config.kv_cache_dtype_skip_layers:
             cache_config.skip_page_size_padded = shared_page
-        # To add the first/last-N sibling:
-        #   cache_config.sibling_page_size_padded = shared_page
+        # The first/last-N sibling. A *full-attention* skip layer keeps the
+        # native layout, which ``unify`` can reconcile by integer block scaling
+        # whenever the native per-token page is a multiple of the primary's
+        # (nvfp4: exactly 2x -- leave those alone). TurboQuant packs K|V into
+        # ``head_size + 6`` bytes per head, never a divisor of the native
+        # ``4 * head_size``, so its skip layers have to pad up to the shared
+        # page the way the sliding spec already does.
+        # ...but only when the specs are mixed-type and so actually reach
+        # ``unify``. An all-full-attention model takes the uniform-type path,
+        # which tolerates differing page sizes and allocates them more tightly
+        # than padding would (~2% more KV tokens on a dense TurboQuant model).
+        if largest_padded_page % primary_page and (
+            model_config.is_hybrid or cls._has_sliding_window_layer(vllm_config)
+        ):
+            cache_config.sibling_page_size_padded = shared_page
         if cache_config.mamba_page_size_padded is not None:
             cache_config.mamba_page_size_padded = shared_page
 
