@@ -103,7 +103,6 @@ class EngineCoreSentinel:
             aborted = scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
             engine._send_abort_outputs(aborted)
 
-        self._clean_batch_queue()
         if (
             hasattr(engine.model_executor, "is_failed")
             and engine.model_executor.is_failed
@@ -152,6 +151,7 @@ class EngineCoreSentinel:
                 scheduler.ft_update_kv_xfer_finished(
                     model_output.kv_connector_output
                 )
+        engine.batch_queue.clear()
 
     def _clear_contaminated_blocks(self) -> None:
         """Evict KV blocks possibly contaminated by the failed step."""
@@ -204,7 +204,7 @@ class EngineCoreSentinel:
             engine.step_counter = 0
 
         executor.collective_rpc("handle_ft_command", args=(ft_request,))
-
+        self._clean_batch_queue()
         self.status_type = EngineStatusType.HEALTHY
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
