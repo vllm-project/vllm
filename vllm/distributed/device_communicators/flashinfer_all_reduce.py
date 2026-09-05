@@ -17,7 +17,11 @@ from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
 )
-from vllm.distributed.parallel_state import _node_count, get_node_count
+from vllm.distributed.parallel_state import (
+    _node_count,
+    get_node_count,
+    in_the_same_node_as,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -39,6 +43,15 @@ try:
 except ImportError:
     pass
 
+try:
+    from flashinfer.comm.mnnvl import (
+        all_ranks_support_mnnvl,  # type: ignore[import-not-found]
+        is_mnnvl_fabric_supported,
+    )
+except (ImportError, AttributeError):
+    all_ranks_support_mnnvl = None  # type: ignore[assignment]
+    is_mnnvl_fabric_supported = None  # type: ignore[assignment]
+
 # Workspace for standalone allreduce and non-quant ar+rms fusion
 _fi_ar_workspace = None
 # Extra workspace for quant fusion patterns. This may use either the primary
@@ -46,6 +59,60 @@ _fi_ar_workspace = None
 # available on the current topology.
 _fi_ar_quant_workspace = None
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
+
+
+# Agreed per-group MNNVL capability votes, keyed by id(group). Latched so the
+# per-layer workspace retry path does not repeat NVML probes and allgathers.
+_mnnvl_supported_groups: dict[int, bool] = {}
+
+
+# TODO: remove this guard once flashinfer gates explicit backend="mnnvl" with
+# a fabric-state probe itself (its auto-path vote only checks the local
+# multicast device attribute, which cannot detect IB-only multi-node).
+def _mnnvl_group_supported(
+    world_size: int, comm_backend: Any, group: ProcessGroup
+) -> bool:
+    """Collectively probe MNNVL fabric support before workspace creation.
+
+    On multi-node groups without an NVLink fabric (e.g. IB-only), mnnvl
+    workspace creation itself hangs for ~30s and leaks GPU memory, so probe
+    before attempting it. Groups confined to one node use node-local handle
+    exchange and need no fabric. Both the node-span check and the capability
+    vote are collectives and must run on every rank of the group.
+
+    Args:
+        world_size: Number of ranks in the workspace group.
+        comm_backend: Flashinfer comm backend scoped to the workspace group.
+        group: CPU (gloo) process group the workspace is created for.
+
+    Returns:
+        Whether mnnvl workspace creation should be attempted. True when the
+        probe APIs are unavailable (older flashinfer), falling back to the
+        pre-existing attempt-and-check behavior.
+    """
+    if get_node_count() == 1:
+        # Single-node mnnvl uses NVSwitch multicast, not the NVLink fabric;
+        # the mc_ptr check after creation covers that case.
+        return True
+    if is_mnnvl_fabric_supported is None or all_ranks_support_mnnvl is None:
+        return True
+    supported = _mnnvl_supported_groups.get(id(group))
+    if supported is not None:
+        return supported
+    if all(in_the_same_node_as(group)):
+        supported = True
+    else:
+        try:
+            local_supported = bool(
+                is_mnnvl_fabric_supported(torch.accelerator.current_device_index())
+            )
+        except Exception as e:
+            logger.debug_once("MNNVL fabric probe failed: %s", e)
+            # Still join the collective vote below or other ranks deadlock.
+            local_supported = False
+        supported = all_ranks_support_mnnvl(local_supported, world_size, comm_backend)
+    _mnnvl_supported_groups[id(group)] = supported
+    return supported
 
 
 def _get_tuned_standalone_max_size(
@@ -78,6 +145,16 @@ def _create_workspace(
     comm_backend = TorchDistBackend(group=group)
     rng_state = random.getstate()
     try:
+        if backend == "mnnvl" and not _mnnvl_group_supported(
+            world_size, comm_backend, group
+        ):
+            logger.warning_once(
+                "Skipping FlashInfer MNNVL allreduce workspace creation: the "
+                "group spans multiple nodes without NVLink fabric support "
+                "(check `nvidia-smi -q | grep -i fabric`). Fused allreduce "
+                "will fall back to unfused allreduce + rmsnorm."
+            )
+            return None
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
         workspace = flashinfer_comm.create_allreduce_fusion_workspace(
             backend=backend,
@@ -315,6 +392,7 @@ def destroy_fi_ar_workspace():
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
         _fi_ar_workspace_groups.clear()
+        _mnnvl_supported_groups.clear()
 
 
 def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
