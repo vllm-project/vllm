@@ -137,3 +137,23 @@ def test_silu_mul_fp8_quant_deep_gemm_clamp(T: int, N: int, clamp_limit: float):
 
     torch.testing.assert_close(output.to(torch.float32), ref_output.to(torch.float32))
     torch.testing.assert_close(output_scales, ref_output_scales)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="ROCm does not support DeepGemm.",
+)
+def test_silu_mul_fp8_quant_deep_gemm_ue8m0_eps_floor():
+    """Regression companion to #53339: the fused kernel must floor
+    all-zero groups at 2**-33 like the decomposed reference."""
+    T, N = 128, 128 * 2
+    input = torch.zeros((T, N), dtype=torch.bfloat16, device=DEVICE)
+
+    output, output_scales = silu_mul_per_token_group_quant_fp8_colmajor(
+        input, use_ue8m0=True
+    )
+    ref_output, ref_output_scales = reference(input, True)
+
+    assert (output.to(torch.float32) == 0).all()
+    assert torch.equal(output_scales, ref_output_scales)
+    assert (output_scales == 2.0**-33).all()
