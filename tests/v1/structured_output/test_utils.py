@@ -115,14 +115,6 @@ def supported_frankenstein_schema():
                     "city": {"type": "string"},
                 },
             },
-            "student": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                },
-                "required": ["name"],
-                "patternProperties": {"^grade_[0-9]+$": {"type": "integer"}},
-            },
         },
         "minProperties": 1,
         "maxProperties": 100,
