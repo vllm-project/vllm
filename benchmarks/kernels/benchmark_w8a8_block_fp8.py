@@ -137,8 +137,8 @@ def get_configs_compute_bound():
 
 
 def get_weight_shapes(tp_size):
-    # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3.
-    # Modify them, if you tune for another different model.
+    # The lists below cover DeepSeek-V3. Append model-specific shapes after
+    # applying their tensor-parallel layout.
     # cannot TP
     total = [
         (512 + 64, 7168),
@@ -169,6 +169,9 @@ def get_weight_shapes(tp_size):
     for k_t in k_tp:
         new_t = (k_t[0], k_t[1] // tp_size)
         weight_shapes.append(new_t)
+    if tp_size == 1:
+        # Qwen3.5-0.8B GDN in_proj_ba.
+        weight_shapes.append((32, 1024))
     return weight_shapes
 
 
