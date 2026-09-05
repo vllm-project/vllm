@@ -595,6 +595,134 @@ void silu_and_mul_quant(torch::stable::Tensor& out,    // [..., d]
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
 }
 
+#ifndef USE_ROCM
+// Fused SiLU+gating + dynamic per-token FP8 quantization.
+//
+// Unlike silu_and_mul_quant (which takes a pre-computed global scale),
+// this kernel determines the quantization scale independently for each
+// token, derived from that token's own activation absmax.  This gives
+// higher accuracy for W8A8-FP8 inference where different tokens in the
+// same batch can have very different dynamic ranges — a common pattern
+// in MLP up-projection activations.
+//
+// Algorithm (two phases, one kernel launch, one block per token):
+//   Phase 1: Each thread computes silu(gate[i])*up[i] for its elements
+//            and tracks the thread-local absmax.  Warp shuffle + shared
+//            memory reduce to a single per-token absmax.
+//            scale[token] = max(absmax, eps) / fp8_max  (optionally
+//            clamped by scale_ub).
+//   Phase 2: Re-read input, recompute activation values, multiply by
+//            inv_scale, clamp and convert to FP8.
+//
+// grid  (num_tokens,)   block  min(d, 1024) threads
+template <typename scalar_t, typename fp8_type>
+__global__ void silu_and_mul_dynamic_per_token_quant_kernel(
+    fp8_type* __restrict__ out,          // [num_tokens, d]
+    float* __restrict__ scales,          // [num_tokens]
+    const scalar_t* __restrict__ input,  // [num_tokens, 2*d]
+    const float* __restrict__ scale_ub,  // optional per-batch scale cap
+    const int d) {
+  // One block per token
+  const int64_t token_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int block_size = blockDim.x;
+
+  const scalar_t* x_ptr = input + token_idx * 2 * d;  // gate half
+  const scalar_t* y_ptr = x_ptr + d;                  // up half
+  fp8_type* out_ptr = out + token_idx * d;
+
+  // ---- Phase 1: per-token absmax ----
+  float thread_absmax = 0.0f;
+  for (int i = tid; i < d; i += block_size) {
+    const float x = static_cast<float>(VLLM_LDG(&x_ptr[i]));
+    const float y = static_cast<float>(VLLM_LDG(&y_ptr[i]));
+    thread_absmax = fmaxf(thread_absmax, fabsf(silu(x) * y));
+  }
+
+  // Warp-level max via shuffle
+  float warp_absmax = warp_max(thread_absmax);
+
+  // Collect per-warp results (at most 32 warps per block of 1024)
+  __shared__ float smem[32];
+  const int lane_id = tid % WARP_SIZE;
+  const int warp_id = tid / WARP_SIZE;
+  const int num_warps = (block_size + WARP_SIZE - 1) / WARP_SIZE;
+
+  if (lane_id == 0) smem[warp_id] = warp_absmax;
+  __syncthreads();
+
+  // Cross-warp reduction + scale write (first warp only)
+  __shared__ float s_scale;
+  if (warp_id == 0) {
+    float val = (lane_id < num_warps) ? smem[lane_id] : 0.0f;
+    val = warp_max(val);
+    if (lane_id == 0) {
+      const float fp8_max = static_cast<float>(quant_type_max_v<fp8_type>);
+      // Guard against zero activations (e.g. all-zero padding tokens)
+      float scale = fmaxf(val, 1e-12f) / fp8_max;
+      if (scale_ub != nullptr) {
+        scale = fminf(scale, *scale_ub);
+      }
+      scales[token_idx] = scale;
+      s_scale = scale;
+    }
+  }
+  __syncthreads();
+
+  // ---- Phase 2: FP8 quantization ----
+  const float inv_scale = 1.0f / s_scale;
+  for (int i = tid; i < d; i += block_size) {
+    const float x = static_cast<float>(VLLM_LDG(&x_ptr[i]));
+    const float y = static_cast<float>(VLLM_LDG(&y_ptr[i]));
+    out_ptr[i] = scaled_fp8_conversion<true, fp8_type>(silu(x) * y, inv_scale);
+  }
+}
+
+void silu_and_mul_dynamic_per_token_quant(
+    torch::stable::Tensor& out,     // [num_tokens, d] FP8
+    torch::stable::Tensor& scales,  // [num_tokens] float32
+    torch::stable::Tensor& input,   // [num_tokens, 2*d] BF16/FP16
+    std::optional<torch::stable::Tensor> const& scale_ub) {
+  STD_TORCH_CHECK(
+      out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
+          out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz,
+      "Output must be FP8 (Float8_e4m3fn or Float8_e4m3fnuz)");
+  STD_TORCH_CHECK(
+      input.scalar_type() == torch::headeronly::ScalarType::Half ||
+          input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Input must be FP16 or BF16");
+  STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "Scales must be float32");
+  STD_TORCH_CHECK(input.size(-1) % 2 == 0,
+                  "Last input dim must be even (gate || up layout)");
+
+  const int d = static_cast<int>(input.size(-1) / 2);
+  const int64_t num_tokens = input.numel() / input.size(-1);
+  const float* scale_ub_ptr =
+      scale_ub.has_value() ? scale_ub->const_data_ptr<float>() : nullptr;
+
+  const dim3 grid(num_tokens);
+  const dim3 block(std::min(d, 1024));
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "silu_and_mul_dynamic_per_token_quant_kernel", [&] {
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
+            out.scalar_type(),
+            "silu_and_mul_dynamic_per_token_quant_kernel_fp8", [&] {
+              vllm::silu_and_mul_dynamic_per_token_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(out.mutable_data_ptr<fp8_t>(),
+                                               scales.mutable_data_ptr<float>(),
+                                               input.const_data_ptr<scalar_t>(),
+                                               scale_ub_ptr, d);
+            });
+      });
+}
+#endif  // !USE_ROCM
+
 void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& input,              // (E, T, 2*H)
     const torch::stable::Tensor& tokens_per_expert,  // (E)
