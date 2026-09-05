@@ -388,6 +388,20 @@ def get_num_attention_heads_from_layers(
     return heads.pop()
 
 
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Return the KV cache dtype configured by this attention group."""
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    if not attn_layers:
+        return None
+    return cast(Any, next(iter(attn_layers.values()))).kv_cache_dtype
+
+
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:

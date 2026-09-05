@@ -22,26 +22,29 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
     # Select an attention backend that supports the drafter's attention: mixing
     # a non-causal layer onto a causal-only backend would fail.
-    draft_vllm_config = replace(
-        vllm_config,
-        attention_config=replace(
-            vllm_config.attention_config,
-            use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
-            backend=speculative_config.attention_backend,
-        ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
-        ),
-    )
-    with set_model_tag("dflash_head"):
-        dflash_model = get_model(
-            vllm_config=draft_vllm_config, model_config=draft_model_config
+    # The engine resolves the physical KV-cache layout after model construction.
+    # Keep the shared CacheConfig so the draft attention implementations observe
+    # that later update, while exposing the draft-only dtype during construction.
+    cache_config = vllm_config.cache_config
+    target_cache_dtype = cache_config.cache_dtype
+    try:
+        if speculative_config.kv_cache_dtype is not None:
+            cache_config.cache_dtype = speculative_config.kv_cache_dtype
+        draft_vllm_config = replace(
+            vllm_config,
+            attention_config=replace(
+                vllm_config.attention_config,
+                use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
+                backend=speculative_config.attention_backend,
+            ),
+            cache_config=cache_config,
         )
+        with set_model_tag("dflash_head"):
+            dflash_model = get_model(
+                vllm_config=draft_vllm_config, model_config=draft_model_config
+            )
+    finally:
+        cache_config.cache_dtype = target_cache_dtype
 
     target_language_model = (
         target_model.get_language_model()
