@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable
 from itertools import product
 
@@ -191,3 +192,57 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+def _get_yarn_rope(factor: float, attention_factor: float | None):
+    rope_parameters = {
+        "rope_type": "yarn",
+        "rope_theta": 10000,
+        "factor": factor,
+        "original_max_position_embeddings": 512,
+    }
+    if attention_factor is not None:
+        rope_parameters["attention_factor"] = attention_factor
+    return get_rope(
+        head_size=64,
+        max_position=int(512 * factor),
+        is_neox_style=True,
+        rope_parameters=rope_parameters,
+        dtype=torch.float32,
+    )
+
+
+def _yarn_output_at_position_zero(rope) -> torch.Tensor:
+    # At position 0 all rotation angles are zero, so the output is `query * mscale`.
+    positions = torch.zeros(1, dtype=torch.long)
+    query = torch.ones(1, 64, dtype=torch.float32)
+    out_query, _ = rope.forward_native(positions, query)
+    return out_query
+
+
+@pytest.mark.parametrize("attention_factor", [1.0, 0.5])
+@torch.inference_mode()
+def test_yarn_explicit_attention_factor(default_vllm_config, attention_factor):
+    rope = _get_yarn_rope(factor=8.0, attention_factor=attention_factor)
+    out_query = _yarn_output_at_position_zero(rope)
+    expected = torch.full_like(out_query, attention_factor)
+    torch.testing.assert_close(
+        out_query,
+        expected,
+        atol=get_default_atol(out_query),
+        rtol=get_default_rtol(out_query),
+    )
+
+
+@torch.inference_mode()
+def test_yarn_default_mscale(default_vllm_config):
+    factor = 8.0
+    rope = _get_yarn_rope(factor=factor, attention_factor=None)
+    out_query = _yarn_output_at_position_zero(rope)
+    expected = torch.full_like(out_query, 0.1 * math.log(factor) + 1.0)
+    torch.testing.assert_close(
+        out_query,
+        expected,
+        atol=get_default_atol(out_query),
+        rtol=get_default_rtol(out_query),
+    )
