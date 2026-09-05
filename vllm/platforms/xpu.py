@@ -349,6 +349,11 @@ class XPUPlatform(Platform):
             compilation_config.inductor_compile_config.setdefault(
                 "use_static_cuda_launcher", False
             )
+            # PyTorch's Triton bundler reads this key. Keep the CUDA-era key
+            # above for compatibility with versions that still recognize it.
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_triton_launcher", False
+            )
             logger.info_once(
                 "Disabling Inductor's static Triton launcher because UVA "
                 "weight offloading is enabled."
