@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.model_executor.models.vision import FusedInputNorm
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -899,6 +900,7 @@ class Qwen4ExpForConditionalGeneration(
                     config.vision_config,
                     norm_eps=config.text_config.rms_norm_eps,
                     quant_config=quant_config,
+                    input_norm=FusedInputNorm.from_model_config(self.model_config),
                     prefix=maybe_prefix(prefix, "visual"),
                 )
 
