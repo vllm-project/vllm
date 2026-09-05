@@ -98,6 +98,7 @@ ENV UV_HTTP_TIMEOUT=500
 # Install Python dependencies
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
+ENV UV_COMPILE_BYTECODE=1
 
 # PyTorch provides its own indexes for standard and nightly builds.
 # PYTORCH_NIGHTLY=1 builds the CPU image against torch nightly (parity with the
