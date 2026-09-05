@@ -711,6 +711,127 @@ def test_async_load_reserves_blocks_for_inflight():
     assert req_b.request_id not in req_to_blocks
 
 
+def test_local_admission_respects_async_load_reservation():
+    vllm_config = create_vllm_config()
+    block_size = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    remote_req = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=block_size * 4,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    local_req = create_request(
+        request_id=2,
+        block_size=block_size,
+        num_tokens=block_size * 4,
+    )
+    scheduler.add_request(remote_req)
+    scheduler.add_request(local_req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(block_size, True), (0, False)],
+    ):
+        scheduler.schedule()
+
+    assert remote_req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert local_req.status == RequestStatus.WAITING
+
+
+def test_failed_async_load_releases_reservation():
+    """A fully-failed async load frees its blocks and must also stop reserving
+    capacity for its remaining sequence: holding nothing, it waits like any
+    other request, so a stale reservation must not starve running requests.
+
+    9 usable blocks. remote_a (4-block sequence, 2 loaded) and remote_b
+    (3-block sequence, 2 loaded) park with reservations of 2 and 1; local_req
+    holds 2 and decodes. remote_a's transfer fails entirely, so promotion
+    frees its blocks and re-admission fails (4 + 1 watermark > 9 - 4 held - 1
+    reserved). local_req's next decode block must then be gated only by
+    remote_b's reservation, not by empty-handed remote_a's."""
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    vllm_config.scheduler_config.watermark = 0.1  # 1 block
+    scheduler = create_scheduler(vllm_config, num_blocks=10)  # usable = 9
+
+    remote_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        num_remote_blocks=2,
+    )
+    remote_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 3,
+        do_remote_prefill=True,
+        num_remote_blocks=2,
+    )
+    # 2 blocks of prompt; needs a 3rd block on its 3rd decoded token.
+    local_req = create_request(
+        request_id=3,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 2 - 2,
+    )
+    for req in (remote_a, remote_b, local_req):
+        scheduler.add_request(req)
+
+    matched = {
+        remote_a.request_id: (BLOCK_SIZE * 2, True),
+        remote_b.request_id: (BLOCK_SIZE * 2, True),
+    }
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=lambda req, _: matched.pop(req.request_id, (0, False)),
+    ):
+        output = scheduler.schedule()
+        assert remote_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert remote_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert local_req.status == RequestStatus.RUNNING
+        scheduler.update_from_output(
+            output, create_model_runner_output(reqs=[local_req])
+        )
+
+        # remote_a's transfer fails entirely (first block invalid).
+        output = scheduler.schedule()
+        (remote_a_blocks,) = scheduler.kv_cache_manager.get_block_ids(
+            remote_a.request_id
+        )
+        scheduler.update_from_output(
+            output,
+            create_model_runner_output(
+                reqs=[local_req],
+                invalid_block_ids={remote_a_blocks[0]},
+                finished_recving={remote_a.request_id},
+            ),
+        )
+        assert remote_a.num_computed_tokens == 0
+
+        # Promotion frees remote_a's blocks; re-admission fails.
+        output = scheduler.schedule()
+        assert remote_a.status == RequestStatus.WAITING
+        assert remote_a not in scheduler._inflight_prefills
+        scheduler.update_from_output(
+            output, create_model_runner_output(reqs=[local_req])
+        )
+
+        # local_req needs a new block; a stale reservation from remote_a
+        # would fail this allocation and preempt local_req.
+        output = scheduler.schedule()
+
+    assert local_req.status == RequestStatus.RUNNING
+    assert local_req.request_id in output.num_scheduled_tokens
+    assert local_req.num_preemptions == 0
+    assert remote_a.status == RequestStatus.WAITING
+
+
 def test_async_loads_both_admitted_when_pool_fits():
     """Sanity: with a pool large enough, the reservation gate admits both async
     loads (it is not over-conservative)."""
