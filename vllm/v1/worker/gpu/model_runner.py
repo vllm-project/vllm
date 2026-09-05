@@ -385,6 +385,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.load_config.load_format = "dummy"
         self.eplb.prepare_load()
         eplb_models_added = False
+        set_offloader(create_offloader(self.vllm_config.offload_config))
         with DeviceMemoryProfiler() as m:
             model_loader = get_model_loader(self.vllm_config.load_config)
             logger.info_once("Loading model from scratch...")
