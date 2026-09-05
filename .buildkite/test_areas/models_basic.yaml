@@ -48,8 +48,26 @@ steps:
   - tests/models/test_terratorch.py
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
+  - tests/models/deepseek_v32/test_sequence_parallel.py
+  - tests/models/test_deepseek_v4_fi_moe_ep.py
+  - tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+  - tests/models/test_dspark_mla.py
+  - tests/models/test_language_model_cache_is_weak.py
+  - tests/models/test_qwen3_5_mtp_config.py
+  - tests/models/transformers/test_layer_registry.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+    - >-
+      pytest -v -s
+      models/test_terratorch.py
+      models/transformers/test_backend.py
+      models/test_registry.py
+      models/deepseek_v32/test_sequence_parallel.py
+      models/test_deepseek_v4_fi_moe_ep.py
+      models/test_deepseek_v4_rocm_compressor_gemm_fusion.py
+      models/test_dspark_mla.py
+      models/test_language_model_cache_is_weak.py
+      models/test_qwen3_5_mtp_config.py
+      models/transformers/test_layer_registry.py
   mirror:
     amd:
       label: ":amd: (MI300) Basic Models (Other)"

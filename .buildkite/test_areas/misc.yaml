@@ -2,6 +2,38 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
+- label: ":computer: (CPU) Platform + Tool Unit Tests"
+  key: cpu-platform-tool-unit-tests
+  depends_on:
+  - image-build-cpu
+  device: cpu-small
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - tools/pre_commit/validate_config.py
+  - vllm/distributed/
+  - vllm/platforms/cpu.py
+  - tests/distributed/test_expert_placement.py
+  - tests/distributed/test_file_store.py
+  - tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py
+  - tests/distributed/test_kv_cache_events.py
+  - tests/distributed/test_kvlayout.py
+  - tests/distributed/test_mq_connect_ip.py
+  - tests/distributed/test_pipeline_partition.py
+  - tests/platforms/test_cpu.py
+  - tests/tools/test_config_validator.py
+  commands:
+  - >-
+    pytest -v -s
+    tests/distributed/test_expert_placement.py
+    tests/distributed/test_file_store.py
+    tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py
+    tests/distributed/test_kv_cache_events.py
+    tests/distributed/test_kvlayout.py
+    tests/distributed/test_mq_connect_ip.py
+    tests/distributed/test_pipeline_partition.py
+    tests/platforms/test_cpu.py
+    tests/tools/test_config_validator.py
+
 - label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
   key: v1-sample-logits
   timeout_in_minutes: 83

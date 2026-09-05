@@ -2,6 +2,43 @@ group: Disaggregated
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (L4) EPD Correctness"
+  key: epd-correctness-4xl4
+  timeout_in_minutes: 120
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  source_file_dependencies:
+  - examples/disaggregated/disaggregated_encoder/
+  - vllm/distributed/ec_transfer/
+  - vllm/distributed/kv_transfer/
+  - tests/v1/ec_connector/integration/
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash v1/ec_connector/integration/run_epd_correctness_test.sh
+
+- label: ":nvidia: (L4) P2P KV Offload Accuracy"
+  key: p2p-kv-offload-accuracy-2xl4
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  optional: true
+  autorun_on_main: true
+  env:
+    MODEL_NAMES: "Qwen/Qwen3-0.6B"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/v1/kv_offload/tiering/
+  - tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  - tests/v1/kv_offload/tiering/p2p/
+  commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash v1/kv_offload/tiering/p2p/run_accuracy_test.sh
+
 - label: ":nvidia: (L4) Distributed NixlConnector PD accuracy"
   key: distributed-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 55

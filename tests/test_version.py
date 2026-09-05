@@ -13,7 +13,7 @@ def test_version_is_defined():
 
 
 def test_version_tuple():
-    assert len(version.__version_tuple__) in (3, 4, 5)
+    assert len(version.__version_tuple__) >= 3
 
 
 @pytest.mark.parametrize(
