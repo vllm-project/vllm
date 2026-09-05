@@ -30,6 +30,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -199,16 +200,19 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     # Indexer padding is -1, and the resolver bounds-checks it
                     # while producing topk_lens, so the separate is_valid mask
                     # is unnecessary on this path.
-                    kv_cache, global_indices, topk_lens = cast(
-                        tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                        hisparse_cache.resolve_topk(
+                    global_indices, topk_lens = cast(
+                        tuple[torch.Tensor, torch.Tensor],
+                        hisparse_cache.swap_in(
                             attn_metadata.req_id_per_token[:num_decode_tokens],
                             block_table=attn_metadata.block_table[:num_decodes],
-                            topk_indices=self.topk_indices_buffer[:num_decode_tokens],
+                            logical_topk_indices=self.topk_indices_buffer[
+                                :num_decode_tokens
+                            ],
                             block_size=block_size,
                             return_valid_counts=True,
                         ),
                     )
+                    kv_cache = hisparse_cache.runtime.hot.attention_cache
                     topk_indices = global_indices.view(num_decode_tokens, 1, -1)
                 else:
                     global_indices, topk_lens = compute_global_topk_indices_and_lens(
@@ -299,8 +303,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         # Use pre-computed prefill metadata.
         seq_lens = swa_metadata.prefill_seq_lens
+        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
+        assert seq_lens_cpu is not None
         assert gather_lens is not None
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
@@ -347,14 +353,45 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     chunk_start:chunk_end
                 ]
                 cache = compressed_k_cache
+                assert cache is not None
                 if self.hisparse_cache is not None:
-                    cache, block_table = (
-                        self.hisparse_cache.runtime.stage_prefill_cache(
-                            compressed_k_cache,
-                            block_table,
-                            seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                        )
+                    compressed_seq_lens = (
+                        seq_lens[chunk_start:chunk_end] // self.compress_ratio
                     )
+                    compressed_seq_lens_cpu = (
+                        seq_lens_cpu[chunk_start:chunk_end] // self.compress_ratio
+                    )
+                    staging_block_capacity = int(
+                        (
+                            (compressed_seq_lens_cpu + cache.shape[1] - 1)
+                            // cache.shape[1]
+                        ).sum()
+                    )
+                    plan = build_hisparse_prefill_staging_plan(
+                        block_table,
+                        compressed_seq_lens,
+                        cache.shape[1],
+                        staging_block_capacity,
+                    )
+                    hisparse_cache = self.hisparse_cache
+                    resident_cache = None
+                    if (
+                        hisparse_cache.view is not None
+                        and hisparse_cache.block_table is not None
+                    ):
+                        plan.ensure_gpu_sources(
+                            hisparse_cache.block_table[num_decodes:][
+                                chunk_start:chunk_end
+                            ],
+                            hisparse_cache.view.block_size,
+                        )
+                        resident_cache = hisparse_cache.view.cache
+                    cache = hisparse_cache.runtime.gather_prefill_cache(
+                        cache,
+                        plan,
+                        resident_cache=resident_cache,
+                    )
+                    block_table = plan.block_table
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     cache,
