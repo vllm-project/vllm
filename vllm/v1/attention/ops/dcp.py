@@ -34,13 +34,18 @@ if TYPE_CHECKING:
 # LSE/output combine
 
 
-def mask_dcp_empty_shards_(
-    lse: torch.Tensor,
+def _validate_dcp_empty_shard_args(
     seq_lens: torch.Tensor | None,
     query_start_loc: torch.Tensor | None,
-) -> None:
+) -> bool:
+    """Validate the empty-shard mask inputs.
+
+    Returns True when masking is requested, False when it is disabled. Raises on
+    an inconsistent pair. Performs no device work so it is safe to call from a
+    CUDA-graph-captured region.
+    """
     if seq_lens is None and query_start_loc is None:
-        return
+        return False
     if seq_lens is None or query_start_loc is None:
         raise ValueError("seq_lens and query_start_loc must be provided together")
     if (
@@ -49,6 +54,17 @@ def mask_dcp_empty_shards_(
         or query_start_loc.shape[0] != seq_lens.shape[0] + 1
     ):
         raise ValueError("query_start_loc must contain one boundary per sequence")
+    return True
+
+
+def mask_dcp_empty_shards_(
+    lse: torch.Tensor,
+    seq_lens: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+) -> None:
+    if not _validate_dcp_empty_shard_args(seq_lens, query_start_loc):
+        return
+    assert seq_lens is not None and query_start_loc is not None
 
     row_indices = torch.arange(
         lse.shape[0], device=lse.device, dtype=query_start_loc.dtype
@@ -442,6 +458,9 @@ def _dcp_a2a_pack_send_kernel(
     out_ptr,
     lse_ptr,
     send_ptr,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    num_seqs,
     out_stride_B,
     out_stride_H,
     out_stride_D,
@@ -455,10 +474,32 @@ def _dcp_a2a_pack_send_kernel(
     HEAD_DIM: tl.constexpr,
     H_PER_RANK: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    NUM_SEQS_POW2: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     local_head_idx = tl.program_id(1).to(tl.int64)
     d_offsets = tl.arange(0, HEAD_DIM)
+
+    # Empty-shard masking, fused in to avoid a separate per-layer pass over the
+    # LSE. Rows that belong to a request with no local KV shard, and rows past
+    # the end of the batch (CUDA-graph padding), must not contribute to the
+    # combine, which the reduction achieves by giving them an LSE of -inf.
+    row_is_empty = False
+    if HAS_MASK:
+        # searchsorted(query_start_loc[1:], batch_idx, right=True), i.e. the
+        # number of request boundaries at or below this row.
+        seq_offsets = tl.arange(0, NUM_SEQS_POW2)
+        boundaries = tl.load(
+            query_start_loc_ptr + 1 + seq_offsets,
+            mask=seq_offsets < num_seqs,
+            other=2**31 - 1,
+        )
+        seq_idx = tl.sum((boundaries <= batch_idx).to(tl.int32), axis=0)
+        seq_idx = tl.minimum(seq_idx, num_seqs - 1)
+        num_rows = tl.load(query_start_loc_ptr + num_seqs)
+        seq_len = tl.load(seq_lens_ptr + seq_idx)
+        row_is_empty = (batch_idx >= num_rows) | (seq_len == 0)
 
     for rank_idx in tl.static_range(N):
         src_head_idx = rank_idx * H_PER_RANK + local_head_idx
@@ -481,6 +522,8 @@ def _dcp_a2a_pack_send_kernel(
         lse_val = tl.load(
             lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H
         ).to(tl.float32)
+        if HAS_MASK:
+            lse_val = tl.where(row_is_empty, -float("inf"), lse_val)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + HEAD_DIM * send_stride_D,
@@ -636,12 +679,21 @@ def _dcp_a2a_pack_send(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> None:
-    mask_dcp_empty_shards_(cp_attn_lse, seq_lens, query_start_loc)
+    # The empty-shard mask is fused into the pack kernel below rather than
+    # applied as a separate pass: the mask is a pure function of seq_lens and
+    # query_start_loc, which are identical for every MLA layer in a step, while
+    # the eager form costs eight launch-bound kernels per layer.
+    has_mask = _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
+    num_seqs = seq_lens.shape[0] if has_mask and seq_lens is not None else 0
+
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
     _dcp_a2a_pack_send_kernel[grid](
         cp_attn_out,
         cp_attn_lse,
         send_buffer,
+        seq_lens,
+        query_start_loc,
+        num_seqs,
         cp_attn_out.stride(0),
         cp_attn_out.stride(1),
         cp_attn_out.stride(2),
@@ -655,6 +707,11 @@ def _dcp_a2a_pack_send(
         HEAD_DIM=head_dim,
         H_PER_RANK=h_per_rank,
         LSE_PACK_DIM=lse_pack_dim,
+        HAS_MASK=has_mask,
+        # Only the arange bound is a constexpr: num_seqs itself is a runtime
+        # argument so the kernel specializes on at most log2(max_num_seqs)
+        # variants instead of one per distinct batch size.
+        NUM_SEQS_POW2=triton.next_power_of_2(max(num_seqs, 1)),
     )
 
 
