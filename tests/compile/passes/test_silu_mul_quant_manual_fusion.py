@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fusion.fused_act_quant import (
     maybe_fused_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
+    InputQuantScales,
     QuantizedActivation,
     expose_input_quant_key,
 )
@@ -54,6 +55,11 @@ class MockLinearForFusion(torch.nn.Module):
             self.input_scale = input_scale
         if input_global_scale is not None:
             self.input_global_scale = input_global_scale
+            self.input_global_scale_inv = input_global_scale.reciprocal()
+        self._input_quant_scales = lambda layer: InputQuantScales(
+            static_scale=getattr(layer, "input_scale", None),
+            global_scale_inv=getattr(layer, "input_global_scale_inv", None),
+        )
 
 
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
@@ -206,6 +212,7 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("global_scale_value", [0.01, 2.0])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
@@ -213,7 +220,7 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
-def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
+def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype, global_scale_value: float):
     """Test kNvfp4Dynamic fusion path.
 
     Compares fused (silu_and_mul_nvfp4_quant) vs unfused (silu_and_mul)
@@ -231,7 +238,9 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
     # M (num_tokens) must be >= 128 for the 128x4 swizzled scale layout.
     num_tokens, hidden_size = 128, 256
     x = torch.rand(num_tokens, hidden_size * 2)
-    input_global_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
+    input_global_scale = torch.tensor(
+        [global_scale_value], dtype=torch.float32, device="cuda"
+    )
 
     config = VllmConfig(
         compilation_config=CompilationConfig(custom_ops=["none"]),
@@ -264,7 +273,7 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
         dequant_result = dequantize_nvfp4_to_dtype(
             tensor_fp4=result_fused.data,
             tensor_sf=result_fused.scale,
-            global_scale=input_global_scale,
+            global_scale=mock_linear_with_key.input_global_scale_inv,
             dtype=dtype,
             device="cuda",
             block_size=16,
