@@ -30,6 +30,7 @@ hybrid_ssm_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
   "VLLM_SSM_CONV_STATE_LAYOUT=DS ENFORCE_EAGER=0 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B VLLM_SERVE_EXTRA_ARGS=--spec-method,mtp,--spec-tokens,1"
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B VLLM_SERVE_EXTRA_ARGS=--kv-cache-dtype=turboquant_4bit_nc"
   # Mamba1 (Jamba)
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ai21labs/AI21-Jamba2-3B VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
@@ -61,6 +62,14 @@ run_tests() {
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
+    # turboquant kv-cache-dtype requires the dedicated TurboQuant attention
+    # backend, which is only reachable via auto-selection. Forcing a
+    # different backend (e.g. TRITON_ATTN on AMD) is an invalid combination.
+    if [[ -n "${cmdline_args:-}" && "${cfg}" == *"kv-cache-dtype=turboquant"* ]]; then
+      echo "-> Skipping ${cfg} (turboquant requires auto-selected backend, not ${label})"
+      continue
+    fi
+
     local -a cfg_parts extra_args_parts
     read -r -a cfg_parts <<< "$cfg"
     read -r -a extra_args_parts <<< "$extra_args"
