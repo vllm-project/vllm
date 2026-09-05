@@ -72,8 +72,6 @@ def test_parse_video_frame_list_as_single_video(frames):
     np.testing.assert_array_equal(video, np.stack([np.asarray(f) for f in frames]))
 
 
-
-
 @pytest.mark.parametrize(
     "modality,processor_cls",
     [
