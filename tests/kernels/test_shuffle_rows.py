@@ -165,11 +165,16 @@ def test_shuffle_rows_edge_cases():
     output = shuffle_rows(input_tensor, dst2src_map)
     torch.testing.assert_close(output, input_tensor, atol=0, rtol=0)
 
-    # Test with single feature dimension
-    input_tensor = torch.randn(16, 1, device="cuda", dtype=dtype)
+    # Test with the minimum 128-bit vector width.
+    input_tensor = torch.randn(16, 8, device="cuda", dtype=dtype)
     dst2src_map = torch.arange(16, device="cuda", dtype=torch.int32)
     output = shuffle_rows(input_tensor, dst2src_map)
     torch.testing.assert_close(output, input_tensor, atol=0, rtol=0)
+
+    # Rows narrower than the vector width are outside the kernel contract.
+    input_tensor = torch.randn(16, 1, device="cuda", dtype=dtype)
+    with pytest.raises(RuntimeError, match="num_cols must be divisible"):
+        shuffle_rows(input_tensor, dst2src_map)
 
 
 def test_shuffle_rows_moe_like_scenario():

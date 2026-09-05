@@ -14,10 +14,12 @@ steps:
   - vllm/envs.py
   - vllm/logger.py
   - vllm/logging_utils/
+  - vllm/logprobs.py
   - vllm/platforms/
   - vllm/sequence.py
   - vllm/triton_utils/
   - vllm/utils/
+  - vllm/version.py
   - tests/engine
   - tests/test_sequence
   - tests/test_config
@@ -25,8 +27,44 @@ steps:
   - tests/test_vllm_port
   - tests/jit_monitor/test_hooks.py
   - tests/jit_monitor/test_hooks_gpu.py
+  - tests/test_access_log_filter.py
+  - tests/test_attention_backend_registry.py
+  - tests/test_audio_media_size_precheck.py
+  - tests/test_cmake_utils.py
+  - tests/test_connections.py
+  - tests/test_embedded_commit.py
+  - tests/test_force_first_config.py
+  - tests/test_fxgraphcache_pickle_patch.py
+  - tests/test_logprobs.py
+  - tests/test_quantization_revision_pin.py
+  - tests/test_ray_env_utils.py
+  - tests/test_request_input_bounds.py
+  - tests/test_scalartype.py
+  - tests/test_tensorizer_revision_pin.py
+  - tests/test_triton_utils.py
+  - tests/test_version.py
+  - tests/test_zen_cpu_platform_detection.py
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
+  - >-
+    pytest -v -s
+    test_access_log_filter.py
+    test_attention_backend_registry.py
+    test_audio_media_size_precheck.py
+    test_cmake_utils.py
+    test_connections.py
+    test_embedded_commit.py
+    test_force_first_config.py
+    test_fxgraphcache_pickle_patch.py
+    test_logprobs.py
+    test_quantization_revision_pin.py
+    test_ray_env_utils.py
+    test_request_input_bounds.py
+    test_scalartype.py
+    test_tensorizer_revision_pin.py
+    test_triton_utils.py
+    test_version.py
+    test_zen_cpu_platform_detection.py
   mirror:
     amd:
       label: ":amd: (MI300) Engine Core"

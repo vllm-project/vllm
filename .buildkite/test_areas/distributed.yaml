@@ -357,3 +357,74 @@ steps:
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+
+- label: ":nvidia: (H100) Direct Context Parallelism"
+  key: distributed-direct-context-parallelism-4xh100
+  timeout_in_minutes: 60
+  device: h100
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/v1/attention/ops/
+  - tests/distributed/test_dcp_a2a.py
+  - tests/distributed/test_dcp_direct_a2a_lse_reduce.py
+  commands:
+  - pytest -v -s distributed/test_dcp_a2a.py
+  - pytest -v -s distributed/test_dcp_direct_a2a_lse_reduce.py
+
+- label: ":nvidia: (H100) Distributed MoE + Weight Transfer"
+  key: distributed-moe-weight-transfer-4xh100
+  timeout_in_minutes: 90
+  device: h100
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/models/kimi_k3/
+  - tests/distributed/test_eplb_fused_moe_layer.py
+  - tests/distributed/test_kimi_linear_context_parallel.py
+  - tests/distributed/test_split_group.py
+  - tests/distributed/test_weight_transfer_nccl_uid.py
+  commands:
+  - pytest -v -s distributed/test_eplb_fused_moe_layer.py
+  - pytest -v -s distributed/test_kimi_linear_context_parallel.py
+  - VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1 pytest -v -s distributed/test_split_group.py
+  - pytest -v -s distributed/test_weight_transfer_nccl_uid.py
+
+- label: ":nvidia: (H100) Expert Parallel Correctness"
+  key: distributed-expert-parallel-4xh100
+  timeout_in_minutes: 180
+  device: h100
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/model_executor/layers/fused_moe/
+  - tests/distributed/test_expert_parallel.py
+  commands:
+  - pytest -v -s distributed/test_expert_parallel.py
+
+- label: ":nvidia: (B200) Distributed EPLB NVFP4"
+  key: distributed-eplb-nvfp4-4xb200
+  timeout_in_minutes: 60
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  autorun_on_main: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/eplb/
+  - vllm/model_executor/layers/fused_moe/
+  - tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py
+  - tests/distributed/test_eplb_quant_scale_consistency.py
+  commands:
+  - pytest -v -s distributed/test_eplb_fused_moe_layer_dep_nvfp4.py
+  - pytest -v -s distributed/test_eplb_quant_scale_consistency.py
