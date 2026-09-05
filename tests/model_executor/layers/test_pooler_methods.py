@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
@@ -11,7 +12,7 @@ import pytest
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import PoolerConfig, set_current_vllm_config
+from vllm.config import PoolerConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.model_executor.layers.pooler.seqwise.methods import (
     CLSPool,
@@ -319,7 +320,7 @@ def test_dispatch_seq_cls_honors_token_pooling_type(tok_pooling_type):
         ),
     )
     classifier = torch.nn.Linear(4, 3)
-    with set_current_vllm_config(config):
+    with set_current_vllm_config(cast(VllmConfig, config)):
         pooler = DispatchPooler.for_seq_cls(pooler_config, classifier=classifier)
 
     token_ids = [[2, 99, 3, 99], [4, 99], [5, 6]]

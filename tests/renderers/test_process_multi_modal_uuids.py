@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from typing import cast
 
 import pytest
 
@@ -9,6 +10,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
+from vllm.inputs import MultiModalUUIDDict
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -135,7 +137,9 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    mm_uuid_items = parse_mm_uuids(mm_uuids)
+    # A per-modality value of None means "no UUIDs supplied", which
+    # _validate_mm_uuids handles explicitly but MultiModalUUIDDict cannot spell.
+    mm_uuid_items = parse_mm_uuids(cast(MultiModalUUIDDict, mm_uuids))
 
     processed_mm_uuids = renderer._process_mm_uuids(
         mm_data, mm_data_items, mm_uuid_items, "req-3"
@@ -167,7 +171,8 @@ def test_multi_modal_uuids_accepts_empty(
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    mm_uuid_items = parse_mm_uuids(mm_uuids)
+    # See above: a None value per modality is supported but untypeable.
+    mm_uuid_items = parse_mm_uuids(cast(MultiModalUUIDDict, mm_uuids))
 
     processed_mm_uuids = renderer._process_mm_uuids(
         mm_data, mm_data_items, mm_uuid_items, "req-4"
@@ -200,12 +205,18 @@ def test_multi_modal_uuids_ignored_when_caching_disabled():
     assert set(mm_uuids.keys()) == {"image", "video"}
     assert len(mm_uuids["image"]) == 2
     assert len(mm_uuids["video"]) == 1
-    assert processed_mm_uuids["image"][0].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][0].endswith("-0")
-    assert processed_mm_uuids["image"][1].startswith(
-        f"{request_id}-image-"
-    ) and processed_mm_uuids["image"][1].endswith("-1")
-    assert processed_mm_uuids["video"][0].startswith(
-        f"{request_id}-video-"
-    ) and processed_mm_uuids["video"][0].endswith("-0")
+    image_uuids = processed_mm_uuids["image"]
+    video_uuids = processed_mm_uuids["video"]
+    # Overrides built from the request id are always generated strings.
+    assert image_uuids[0] is not None
+    assert image_uuids[1] is not None
+    assert video_uuids[0] is not None
+    assert image_uuids[0].startswith(f"{request_id}-image-") and image_uuids[
+        0
+    ].endswith("-0")
+    assert image_uuids[1].startswith(f"{request_id}-image-") and image_uuids[
+        1
+    ].endswith("-1")
+    assert video_uuids[0].startswith(f"{request_id}-video-") and video_uuids[
+        0
+    ].endswith("-0")

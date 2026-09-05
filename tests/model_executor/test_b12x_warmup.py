@@ -3,6 +3,7 @@
 
 import importlib
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import torch
@@ -16,6 +17,9 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.utils.b12x import B12xWarmupUnit, b12x_warmup_token_counts
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 
 def test_b12x_warmup_token_counts_cover_serving_regimes() -> None:
@@ -202,7 +206,7 @@ def test_b12x_warmup_deduplicates_registered_signatures(monkeypatch) -> None:
         lambda: synchronized.append(True),
     )
 
-    b12x_warmup(worker, [1, 2])
+    b12x_warmup(cast("Worker", worker), [1, 2])
 
     assert scans == 1
     assert calls == [

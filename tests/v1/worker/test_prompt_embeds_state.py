@@ -10,6 +10,7 @@ mixed-mode `prompt_is_token_ids` mask (token-id rows keep the base embedding).
 """
 
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 import torch
@@ -20,6 +21,8 @@ if not torch.cuda.is_available():
         "CUDA required for prompt-embeds overlay tests", allow_module_level=True
     )
 
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.prompt_embeds import PromptEmbedsState
 
 HIDDEN = 24
@@ -40,6 +43,15 @@ class _Batch:
     num_scheduled_tokens: torch.Tensor  # np-like, only .max() is used
     idx_mapping: torch.Tensor
     query_start_loc: torch.Tensor
+
+
+def _new_req(
+    req_id: str,
+    prompt_embeds: torch.Tensor | None,
+    prompt_is_token_ids: list[bool] | None = None,
+) -> NewRequestData:
+    """`add_request` only reads these three fields off the request data."""
+    return cast(NewRequestData, _NewReqData(req_id, prompt_embeds, prompt_is_token_ids))
 
 
 def _make_state() -> PromptEmbedsState:
@@ -70,7 +82,7 @@ def _apply(
         num_computed_tokens[req_index] = num_computed[batch_idx]
     base = torch.randn(num_tokens, HIDDEN, dtype=torch.float32, device=DEVICE)
     inputs_embeds = base.clone()
-    state.apply(batch, num_computed_tokens, inputs_embeds)
+    state.apply(cast(InputBatch, batch), num_computed_tokens, inputs_embeds)
     torch.accelerator.synchronize()
     return inputs_embeds, base
 
@@ -82,9 +94,9 @@ def test_overlay_chunked_prefill_and_decode():
     state = _make_state()
     embeds_a = torch.randn(6, HIDDEN, dtype=torch.float32)
     embeds_b = torch.randn(5, HIDDEN, dtype=torch.float32)
-    state.add_request(0, _NewReqData("a", embeds_a))
-    state.add_request(1, _NewReqData("b", embeds_b))
-    state.add_request(2, _NewReqData("c", None))
+    state.add_request(0, _new_req("a", embeds_a))
+    state.add_request(1, _new_req("b", embeds_b))
+    state.add_request(2, _new_req("c", None))
     state.apply_staged_writes()
 
     # a: chunk [2, 6) of its embeds; b: fully decoded; c: no embeds.
@@ -100,7 +112,7 @@ def test_overlay_clamps_to_embeds_length():
     in-range rows (e.g. final prefill chunk + sampled token)."""
     state = _make_state()
     embeds = torch.randn(4, HIDDEN, dtype=torch.float32)
-    state.add_request(3, _NewReqData("a", embeds))
+    state.add_request(3, _new_req("a", embeds))
     state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[3], idx_mapping=[3])
@@ -116,7 +128,7 @@ def test_overlay_respects_is_token_ids_mask():
     state = _make_state()
     embeds = torch.randn(5, HIDDEN, dtype=torch.float32)
     is_token_ids = [True, False, False, True, False]
-    state.add_request(0, _NewReqData("a", embeds, is_token_ids))
+    state.add_request(0, _new_req("a", embeds, is_token_ids))
     state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[5], idx_mapping=[0])
@@ -132,14 +144,14 @@ def test_index_reuse_clears_stale_entry():
     """A request added at a previously-used index without embeds must not
     inherit the prior occupant's pointer-table entry."""
     state = _make_state()
-    state.add_request(0, _NewReqData("a", torch.randn(4, HIDDEN, dtype=torch.float32)))
+    state.add_request(0, _new_req("a", torch.randn(4, HIDDEN, dtype=torch.float32)))
     # A second live embeds request so the kernel actually launches (the
     # overlay is skipped entirely when no request holds embeds).
     other = torch.randn(2, HIDDEN, dtype=torch.float32)
-    state.add_request(1, _NewReqData("other", other))
+    state.add_request(1, _new_req("other", other))
     state.apply_staged_writes()
     state.remove_request("a")
-    state.add_request(0, _NewReqData("b", None))
+    state.add_request(0, _new_req("b", None))
     state.apply_staged_writes()
 
     batch = _batch(num_scheduled=[2, 2], idx_mapping=[0, 1])

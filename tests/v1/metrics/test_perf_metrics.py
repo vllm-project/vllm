@@ -6,6 +6,7 @@ Tests for the analytic estimators in metrics/flops.py.
 
 import types
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
@@ -16,6 +17,7 @@ from transformers.models.llama4.configuration_llama4 import (
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
+from vllm.config import VllmConfig
 from vllm.config.model import ModelConfig, get_hf_text_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -86,7 +88,7 @@ def create_mock_vllm_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     enable_expert_parallel=False,
-) -> SimpleNamespace:
+) -> VllmConfig:
     vllm_config = SimpleNamespace()
     vllm_config.model_config = MockModelConfig(hf_config, model_dtype)
 
@@ -101,7 +103,10 @@ def create_mock_vllm_config(
     vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
     vllm_config.parallel_config.enable_expert_parallel = enable_expert_parallel
 
-    return vllm_config
+    # The parsers only read the handful of fields set above, so this
+    # duck-typed namespace stands in for a real VllmConfig (constructing one
+    # would require loading an actual model).
+    return cast(VllmConfig, vllm_config)
 
 
 #### Parser Tests ####

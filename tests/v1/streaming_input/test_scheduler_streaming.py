@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from typing import TypedDict
 from unittest.mock import MagicMock
 
 import torch
@@ -27,7 +28,21 @@ from vllm.v1.structured_output import StructuredOutputManager
 STOP_TOKEN = 128001
 
 
+class CachedState(TypedDict):
+    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+
+    req_id: str
+    prompt_token_ids: list[int]
+    output_token_ids: list[int]
+    num_computed_tokens: int
+
+
 class DummyRequest(Request):
+    # Narrower than the base class: this test double always builds a request
+    # with concrete prompt token ids and sampling params, never None.
+    prompt_token_ids: list[int]
+    sampling_params: SamplingParams
+
     def __init__(
         self,
         request_id,
@@ -104,7 +119,9 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler.add_request(next_request)
 
         assert next_request.status == RequestStatus.WAITING
-        assert len(scheduler.requests["test_request"].streaming_queue) == 1
+        streaming_queue = scheduler.requests["test_request"].streaming_queue
+        assert streaming_queue is not None
+        assert len(streaming_queue) == 1
 
     def test_update_request_as_session_max_token(self):
         scheduler = create_scheduler()
@@ -124,7 +141,9 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
+        # from_request() only returns None for non-resumable requests.
         update = StreamingUpdate.from_request(new_request)
+        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         assert session.sampling_params.max_tokens == 10
@@ -143,6 +162,7 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
         update2 = StreamingUpdate.from_request(new_request2)
+        assert update2 is not None
         scheduler._update_request_as_session(session, update2)
 
         assert session.sampling_params.max_tokens == 10
@@ -165,6 +185,7 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
         update = StreamingUpdate.from_request(new_request)
+        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
@@ -200,6 +221,7 @@ class TestStreamingScheduler(unittest.TestCase):
             mm_features=[mm_feature],
         )
         update = StreamingUpdate.from_request(new_request)
+        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         assert len(session.mm_features) == 2
@@ -296,6 +318,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         update = StreamingUpdate.from_request(new_request)
+        assert update is not None
         scheduler._update_request_as_session(session, update)
 
         # _update_request_as_session keeps computed output tokens (they become
@@ -391,7 +414,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
-        cached_state_cycle1 = {
+        cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle1.prompt_token_ids
@@ -549,7 +572,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # The model runner makes a copy of prompt_token_ids when creating
         # CachedRequestState
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
-        cached_state_cycle3 = {
+        cached_state_cycle3: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
                 new_req_data_cycle3.prompt_token_ids

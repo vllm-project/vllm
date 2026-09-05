@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -68,7 +70,7 @@ def test_retie_only_when_identical(identical: bool):
 def test_quantized_lm_head_is_left_alone():
     """A quantized head may store its weights packed under another name."""
     model = UntiedModel()
-    model.lm_head.quant_method = SimpleNamespace()
+    model.lm_head.quant_method = cast(QuantizeMethodBase, SimpleNamespace())
 
     maybe_retie_word_embeddings(model, make_model_config(untied_by_checkpoint=True))
 

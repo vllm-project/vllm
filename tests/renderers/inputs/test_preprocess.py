@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
+from vllm.inputs import SingletonPrompt
 from vllm.renderers.inputs.preprocess import (
     parse_dec_only_prompt,
     parse_enc_dec_prompt,
@@ -28,8 +29,10 @@ def test_tokens_input():
 
 
 def test_text_tokens_input():
-    assert prompt_to_seq([[1, 2], "foo"]) == [[1, 2], "foo"]
-    assert prompt_to_seq(["foo", [1, 2]]) == ["foo", [1, 2]]
+    tokens_then_text: list[SingletonPrompt] = [[1, 2], "foo"]
+    text_then_tokens: list[SingletonPrompt] = ["foo", [1, 2]]
+    assert prompt_to_seq(tokens_then_text) == [[1, 2], "foo"]
+    assert prompt_to_seq(text_then_tokens) == ["foo", [1, 2]]
 
 
 def test_bytes_input():
@@ -39,9 +42,14 @@ def test_bytes_input():
 
 
 def test_dict_input():
+    one_dict: list[SingletonPrompt] = [{"prompt": "foo"}]
+    two_dicts: list[SingletonPrompt] = [
+        {"prompt": "foo"},
+        {"prompt_token_ids": [1, 2]},
+    ]
     assert prompt_to_seq({"prompt": "foo"}) == [{"prompt": "foo"}]
-    assert prompt_to_seq([{"prompt": "foo"}]) == [{"prompt": "foo"}]
-    assert prompt_to_seq([{"prompt": "foo"}, {"prompt_token_ids": [1, 2]}]) == [
+    assert prompt_to_seq(one_dict) == [{"prompt": "foo"}]
+    assert prompt_to_seq(two_dicts) == [
         {"prompt": "foo"},
         {"prompt_token_ids": [1, 2]},
     ]

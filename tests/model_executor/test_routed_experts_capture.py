@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -60,7 +61,7 @@ def _capturer_with_buffer(
 class DummyRouter(BaseRouter):
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return RoutingMethodType.FUSED_TOPK
+        return RoutingMethodType.TopK
 
     def _compute_routing(
         self, hidden_states, router_logits, indices_type, *, input_ids=None
@@ -88,7 +89,7 @@ def _make_modular_routed_experts():
     )
 
 
-def _make_model_config(hf_config):
+def _make_model_config(hf_config) -> ModelConfig:
     num_experts_per_token = ModelArchConfigConvertorBase(
         hf_config, hf_config
     ).get_num_experts_per_token()
@@ -98,12 +99,15 @@ def _make_model_config(hf_config):
             num_experts_per_token=num_experts_per_token,
         ),
     )
+    # Only the attributes RoutedExpertsManager reads are populated, so present
+    # the namespace to callers as the ModelConfig it stands in for.
+    fake_model_config = cast(ModelConfig, model_config)
     model_config.get_num_experts = lambda: hf_config.num_experts
     model_config.get_num_experts_per_tok = lambda: (
-        ModelConfig.get_num_experts_per_tok(model_config)
+        ModelConfig.get_num_experts_per_tok(fake_model_config)
     )
     model_config.get_total_num_hidden_layers = lambda: hf_config.num_hidden_layers
-    return model_config
+    return fake_model_config
 
 
 def test_routed_experts_manager_uses_gemma4_top_k_experts():
@@ -125,7 +129,7 @@ def test_routed_experts_manager_uses_gemma4_top_k_experts():
         kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
     )
 
-    manager = RoutedExpertsManager(vllm_config, kv_cache_config)
+    manager = RoutedExpertsManager(cast(VllmConfig, vllm_config), kv_cache_config)
 
     assert manager.routed_experts_by_slot.shape == (8, 3, 2)
 
@@ -149,7 +153,7 @@ def test_routed_experts_manager_uses_kimi_k3_experts_per_token():
         kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
     )
 
-    manager = RoutedExpertsManager(vllm_config, kv_cache_config)
+    manager = RoutedExpertsManager(cast(VllmConfig, vllm_config), kv_cache_config)
 
     assert manager.routed_experts_by_slot.shape == (8, 3, 2)
 
@@ -217,7 +221,8 @@ def test_public_binding_only_visits_target_model(monkeypatch):
     capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
 
     bind_routed_experts_capturer(
-        types.SimpleNamespace(modules=lambda: [target_module]), capturer
+        types.SimpleNamespace(modules=lambda: [target_module]),
+        cast(RoutedExpertsCapturer, capturer),
     )
 
     assert target_module.router.capture_fn is not None
@@ -249,7 +254,7 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
             )
             self._quant_method = self.routed_experts.quant_method
             self._quant_method.moe_kernel.impl.fused_experts = fused_experts
-            fused_experts.supports_routing_replay_capture = lambda: False
+            fused_experts.supports_routing_replay_capture = lambda: False  # type: ignore[method-assign]
 
     class DummyCapturer:
         def capture(self, layer_id, topk_ids):
@@ -262,7 +267,8 @@ def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
 
     with pytest.raises(ValueError, match="monolithic MoE kernel"):
         bind_routed_experts_capturer(
-            types.SimpleNamespace(modules=lambda: [dummy_module]), DummyCapturer()
+            types.SimpleNamespace(modules=lambda: [dummy_module]),
+            cast(RoutedExpertsCapturer, DummyCapturer()),
         )
 
 
@@ -337,10 +343,12 @@ def test_routed_experts_attention_group_is_shared_and_fail_closed():
             KVCacheGroupSpec(["full_layer"], FullAttentionSpec(block_size=4, **common)),
         ]
     )
-    assert get_routed_experts_attn_gid(config) == 1
+    assert get_routed_experts_attn_gid(cast(KVCacheConfig, config)) == 1
 
     with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
-        get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
+        get_routed_experts_attn_gid(
+            cast(KVCacheConfig, SimpleNamespace(kv_cache_groups=[]))
+        )
 
 
 def test_routed_experts_attention_group_unwraps_uniform_type_specs():
@@ -370,11 +378,11 @@ def test_routed_experts_attention_group_unwraps_uniform_type_specs():
         ]
     )
 
-    assert get_routed_experts_attn_gid(config) == 1
+    assert get_routed_experts_attn_gid(cast(KVCacheConfig, config)) == 1
 
     swa_only = SimpleNamespace(kv_cache_groups=[config.kv_cache_groups[0]])
     with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
-        get_routed_experts_attn_gid(swa_only)
+        get_routed_experts_attn_gid(cast(KVCacheConfig, swa_only))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -422,8 +430,10 @@ def test_all_tp_ranks_initialize_capture(monkeypatch, rank):
 
     runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
     runner.max_num_tokens = 32
-    runner.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=rank))
-    runner.kv_cache_config = SimpleNamespace()
+    runner.vllm_config = cast(
+        VllmConfig, SimpleNamespace(parallel_config=SimpleNamespace(rank=rank))
+    )
+    runner.kv_cache_config = cast(KVCacheConfig, SimpleNamespace())
     runner.model = Mock()
 
     runner.init_routed_experts_capturer()
@@ -467,6 +477,8 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
         ec_transfer_config=None,
     )
 
-    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
+    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(
+        cast(VllmConfig, config)
+    )
 
     assert "routed experts capture" not in unsupported

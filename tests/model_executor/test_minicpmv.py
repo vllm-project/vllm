@@ -12,12 +12,14 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 def make_model() -> MiniCPMV2_6:
-    return object.__new__(MiniCPMV2_6)
+    return object.__new__(MiniCPMV2_6)  # type: ignore[type-abstract]
 
 
 def make_model_4_6() -> MiniCPMV4_6ForConditionalGeneration:
-    model = object.__new__(MiniCPMV4_6ForConditionalGeneration)
-    model._process_vision_input = lambda vision_input, use_vit_merger=None: [
+    model = object.__new__(
+        MiniCPMV4_6ForConditionalGeneration  # type: ignore[type-abstract]
+    )
+    model._process_vision_input = lambda vision_input, use_vit_merger=None: [  # type: ignore[method-assign]
         vision_input["image_embeds"]
     ]
     return model
@@ -52,5 +54,9 @@ def test_image_and_video_embeds_stay_in_their_own_modality():
         video_embeds=video_embeds,
     )
 
-    assert torch.equal(modalities["images"]["image_embeds"], image_embeds)
-    assert torch.equal(modalities["videos"]["image_embeds"], video_embeds)
+    image_input = modalities["images"]
+    video_input = modalities["videos"]
+    assert image_input is not None
+    assert video_input is not None
+    assert torch.equal(image_input["image_embeds"], image_embeds)
+    assert torch.equal(video_input["image_embeds"], video_embeds)
