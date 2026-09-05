@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -2841,6 +2842,56 @@ def _grouping_config():
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
         cache_config=cache_config,
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix_match_unit", "minimum_cacheable_prefix"),
+    [(None, 1920), (32, 32)],
+)
+def test_resolve_kv_cache_block_sizes_logs_minimum_cacheable_prefix(
+    prefix_match_unit, minimum_cacheable_prefix
+):
+    block_size = 1920
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["attention"],
+                new_kv_cache_spec(block_size=block_size),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                new_mamba_spec(
+                    block_size=block_size,
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=block_size,
+            enable_prefix_caching=True,
+            prefix_match_unit=prefix_match_unit,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=None,
+    )
+
+    with patch.object(kv_cache_utils.logger, "info_once") as info_once:
+        resolved_sizes = kv_cache_utils.resolve_kv_cache_block_sizes(
+            kv_cache_config,
+            vllm_config,
+        )
+
+    assert resolved_sizes == (block_size, minimum_cacheable_prefix)
+    info_once.assert_called_once_with(
+        "Prefix caching enabled: minimum cacheable prefix is %d tokens "
+        "(prefix cache match unit); shared prefixes shorter than this "
+        "cannot produce cache hits.",
+        minimum_cacheable_prefix,
     )
 
 
