@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -238,6 +238,33 @@ class SchedulerInterface(ABC):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
+
+    def get_forward_pass_metrics_request_state(
+        self,
+    ) -> tuple[
+        Mapping[str, "Request"],
+        Iterable["Request"],
+        Iterable["Request"],
+    ]:
+        """Return request lookup, waiting, and skipped-waiting state for FPM.
+
+        Custom schedulers must implement this method when native forward-pass
+        metrics are enabled. Keeping this as an explicit interface avoids
+        coupling the metrics implementation to scheduler-private attributes.
+        """
+
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement "
+            "get_forward_pass_metrics_request_state() when forward-pass "
+            "metrics are enabled"
+        )
+
+    def should_emit_forward_pass_metrics(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> bool:
+        """Whether native FPM should measure and emit this iteration."""
+
+        return True
 
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
