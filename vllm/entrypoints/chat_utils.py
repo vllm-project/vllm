@@ -419,6 +419,33 @@ class ConversationMessage(TypedDict, total=False):
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
 
+def normalize_reasoning_content(data: Any) -> Any:
+    """Rename the deprecated ``reasoning_content`` message field to ``reasoning``.
+
+    Renderers only read ``reasoning``, so every request type carrying chat
+    messages must run this or the thinking of clients using the old name is
+    silently dropped from the rendered prompt.
+
+    Args:
+        data: Raw request payload, as passed to a "before" model validator.
+
+    Returns:
+        The payload, with assistant messages normalized in place.
+    """
+    if not isinstance(data, dict):
+        return data
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return data
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        reasoning_content = msg.pop("reasoning_content", None)
+        if reasoning_content is not None and msg.get("reasoning") is None:
+            msg["reasoning"] = reasoning_content
+    return data
+
+
 # Passed in by user
 ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
