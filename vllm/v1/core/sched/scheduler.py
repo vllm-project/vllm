@@ -1005,7 +1005,28 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
-                    assert num_new_tokens > 0
+                    if num_new_tokens <= 0:
+                        # A waiting request is supposed to have local work.
+                        # Several KV-connector / prefix-cache orderings can
+                        # still produce computed == num_tokens (NIXL/Mooncake
+                        # Mamba N-1 truncation after a full local hit, a
+                        # connector match that covers the prompt suffix,
+                        # hybrid per-group hit divergence). This used to be
+                        # `assert num_new_tokens > 0`, which killed EngineCore
+                        # and, under EP/DP lockstep, the whole prefill world.
+                        # Fail this request and keep scheduling the rest.
+                        logger.error(
+                            "Request %s has no tokens to schedule "
+                            "(computed=%s of %s). Failing the request "
+                            "instead of crashing the engine.",
+                            request.request_id,
+                            num_computed_tokens,
+                            request.num_tokens,
+                        )
+                        self.finish_requests(
+                            request.request_id, RequestStatus.FINISHED_ERROR
+                        )
+                        continue
 
                     # Apply Mamba alignment before encoder caps.
                     if self.need_mamba_block_aligned_split:

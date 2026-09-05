@@ -147,6 +147,34 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 
+def test_zero_new_tokens_fails_request_not_engine():
+    """A waiting request with computed == num_tokens must not crash EngineCore.
+
+    The waiting-loop used to `assert num_new_tokens > 0`. KV-connector and
+    prefix-cache orderings can still produce that state (full local hit then
+    N-1 truncation, connector match covering the prompt suffix). Fail the
+    broken request and keep scheduling healthy neighbors.
+    """
+    scheduler = create_scheduler()
+    broken, healthy = create_requests(num_requests=2, num_tokens=16)
+    scheduler.add_request(broken)
+    scheduler.add_request(healthy)
+    # KVTransfer waiting path: num_computed_tokens > 0 skips prefix lookup
+    # and uses the stored count. Set it equal to the prompt so the request
+    # has zero local work.
+    broken.num_computed_tokens = broken.num_tokens
+
+    scheduler_output = scheduler.schedule()
+
+    assert broken.status == RequestStatus.FINISHED_ERROR
+    assert broken.request_id not in scheduler.requests
+    assert broken.request_id in scheduler_output.finished_req_ids
+    assert healthy.request_id in scheduler_output.num_scheduled_tokens
+    assert (
+        scheduler_output.num_scheduled_tokens[healthy.request_id] == healthy.num_tokens
+    )
+
+
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
     [
