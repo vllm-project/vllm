@@ -1510,6 +1510,16 @@ class PerfMetricsLogging:
             or self.total_read_bytes_per_gpu
             or self.total_write_bytes_per_gpu
         ):
+            # Nothing was observed during this interval, so there is nothing to
+            # log. Restart the interval clock anyway: leaving it at the previous
+            # non-empty interval would charge this idle gap to the rates of the
+            # next interval that does have work.
+            #
+            # Only the clock is restarted, not the full reset(): the debug
+            # accumulators can hold observations from batches that produced no
+            # flops or bytes, and those belong to the window that is still
+            # accumulating.
+            self.last_log_time = time.monotonic()
             return
 
         now = time.monotonic()
