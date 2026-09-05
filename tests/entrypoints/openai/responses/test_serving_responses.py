@@ -604,6 +604,42 @@ class TestHarmonyPreambleStreaming:
         type_names = [e.type for e in events]
         assert "response.output_text.delta" not in type_names
 
+    def test_browser_stream_uses_web_search_lifecycle(self) -> None:
+        """Browser calls use web-search events instead of MCP events."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+            emit_tool_action_events,
+        )
+
+        browser_segment = self._make_segment(
+            channel="commentary", recipient="browser.search"
+        )
+        assert emit_content_delta_events(browser_segment, StreamingState()) == []
+
+        previous = self._make_previous_item(
+            channel="commentary",
+            recipient="browser.search",
+            text='{"query": "vLLM"}',
+        )
+        previous.author.role = "assistant"
+        tool_server = MagicMock(spec=ToolServer)
+        tool_server.has_tool.return_value = True
+
+        events = emit_tool_action_events(previous, StreamingState(), tool_server)
+        assert [event.type for event in events] == [
+            "response.output_item.added",
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+            "response.output_item.done",
+        ]
+
+        mcp_segment = self._make_segment(
+            channel="commentary", recipient="repo_browser.list"
+        )
+        events = emit_content_delta_events(mcp_segment, StreamingState(), frozenset())
+        assert "response.mcp_call.in_progress" in [event.type for event in events]
+
     def test_preamble_done_emits_text_done_events(self) -> None:
         """Completed preamble should emit text done + content_part done +
         output_item done, same shape as final channel."""
