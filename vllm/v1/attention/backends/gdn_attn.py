@@ -65,6 +65,12 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # 1D source block indices for state recovery after spec decode.
+    # When set, conv/ssm state must be copied from these blocks to the
+    # blocks in non_spec_state_indices_tensor before the decode kernel.
+    spec_decode_src_indices: torch.Tensor | None = None
+    non_spec_num_accepted: torch.Tensor | None = None
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -246,6 +252,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     spec_sequence_masks_cpu, device=query_start_loc.device
                 )
 
+        spec_decode_src_indices = None
+        non_spec_num_accepted = None
         if spec_sequence_masks is None:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(m, decode_threshold=1)
@@ -254,11 +262,34 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx = None
             non_spec_token_indx = None
             spec_state_indices_tensor = None
-            non_spec_state_indices_tensor = block_table_tensor[:, 0]
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
             non_spec_query_start_loc_cpu = query_start_loc_cpu
-            num_accepted_tokens = None
+            non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            if (
+                self.use_spec_decode
+                and num_accepted_tokens is not None
+                and num_decodes > 0
+            ):
+                col_indices = (num_accepted_tokens[:num_decodes] - 1).clamp(min=0)
+                spec_decode_src_indices = block_table_tensor[
+                    torch.arange(num_decodes, device=block_table_tensor.device),
+                    col_indices,
+                ]
+                num_accepted_tokens = num_accepted_tokens[:num_decodes]
+                if num_prefills > 0:
+                    num_accepted_tokens = torch.cat(
+                        [
+                            num_accepted_tokens,
+                            torch.ones(
+                                num_prefills,
+                                dtype=num_accepted_tokens.dtype,
+                                device=num_accepted_tokens.device,
+                            ),
+                        ]
+                    )
+            else:
+                num_accepted_tokens = None
         else:
             query_lens = query_start_loc[1:] - query_start_loc[:-1]
             assert spec_sequence_masks_cpu is not None
@@ -360,6 +391,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     dim=0,
                     out=non_spec_query_start_loc_cpu[1:],
                 )
+
+                assert num_accepted_tokens is not None
+                non_spec_num_accepted = num_accepted_tokens[
+                    non_spec_sequence_masks_cpu
+                ].clamp(min=1)
+                non_spec_block_rows = block_table_tensor[non_spec_sequence_masks_cpu]
+                source_columns = non_spec_num_accepted - 1
+                spec_decode_src_indices = non_spec_block_rows[
+                    torch.arange(
+                        non_spec_block_rows.size(0),
+                        device=block_table_tensor.device,
+                    ),
+                    source_columns,
+                ]
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
@@ -515,6 +560,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            spec_decode_src_indices=spec_decode_src_indices,
+            non_spec_num_accepted=non_spec_num_accepted,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
