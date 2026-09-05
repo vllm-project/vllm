@@ -1462,6 +1462,8 @@ class GPUModelRunner(
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
+                if req_state.pooling_states is not None:
+                    req_state.pooling_states.clean()
 
             if req_index is None:
                 # The request is not in the persistent batch.

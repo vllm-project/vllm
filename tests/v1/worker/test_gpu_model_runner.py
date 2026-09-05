@@ -29,8 +29,10 @@ from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.pooler.tokwise.methods import AllPool
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
@@ -586,6 +588,52 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
+
+
+@pytest.mark.parametrize("preempted", [False, True])
+def test_token_pooling_after_request_resumes(model_runner, dist_init, preempted):
+    """Preserve paused chunks, but discard chunks that preemption recomputes."""
+    req_id = "req_0"
+    pooler = AllPool()
+    model_runner.model = SimpleNamespace(pooler=pooler)
+    model_runner.is_pooling_model = True
+    model_runner.input_batch.is_pooling_model = True
+    hidden_states = torch.tensor([[1.0], [2.0], [3.0]], device=model_runner.device)
+
+    def pool_chunk(hidden_chunk, seq_len):
+        metadata = model_runner.input_batch.get_pooling_metadata()
+        metadata.build_pooling_cursor(
+            np.array([len(hidden_chunk)], dtype=np.int32),
+            torch.tensor([seq_len], dtype=torch.int32),
+            device=hidden_chunk.device,
+        )
+        return pooler(hidden_chunk, metadata)[0]
+
+    scheduler_output = _schedule_new_request(req_id)
+    new_req = scheduler_output.scheduled_new_reqs[0]
+    new_req.sampling_params = None
+    new_req.pooling_params = PoolingParams(task="token_embed")
+    scheduler_output.num_scheduled_tokens[req_id] = 2
+    scheduler_output.total_num_scheduled_tokens = 2
+    model_runner._update_states(scheduler_output)
+    assert pool_chunk(hidden_states[:2], seq_len=2) is None
+
+    model_runner._update_states(_schedule_new_request())
+    start = 0 if preempted else 2
+    scheduler_output = _schedule_cached_requests(
+        [req_id],
+        num_scheduled_tokens={req_id: len(hidden_states) - start},
+        new_token_ids=[[]],
+        num_computed_tokens=[start],
+        num_output_tokens=[0],
+    )
+    if preempted:
+        scheduler_output.scheduled_cached_reqs.resumed_req_ids = {req_id}
+        scheduler_output.scheduled_cached_reqs.new_block_ids = [([1],)]
+    model_runner._update_states(scheduler_output)
+
+    output = pool_chunk(hidden_states[start:], seq_len=len(hidden_states))
+    torch.testing.assert_close(output, hidden_states)
 
 
 def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
