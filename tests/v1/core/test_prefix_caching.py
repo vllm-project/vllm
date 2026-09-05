@@ -3,6 +3,7 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -4388,6 +4389,74 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
 
 
+def test_prefix_cache_stats_report_sparse_retention_miss():
+    """An align-mode Mamba group holding no checkpoint at a shared-prefix
+    junction vetoes the attention group's match, so a request that could have
+    reused two blocks reuses nothing. Report the lost tokens, otherwise the
+    loss is indistinguishable from "these requests share no prefix"."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    shared = [7 for _ in range(2 * block_size)]
+
+    def distinct(v):
+        return [v for _ in range(2 * block_size)]
+
+    # req0 primes the shared prefix densely on the attention group; align-mode
+    # Mamba keeps only its own tail, which sits past the shared prefix.
+    req0 = make_request("0", shared + distinct(50), block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+
+    # req1 shares the prefix, but the Mamba group has nothing cached there.
+    req1 = make_request("1", shared + distinct(60), block_size, sha256)
+    _, num_hits, boundary = manager.get_computed_blocks(req1)
+    req1.shared_prefix_boundary = boundary
+    assert num_hits == 0
+    assert boundary == 2 * block_size
+
+    manager.record_prefix_cache_stats(req1, num_hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.hits == 0
+    assert stats.sparse_retention_misses == 2 * block_size
+
+
+def test_prefix_cache_stats_no_sparse_retention_miss_on_clean_hit():
+    """A hit that every group agrees on reports no loss, so the counter does
+    not fire on healthy reuse."""
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    tokens = [7 for _ in range(4 * block_size)]
+
+    req0 = make_request("0", tokens, block_size, sha256)
+    cb, nc, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+    manager.free(req0)
+
+    req1 = make_request(
+        "1", tokens + [8 for _ in range(block_size)], block_size, sha256
+    )
+    _, num_hits, boundary = manager.get_computed_blocks(req1)
+    req1.shared_prefix_boundary = boundary
+
+    manager.record_prefix_cache_stats(req1, num_hits)
+    stats = manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.sparse_retention_misses == 0
+
+
 def test_swa_reachable_block_mask_pins_shared_prefix():
     """SWA analog of the Mamba pin: the shared-prefix junction must keep the
     ``need``-block sliding-window tail ending on that boundary (not a single
@@ -4635,3 +4704,35 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def test_zero_retention_is_announced_on_sparse_models(caplog):
+    """The default retains only semantic checkpoints, which is silent otherwise.
+
+    A sparse group files a state at every boundary it crosses and only the
+    semantic ones are hashed, so the rest can never serve a hit -- while the
+    prefix-cache hit-rate metric still reports non-zero. Nothing in the log said
+    so, and the neighbouring derived default (`mamba_cache_mode='align'`) is
+    announced, so this pins the missing half of that pair.
+    """
+    block_size = 16
+    config = _make_hybrid_kv_cache_config(block_size, 32, ["full", "mamba_align"])
+
+    def log_for(retention_interval, enable_caching=True):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="vllm.v1.core.kv_cache_coordinator"):
+            make_kv_cache_manager(
+                config,
+                max_model_len=8192,
+                enable_caching=enable_caching,
+                hash_block_size=block_size,
+                retention_interval=retention_interval,
+            )
+        return "retain only semantic checkpoints" in caplog.text
+
+    # The default, on a model that actually has a sparse group.
+    assert log_for(0)
+    # Not noise: a periodic interval retains those states, and with caching off
+    # retention cannot affect anything.
+    assert not log_for(block_size)
+    assert not log_for(0, enable_caching=False)

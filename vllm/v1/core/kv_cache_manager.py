@@ -219,10 +219,19 @@ class KVCacheManager:
         if not self.log_stats or not self.prefix_cache_lookup_enabled(request):
             return
         assert self.prefix_cache_stats is not None
+        # The pinned junction sits at the hit plus the shared prefix that no
+        # sparse-retention group has cached, so the difference is what the
+        # missing checkpoint cost this lookup.
+        sparse_retention_misses = (
+            max(request.shared_prefix_boundary - num_hits, 0)
+            if request.shared_prefix_boundary
+            else 0
+        )
         self.prefix_cache_stats.record(
             num_tokens=request.num_tokens,
             num_hits=num_hits,
             preempted=request.num_preemptions > 0,
+            sparse_retention_misses=sparse_retention_misses,
         )
 
     def get_computed_blocks(self, request: Request) -> tuple[KVCacheBlocks, int, int]:

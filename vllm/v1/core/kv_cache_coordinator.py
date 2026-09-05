@@ -34,6 +34,7 @@ def _validate_prefix_cache_retention_interval(
     retention_interval: int | None,
     scheduler_block_size: int,
     kv_cache_config: KVCacheConfig,
+    enable_caching: bool,
 ) -> None:
     if retention_interval is None:
         return
@@ -59,6 +60,18 @@ def _validate_prefix_cache_retention_interval(
             f"prefix_cache_retention_interval ({retention_interval}) "
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
+        )
+
+    if retention_interval == 0 and enable_caching:
+        # Silent otherwise: unretained boundary states are filed and never
+        # hashed, while the prefix-cache hit rate still reports non-zero.
+        logger.info(
+            "prefix_cache_retention_interval is 0, so sliding-window and Mamba "
+            "groups retain only semantic checkpoints (the latest replay boundary "
+            "and shared-prefix junctions). Other boundary states are not "
+            "reusable. Set prefix_cache_retention_interval to a multiple of the "
+            "scheduler block size (%d) to retain them periodically.",
+            scheduler_block_size,
         )
 
 
@@ -157,7 +170,10 @@ class KVCacheCoordinator(ABC):
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = kv_cache_config.prefix_cache_retention_interval
         _validate_prefix_cache_retention_interval(
-            self.retention_interval, self.scheduler_block_size, kv_cache_config
+            self.retention_interval,
+            self.scheduler_block_size,
+            kv_cache_config,
+            enable_caching,
         )
 
     def get_num_blocks_to_allocate(
