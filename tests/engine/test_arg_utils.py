@@ -23,6 +23,7 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -523,6 +524,34 @@ def test_prefix_cache_retention_interval_from_deprecated_env(
     args = parser.parse_args(["--prefix-cache-retention-interval", "32"])
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.prefix_cache_retention_interval == 32
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "device_name", "expected_server_tokens"),
+    [
+        (True, "NVIDIA B200", 16384),
+        (False, "AMD MI300X", 8192),
+    ],
+)
+def test_large_memory_defaults_are_cuda_only(
+    is_cuda: bool, device_name: str, expected_server_tokens: int
+):
+    """Use the largest batch defaults only for CUDA GPUs."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.utils.mem_constants import GiB_bytes
+
+    mock_platform = MagicMock()
+    mock_platform.get_device_total_memory.return_value = 192 * GiB_bytes
+    mock_platform.get_device_name.return_value = device_name
+    mock_platform.is_cuda.return_value = is_cuda
+    mock_platform.is_tpu.return_value = False
+    mock_platform.is_cpu.return_value = False
+
+    with patch("vllm.engine.arg_utils.current_platform", mock_platform):
+        defaults, _ = EngineArgs.get_batch_defaults(world_size=1)
+
+    assert defaults[UsageContext.OPENAI_API_SERVER] == expected_server_tokens
 
 
 @pytest.mark.parametrize(

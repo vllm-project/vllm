@@ -2643,8 +2643,9 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 160 * GiB_bytes:
-            # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+        if current_platform.is_cuda() and device_memory >= 160 * GiB_bytes:
+            # For CUDA GPUs like B200/B300 with >= 160GB memory, use the
+            # largest defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 16384,
