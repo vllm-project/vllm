@@ -4,7 +4,6 @@
 import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -43,6 +42,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
+        maybe_share_target_embed,
     )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
@@ -53,6 +53,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
+        parallel_config=speculative_config.draft_parallel_config,
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
@@ -76,9 +77,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
-    if get_pp_group().world_size != 1:
-        raise NotImplementedError("DSpark does not support pipeline parallelism.")
-
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
@@ -88,18 +86,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if (
-        target_embed is not None
-        and draft_model_config.get_vocab_size() <= target_vocab_size
-        and _should_share(
-            draft_model, "has_own_embed_tokens", draft_embed, target_embed
-        )
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    if draft_model_config.get_vocab_size() <= target_vocab_size:
+        maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)
