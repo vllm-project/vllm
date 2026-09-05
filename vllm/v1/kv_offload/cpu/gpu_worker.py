@@ -329,6 +329,10 @@ class SingleDirectionOffloadingHandler:
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
+        # jobs that failed before they could be queued on the transfer stream.
+        # They still have to be reported by get_finished(), or the scheduler
+        # would wait for a completion that never arrives.
+        self._submit_failures: deque[int] = deque()
         # list of CUDA streams available for re-use
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
@@ -653,16 +657,40 @@ class SingleDirectionOffloadingHandler:
         # writing; we must keep STREAM ordering so source reads are gated
         # by the transfer stream's wait_stream(compute) barrier.
         is_src_access_order_any = not self.gpu_to_cpu
-        with current_platform.stream(stream):
-            start_event.record(stream)
-            if op_idx > 0:
-                self._swap_blocks_batch(
-                    src,
-                    dst,
-                    sizes,
-                    is_src_access_order_any=is_src_access_order_any,
-                )
-            end_event.record(stream)
+        try:
+            with current_platform.stream(stream):
+                start_event.record(stream)
+                if op_idx > 0:
+                    self._swap_blocks_batch(
+                        src,
+                        dst,
+                        sizes,
+                        is_src_access_order_any=is_src_access_order_any,
+                    )
+                end_event.record(stream)
+        except RuntimeError:
+            # Device faults surface as RuntimeError (torch.AcceleratorError and
+            # the STD_TORCH_CHECK in swap_blocks_batch both derive from it).
+            # Deliberately not broader: a missing op or a bad argument is a
+            # programming error and must keep propagating, not be silently
+            # downgraded to a degraded cache.
+            # A transfer fault must not take the engine down. Offloading is a
+            # best-effort cache (OffloadingConnector.requires_kv_delivery is
+            # False), so report the job as failed and let the connector decide:
+            # a failed store is dropped, a failed load is escalated so the
+            # affected blocks are recomputed.
+            logger.exception(
+                "KV offload %s transfer failed for job %d",
+                "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                job_id,
+            )
+            # Deliberately not returning the stream/events to their pools: the
+            # stream may carry a latched device error, and reusing it would
+            # spread this failure to unrelated transfers. The pinned descriptor
+            # buffers are plain host memory and are safe to reuse.
+            self._buffer_pool.append((batch_src, batch_dst, batch_sizes))
+            self._submit_failures.append(job_id)
+            return True
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(
@@ -683,19 +711,46 @@ class SingleDirectionOffloadingHandler:
 
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
-        while self._transfers and self._transfers[0].end_event.query():
-            transfer = self._transfers.popleft()
-            transfer_time = (
-                transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-            )  # elapsed_time is in milliseconds
-            result = TransferResult(
-                job_id=transfer.job_id,
-                success=True,
-                transfer_size=transfer.num_bytes,
-                transfer_time=transfer_time,
-            )
+        while self._submit_failures:
+            job_id = self._submit_failures.popleft()
+            self._transfer_events.pop(job_id, None)
+            results.append(TransferResult(job_id=job_id, success=False))
 
-            results.append(result)
+        while self._transfers:
+            transfer = self._transfers[0]
+            try:
+                if not transfer.end_event.query():
+                    break
+                transfer_time = (
+                    transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
+                )  # elapsed_time is in milliseconds
+            except RuntimeError:
+                # A device error latched by this transfer (or by earlier work
+                # on its stream) surfaces here rather than at submit time.
+                # Same contract as the submit-time failure above.
+                logger.exception(
+                    "KV offload %s transfer failed for job %d while polling "
+                    "for completion",
+                    "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                    transfer.job_id,
+                )
+                self._transfers.popleft()
+                self._transfer_events.pop(transfer.job_id, None)
+                self._buffer_pool.append(
+                    (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
+                )
+                results.append(TransferResult(job_id=transfer.job_id, success=False))
+                continue
+
+            self._transfers.popleft()
+            results.append(
+                TransferResult(
+                    job_id=transfer.job_id,
+                    success=True,
+                    transfer_size=transfer.num_bytes,
+                    transfer_time=transfer_time,
+                )
+            )
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
@@ -709,7 +764,17 @@ class SingleDirectionOffloadingHandler:
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
-                event.synchronize()
+                try:
+                    event.synchronize()
+                except RuntimeError:
+                    # Leave the transfer queued: the next get_finished() poll
+                    # hits the same error and reports the job as failed, which
+                    # keeps failure handling in one place.
+                    logger.exception(
+                        "KV offload transfer for job %d failed while waiting "
+                        "for it to complete",
+                        job_id,
+                    )
 
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
@@ -730,6 +795,7 @@ class SingleDirectionOffloadingHandler:
             self._transfers.popleft()
 
         self._transfer_events.clear()
+        self._submit_failures.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
