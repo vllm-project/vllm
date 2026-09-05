@@ -32,7 +32,7 @@ python examples/features/logits_processor/custom_req_init.py
 
 - **Batch-level vs. request-level**: vLLM processes logits at the batch level for efficiency. If you have a per-request processor, you need to wrap it using the patterns shown in `custom_req.py` and `custom_req_init.py`.
 - **`SamplingParams.extra_args`**: Use this to pass custom keyword arguments to your logits processor on a per-request basis (e.g., `target_token`).
-- **`DummyLogitsProcessor`**: A reference implementation available in `vllm/test_utils.py` that can be used as a starting point for custom processors.
+- **`DummyLogitsProcessor`**: A reference implementation available in `tests/v1/logits_processors/utils.py` that can be used as a starting point for custom processors.
 
 ## Further Reading
 
