@@ -45,33 +45,14 @@ fn runtime_lora_updating_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
-fn parse_scale_out_endpoints_flag(value: Option<&str>) -> Result<bool, String> {
-    let Some(value) = value else {
-        return Ok(false);
-    };
-    if value.is_empty() {
-        return Ok(false);
-    }
-
-    match value.trim() {
-        "0" => Ok(false),
-        "1" => Ok(true),
-        _ => Err("VLLM_ENABLE_SCALE_OUT_ENDPOINTS must be 0 or 1".to_string()),
-    }
-}
-
-fn scale_out_endpoints_enabled() -> bool {
-    let value = std::env::var("VLLM_ENABLE_SCALE_OUT_ENDPOINTS").ok();
-    parse_scale_out_endpoints_flag(value.as_deref()).unwrap_or_else(|message| panic!("{message}"))
-}
-
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
     build_router_with_options(
         state,
         server_dev_mode_enabled(),
         runtime_lora_updating_enabled(),
-        scale_out_endpoints_enabled(),
+        scale_out_endpoints_enabled,
     )
 }
 
@@ -120,10 +101,7 @@ fn build_router_with_options(
     if scale_out_endpoints_enabled {
         router = router.route("/inference/v1/generate", post(inference::generate));
     } else {
-        info!(
-            "scale-out endpoints are disabled; set \
-             VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 to enable them"
-        );
+        info!("scale-out endpoints are disabled; pass --enable-scale-out to enable them");
     }
 
     if runtime_lora_updating_enabled {

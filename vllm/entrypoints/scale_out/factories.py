@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.tasks import SupportedTask
@@ -66,22 +65,15 @@ def register_scale_out_api_routers(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
 ):
-    dedicated_mode = None
-    if "render" in supported_tasks:
-        dedicated_mode = "`vllm launch render`"
-    elif getattr(app.state.args, "tokens_only", False):
-        dedicated_mode = "`--tokens-only`"
-
-    enabled = envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS
-    if dedicated_mode is not None and enabled is False:
-        raise ValueError(
-            "`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=0` conflicts with "
-            f"{dedicated_mode}; unset it or set it to 1"
-        )
-    if dedicated_mode is None and not enabled:
+    args = getattr(app.state, "args", None)
+    # `vllm launch render` and `vllm serve --tokens-only` are dedicated to
+    # serving these endpoints, so they always register them regardless of
+    # `--enable-scale-out`.
+    dedicated_mode = "render" in supported_tasks or getattr(args, "tokens_only", False)
+    enabled = dedicated_mode or getattr(args, "enable_scale_out", False)
+    if not enabled:
         logger.info(
-            "Scale-out endpoints are disabled. Set "
-            "VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 to enable them."
+            "Scale-out endpoints are disabled. Set --enable-scale-out to enable them."
         )
         return
 
