@@ -896,14 +896,12 @@ class KimiDecoderLayer(nn.Module):
                     aux_stream=aux_stream,
                     run_gemm_rs_ar=run_gemm_rs_ar,
                 )
-                self._self_attn_writes_output = False
             else:
                 self.self_attn = KimiLinearGatedDeltaNetAttention(
                     config,
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                 )
-                self._self_attn_writes_output = True
         else:
             qk_nope_head_dim = config.qk_nope_head_dim
             qk_rope_head_dim = config.qk_rope_head_dim
@@ -933,7 +931,6 @@ class KimiDecoderLayer(nn.Module):
                 aux_stream=aux_stream,
                 run_gemm_rs_ar=run_gemm_rs_ar,
             )
-            self._self_attn_writes_output = False
 
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
@@ -999,14 +996,6 @@ class KimiDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self._self_attn_writes_output:
-            output = torch.empty_like(hidden_states)
-            self.self_attn(
-                hidden_states=hidden_states,
-                positions=positions,
-                output=output,
-            )
-            return output
         return self.self_attn(
             hidden_states=hidden_states,
             positions=positions,
