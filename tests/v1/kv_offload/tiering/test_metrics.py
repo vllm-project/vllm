@@ -211,6 +211,43 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
     assert values[TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS][p2p_label] == 1
 
 
+def test_tiering_metrics_tracker_records_promotion_latency_histogram():
+    tracker = TieringMetricsTracker(
+        tier_types=["fs"],
+        num_primary_blocks=5,
+        primary_block_size=16,
+    )
+    label = ("1:fs",)
+
+    promotion_job = JobMetadata(
+        TransferJob(0, to_keys([0, 1]), np.array([0, 1]), True, _CTX),
+        0,
+    )
+    tracker.on_job_registered(promotion_job)
+    tracker.on_job_finished(
+        promotion_job, JobResult(job_id=0, success=True, transfer_time=0.42)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert values[TieringOffloadingMetrics.PROMOTION_LATENCY][label] == [0.42]
+
+    cascade_job = JobMetadata(
+        TransferJob(1, to_keys([2]), np.array([2]), False, _CTX),
+        0,
+    )
+    tracker.on_job_registered(cascade_job)
+    tracker.on_job_finished(
+        cascade_job, JobResult(job_id=1, success=True, transfer_time=0.10)
+    )
+
+    stats = tracker.take_stats()
+    assert stats is not None
+    values = stats.data["data"]
+    assert TieringOffloadingMetrics.PROMOTION_LATENCY not in values
+
+
 def test_tiering_metrics_tracker_records_promotion_allocation_failures():
     tracker = TieringMetricsTracker(
         tier_types=["fs"],
