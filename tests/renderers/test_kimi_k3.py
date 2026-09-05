@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
@@ -60,7 +61,7 @@ class MockVllmConfig:
 
 
 def _make_renderer(tokenizer: StubTokenizer) -> KimiK3Renderer:
-    config = MockVllmConfig(MockModelConfig(), MockParallelConfig())
+    config = cast(VllmConfig, MockVllmConfig(MockModelConfig(), MockParallelConfig()))
     return KimiK3Renderer(config, tokenizer)
 
 
@@ -302,10 +303,13 @@ def test_render_messages_derives_private_xtml_tool_attrs():
         "first",
         "second",
     ]
-    assert conversation[1]["tool"] == "lookup"
-    assert conversation[1]["index"] == 1
-    assert conversation[2]["tool"] == "lookup"
-    assert conversation[2]["index"] == 2
+    # `tool` and `index` are Kimi-K3-specific XTML attributes that the renderer
+    # adds to resolved tool messages; they are not keys of ConversationMessage.
+    enriched = cast(list[dict[str, Any]], conversation)
+    assert enriched[1]["tool"] == "lookup"
+    assert enriched[1]["index"] == 1
+    assert enriched[2]["tool"] == "lookup"
+    assert enriched[2]["index"] == 2
     assert tokenizer.conversations[-1] == conversation
 
 

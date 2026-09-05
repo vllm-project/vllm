@@ -9,6 +9,7 @@ hand-builds its `SchedulerOutput`s, so it has to reserve the same blocks.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -26,6 +27,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     MambaSpec,
 )
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.warmup import (
     _reserved_block_count,
     run_mixed_prefill_decode_warmup,
@@ -178,7 +180,10 @@ def test_mixed_warmup_reserves_lookahead_blocks():
     recorder = _StepRecorder()
 
     assert run_mixed_prefill_decode_warmup(
-        _make_runner([_attention_group()], num_lookahead_tokens),
+        cast(
+            GPUModelRunner,
+            _make_runner([_attention_group()], num_lookahead_tokens),
+        ),
         worker_execute_model=recorder.execute_model,
         worker_sample_tokens=recorder.sample_tokens,
         num_tokens=128,
@@ -360,7 +365,7 @@ def test_num_lookahead_tokens_per_method(method: str, expected: int):
     config = _Config()
     config.speculative_config = speculative_config
 
-    assert config.num_lookahead_tokens == expected
+    assert cast(VllmConfig, config).num_lookahead_tokens == expected
 
 
 def test_num_lookahead_tokens_without_speculation():
@@ -372,4 +377,4 @@ def test_num_lookahead_tokens_without_speculation():
 
     config = _Config()
 
-    assert config.num_lookahead_tokens == 0
+    assert cast(VllmConfig, config).num_lookahead_tokens == 0

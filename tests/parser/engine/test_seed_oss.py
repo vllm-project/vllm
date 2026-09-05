@@ -152,6 +152,7 @@ def test_end_to_end_through_registered_adapters(mock_tokenizer, mock_request):
     )
     reasoning, remaining = reasoning_parser.extract_reasoning(text, mock_request)
     assert reasoning == "Plan the call."
+    assert remaining is not None
 
     tool_result = tool_parser.extract_tool_calls(remaining, mock_request)
     assert tool_result.tool_calls[0].function.name == "get_weather"
@@ -181,6 +182,7 @@ def test_budget_reflect_tags_do_not_break_adapter_pipeline(
     assert "current thinking budget is 512" in reasoning
     assert "<seed:cot_budget_reflect>" in reasoning
     assert "</seed:cot_budget_reflect>" in reasoning
+    assert remaining is not None
 
     tool_result = tool_parser.extract_tool_calls(remaining, mock_request)
     assert tool_result.tool_calls[0].function.name == "get_weather"

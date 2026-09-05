@@ -3,6 +3,7 @@
 import os
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
@@ -433,11 +434,12 @@ class TestProtonConfig:
         ],
     )
     def test_rejects_invalid_typed_options(self, field, tmp_path):
+        invalid_option: dict[str, Any] = {field: "invalid"}
         with pytest.raises(ValidationError):
             ProfilerConfig(
                 profiler="proton",
                 proton_profiler_dir=str(tmp_path),
-                **{field: "invalid"},
+                **invalid_option,
             )
 
     @pytest.mark.parametrize(

@@ -33,7 +33,9 @@ class DummyConfig:
 
 
 def make_model(config: DummyConfig) -> Ernie4_5_VLMoeForConditionalGeneration:
-    model = object.__new__(Ernie4_5_VLMoeForConditionalGeneration)
+    model = object.__new__(
+        Ernie4_5_VLMoeForConditionalGeneration  # type: ignore[type-abstract]
+    )
     model.config = config
     return model
 
@@ -51,7 +53,7 @@ def make_mm_feature(
             {
                 field_name: MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
-                    field=None,  # HACK.
+                    field=None,  # type: ignore[arg-type]  # HACK.
                 ),
             }
         ),

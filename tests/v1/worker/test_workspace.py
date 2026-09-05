@@ -56,8 +56,8 @@ def test_workspace_lanes_do_not_alias_and_restore_context(monkeypatch) -> None:
         (draft_reused,) = manager.get_simultaneous(((8,), torch.uint8))
     (target_reused,) = manager.get_simultaneous(((8,), torch.uint8))
 
-    assert manager._current_workspaces[0].numel() == 512  # type: ignore[union-attr]
-    assert manager._current_workspaces[1].numel() == 256  # type: ignore[union-attr]
+    assert manager._current_workspaces[0].numel() == 512
+    assert manager._current_workspaces[1].numel() == 256
     assert manager._current_workspaces[2:] == [None, None]
     assert target.data_ptr() != draft.data_ptr()
     assert draft.data_ptr() == draft_reused.data_ptr()

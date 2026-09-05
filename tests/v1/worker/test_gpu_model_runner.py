@@ -4,6 +4,7 @@
 import gc
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import numpy as np
@@ -35,7 +36,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionBackend, MultipleOf
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
@@ -317,7 +318,10 @@ def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch)
 
     selected_size = select_common_block_size(
         16,
-        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+        cast(
+            list[type[AttentionBackend]],
+            [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+        ),
     )
     assert selected_size == 16
 
@@ -368,7 +372,8 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         nonlocal receive_calls
         receive_calls += 1
 
-    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
+    # Stub the bound method on a hand-built runner to count receive calls.
+    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (  # type: ignore[method-assign]
         receive_prev_sampled_token_ids
     )
     monkeypatch.setattr(
@@ -880,10 +885,13 @@ def test_reload_weights_before_load_model(model_runner):
 def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     runner = object.__new__(GPUModelRunner)
     runner.use_async_scheduling = False
-    runner.input_batch = SimpleNamespace(
-        sampling_metadata=Mock(spec=SamplingMetadata),
-        update_async_output_token_ids=Mock(),
-        req_ids=["req_a", "req_b", "req_c"],
+    runner.input_batch = cast(
+        Any,
+        SimpleNamespace(
+            sampling_metadata=Mock(spec=SamplingMetadata),
+            update_async_output_token_ids=Mock(),
+            req_ids=["req_a", "req_b", "req_c"],
+        ),
     )
     runner.rejection_sampler = Mock(return_value="sampler_output")
     runner.sampler = Mock()
@@ -913,15 +921,18 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
 def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None)
+    runner.vllm_config = cast(
+        Any, SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
     )
     runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
     runner.sampler = Mock(return_value="sampler_output")
     runner.sampler.logprobs_mode = "processed_logprobs"
-    runner.speculative_config = SimpleNamespace(
-        rejection_sample_method="standard",
-        draft_sample_method="greedy",
+    runner.speculative_config = cast(
+        Any,
+        SimpleNamespace(
+            rejection_sample_method="standard",
+            draft_sample_method="greedy",
+        ),
     )
     runner.rejection_sampler = Mock()
     synchronize = Mock()
@@ -950,8 +961,11 @@ def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     # embedding boundary). For num_draft_tokens=[2, 1, 2] the draft positions
     # are [1, 2, 4, 6, 7], so the gather carries the -1s straight into the
     # rejection-sampling metadata.
-    runner.input_ids = SimpleNamespace(
-        gpu=torch.tensor([99, 10, -1, 99, 12, 99, 13, -1], dtype=torch.int32),
+    runner.input_ids = cast(
+        Any,
+        SimpleNamespace(
+            gpu=torch.tensor([99, 10, -1, 99, 12, 99, 13, -1], dtype=torch.int32),
+        ),
     )
 
     metadata = GPUModelRunner._calc_spec_decode_metadata(
@@ -1383,10 +1397,10 @@ def test_hybrid_attention_mamba_tensor_shapes():
 
 def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch):
     runner = object.__new__(GPUModelRunner)
-    runner.vllm_config = SimpleNamespace(reasoning_config=None)
-    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
-    runner.cache_config = SimpleNamespace(use_replayssm=False)
-    runner.model_config = SimpleNamespace(get_vocab_size=lambda: 32)
+    runner.vllm_config = cast(Any, SimpleNamespace(reasoning_config=None))
+    runner.parallel_config = cast(Any, SimpleNamespace(cp_kv_cache_interleave_size=16))
+    runner.cache_config = cast(Any, SimpleNamespace(use_replayssm=False))
+    runner.model_config = cast(Any, SimpleNamespace(get_vocab_size=lambda: 32))
     runner.max_model_len = 64
     runner.max_encoder_len = 0
     runner.max_num_reqs = 1
@@ -1401,9 +1415,12 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         gpu_model_runner_module.SlotMappingMode.TOKEN_TO_KV_SLOT
     ]
     runner.cp_kv_cache_interleave_size = 1
-    runner.input_batch = SimpleNamespace(
-        logitsprocs=None,
-        logitsprocs_need_output_token_ids=False,
+    runner.input_batch = cast(
+        Any,
+        SimpleNamespace(
+            logitsprocs=None,
+            logitsprocs_need_output_token_ids=False,
+        ),
     )
     runner.jit_warmup_registry = Mock()
     runner.jit_warmup_registry.activate.return_value = nullcontext()
@@ -1412,8 +1429,9 @@ def test_input_batch_reinitialized_after_late_interleave_adjustment(monkeypatch)
         block_size=16,
         max_num_blocks_per_req=lambda *_: 4,
     )
-    kv_cache_config = SimpleNamespace(
-        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+    kv_cache_config = cast(
+        KVCacheConfig,
+        SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]),
     )
     input_batch_cls = Mock(return_value=SimpleNamespace())
     monkeypatch.setattr(gpu_model_runner_module, "InputBatch", input_batch_cls)
@@ -1433,7 +1451,7 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     from vllm.v1.worker.gpu import model_runner as v2_model_runner_module
 
     runner = object.__new__(v2_model_runner_module.GPUModelRunner)
-    runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=16)
+    runner.parallel_config = cast(Any, SimpleNamespace(cp_kv_cache_interleave_size=16))
     runner.cp_interleave = 1
 
     class StopInitialization(Exception):
@@ -1446,7 +1464,7 @@ def test_v2_runner_snapshots_late_interleave_adjustment(monkeypatch):
     )
 
     with pytest.raises(StopInitialization):
-        runner.initialize_kv_cache(SimpleNamespace())
+        runner.initialize_kv_cache(cast(KVCacheConfig, SimpleNamespace()))
 
     assert runner.cp_interleave == 16
 

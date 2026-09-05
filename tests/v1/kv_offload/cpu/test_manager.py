@@ -935,6 +935,8 @@ def test_filter_reused_manager():
     # lookup() does not count towards store admission
     assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.MISS
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.MISS
+    # store_threshold > 1 means the reuse tracker is enabled, so counts exists.
+    assert manager.counts is not None
     assert not manager.counts
 
     # 1st offer of [1, 2] -> tracked at count 1, not eligible yet

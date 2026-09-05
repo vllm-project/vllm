@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -13,6 +14,9 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup import replayssm_warmup as warmup
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda() or not has_flashinfer(),
@@ -36,18 +40,22 @@ def _autotune_runner(
     max_num_tokens: int = 100,
     use_replayssm: bool = True,
     backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            cache_config=SimpleNamespace(use_replayssm=use_replayssm),
-            mamba_config=SimpleNamespace(backend=backend),
-            use_v2_model_runner=use_v2_model_runner,
+) -> "GPUModelRunner":
+    # Only the attributes the warmup helpers read are populated.
+    return cast(
+        "GPUModelRunner",
+        SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                cache_config=SimpleNamespace(use_replayssm=use_replayssm),
+                mamba_config=SimpleNamespace(backend=backend),
+                use_v2_model_runner=use_v2_model_runner,
+            ),
+            uniform_decode_query_len=query_len,
+            decode_query_len=query_len,
+            max_num_tokens=max_num_tokens,
+            scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
+            kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
         ),
-        uniform_decode_query_len=query_len,
-        decode_query_len=query_len,
-        max_num_tokens=max_num_tokens,
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
-        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
     )
 
 
@@ -128,10 +136,13 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
     multi_group_block_table = SimpleNamespace(
         block_tables=[block_table], commit_block_table=Mock()
     )
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(use_v2_model_runner=False),
-        input_batch=SimpleNamespace(block_table=multi_group_block_table),
-        get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
+    runner = cast(
+        "GPUModelRunner",
+        SimpleNamespace(
+            vllm_config=SimpleNamespace(use_v2_model_runner=False),
+            input_batch=SimpleNamespace(block_table=multi_group_block_table),
+            get_model=lambda: SimpleNamespace(modules=lambda: (mixer,)),
+        ),
     )
 
     with warmup._temporary_replayssm_autotune_state(runner, 2):

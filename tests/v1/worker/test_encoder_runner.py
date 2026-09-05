@@ -9,12 +9,14 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
+from typing import cast
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldElem,
@@ -71,7 +73,7 @@ def _make_runner(
             length * HIDDEN, dtype=torch.float32
         ).reshape(length, HIDDEN)
     return EncoderRunner(
-        model=None,  # unused by gather_mm_embeddings
+        model=cast(SupportsMultiModal, None),  # unused by gather_mm_embeddings
         max_num_tokens=64,
         hidden_size=HIDDEN,
         encoder_cache=cache,
@@ -163,7 +165,7 @@ def test_multi_request_batch_gathers_per_request(draft_lookahead):
             f.mm_position.length * HIDDEN, dtype=torch.float32
         ).reshape(f.mm_position.length, HIDDEN)
     runner = EncoderRunner(
-        model=None,
+        model=cast(SupportsMultiModal, None),
         max_num_tokens=64,
         hidden_size=HIDDEN,
         encoder_cache=cache,

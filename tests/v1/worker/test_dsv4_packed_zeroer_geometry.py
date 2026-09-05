@@ -12,17 +12,23 @@ launched.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
 from vllm.v1.worker.utils import (
     AttentionGroup,
     KVBlockZeroer,
     allocate_kv_cache,
 )
+
+# KVBlockZeroer never reads AttentionGroup.backend, so these fixtures leave it
+# unset rather than standing up a real backend class.
+_NO_BACKEND = cast("type[AttentionBackend]", None)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -65,7 +71,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
         attn_groups_iter=iter(
             [
                 AttentionGroup(
-                    backend=None,
+                    backend=_NO_BACKEND,
                     layer_names=[f"layer.{i}" for i in range(NUM_LAYERS)],
                     kv_cache_spec=spec,
                     kv_cache_group_id=0,
@@ -78,6 +84,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
         },
         num_blocks=NUM_BLOCKS,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     assert n_segs == NUM_LAYERS
@@ -140,7 +147,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
 
     attn_groups = [
         AttentionGroup(
-            backend=None,
+            backend=_NO_BACKEND,
             layer_names=list(specs),
             kv_cache_spec=next(iter(specs.values())),
             kv_cache_group_id=gid,
@@ -156,6 +163,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
         },
         num_blocks=config.num_blocks,
     )
+    assert zeroer._meta is not None
     seg_addrs, seg_block_strides, seg_page_sizes, _, _, n_segs = zeroer._meta
 
     # g1.big and g2.huge overlay at offset 0 -> one segment with g2's wider

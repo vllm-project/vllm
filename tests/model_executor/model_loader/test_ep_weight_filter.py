@@ -91,6 +91,7 @@ class TestComputeLocalExpertIds:
         ids_0 = compute_local_expert_ids(10, ep_size=3, ep_rank=0)
         ids_1 = compute_local_expert_ids(10, ep_size=3, ep_rank=1)
         ids_2 = compute_local_expert_ids(10, ep_size=3, ep_rank=2)
+        assert ids_0 is not None and ids_1 is not None and ids_2 is not None
 
         assert len(ids_0) == 4
         assert len(ids_1) == 3
@@ -104,24 +105,28 @@ class TestComputeLocalExpertIds:
         # Kimi-K2.5 config: 384 experts, EP=8
         for rank in range(8):
             ids = compute_local_expert_ids(384, ep_size=8, ep_rank=rank)
+            assert ids is not None
             assert len(ids) == 48
 
         # All experts covered
-        all_ids = set()
+        all_ids: set[int] = set()
         for rank in range(8):
             ids = compute_local_expert_ids(384, ep_size=8, ep_rank=rank)
+            assert ids is not None
             all_ids |= ids
         assert all_ids == set(range(384))
 
     def test_384_experts_ep16(self):
         for rank in range(16):
             ids = compute_local_expert_ids(384, ep_size=16, ep_rank=rank)
+            assert ids is not None
             assert len(ids) == 24
 
     def test_384_experts_ep24(self):
         # 384 / 24 = 16 exactly
         for rank in range(24):
             ids = compute_local_expert_ids(384, ep_size=24, ep_rank=rank)
+            assert ids is not None
             assert len(ids) == 16
 
     # round_robin placement tests
@@ -314,6 +319,7 @@ class TestEpFilterOnSyntheticMoeWeights:
         files, expected = synthetic_moe_files
         # EP=2, rank=0 → experts 0-3
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=0)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )
@@ -337,6 +343,7 @@ class TestEpFilterOnSyntheticMoeWeights:
     def test_ep2_rank1_gets_other_half(self, synthetic_moe_files):
         files, expected = synthetic_moe_files
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=1)
+        assert local_ids is not None
         loaded = dict(
             safetensors_weights_iterator(files, False, local_expert_ids=local_ids)
         )

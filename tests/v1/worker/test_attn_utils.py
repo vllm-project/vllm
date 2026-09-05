@@ -7,11 +7,13 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from typing import cast
+
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -61,19 +63,19 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         dtype=torch.bfloat16,
     )
     target_group = AttentionGroup(
-        _TargetBackend,
+        cast("type[AttentionBackend]", _TargetBackend),
         ["target"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     target_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
     ]
     draft_group = AttentionGroup(
-        _DraftBackend,
+        cast("type[AttentionBackend]", _DraftBackend),
         ["draft"],
         spec,
-        0,  # type: ignore[arg-type]
+        0,
     )
     draft_group.metadata_builders = [
         _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
@@ -133,6 +135,7 @@ def test_reshape_padded_kv_cache_strides_by_padded_page():
     (kv_cache,) = dense_kv_cache_views(raw, spec, num_blocks, 1, KVCacheLayout.LBHNC)
 
     elem_size = 4  # float32
+    assert spec.page_size_padded is not None
     # Content dim packs K and V: 2 * head_size.
     assert kv_cache.shape == (num_blocks, 1, 16, 2 * spec.head_size)
     assert kv_cache.dtype == spec.dtype

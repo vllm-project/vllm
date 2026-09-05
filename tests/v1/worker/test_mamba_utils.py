@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -19,10 +19,12 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.mamba_utils import (
     MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
@@ -430,14 +432,14 @@ def _make_requests(
     req_ids: list[str],
     num_computed_tokens: list[int],
     block_ids_per_req: list[list[int]],
-) -> dict[str, MagicMock]:
+) -> dict[str, CachedRequestState]:
     """Create mock CachedRequestState objects."""
-    requests = {}
+    requests: dict[str, CachedRequestState] = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
         req.num_computed_tokens = num_computed_tokens[i]
         req.block_ids = {0: block_ids_per_req[i]}  # group_id=0
-        requests[req_id] = req
+        requests[req_id] = cast(CachedRequestState, req)
     return requests
 
 
@@ -571,7 +573,7 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
         mamba_cache_mode="align",
         num_speculative_blocks=3,
     )
-    layer_specs = {
+    layer_specs: dict[str, KVCacheSpec] = {
         "gdn.0": gdn_spec,
         "gdn.1": gdn_spec,
         "ple.0": short_conv_spec,
