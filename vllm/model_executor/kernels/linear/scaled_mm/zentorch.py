@@ -8,10 +8,15 @@ oneDNN-backed ``CPUInt8ScaledMMLinearKernel``. When ``is_supported`` or
 kernel in ``_POSSIBLE_INT8_KERNELS[PlatformEnum.CPU]``.
 """
 
+import os
+
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.kernels.linear.zentorch_utils import (
+    has_zentorch_op,
+    has_zentorch_op_arg,
+)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -21,6 +26,19 @@ from .ScaledMMLinearKernel import (
 )
 
 logger = init_logger(__name__)
+
+
+def _weight_prepack_enabled() -> bool:
+    """Return ``True`` when zentorch can consume a prepacked W8A8 weight.
+
+    The prepacked layout is only valid for the blocked matmul algo; any other
+    algo silently misreads it instead of failing.
+    """
+    if not has_zentorch_op(["zentorch_weight_prepack_for_dynamic_qlinear"]):
+        return False
+    if not has_zentorch_op_arg("zentorch_dynamic_qlinear", "is_weight_prepacked"):
+        return False
+    return os.environ.get("ZENDNNL_MATMUL_ALGO", "1") == "1"
 
 
 class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -58,10 +76,21 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)
         n = weight.shape[0]
+        weight_data = weight.data.contiguous()
+
+        prepacked = _weight_prepack_enabled()
+        if prepacked:
+            weight_data = (
+                torch.ops.zentorch.zentorch_weight_prepack_for_dynamic_qlinear(
+                    weight_data
+                )
+            )
+        layer._zentorch_weight_prepacked = prepacked
+
         replace_parameter(
             layer,
             w_q_name,
-            torch.nn.Parameter(weight.data.contiguous(), requires_grad=False),
+            torch.nn.Parameter(weight_data, requires_grad=False),
         )
 
         weight_scale = getattr(layer, w_s_name)
@@ -79,7 +108,9 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             torch.nn.Parameter(ws, requires_grad=False),
         )
         logger.info_once(
-            "[zen_cpu] Using zentorch_dynamic_qlinear for W8A8 (dynamic-symmetric)"
+            "[zen_cpu] Using zentorch_dynamic_qlinear for W8A8 "
+            "(dynamic-symmetric, weight_prepacked=%s)",
+            prepacked,
         )
 
     def apply_weights(
@@ -89,10 +120,22 @@ class ZentorchInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
+        weight = getattr(layer, w_q_name)
+        weight_scale = getattr(layer, w_s_name)
+        if getattr(layer, "_zentorch_weight_prepacked", False):
+            # Only a newer zentorch declares this argument.
+            return torch.ops.zentorch.zentorch_dynamic_qlinear(
+                x,
+                weight,
+                weight_scale,
+                bias,
+                is_weight_prepacked=True,
+                zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
+            )
         return torch.ops.zentorch.zentorch_dynamic_qlinear(
             x,
-            getattr(layer, w_q_name),
-            getattr(layer, w_s_name),
+            weight,
+            weight_scale,
             bias,
             zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
         )
