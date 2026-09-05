@@ -206,7 +206,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         assert cache_config.hisparse_host_num_blocks == num_gpu_blocks_override
     assert host_group.block_pool_id is None
     assert indexer_group.block_pool_id == 0
-    assert host_group.kv_cache_spec.block_size == block_size
+    assert host_group.kv_cache_spec.block_size == gpu_block_size
     assert indexer_group.kv_cache_spec.block_size == gpu_block_size
     host_specs = host_group.kv_cache_spec.kv_cache_specs
     gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
