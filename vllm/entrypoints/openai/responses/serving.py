@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Se
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
@@ -44,6 +44,10 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_user_message,
     has_custom_tools,
     render_for_completion,
+)
+from vllm.entrypoints.openai.reasoning_effort import (
+    ReasoningEffortRounding,
+    normalize_reasoning_effort,
 )
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -163,6 +167,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        supported_reasoning_efforts: list[str] | None = None,
+        reasoning_effort_rounding: ReasoningEffortRounding = "down",
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -175,6 +181,10 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.chat_template_kwargs = default_chat_template_kwargs or {}
+        self.supported_reasoning_efforts = supported_reasoning_efforts
+        self.reasoning_effort_rounding: ReasoningEffortRounding = (
+            reasoning_effort_rounding
+        )
         self.enable_log_outputs = enable_log_outputs
 
         # Set up the unified parser - either a unified parser or fall back to
@@ -342,6 +352,15 @@ class OpenAIServingResponses(GenerateBaseServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        if request.reasoning is not None:
+            request.reasoning.effort = cast(
+                Any,
+                normalize_reasoning_effort(
+                    request.reasoning.effort,
+                    self.supported_reasoning_efforts,
+                    self.reasoning_effort_rounding,
+                ),
+            )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
