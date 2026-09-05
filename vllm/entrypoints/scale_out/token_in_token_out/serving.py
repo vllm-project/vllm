@@ -221,14 +221,33 @@ class ServingTokens(GenerateBaseServing):
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
         # every generation that omits the field.
+        prompt_len = self._extract_prompt_len(engine_input)
         if not request.is_sampling_param_provided("max_tokens"):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
-                input_length=self._extract_prompt_len(engine_input),
+                input_length=prompt_len,
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
+        elif sampling_params.max_tokens is not None:
+            # A client-supplied value has to be bounded as well. The worker
+            # writes ``prompt_len + max_tokens`` into an int32 numpy array
+            # (``GpuModelRunnerStates.add_request``), so an unbounded value
+            # raises OverflowError there and kills EngineCore -- a single
+            # request is enough to terminate the server for every client.
+            # The bound is on the SUM, so max_tokens == INT32_MAX is already
+            # fatal for any non-empty prompt.
+            max_allowed = self.model_config.max_model_len - prompt_len
+            if sampling_params.max_tokens > max_allowed:
+                return self.create_error_response(
+                    f"max_tokens={sampling_params.max_tokens} cannot be greater "
+                    f"than max_model_len - prompt_len = {max_allowed} "
+                    f"(max_model_len={self.model_config.max_model_len}, "
+                    f"prompt_len={prompt_len}). "
+                    f"Please request fewer output tokens.",
+                    param="max_tokens",
+                )
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False

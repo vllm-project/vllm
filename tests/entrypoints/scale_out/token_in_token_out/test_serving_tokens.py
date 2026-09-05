@@ -496,3 +496,72 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "max_tokens",
+    [
+        2147483647,  # INT32_MAX -- fits in int32 on its own, but the engine
+        # writes prompt_len + max_tokens, and it is the SUM that overflows
+        2147483648,  # INT32_MAX + 1
+        9223372036854775808,  # INT64_MAX + 1
+        1e18,  # float literal: pydantic coerces an integral float to int, so
+        # this reaches the same int32 write by a different parse path
+    ],
+)
+async def test_generate_rejects_unbounded_max_tokens(client, max_tokens: int):
+    """A client-supplied ``max_tokens`` must be bounded.
+
+    Unvalidated it reaches ``GpuModelRunnerStates.add_request``, which writes
+    ``prompt_len + max_tokens`` into an int32 numpy array and raises
+    OverflowError, killing EngineCore -- a single request was enough to take
+    the server down for every client.
+
+    The second assertion is the denial-of-service regression: the server must
+    still be serving afterwards.
+    """
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": max_tokens, "temperature": 0.0},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    assert resp.status_code == 400, resp.text
+
+    followup = await client.post(
+        GEN_ENDPOINT,
+        json={
+            "model": MODEL_NAME,
+            "token_ids": [1, 2, 3],
+            "sampling_params": {"max_tokens": 5},
+            "stream": False,
+        },
+    )
+    assert followup.status_code == 200, (
+        f"engine did not survive max_tokens={max_tokens}: {followup.text}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_max_tokens_boundary(client):
+    """The bound is ``max_model_len - prompt_len``, inclusive.
+
+    Fixture serves with ``--max-model-len 1024``; the prompt is 3 tokens, so
+    1021 must be accepted and 1022 rejected.
+    """
+    for max_tokens, expected in ((1021, 200), (1022, 400)):
+        resp = await client.post(
+            GEN_ENDPOINT,
+            json={
+                "model": MODEL_NAME,
+                "token_ids": [1, 2, 3],
+                "sampling_params": {"max_tokens": max_tokens, "temperature": 0.0},
+                "stream": False,
+            },
+        )
+        assert resp.status_code == expected, (
+            f"max_tokens={max_tokens}: expected {expected}, "
+            f"got {resp.status_code} {resp.text}"
+        )

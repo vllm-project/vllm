@@ -49,3 +49,32 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+@pytest.mark.parametrize(
+    "max_tokens",
+    [
+        2147483648,  # INT32_MAX + 1
+        9223372036854775808,  # INT64_MAX + 1
+        int(1e18),  # what pydantic hands over for a JSON ``1e+18``
+    ],
+)
+def test_max_tokens_rejects_values_beyond_int32(max_tokens: int):
+    """The engine stores sequence lengths in int32 arrays.
+
+    An unrepresentable ``max_tokens`` must fail validation here rather than
+    raising OverflowError inside the worker, which kills EngineCore.
+    """
+    params = SamplingParams(max_tokens=max_tokens)
+    with pytest.raises(VLLMValidationError, match="max_tokens must be at most"):
+        params.verify(MockModelConfig(), None, None, None)
+
+
+def test_max_tokens_accepts_int32_max():
+    """The representability bound is inclusive of INT32_MAX.
+
+    Note this value is still rejected per-request by the endpoint, because the
+    engine writes ``prompt_len + max_tokens`` and it is the SUM that must fit.
+    That bound needs ``max_model_len``, so it lives at the endpoint, not here.
+    """
+    SamplingParams(max_tokens=2**31 - 1).verify(MockModelConfig(), None, None, None)
