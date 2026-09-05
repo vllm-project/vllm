@@ -753,6 +753,18 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
+    def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            _find_simple_cpu_offload_connector,
+        )
+
+        if not has_kv_transfer_group():
+            return None
+        connector = _find_simple_cpu_offload_connector(get_kv_transfer_group())
+        if connector is None:
+            return None
+        return connector.get_aligned_num_cpu_blocks()
+
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []

@@ -46,6 +46,10 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import (
+    compute_num_offload_blocks_from_config,
+    compute_num_offload_blocks_from_configs,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -111,6 +115,8 @@ class SimpleCPUOffloadScheduler:
         hash_block_size: int,
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
+        worker_kv_cache_configs: list["KVCacheConfig"] | None = None,
+        aligned_num_cpu_blocks: int | None = None,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -129,8 +135,23 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
+        if aligned_num_cpu_blocks is not None:
+            num_cpu_blocks = aligned_num_cpu_blocks
+        else:
+            sizing_configs = worker_kv_cache_configs or [kv_cache_config]
+            num_cpu_blocks = compute_num_offload_blocks_from_configs(
+                sizing_configs, offload_capacity
+            )
+            if worker_kv_cache_configs is not None:
+                logger.warning(
+                    "SimpleCPUOffloadScheduler: worker-aligned num_cpu_blocks is "
+                    "unavailable; falling back to config-based sizing (%d blocks). "
+                    "PP/spec-decode deployments should always provide the aligned "
+                    "value from workers.",
+                    num_cpu_blocks,
+                )
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, offload_capacity
+            kv_cache_config, offload_capacity, num_cpu_blocks=num_cpu_blocks
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self.kv_event_medium = MEDIUM_STORAGE if disk_capacity_bytes > 0 else MEDIUM_CPU
@@ -224,7 +245,9 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _derive_cpu_config(
-        gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
+        gpu_config: "KVCacheConfig",
+        cpu_capacity_bytes: int,
+        num_cpu_blocks: int | None = None,
     ) -> "KVCacheConfig":
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio."""
@@ -233,11 +256,11 @@ class SimpleCPUOffloadScheduler:
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        # Every KVCacheTensor describes placement within the same backing allocation,
-        # so its size is the total GPU KV cache size.
-        gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
-        num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
+        if num_cpu_blocks is None:
+            num_cpu_blocks = compute_num_offload_blocks_from_config(
+                gpu_config, cpu_capacity_bytes
+            )
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
         cpu_tensors = [
             KVCacheTensor(

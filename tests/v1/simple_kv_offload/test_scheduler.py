@@ -48,6 +48,9 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.simple_kv_offload.sizing import (
+    compute_num_offload_blocks_from_configs,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -82,6 +85,8 @@ def _make_kv_cache_config(
     register_all_kvcache_specs(
         vllm_config=None
     )  # Ensure specs are registered for tests
+    total_size = _BYTES_PER_BLOCK * num_blocks * num_groups
+    byte_offset = 0
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         spec = (
@@ -108,12 +113,14 @@ def _make_kv_cache_config(
         )
         tensors.append(
             KVCacheTensor(
-                size=_BYTES_PER_BLOCK * num_blocks,
+                size=total_size,
                 layers=layer_names,
                 layer_stride=_BYTES_PER_BLOCK * num_blocks,
                 block_stride=_BYTES_PER_BLOCK,
+                offset=byte_offset,
             )
         )
+        byte_offset += _BYTES_PER_BLOCK * num_blocks
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
@@ -2075,3 +2082,61 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: PP / spec-decode sizing alignment
+# ---------------------------------------------------------------------------
+def test_compute_num_cpu_blocks_uses_heaviest_worker() -> None:
+    """Offload block count must follow the worker with the largest bytes/block."""
+    num_gpu_blocks = 100
+    cpu_capacity = 8 * _BYTES_PER_BLOCK
+    light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+    heavy = _make_kv_cache_config(num_gpu_blocks, num_groups=2)
+
+    heavy_only = compute_num_offload_blocks_from_configs([heavy], cpu_capacity)
+    aligned = compute_num_offload_blocks_from_configs([light, heavy], cpu_capacity)
+    light_only = compute_num_offload_blocks_from_configs([light], cpu_capacity)
+
+    assert aligned == heavy_only
+    assert aligned < light_only
+
+
+def test_scheduler_uses_worker_kv_cache_configs() -> None:
+    """Scheduler must not size the CPU pool from worker 0 alone under PP."""
+    num_gpu_blocks = 16
+    cpu_capacity = 4 * _BYTES_PER_BLOCK
+    light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+    heavy = _make_kv_cache_config(num_gpu_blocks, num_groups=2)
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=light,
+        cpu_capacity_bytes=cpu_capacity,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        worker_kv_cache_configs=[light, heavy],
+    )
+
+    expected = compute_num_offload_blocks_from_configs([light, heavy], cpu_capacity)
+    assert sched.num_cpu_blocks == expected
+    assert sched.num_cpu_blocks == 2
+
+
+def test_scheduler_uses_worker_aligned_num_cpu_blocks() -> None:
+    """Authoritative worker-aligned sizing overrides config-only estimates."""
+    num_gpu_blocks = 16
+    cpu_capacity = 4 * _BYTES_PER_BLOCK
+    light = _make_kv_cache_config(num_gpu_blocks, num_groups=1)
+    heavy = _make_kv_cache_config(num_gpu_blocks, num_groups=2)
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=_make_vllm_config(),
+        kv_cache_config=light,
+        cpu_capacity_bytes=cpu_capacity,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
+        worker_kv_cache_configs=[light, heavy],
+        aligned_num_cpu_blocks=1,
+    )
+    assert sched.num_cpu_blocks == 1

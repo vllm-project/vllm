@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from vllm.platforms import current_platform
 
@@ -30,6 +31,7 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     pin_tensor,
 )
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
 NUM_BLOCKS = 64
@@ -309,3 +311,56 @@ def test_register_separate_kv_head_groups(monkeypatch):
     assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
         (num_blocks, per_group_block_bytes)
     }
+
+
+def test_sync_num_cpu_blocks_across_workers_noop_when_dist_uninitialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: False,
+    )
+    assert sync_num_offload_blocks_across_workers(42) == 42
+
+
+def test_sync_num_cpu_blocks_across_workers_noop_when_world_size_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGroup:
+        world_size = 1
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: FakeGroup(),
+    )
+    assert sync_num_offload_blocks_across_workers(42) == 42
+
+
+def test_sync_num_cpu_blocks_across_workers_all_reduce_min(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeGroup:
+        world_size = 4
+        cpu_group = object()
+
+    def fake_all_reduce(tensor, group, op) -> None:
+        assert op is dist.ReduceOp.MIN
+        tensor.fill_(5)
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.is_initialized",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: FakeGroup(),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.sizing.dist.all_reduce",
+        fake_all_reduce,
+    )
+    assert sync_num_offload_blocks_across_workers(10) == 5

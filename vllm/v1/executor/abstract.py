@@ -148,6 +148,23 @@ class Executor(ABC):
     def determine_available_memory(self) -> list[int]:  # in bytes
         return self.collective_rpc("determine_available_memory")
 
+    def get_simple_cpu_offload_num_blocks(self) -> int | None:
+        values: list[int | None] = self.collective_rpc(
+            "get_simple_cpu_offload_num_cpu_blocks"
+        )
+        nums = [value for value in values if value is not None]
+        if not nums:
+            return None
+        aligned = min(nums)
+        if len(set(nums)) > 1:
+            logger.warning(
+                "SimpleCPUOffload workers reported mismatched num_cpu_blocks %s; "
+                "using min=%d",
+                nums,
+                aligned,
+            )
+        return aligned
+
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 

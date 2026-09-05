@@ -16,6 +16,10 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import (
+    local_num_offload_blocks,
+    sync_num_offload_blocks_across_workers,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -136,8 +140,6 @@ class SimpleCPUOffloadWorker:
         ]
         total_bytes_per_block = sum(per_tensor_bpb)
 
-        self.num_cpu_blocks = max(1, self.cpu_capacity_bytes // total_bytes_per_block)
-
         # Use lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
         self.load_stream = torch.cuda.Stream(priority=low_pri)
@@ -156,14 +158,18 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = max(1, self.disk_capacity_bytes // total_bytes_per_block)
-        self.num_cpu_blocks = num_disk_slots
+        local_num_disk_slots = local_num_offload_blocks(
+            self.disk_capacity_bytes, total_bytes_per_block
+        )
+        self.num_cpu_blocks = sync_num_offload_blocks_across_workers(
+            local_num_disk_slots
+        )
 
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
-            num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -175,7 +181,7 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
             rank_path,
-            num_disk_slots,
+            self.num_cpu_blocks,
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
@@ -187,6 +193,13 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
+        local_num_cpu_blocks = local_num_offload_blocks(
+            self.cpu_capacity_bytes, total_bytes_per_block
+        )
+        self.num_cpu_blocks = sync_num_offload_blocks_across_workers(
+            local_num_cpu_blocks
+        )
+
         logger.info(
             "SimpleCPUOffloadWorker [CPU]: %d tensors, %d CPU blocks (%.2f GB)",
             len(unique_gpu_caches),
