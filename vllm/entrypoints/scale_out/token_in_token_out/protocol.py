@@ -11,7 +11,7 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import StreamOptions, validate_cache_salt
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -176,6 +176,13 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_cache_salt(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            validate_cache_salt(data.get("cache_salt"))
+        return data
 
     def is_sampling_param_provided(self, name: str) -> bool:
         """Whether the caller explicitly set ``sampling_params.<name>``.
