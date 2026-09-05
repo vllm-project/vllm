@@ -446,6 +446,7 @@ class EngineArgs:
     )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
+    verify_weights: bool = LoadConfig.verify_weights
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -970,6 +971,9 @@ class EngineArgs:
         )
         load_group.add_argument(
             "--model-loader-extra-config", **load_kwargs["model_loader_extra_config"]
+        )
+        load_group.add_argument(
+            "--verify-weights", **load_kwargs["verify_weights"]
         )
         load_group.add_argument("--ignore-patterns", **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
@@ -1869,6 +1873,7 @@ class EngineArgs:
             safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
             safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
             model_loader_extra_config=self.model_loader_extra_config,
+            verify_weights=self.verify_weights,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
             pt_load_map_location=self.pt_load_map_location,
