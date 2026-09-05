@@ -192,7 +192,13 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: All2AllBackend = "allgather_reducescatter"
+    all2all_backend: All2AllBackend = Field(
+        default_factory=lambda: (
+            "flashinfer_nvlink_one_sided"
+            if current_platform.is_cuda()
+            else "allgather_reducescatter"
+        )
+    )
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
@@ -492,6 +498,15 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if (
+            self.all2all_backend == "flashinfer_nvlink_one_sided"
+            and not current_platform.is_cuda()
+        ):
+            raise ValueError(
+                "all2all_backend='flashinfer_nvlink_one_sided' is only "
+                "supported on CUDA. Use 'allgather_reducescatter' on ROCm."
+            )
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
