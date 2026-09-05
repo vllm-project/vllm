@@ -76,9 +76,7 @@ Currently, the internal DP load balancing is done within the API server process(
 
 When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
 
-<figure markdown="1">
 ![DP Internal LB Diagram](../assets/deployment/dp_internal_lb.png)
-</figure>
 
 ## Hybrid Load Balancing
 
@@ -126,8 +124,6 @@ vllm serve $MODEL --data-parallel-size 2 --data-parallel-rank 1 \
 
 The coordinator process also runs in this scenario, co-located with the DP rank 0 engine.
 
-<figure markdown="1">
 ![DP External LB Diagram](../assets/deployment/dp_external_lb.png)
-</figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
