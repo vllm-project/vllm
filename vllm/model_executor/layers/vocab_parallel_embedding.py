@@ -503,7 +503,19 @@ class VocabParallelEmbedding(PluggableLayer):
 
     def forward(self, input_):
         if self.tp_size == 1:
-            return self.quant_method.embedding(self, input_.long())
+            # tp_size == 1 has no vocab sharding, but the input can still carry
+            # out-of-range placeholder ids: speculative decode feeds the target
+            # a padded query block whose not-yet-filled / rejected draft slots
+            # are the -1 sentinel. Without the tp>1 masking these reach the
+            # embedding gather and trip a device-side index assert
+            # (indexSelectSmallIndex: srcIndex < srcSelectDimSize). Mask them
+            # to index 0 and zero their output rows, mirroring the tp>1 path;
+            # such positions are discarded downstream by rejection sampling.
+            input_mask = (input_ < 0) | (input_ >= self.num_embeddings_per_partition)
+            masked_input = input_.masked_fill(input_mask, 0)
+            output = self.quant_method.embedding(self, masked_input.long())
+            output.masked_fill_(input_mask.unsqueeze(-1), 0)
+            return output
 
         if self.use_fused_embedding:
             output_parallel = ops.vocab_parallel_embedding(
