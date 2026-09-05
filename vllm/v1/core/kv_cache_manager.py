@@ -300,15 +300,17 @@ class KVCacheManager:
 
         Hybrid (Mamba + full-attention) models can have per-group prefix hits
         diverge under block pressure: the full-attention tail may be evicted
-        while a deeper Mamba state survives, or vice versa. Report the
-        full-attention hit as the local prefix - the connector transfers the
-        remaining suffix and the Mamba state is transferred unconditionally by
-        nixl's ``_apply_prefix_caching`` - and flag when that hit ran deeper
-        than a lagging group. Such a hit only has a valid Mamba state at its
-        boundary if the connector supplies it, so the caller must fall back to
-        ``get_computed_blocks`` to reconcile when no external tokens are found.
+        while a deeper Mamba state survives, or vice versa. The reported local
+        prefix is always a boundary at which every group has a valid cached
+        state. A group deeper than full attention (its full-attention blocks
+        evicted) yields the reconciled boundary unflagged; a lagging group
+        (e.g. a Mamba state that does not exist at the full-attention
+        boundary) yields the reconciled boundary flagged ``hit_diverged``,
+        which the caller reconciles via ``get_computed_blocks`` when no
+        external tokens backfill it; converged hits use the full-attention
+        boundary itself.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        Non-hybrid models use ``get_computed_blocks``.
 
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
@@ -329,16 +331,24 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, request.num_tokens - 1
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
+        fa_hit = per_group_hits[fa_group_id]
+        if any(hit > fa_hit for hit in per_group_hits):
+            # A group hit deeper than full attention means its full-attention
+            # blocks were evicted; use the reconciled boundary that every
+            # group agrees on.
             return *self.get_computed_blocks(request), False
+        if any(hit < fa_hit for hit in per_group_hits):
+            # A group (the Mamba state) lags full attention: no valid Mamba
+            # state exists at the full-attention boundary, so serving it would
+            # be misaligned. Use the reconciled boundary and flag the
+            # divergence; the scheduler reconciles again when no external
+            # tokens back the deeper hit.
+            return *self.get_computed_blocks(request), True
 
-        num_local = per_group_hits[fa_group_id]
+        num_local = fa_hit
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
-        return blocks, num_local, 0, min(per_group_hits) < num_local
+        return blocks, num_local, 0, False
 
     def allocate_slots(
         self,
