@@ -27,6 +27,8 @@ FLy requires at least two speculative tokens. `fly_window_size` is the number of
 
 FLy supports greedy draft sampling with target-only acceptance and probabilistic draft sampling with standard p/q acceptance. Token-Level Intersection can be used for cross-vocabulary draft models with greedy draft sampling, but is incompatible with `use_local_argmax_reduction`.
 
+FLy is supported by both model runners. With ModelRunnerV2, use a supported proposer such as MTP, EAGLE, or DFlash; standalone `draft_model` proposing still requires ModelRunnerV1.
+
 ## Validated Configurations
 
 The primary evaluation covers the V1 `draft_model` proposer. Configurations not listed below are not necessarily unsupported, but have not yet been experimentally validated.
