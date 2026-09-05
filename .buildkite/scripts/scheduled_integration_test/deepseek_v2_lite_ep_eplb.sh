@@ -10,7 +10,7 @@ mkdir -p "${OUT_DIR}"
 
 wait_for_server() {
   local port=$1
-  timeout 600 bash -c '
+  timeout "${VLLM_ENGINE_READY_TIMEOUT_S:-600}" bash -c '
     until curl -sf "http://127.0.0.1:'"$port"'/health" > /dev/null; do
       sleep 1
     done'
