@@ -1328,6 +1328,30 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_get_kv_cache_config_ignores_layers_outside_projected_uniform_group():
+    """A PP worker must not allocate tensors for another worker's layers."""
+    spec = new_kv_cache_spec()
+    projected_groups = [
+        KVCacheGroupSpec(
+            [],
+            UniformTypeKVCacheSpecs(
+                block_size=spec.block_size,
+                kv_cache_specs={"remote.layer": spec},
+            ),
+        ),
+        KVCacheGroupSpec(["local.layer"], spec),
+    ]
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config,
+        projected_groups,
+        available_memory=spec.page_size_bytes * 2,
+    )
+
+    assert [tensor.layers for tensor in config.kv_cache_tensors] == [["local.layer"]]
+
+
 def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
     dcp = 8
     full = FullAttentionSpec(
