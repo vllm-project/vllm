@@ -24,6 +24,8 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     partial_output_ptr,
     partial_lse_ptr,
     output_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
     stride_q_row,
     stride_q_head,
     stride_k_block,
@@ -49,12 +51,18 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
     NUM_TILES: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    IS_FP8: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
     kv_head = tl.program_id(1)
     split_id = tl.program_id(2)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
+    if IS_FP8:
+        # Per-tensor dequant scales read from device buffers, so a cudagraph
+        # replay stays valid if the scales are ever recalibrated.
+        k_scale = tl.load(k_scale_ptr).to(tl.float32)
+        v_scale = tl.load(v_scale_ptr).to(tl.float32)
 
     # The packed selection buffer carries one TRAILING COUNT COLUMN per row
     # (column TOPK of a TOPK+1-wide buffer): the row's valid-entry count,
@@ -117,6 +125,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[None, :],
             other=0.0,
         )
+        if IS_FP8:
+            # e4m3 -> bf16 is exact; sm12x Triton cannot tl.dot fp8 operands.
+            keys = keys.to(tl.bfloat16)
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
@@ -126,7 +137,12 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
             mask=valid[:, None],
             other=0.0,
         )
+        if IS_FP8:
+            values = values.to(tl.bfloat16)
         scores = tl.dot(query, keys)
+        if IS_FP8:
+            # Fold the per-tensor K dequant scale into the logits.
+            scores *= k_scale
         # Scaling scores avoids re-quantizing a scaled query to BF16.
         scores *= softmax_scale_log2
         scores = tl.where(valid[None, :], scores, -1.0e20)
@@ -149,6 +165,9 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         accumulator / tl.maximum(normalizer[:, None], 1.0e-20),
         0.0,
     )
+    if IS_FP8:
+        # Fold the per-tensor V dequant scale into the (partial) output.
+        normalized_output = normalized_output * v_scale
     output_mask = head_offsets[:, None] < GROUP_SIZE
     if NUM_SPLITS == 1:
         tl.store(
@@ -455,8 +474,13 @@ def qsa_sparse_paged_attention(
     token_to_req: torch.Tensor,
     use_prefill_config: bool,
     out: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Run sparse GQA directly over paged BF16 K/V caches.
+    """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
+
+    With fp8 caches, k_scale/v_scale are the layer's per-tensor dequant scales
+    (1-element device tensors); the kernel dequantizes on load.
 
     logical_indices is the PACKED selection buffer: [rows, selection_width + 1]
     with the trailing column holding each row's valid-entry count (written by
@@ -480,7 +504,15 @@ def qsa_sparse_paged_attention(
         raise ValueError("QSA sparse attention requires valid grouped-query heads")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+    assert q.dtype == torch.bfloat16
+    assert k_cache.dtype == v_cache.dtype
+    is_fp8 = k_cache.dtype == torch.float8_e4m3fn
+    if is_fp8:
+        assert k_scale is not None and v_scale is not None
+        assert k_scale.numel() == 1 and v_scale.numel() == 1
+        assert k_scale.is_cuda and v_scale.is_cuda
+    else:
+        assert k_cache.dtype == torch.bfloat16
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert token_to_req.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
@@ -533,6 +565,9 @@ def qsa_sparse_paged_attention(
         partial_output,
         partial_lse,
         out,
+        # Dummy pointers when bf16: IS_FP8=False compiles the loads out.
+        k_scale if is_fp8 else q,
+        v_scale if is_fp8 else q,
         q.stride(0),
         q.stride(1),
         k_cache.stride(0),
@@ -558,6 +593,7 @@ def qsa_sparse_paged_attention(
         NUM_TILES=num_tiles,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
+        IS_FP8=is_fp8,
         num_warps=partial_warps,
         num_stages=2,
     )
@@ -592,6 +628,9 @@ def warmup_qsa_sparse_paged_attention(
 
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
+    # An fp8 cache is allocated as uint8 and viewed as e4m3 at attention time.
+    is_fp8 = kv_cache.dtype == torch.uint8
+    cache_dtype = torch.float8_e4m3fn if is_fp8 else key_cache.dtype
     num_kv_heads = key_cache.shape[2]
     group_size = num_query_heads // num_kv_heads
     block_m = triton.next_power_of_2(group_size)
@@ -612,15 +651,16 @@ def warmup_qsa_sparse_paged_attention(
         torch.bfloat16, shape=(num_rows, num_query_heads, head_dim)
     )
     k_cache_ptr = TritonWarmupTensor(
-        key_cache.dtype,
+        cache_dtype,
         shape=tuple(key_cache.shape),
         strides=tuple(key_cache.stride()),
     )
     v_cache_ptr = TritonWarmupTensor(
-        value_cache.dtype,
+        cache_dtype,
         shape=tuple(value_cache.shape),
         strides=tuple(value_cache.stride()),
     )
+    scale_ptr = TritonWarmupTensor(torch.float32, shape=(1,))
     # +1: the packed buffer's trailing count column.
     indices_ptr = TritonWarmupTensor(torch.int32, shape=(num_rows, selection_width + 1))
     block_table_ptr = TritonWarmupTensor(
@@ -659,6 +699,8 @@ def warmup_qsa_sparse_paged_attention(
             partial_output_ptr,
             partial_lse_ptr,
             output_ptr,
+            scale_ptr if is_fp8 else q_ptr,
+            scale_ptr if is_fp8 else q_ptr,
             row_stride,
             head_stride,
             key_cache.stride(0),
@@ -684,6 +726,7 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
+            IS_FP8=is_fp8,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),
