@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from functools import cache
 from typing import cast
 
 import torch
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     kv_cache_dtype_str_to_dtype,
@@ -25,6 +27,11 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
+)
+from vllm.v1.attention.backends.flex_attention import (
+    FlexAttentionBackend,
+    FlexAttentionImpl,
+    FlexAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -39,9 +46,16 @@ from .ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
+from .ops.flex_rel_attention import make_inkling_flex_score_mod
 from .ops.qkvr_prep import fused_qkvr_prep
 from .sconv_swa_attn import _K, _V, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
+
+
+@cache
+def _use_sm8x_flex_attention() -> bool:
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major == 8
 
 
 def compute_log_scaling_tau(
@@ -90,6 +104,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.log_scaling_alpha = config.log_scaling_alpha
         # q/k are per-head RMS-normed (unit norm), so Inkling scales by 1/head_dim.
         self.scaling = 1.0 / head_dim
+        self._use_flex_attention = _use_sm8x_flex_attention()
 
         tp_size = get_tensor_model_parallel_world_size()
         self.num_total_heads = num_heads
@@ -157,7 +172,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             local_extent if is_local else vllm_config.model_config.max_model_len
         )
 
-        # ---- KV-cache wiring (reuse FlashAttentionBackend for metadata) ----
+        # ---- KV-cache wiring ----
         cache_config = vllm_config.cache_config
         self.kv_cache_dtype = (
             cache_config.cache_dtype if cache_config is not None else "auto"
@@ -167,6 +182,17 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         )
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
+        self._flex_attention_impl: FlexAttentionImpl | None = None
+        if self._use_flex_attention:
+            self._flex_attention_impl = FlexAttentionImpl(
+                num_heads=self.num_heads,
+                head_size=self.head_dim,
+                scale=self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                alibi_slopes=None,
+                sliding_window=self.local_extent,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
 
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -175,6 +201,8 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self._use_flex_attention:
+            return FlexAttentionBackend
         return FlashAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -225,7 +253,10 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             conv_meta = attn_metadata[self.conv_owner.prefix]
             md = attn_metadata[self.prefix]
             assert isinstance(conv_meta, InklingSconvMetadata)
-            fa_md = cast(FlashAttentionMetadata, md)
+            if self._use_flex_attention:
+                slot_mapping = cast(FlexAttentionMetadata, md).slot_mapping
+            else:
+                slot_mapping = cast(FlashAttentionMetadata, md).slot_mapping
             assert self.kv_cache.numel() > 0
             assert self.conv_owner.kv_cache.numel() > 0
             # One launch: K/V sconv (conv-cache insert + conv + residual),
@@ -254,7 +285,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
                 conv_meta.seq_idx,
                 conv_meta.slot_mapping,
                 conv_meta.query_start,
-                fa_md.slot_mapping,
+                slot_mapping,
                 off_k,
                 off_v,
                 self.conv_owner.block_size,
@@ -276,8 +307,29 @@ class InklingAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict)
-        md = cast(FlashAttentionMetadata, attn_metadata[self.prefix])
+        raw_md = attn_metadata[self.prefix]
 
+        if self._use_flex_attention:
+            flex_md = cast(FlexAttentionMetadata, raw_md)
+            nt = flex_md.num_actual_tokens
+            flex_md.score_mod = make_inkling_flex_score_mod(
+                rel_logits[:nt], self.rel_extent
+            )
+            flex_md.transformed_score_mod = flex_md.get_transformed_score_mod()
+            assert self._flex_attention_impl is not None
+            empty_kv = q.new_empty((0,))
+            self._flex_attention_impl.forward(
+                layer=self,
+                query=q[:nt],
+                key=empty_kv,
+                value=empty_kv,
+                kv_cache=self.kv_cache,
+                attn_metadata=flex_md,
+                output=output[:nt],
+            )
+            return
+
+        md = cast(FlashAttentionMetadata, raw_md)
         nt = md.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache()
         max_seqlen_q = bucket_max_seqlen_q(md.max_query_len)
