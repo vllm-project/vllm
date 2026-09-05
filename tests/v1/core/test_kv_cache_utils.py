@@ -2514,6 +2514,60 @@ def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible_no_indexer():
         kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
+@pytest.mark.parametrize(
+    ("cache_dtype", "bytes_per_token", "expected_block_size"),
+    [("fp8_ds_mla", 656, 3584), ("nvfp4_ds_mla", 352, 6656), ("fp8", 512, 4608)],
+)
+def test_hybrid_mla_block_alignment_uses_packed_state_size(
+    monkeypatch, cache_dtype, bytes_per_token, expected_block_size
+):
+    from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.platforms.interface import Platform
+
+    config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype=cache_dtype, mamba_cache_mode="align")
+    )
+    config.model_config = SimpleNamespace(
+        use_mla=True,
+        architecture="Glm5NextForConditionalGeneration",
+        get_num_kv_heads=lambda parallel_config: 1,
+        get_head_size=lambda: 512,
+    )
+    model_cls = SimpleNamespace(
+        get_mamba_state_shape_from_config=lambda config: (
+            (12288, 8),
+            (32, 128, 128),
+        ),
+        get_mamba_state_dtype_from_config=lambda config: (
+            torch.bfloat16,
+            torch.float32,
+        ),
+    )
+    monkeypatch.setattr(
+        ModelRegistry, "resolve_model_cls", lambda *args, **kwargs: (model_cls, None)
+    )
+    monkeypatch.setattr(Platform, "_get_indexer_block_alignment", lambda config: 256)
+    backend = SimpleNamespace(get_supported_kernel_block_sizes=lambda: [64])
+
+    Platform._align_hybrid_block_size(config, backend)
+
+    assert config.cache_config.block_size == expected_block_size
+    assert config.cache_config.mamba_block_size == expected_block_size
+    assert (
+        config.cache_config.mamba_page_size_padded
+        == expected_block_size * bytes_per_token
+    )
+    layer = SimpleNamespace(
+        kv_cache_dtype=cache_dtype,
+        head_size=512,
+        sliding_window=None,
+        non_causal_multi_token_decode=False,
+    )
+    spec = MLAAttention.get_kv_cache_spec(layer, config)
+    assert config.cache_config.mamba_page_size_padded == spec.page_size_bytes
+
+
 def test_get_kv_cache_config_mamba_hybrid_sharing_prepadded_mamba():
     """Platform-prepadded mamba pages (mamba_page_size_padded hint) must not
     disable slot sharing; the layout re-pads them to the MLA page."""

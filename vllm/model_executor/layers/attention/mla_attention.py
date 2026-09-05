@@ -307,6 +307,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
+    get_mla_state_content_bytes,
 )
 
 logger = init_logger(__name__)
@@ -1280,12 +1281,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
-            # blob, so the size is not derivable from head_size.
-            # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
-            ),
+            state_content_bytes=get_mla_state_content_bytes(self.kv_cache_dtype),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(

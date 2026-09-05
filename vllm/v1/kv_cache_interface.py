@@ -541,6 +541,12 @@ class FullAttentionSpec(AttentionSpec):
         return merged_spec
 
 
+def get_mla_state_content_bytes(cache_dtype: str) -> int | None:
+    """Packed NoPE + RoPE + scales bytes per token, or None for standard MLA."""
+    # See the ds_mla layouts in flashmla_sparse.py.
+    return {"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(cache_dtype)
+
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return
