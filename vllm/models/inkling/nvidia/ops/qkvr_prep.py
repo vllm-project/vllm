@@ -6,6 +6,16 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import aux_stream
 
+# Finite range of float8_e4m3fn. Values are clamped before the store
+# cast, matching vLLM's other fp8 cache-write kernels; fp8 cast
+# saturation is backend-dependent, so it is not relied on. Globals
+# referenced inside @triton.jit must be tl.constexpr instances.
+_FP8_MAX = tl.constexpr(448.0)
+
+# e4m3 only: the layer rejects other fp8 variants, and the clamp above is
+# wrong for e5m2.
+_FP8_KV_DTYPES = (torch.float8_e4m3fn,)
+
 LOW_BLOCK_M = 32
 LOW_BLOCK_N = 64
 LOW_NUM_WARPS = 4
@@ -206,6 +216,8 @@ def _qkvr_qkv_kernel(
     conv_block_table_ptr,
     query_start_ptr,
     attention_slot_mapping_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
     log_scaling_ptr,
     tokens,
     eps,
@@ -236,6 +248,7 @@ def _qkvr_qkv_kernel(
     D_REL: tl.constexpr,
     REL_EXTENT: tl.constexpr,
     REL_EXTENT_PADDED: tl.constexpr,
+    KV_CACHE_FP8: tl.constexpr,
 ):
     block = tl.program_id(0)
     num_q_rows = tokens * NUM_Q_HEADS
@@ -370,14 +383,28 @@ def _qkvr_qkv_kernel(
                 acc_k += source_k * k_weight
                 acc_v += source_v * v_weight
 
+            v_float = acc_v + v_value.to(tl.float32)
             k_rounded = (acc_k + k_value.to(tl.float32)).to(qkvr_ptr.dtype.element_ty)
-            v_rounded = (acc_v + v_value.to(tl.float32)).to(qkvr_ptr.dtype.element_ty)
             k_float = k_rounded.to(tl.float32)
             k_norm_weight = tl.load(k_norm_weight_ptr + dims).to(tl.float32)
             rstd = tl.rsqrt(tl.sum(k_float * k_float, axis=0) / HEAD_DIM + eps)
-            k_normalized = (k_float * rstd * k_norm_weight).to(
-                qkvr_ptr.dtype.element_ty
-            )
+            k_normalized = k_float * rstd * k_norm_weight
+
+            if KV_CACHE_FP8:
+                # Per-tensor fp8 quantization on store. Scales are fp32
+                # scalars; the cache pointers carry an fp8 element type,
+                # so the store cast performs the fp32-to-fp8 rounding.
+                k_inv = 1.0 / tl.load(k_scale_ptr)
+                v_inv = 1.0 / tl.load(v_scale_ptr)
+                k_store = tl.clamp(k_normalized * k_inv, -_FP8_MAX, _FP8_MAX).to(
+                    key_cache_ptr.dtype.element_ty
+                )
+                v_store = tl.clamp(v_float * v_inv, -_FP8_MAX, _FP8_MAX).to(
+                    value_cache_ptr.dtype.element_ty
+                )
+            else:
+                k_store = k_normalized.to(qkvr_ptr.dtype.element_ty)
+                v_store = v_float.to(qkvr_ptr.dtype.element_ty)
 
             safe_attention_slot = tl.maximum(attention_slot, 0)
             attention_block = safe_attention_slot // attention_page_size
@@ -388,7 +415,7 @@ def _qkvr_qkv_kernel(
                 + attention_offset * stride_kc_token
                 + head * stride_kc_head
                 + dims,
-                k_normalized,
+                k_store,
                 mask=attention_slot >= 0,
             )
             tl.store(
@@ -397,7 +424,7 @@ def _qkvr_qkv_kernel(
                 + attention_offset * stride_vc_token
                 + head * stride_vc_head
                 + dims,
-                v_rounded,
+                v_store,
                 mask=attention_slot >= 0,
             )
 
@@ -458,6 +485,8 @@ def _kv_kernel(
     conv_block_table_ptr,
     query_start_ptr,
     attention_slot_mapping_ptr,
+    k_scale_ptr,
+    v_scale_ptr,
     tokens,
     eps,
     stride_x_t,
@@ -483,6 +512,7 @@ def _kv_kernel(
     OFF_K: tl.constexpr,
     OFF_V: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
+    KV_CACHE_FP8: tl.constexpr,
 ):
     token = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
     dims = tl.arange(0, HEAD_DIM)
@@ -579,14 +609,26 @@ def _kv_kernel(
         acc_k += source_k * k_weight[None, :]
         acc_v += source_v * v_weight[None, :]
 
+    v_float = acc_v + v_value.to(tl.float32)
     k_rounded = (acc_k + k_value.to(tl.float32)).to(qkvr_ptr.dtype.element_ty)
-    v_rounded = (acc_v + v_value.to(tl.float32)).to(qkvr_ptr.dtype.element_ty)
     k_float = k_rounded.to(tl.float32)
     k_norm_weight = tl.load(k_norm_weight_ptr + dims).to(tl.float32)
     rstd = tl.rsqrt(tl.sum(k_float * k_float, axis=1) / HEAD_DIM + eps)
-    k_normalized = (k_float * rstd[:, None] * k_norm_weight[None, :]).to(
-        qkvr_ptr.dtype.element_ty
-    )
+    k_normalized = k_float * rstd[:, None] * k_norm_weight[None, :]
+
+    if KV_CACHE_FP8:
+        # Per-tensor fp8 quantization on store. See _qkvr_qkv_kernel.
+        k_inv = 1.0 / tl.load(k_scale_ptr)
+        v_inv = 1.0 / tl.load(v_scale_ptr)
+        k_store = tl.clamp(k_normalized * k_inv, -_FP8_MAX, _FP8_MAX).to(
+            key_cache_ptr.dtype.element_ty
+        )
+        v_store = tl.clamp(v_float * v_inv, -_FP8_MAX, _FP8_MAX).to(
+            value_cache_ptr.dtype.element_ty
+        )
+    else:
+        k_store = k_normalized.to(qkvr_ptr.dtype.element_ty)
+        v_store = v_float.to(qkvr_ptr.dtype.element_ty)
 
     safe_attention_slot = tl.maximum(attention_slot, 0)
     attention_block = safe_attention_slot // attention_page_size
@@ -598,7 +640,7 @@ def _kv_kernel(
         + attention_offset[:, None] * stride_kc_token
         + head[:, None] * stride_kc_head
         + dims[None, :],
-        k_normalized,
+        k_store,
         mask=attention_mask[:, None],
     )
     tl.store(
@@ -607,7 +649,7 @@ def _kv_kernel(
         + attention_offset[:, None] * stride_vc_token
         + head[:, None] * stride_vc_head
         + dims[None, :],
-        v_rounded,
+        v_store,
         mask=attention_mask[:, None],
     )
 
@@ -654,6 +696,8 @@ def _run_tiled_kv(
     conv_block_table: torch.Tensor,
     query_start: torch.Tensor,
     attention_slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     *,
     eps: float,
     num_q_heads: int,
@@ -662,6 +706,7 @@ def _run_tiled_kv(
     off_k: int,
     off_v: int,
     conv_block_size: int,
+    kv_cache_fp8: bool,
 ) -> None:
     tokens = qkvr.shape[0]
     _kv_kernel[(triton.cdiv(tokens, KV_BLOCK_ROWS), num_kv_heads)](
@@ -678,6 +723,8 @@ def _run_tiled_kv(
         conv_block_table,
         query_start,
         attention_slot_mapping,
+        k_scale,
+        v_scale,
         tokens,
         eps,
         qkvr.stride(0),
@@ -703,6 +750,7 @@ def _run_tiled_kv(
         OFF_K=off_k,
         OFF_V=off_v,
         BLOCK_ROWS=KV_BLOCK_ROWS,
+        KV_CACHE_FP8=kv_cache_fp8,
         num_warps=KV_NUM_WARPS,
     )
 
@@ -725,6 +773,8 @@ def _run_fused_small(
     conv_block_table: torch.Tensor,
     query_start: torch.Tensor,
     attention_slot_mapping: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     *,
     eps: float,
     num_q_heads: int,
@@ -734,6 +784,7 @@ def _run_fused_small(
     off_v: int,
     conv_block_size: int,
     log_scaling: torch.Tensor | None,
+    kv_cache_fp8: bool,
 ) -> None:
     tokens = qkvr.shape[0]
 
@@ -757,6 +808,8 @@ def _run_fused_small(
         conv_block_table,
         query_start,
         attention_slot_mapping,
+        k_scale,
+        v_scale,
         log_scaling if log_scaling is not None else positions,
         tokens,
         eps,
@@ -787,6 +840,7 @@ def _run_fused_small(
         D_REL=16,
         REL_EXTENT=rel_proj.shape[1],
         REL_EXTENT_PADDED=triton.next_power_of_2(rel_proj.shape[1]),
+        KV_CACHE_FP8=kv_cache_fp8,
         num_warps=SMALL_NUM_WARPS,
     )
 
@@ -816,6 +870,8 @@ def fused_qkvr_prep(
     off_v: int,
     conv_block_size: int,
     log_scaling: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert d_rel == 16 and rel_proj.shape[0] == 16
     assert head_dim == 128
@@ -825,6 +881,16 @@ def fused_qkvr_prep(
     assert rel_proj.stride() == (rel_proj.shape[1], 1)
     assert conv_cache.stride(3) == 1
     assert key_cache.stride(3) == 1 and value_cache.stride(3) == 1
+    assert value_cache.dtype == key_cache.dtype
+    kv_cache_fp8 = key_cache.dtype in _FP8_KV_DTYPES
+    if kv_cache_fp8:
+        assert k_scale is not None and v_scale is not None
+        assert k_scale.dtype == torch.float32 and v_scale.dtype == torch.float32
+    else:
+        # Placeholder pointers; the kernels do not load them when
+        # KV_CACHE_FP8 is false.
+        k_scale = k_norm_weight
+        v_scale = k_norm_weight
     tokens = qkvr.shape[0]
     q_out = torch.empty(
         (tokens, num_q_heads * head_dim), dtype=qkvr.dtype, device=qkvr.device
@@ -856,6 +922,8 @@ def fused_qkvr_prep(
             conv_block_table,
             query_start,
             attention_slot_mapping,
+            k_scale,
+            v_scale,
             eps=eps,
             num_q_heads=num_q_heads,
             num_kv_heads=num_kv_heads,
@@ -864,6 +932,7 @@ def fused_qkvr_prep(
             off_v=off_v,
             conv_block_size=conv_block_size,
             log_scaling=log_scaling,
+            kv_cache_fp8=kv_cache_fp8,
         )
         return q_out, rel_out
 
@@ -886,6 +955,8 @@ def fused_qkvr_prep(
             conv_block_table,
             query_start,
             attention_slot_mapping,
+            k_scale,
+            v_scale,
             eps=eps,
             num_q_heads=num_q_heads,
             num_kv_heads=num_kv_heads,
@@ -893,6 +964,7 @@ def fused_qkvr_prep(
             off_k=off_k,
             off_v=off_v,
             conv_block_size=conv_block_size,
+            kv_cache_fp8=kv_cache_fp8,
         )
     _run_tiled_q(
         qkvr,
