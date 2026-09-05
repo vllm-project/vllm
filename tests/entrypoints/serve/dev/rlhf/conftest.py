@@ -12,6 +12,7 @@ PR:  https://github.com/vllm-project/vllm/pull/45586
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -40,7 +41,6 @@ _BASE_ARGS = [
     "32",
     "--gpu-memory-utilization",
     "0.75",
-    "--enable-sleep-mode",
     "--enforce-eager",
 ]
 
@@ -56,11 +56,15 @@ _DUMMY_ARGS = [
     "8",
     "--gpu-memory-utilization",
     "0.5",
-    "--enable-sleep-mode",
     "--enforce-eager",
     "--load-format",
     "dummy",
 ]
+
+# Name the server registers the model under; requests must use this
+# name (vLLM does not serve the load-time model name once
+# --served-model-name is set).
+SERVED_MODEL_NAME = "m"
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +84,7 @@ def _warm_up(url: str) -> None:
 
 @contextmanager
 def server(
+    model: str,
     extra_args=None,
     port: int = 8770,
     timeout: float = 180.0,
@@ -88,10 +93,14 @@ def server(
     """Launch a vLLM server with the dev router; yield its base URL.
 
     Args:
+        model:           Model to serve; each test module passes its own.
         extra_args:      Additional CLI flags appended after the base args.
         port:            HTTP port to bind (caller is responsible for uniqueness).
         timeout:         Seconds to wait for /health before giving up.
         dummy_weights:   If True, use --load-format dummy (fast, no real weights).
+
+    The base args pin eager execution (``--enforce-eager``); callers can
+    add further flags via ``extra_args``.
     """
     env = {**os.environ, "VLLM_SERVER_DEV_MODE": "1"}
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
@@ -100,15 +109,19 @@ def server(
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        MODEL_NAME,
+        model,
         "--port",
         str(port),
         "--served-model-name",
-        "m",
+        SERVED_MODEL_NAME,
         *(base + (extra_args or [])),
     ]
     proc = subprocess.Popen(
-        cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        cmd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     url = f"http://localhost:{port}"
     try:
@@ -131,11 +144,27 @@ def server(
         _warm_up(url)
         yield url
     finally:
-        proc.terminate()
+        # vLLM's DP supervisor / engine-core / DP coordinator run as
+        # child processes and survive a plain terminate() of the parent,
+        # then collide with the next server (ZMQ BrokenPipeError in the
+        # coordinator). Kill the whole process group instead;
+        # start_new_session above makes the server a group leader.
+        _kill_server(proc, signal.SIGTERM)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=10)
         if proc.poll() is None:
-            proc.kill()
+            _kill_server(proc, signal.SIGKILL)
+
+
+def _kill_server(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the server's process group, falling back to the parent."""
+    if hasattr(os, "killpg"):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), sig)
+    elif sig == signal.SIGTERM:
+        proc.terminate()
+    else:
+        proc.kill()
 
 
 # ---------------------------------------------------------------------------

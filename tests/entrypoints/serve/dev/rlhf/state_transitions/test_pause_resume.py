@@ -11,6 +11,7 @@ import pytest
 import requests
 
 from tests.entrypoints.serve.dev.rlhf.conftest import (
+    MODEL_NAME,
     cached_tokens,
     completion_with_cache_details,
     gen,
@@ -38,10 +39,12 @@ def server_url(use_v2):
     with (
         patch.dict(os.environ, env_vars),
         server(
+            MODEL_NAME,
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
-            ]
+                "--enable-sleep-mode",
+            ],
         ) as url,
     ):
         yield url
