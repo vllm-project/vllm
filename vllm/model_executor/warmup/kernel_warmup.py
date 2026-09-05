@@ -44,6 +44,7 @@ from vllm.model_executor.warmup.replayssm_warmup import (
 from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
     spec_decode_rejection_warmup,
 )
+from vllm.model_executor.warmup.triton_moe_warmup import triton_moe_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -168,6 +169,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         fa4_cutedsl_warmup(worker)
         spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        triton_moe_warmup(worker)
 
     if current_platform.has_device_capability(90):
         _warmup_ll_bf16_router_gemm(worker.get_model())
