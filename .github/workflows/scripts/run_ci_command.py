@@ -4,6 +4,7 @@
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -67,6 +68,7 @@ ACTIVE_BUILD_STATES = {
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 SETUP_STEP_KEYS = {
+    "bootstrap",
     "ensure-ci-base-amd",
     "pre-commit",
     "refresh-rocm-base-amd",
@@ -434,6 +436,17 @@ class BuildkiteClient:
                 )
             url = next_url
         return jobs
+
+    def get_job_log(self, build_number: int, job_id: str) -> str:
+        number = urllib.parse.quote(str(build_number), safe="")
+        job = urllib.parse.quote(str(job_id), safe="")
+        response = self._request(path=f"/{number}/jobs/{job}/log")
+        if not isinstance(response, Mapping):
+            raise ApiError(None, "Buildkite API returned an invalid job log.")
+        content = response.get("content")
+        if not isinstance(content, str):
+            raise ApiError(None, "Buildkite API returned an invalid job log.")
+        return content
 
 
 def parse_command(body: str) -> str | None:
@@ -849,6 +862,37 @@ def handle_run_ci(
     )
 
 
+def retry_source_note(source_build: Mapping[str, Any], ci_name: str) -> str:
+    metadata = source_build.get("meta_data") or {}
+    original_number = metadata.get("github-retry-source-build")
+    if not original_number:
+        return ""
+    original_url = re.sub(r"\d+$", str(original_number), str(source_build["web_url"]))
+    return (
+        f" Build #{source_build['number']} was itself a retry of "
+        f"[Buildkite {ci_name} #{original_number}]({original_url})."
+    )
+
+
+def unknown_step_keys_from_log(
+    buildkite: BuildkiteClient,
+    build_number: int,
+    job_id: str,
+) -> str | None:
+    try:
+        log = buildkite.get_job_log(build_number, job_id)
+    except ApiError as error:
+        print(f"Could not fetch the bootstrap job log: {error}", file=sys.stderr)
+        return None
+    log = re.sub(r"\x1b_bk;t=\d*\x07", "", log)
+    log = re.sub(r"\x1b\[[0-9;]*[mK]", "", log)
+    match = re.search(r"Unknown CI step key\(s\): (.*)", log)
+    if not match:
+        return None
+    keys = [key.strip() for key in match.group(1).strip().split(",")]
+    return ", ".join(f"`{key}`" for key in keys if key)
+
+
 def handle_retry_failed(
     *,
     actor: str,
@@ -921,14 +965,39 @@ def handle_retry_failed(
     setup_failures = sorted(
         step_key
         for step_key in failed_step_keys
-        if step_key.startswith("image-build") or step_key in SETUP_STEP_KEYS
+        if "image-build" in step_key or step_key in SETUP_STEP_KEYS
     )
     if setup_failures:
-        return (
+        setup_keys = ", ".join(f"`{step_key}`" for step_key in setup_failures)
+        message = (
             f"[Buildkite {ci_name} #{source_build['number']}]"
-            f"({source_build['web_url']}) failed during CI setup, so its test "
-            f"failure set is incomplete. Use `{run_command}` for the new commit."
+            f"({source_build['web_url']}) failed during CI setup ({setup_keys}), "
+            "so its test failure set is incomplete and nothing was retried."
         )
+        retry_note = retry_source_note(source_build, ci_name)
+        if "bootstrap" in setup_failures:
+            bootstrap_job = next(
+                job for job in failed_script_jobs if job["step_key"] == "bootstrap"
+            )
+            unknown_keys = unknown_step_keys_from_log(
+                buildkite,
+                source_build["number"],
+                str(bootstrap_job["id"]),
+            )
+            if unknown_keys is not None:
+                message += (
+                    "\n\nIts bootstrap step rejected the requested step keys: "
+                    f"{unknown_keys}. Those steps do not exist at that commit."
+                    f"{retry_note}"
+                )
+            else:
+                message += (
+                    f"\n\nSee the [bootstrap log]({bootstrap_job['web_url']}) "
+                    f"for the reason.{retry_note}"
+                )
+        else:
+            message += retry_note
+        return f"{message}\n\nUse `{run_command}` for the new commit."
 
     step_keys = sorted(failed_step_keys)
     if not step_keys:

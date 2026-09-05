@@ -138,11 +138,14 @@ class FakeBuildkite:
         self,
         build_lists: list[list[dict[str, Any]]] | None = None,
         failed_job_lists: list[list[dict[str, Any]]] | None = None,
+        job_logs: list[str | ApiError] | None = None,
     ) -> None:
         self.build_lists = build_lists or []
         self.created_builds: list[dict[str, Any]] = []
         self.failed_job_lists = failed_job_lists or []
         self.job_list_calls: list[int] = []
+        self.job_logs = job_logs or []
+        self.job_log_calls: list[tuple[int, str]] = []
         self.list_calls: list[tuple[str | None, tuple[str, str] | None]] = []
         self.list_requests: list[dict[str, Any]] = []
         self.retry_calls: list[tuple[int, str]] = []
@@ -189,6 +192,13 @@ class FakeBuildkite:
     def list_failed_jobs(self, build_number: int) -> list[dict[str, Any]]:
         self.job_list_calls.append(build_number)
         return self.failed_job_lists.pop(0)
+
+    def get_job_log(self, build_number: int, job_id: str) -> str:
+        self.job_log_calls.append((build_number, job_id))
+        result = self.job_logs.pop(0)
+        if isinstance(result, ApiError):
+            raise result
+        return result
 
 
 class FakeTransport:
@@ -1037,6 +1047,297 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn("failed during CI setup", github.comments[0])
         self.assertIn("Use `/ci run`", github.comments[0])
+
+    def test_ci_retry_new_head_explains_bootstrap_unknown_step_keys(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "meta_data": {"github-retry-source-build": "87066"},
+                        "number": 87079,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87079",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "id": "bootstrap-job",
+                        "state": "failed",
+                        "step_key": "bootstrap",
+                        "type": "script",
+                        "web_url": "https://buildkite.example/jobs/bootstrap-job",
+                    }
+                ]
+            ],
+            job_logs=[
+                "\x1b_bk;t=1753795200000\x07\x1b[31mTraceback\x1b[0m\n"
+                "\x1b_bk;t=1753795200001\x07ValueError: "
+                "Unknown CI step key(s): amd-multi-modal-processor\n"
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(buildkite.job_log_calls, [(87079, "bootstrap-job")])
+        self.assertEqual(
+            github.comments[0],
+            "✅ [Buildkite CI #87079](https://buildkite.example/builds/87079) "
+            "failed during CI setup (`bootstrap`), so its test failure set is "
+            "incomplete and nothing was retried.\n"
+            "\n"
+            "Its bootstrap step rejected the requested step keys: "
+            "`amd-multi-modal-processor`. Those steps do not exist at that "
+            "commit. Build #87079 was itself a retry of "
+            "[Buildkite CI #87066](https://buildkite.example/builds/87066).\n"
+            "\n"
+            "Use `/ci run` for the new commit.",
+        )
+
+    def test_ci_retry_new_head_links_bootstrap_log_when_log_fetch_fails(
+        self,
+    ) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "meta_data": {"github-retry-source-build": "87066"},
+                        "number": 87079,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87079",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "id": "bootstrap-job",
+                        "state": "failed",
+                        "step_key": "bootstrap",
+                        "type": "script",
+                        "web_url": "https://buildkite.example/jobs/bootstrap-job",
+                    }
+                ]
+            ],
+            job_logs=[ApiError(403, "API returned 403: Forbidden")],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(
+            github.comments[0],
+            "✅ [Buildkite CI #87079](https://buildkite.example/builds/87079) "
+            "failed during CI setup (`bootstrap`), so its test failure set is "
+            "incomplete and nothing was retried.\n"
+            "\n"
+            "See the [bootstrap log](https://buildkite.example/jobs/"
+            "bootstrap-job) for the reason. Build #87079 was itself a retry of "
+            "[Buildkite CI #87066](https://buildkite.example/builds/87066).\n"
+            "\n"
+            "Use `/ci run` for the new commit.",
+        )
+
+    def test_ci_retry_new_head_links_bootstrap_log_without_known_reason(
+        self,
+    ) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 87079,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87079",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "id": "bootstrap-job",
+                        "state": "failed",
+                        "step_key": "bootstrap",
+                        "type": "script",
+                        "web_url": "https://buildkite.example/jobs/bootstrap-job",
+                    }
+                ]
+            ],
+            job_logs=["pip install failed: network unreachable\n"],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(
+            github.comments[0],
+            "✅ [Buildkite CI #87079](https://buildkite.example/builds/87079) "
+            "failed during CI setup (`bootstrap`), so its test failure set is "
+            "incomplete and nothing was retried.\n"
+            "\n"
+            "See the [bootstrap log](https://buildkite.example/jobs/"
+            "bootstrap-job) for the reason.\n"
+            "\n"
+            "Use `/ci run` for the new commit.",
+        )
+
+    def test_ci_retry_new_head_treats_arm64_image_build_as_setup(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 122,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/122",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "cpu-arm64-image-build",
+                        "type": "script",
+                    }
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertIn(
+            "failed during CI setup (`cpu-arm64-image-build`)",
+            github.comments[0],
+        )
+        self.assertIn("Use `/ci run`", github.comments[0])
+
+    def test_ci_retry_new_head_lists_multiple_setup_failures(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 87066,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/87066",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "pre-commit",
+                        "type": "script",
+                    },
+                    {
+                        "state": "failed",
+                        "step_key": "image-build-amd",
+                        "type": "script",
+                    },
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertEqual(buildkite.job_log_calls, [])
+        self.assertEqual(
+            github.comments[0],
+            "✅ [Buildkite CI #87066](https://buildkite.example/builds/87066) "
+            "failed during CI setup (`image-build-amd`, `pre-commit`), so its "
+            "test failure set is incomplete and nothing was retried.\n"
+            "\n"
+            "Use `/ci run` for the new commit.",
+        )
+
+    def test_ci_retry_new_head_forwards_amd_mirror_step_keys(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        buildkite = FakeBuildkite(
+            [
+                [],
+                [
+                    {
+                        "commit": "old-commit",
+                        "created_at": "2026-07-28T01:00:00Z",
+                        "finished_at": "2026-07-28T02:00:00Z",
+                        "number": 122,
+                        "pull_request": {"id": 42},
+                        "state": "failed",
+                        "web_url": "https://buildkite.example/builds/122",
+                    }
+                ],
+            ],
+            [
+                [
+                    {
+                        "state": "failed",
+                        "step_key": "amd-multi-modal-processor",
+                        "type": "script",
+                    }
+                ]
+            ],
+        )
+
+        run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+        payload = buildkite.created_builds[0]
+        self.assertEqual(
+            json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
+            ["amd-multi-modal-processor"],
+        )
+        self.assertIn("Buildkite CI #122", github.comments[0])
 
     def test_buildkite_retry_uses_retry_failed_jobs_endpoint(self) -> None:
         transport = FakeTransport({"retried_jobs_count": 2})
