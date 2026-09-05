@@ -103,6 +103,12 @@ def test_triton_placeholder_language():
     assert lang.int32 is None
     assert lang.tensor is None
 
+    @lang.core.extern
+    def identity(x):
+        return x
+
+    assert identity(1) == 1
+
 
 def test_triton_placeholder_language_from_parent():
     triton = TritonPlaceholder()
