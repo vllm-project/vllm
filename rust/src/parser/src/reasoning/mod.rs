@@ -20,6 +20,7 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod delimited;
+mod ernie45;
 mod hy;
 mod kimi;
 mod minimax_m3;
@@ -33,6 +34,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub(crate) use self::delimited::{DelimitedReasoningParser, last_reasoning_boundary};
+pub use self::ernie45::Ernie45ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
