@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -1693,6 +1695,107 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
 
     with pytest.raises(ValueError, match="num_kv_heads == 1"):
         sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+def test_aiter_sparse_pa_slot_mapping_keeps_split_cache_slots(monkeypatch):
+    """Separate K/V planes use the allocator's original slot numbering."""
+    import vllm.models.minimax_m3.amd.model as model_mod
+
+    def fail_forward_context():
+        pytest.fail("split cache planes must not read page-16 metadata")
+
+    monkeypatch.setattr(model_mod, "get_forward_context", fail_forward_context)
+    slot_mapping = torch.tensor([-1, 0, 127, 128])
+    cache = torch.empty(16)
+
+    actual = model_mod.MiniMaxM3SparseAttention._normalize_aiter_sparse_pa_slot_mapping(
+        SimpleNamespace(), slot_mapping, cache, cache
+    )
+
+    assert actual is slot_mapping
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+def test_aiter_sparse_pa_slot_mapping_reuses_page16_metadata(monkeypatch):
+    """Block-contiguous K/V storage reuses the graph-safe page-16 mapping."""
+    import vllm.models.minimax_m3.amd.model as model_mod
+
+    slot_mapping = torch.tensor([-1, 0, 127, 128])
+    page16_slot_mapping = torch.tensor([-1, 0, 127, 256])
+    layer_name = "model.layers.0.self_attn"
+    metadata = model_mod.MiniMaxM3SparseMetadata(
+        seq_lens=torch.empty(0, dtype=torch.int32),
+        max_seq_len=0,
+        slot_mapping=slot_mapping,
+        num_actual_tokens=slot_mapping.numel(),
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        page16_slot_mapping=page16_slot_mapping,
+    )
+    monkeypatch.setattr(
+        model_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={layer_name: metadata}),
+    )
+    attention = SimpleNamespace(
+        layer_name=layer_name,
+        kv_cache=torch.empty(1, 2, BLOCK_SIZE, 2 * HEAD_DIM),
+    )
+
+    actual = model_mod.MiniMaxM3SparseAttention._normalize_aiter_sparse_pa_slot_mapping(
+        attention,
+        slot_mapping,
+        torch.empty(16),
+        torch.empty(8),
+    )
+
+    assert actual is page16_slot_mapping
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+def test_aiter_sparse_pa_slot_mapping_rebases_without_metadata(monkeypatch):
+    """Eager or shape-mismatched batches rebuild the page-16 mapping."""
+    import vllm.models.minimax_m3.amd.model as model_mod
+
+    slot_mapping = torch.tensor([-1, 0, 127, 128])
+    page16_slot_mapping = torch.tensor([-1, 0, 127, 256])
+    monkeypatch.setattr(
+        model_mod,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None),
+    )
+
+    def rebase_slots(actual_slot_mapping, block_size):
+        assert actual_slot_mapping is slot_mapping
+        assert block_size == BLOCK_SIZE
+        return page16_slot_mapping
+
+    monkeypatch.setattr(model_mod, "minimax_m3_rebase_slots_to_page16", rebase_slots)
+    attention = SimpleNamespace(
+        layer_name="model.layers.0.self_attn",
+        kv_cache=torch.empty(1, 2, BLOCK_SIZE, 2 * HEAD_DIM),
+    )
+
+    actual = model_mod.MiniMaxM3SparseAttention._normalize_aiter_sparse_pa_slot_mapping(
+        attention,
+        slot_mapping,
+        torch.empty(16),
+        torch.empty(8),
+    )
+
+    assert actual is page16_slot_mapping
 
 
 def test_indexer_cache_squeezes_to_contiguous_3d():

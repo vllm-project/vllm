@@ -18,6 +18,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from functools import cache
 
 import torch
 from torch import nn
@@ -125,6 +126,17 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+@cache
+def _aiter_fused_cache_insert_available() -> bool:
+    try:
+        from aiter.ops.minimax_m3_fused_qknorm_rope import (  # noqa: F401
+            minimax_m3_qknorm_rope_cache_shuffle_insert,
+        )
+    except ImportError:
+        return False
+    return True
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -732,6 +744,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+        self.use_aiter_fused_cache_insert = (
+            self.use_aiter_sparse_pa and _aiter_fused_cache_insert_available()
+        )
 
     def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
         return self.attn_backend
@@ -813,6 +828,170 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self._ensure_aiter_sparse_pa_kv_cache()
         return self.kv_cache_k, self.kv_cache_v
 
+    def _normalize_aiter_sparse_pa_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+    ) -> torch.Tensor:
+        if value_cache.shape[0] == key_cache.shape[0]:
+            return slot_mapping
+
+        attn_metadata = get_forward_context().attn_metadata
+        page16_slot_mapping = None
+        if isinstance(attn_metadata, dict):
+            main_md = attn_metadata[self.layer_name]
+            assert isinstance(main_md, MiniMaxM3SparseMetadata)
+            page16_slot_mapping = main_md.page16_slot_mapping
+        if (
+            page16_slot_mapping is None
+            or page16_slot_mapping.shape != slot_mapping.shape
+        ):
+            page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
+                slot_mapping, self.kv_cache.shape[2]
+            )
+        return page16_slot_mapping
+
+    def _run_aiter_fused_cache_insert(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        index_q: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor | None,
+        *,
+        skip_index_branch: bool,
+    ) -> None:
+        """Run AITER's fused QK-norm, RoPE, and page-16 cache insertion."""
+        from aiter.ops.minimax_m3_fused_qknorm_rope import (
+            minimax_m3_qknorm_rope_cache_shuffle_insert,
+        )
+
+        key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        slot_mapping = self._normalize_aiter_sparse_pa_slot_mapping(
+            slot_mapping, key_cache, value_cache
+        )
+        index_cache = None
+        if not skip_index_branch:
+            index_cache = self.indexer.index_cache.kv_cache
+            if index_cache.numel() == 0:
+                raise RuntimeError("MiniMax-M3 index cache is not bound")
+
+        kv_cache_dtype = (
+            self.kv_cache_dtype
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else "auto"
+        )
+        minimax_m3_qknorm_rope_cache_shuffle_insert(
+            qkv,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.num_heads,
+            self.num_kv_heads,
+            self.num_idx_heads,
+            self.rotary_emb.rotary_dim,
+            self.q_norm.variance_epsilon,
+            slot_mapping,
+            key_cache,
+            value_cache,
+            q,
+            index_q_norm_weight=(
+                None if skip_index_branch else self.index_q_norm.weight
+            ),
+            index_k_norm_weight=(
+                None if skip_index_branch else self.index_k_norm.weight
+            ),
+            index_slot_mapping=index_slot_mapping,
+            index_cache=index_cache,
+            index_q_out=index_q,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=getattr(self, "_k_scale", None),
+            v_scale=getattr(self, "_v_scale", None),
+            skip_index_branch=skip_index_branch,
+        )
+
+    def _run_aiter_sparse_pa_preprocessing(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        index_q: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor | None,
+        *,
+        skip_index_branch: bool,
+    ) -> None:
+        """Prepare queries and caches for the AITER sparse-attention path."""
+        if self.use_aiter_fused_cache_insert:
+            self._run_aiter_fused_cache_insert(
+                qkv,
+                positions,
+                q,
+                index_q,
+                slot_mapping,
+                index_slot_mapping,
+                skip_index_branch=skip_index_branch,
+            )
+            return
+
+        if skip_index_branch:
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                self.rotary_emb.rotary_dim,
+                self.q_norm.variance_epsilon,
+                num_index_heads=self.num_idx_heads,
+                q_out=q,
+                skip_index_branch=True,
+            )
+        else:
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                self.rotary_emb.cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                self.rotary_emb.rotary_dim,
+                self.q_norm.variance_epsilon,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                self.num_idx_heads,
+                q_out=q,
+                index_q_out=index_q,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+
+        num_tokens = qkv.shape[0]
+        k_start = self.q_size
+        v_start = k_start + self.kv_size
+        k = qkv[:, k_start:v_start].view(num_tokens, self.num_kv_heads, self.head_dim)
+        v = qkv[:, v_start : v_start + self.kv_size].view(
+            num_tokens, self.num_kv_heads, self.head_dim
+        )
+        index_k = None
+        if not skip_index_branch:
+            index_k_start = v_start + self.kv_size + self.index_q_size
+            index_k = qkv[:, index_k_start : index_k_start + self.idx_head_dim].view(
+                num_tokens, self.idx_head_dim
+            )
+        self._insert_aiter_sparse_pa_kv(
+            k,
+            v,
+            index_k,
+            slot_mapping,
+            index_slot_mapping,
+        )
+
     def _insert_aiter_sparse_pa_kv(
         self,
         k: torch.Tensor,
@@ -830,21 +1009,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
-        if value_cache.shape[0] != key_cache.shape[0]:
-            attn_metadata = get_forward_context().attn_metadata
-            page16_slot_mapping = None
-            if isinstance(attn_metadata, dict):
-                main_md = attn_metadata[self.layer_name]
-                assert isinstance(main_md, MiniMaxM3SparseMetadata)
-                page16_slot_mapping = main_md.page16_slot_mapping
-            if (
-                page16_slot_mapping is None
-                or page16_slot_mapping.shape != slot_mapping.shape
-            ):
-                page16_slot_mapping = minimax_m3_rebase_slots_to_page16(
-                    slot_mapping, self.kv_cache.shape[2]
-                )
-            slot_mapping = page16_slot_mapping
+        slot_mapping = self._normalize_aiter_sparse_pa_slot_mapping(
+            slot_mapping, key_cache, value_cache
+        )
         kv_cache_dtype = (
             self.kv_cache_dtype
             if is_quantized_kv_cache(self.kv_cache_dtype)
@@ -902,34 +1069,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if self.skip_index_topk:
             index_q = None
             if self.use_aiter_sparse_pa:
-                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                self._run_aiter_sparse_pa_preprocessing(
                     qkv,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
                     positions,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    rotary_dim,
-                    eps,
-                    num_index_heads=self.num_idx_heads,
-                    q_out=q,
-                    skip_index_branch=True,
-                )
-                k_start = self.q_size
-                v_start = k_start + self.kv_size
-                k = qkv[:, k_start:v_start].view(
-                    num_tokens, self.num_kv_heads, self.head_dim
-                )
-                v = qkv[:, v_start : v_start + self.kv_size].view(
-                    num_tokens, self.num_kv_heads, self.head_dim
-                )
-                self._insert_aiter_sparse_pa_kv(
-                    k,
-                    v,
+                    q,
                     None,
                     main_slot_mapping,
                     None,
+                    skip_index_branch=True,
                 )
             else:
                 ops.fused_minimax_m3_qknorm_rope_kv_insert(
@@ -954,41 +1101,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
             index_q = qkv.new_empty((num_tokens, self.index_q_size))
             if self.use_aiter_sparse_pa:
-                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                self._run_aiter_sparse_pa_preprocessing(
                     qkv,
-                    self.q_norm.weight,
-                    self.k_norm.weight,
-                    cos_sin_cache,
                     positions,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    rotary_dim,
-                    eps,
-                    self.index_q_norm.weight,
-                    self.index_k_norm.weight,
-                    self.num_idx_heads,
-                    q_out=q,
-                    index_q_out=index_q,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                )
-                k_start = self.q_size
-                v_start = k_start + self.kv_size
-                index_k_start = v_start + self.kv_size + self.index_q_size
-                k = qkv[:, k_start:v_start].view(
-                    num_tokens, self.num_kv_heads, self.head_dim
-                )
-                v = qkv[:, v_start : v_start + self.kv_size].view(
-                    num_tokens, self.num_kv_heads, self.head_dim
-                )
-                index_k = qkv[
-                    :, index_k_start : index_k_start + self.idx_head_dim
-                ].view(num_tokens, self.idx_head_dim)
-                self._insert_aiter_sparse_pa_kv(
-                    k,
-                    v,
-                    index_k,
+                    q,
+                    index_q,
                     main_slot_mapping,
                     index_slot_mapping,
+                    skip_index_branch=False,
                 )
             else:
                 ops.fused_minimax_m3_qknorm_rope_kv_insert(
