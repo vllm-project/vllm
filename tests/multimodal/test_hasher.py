@@ -212,3 +212,43 @@ def test_hash_media_io_noop_config_preserves_hash():
     assert hasher.hash_kwargs("blake3", image=loaded) == hasher.hash_kwargs(
         "blake3", image=plain
     )
+
+
+# The digest input is a concatenation of byte chunks, so it has to be uniquely
+# decodable. Each case below is a pair of distinct processor kwargs that used to
+# serialize to the same bytes, which made two requests share an mm hash -- and
+# therefore share both the processor cache entry and the prefix-cache block key.
+IMAGE = b"\x89PNG\r\n\x1a\n"
+
+
+def _hash(**mm_processor_kwargs: object) -> str:
+    return MultiModalHasher.hash_kwargs(
+        "blake3", model_id="m", image=IMAGE, **mm_processor_kwargs
+    )
+
+
+def test_hash_collision_kwargs_key_value_boundary():
+    # Both used to flatten to b"ab" + b"c".
+    assert _hash(**{"ab": "c"}) != _hash(**{"a": "bc"})
+
+
+def test_hash_collision_nested_vs_flattened_key():
+    nested = _hash(size={"shortest_edge": 224})
+    flattened = _hash(**{"size.shortest_edge": 224})
+    assert nested != flattened
+
+
+def test_hash_collision_sequence_vs_mapping():
+    assert _hash(fps=[2, 4]) != _hash(fps={"0": 2, "1": 4})
+
+
+@pytest.mark.parametrize("empty", ["", b"", []])
+def test_hash_collision_none_vs_empty(empty):
+    assert _hash(video_pruning_rate=None) != _hash(video_pruning_rate=empty)
+
+
+def test_hash_collision_empty_container_vs_omitted():
+    omitted = _hash()
+    assert _hash(size={}) != omitted
+    assert _hash(size=[]) != omitted
+    assert _hash(size={}) != _hash(size=[])
