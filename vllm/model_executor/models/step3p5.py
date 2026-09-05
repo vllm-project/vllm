@@ -11,7 +11,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -45,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MixtureOfExperts, SupportsPP
@@ -79,7 +80,7 @@ class FP32ReplicatedLinear(ReplicatedLinear):
 class Step3p5MLP(nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
+        config: Step3p5Config,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
@@ -147,9 +148,9 @@ class Step3p5Attention(nn.Module):
         # Step3p5 specific args
         sliding_window: int | None = None,
         use_head_wise_attn_gate: bool = False,
-        layer_types: list = None,
-        use_rope_layers: list = None,
-        yarn_only_types: list = None,
+        layer_types: list[str] | None = None,
+        use_rope_layers: list[bool] | None = None,
+        yarn_only_types: list[str] | None = None,
         swa_num_attention_heads: int | None = None,
         partial_rotary_factor: float = 1.0,
     ):
@@ -162,8 +163,10 @@ class Step3p5Attention(nn.Module):
             enable_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
         else:
             enable_sliding_window = self.layer_idx % 2 == 0
-        if yarn_only_types and layer_types[self.layer_idx] not in yarn_only_types:
-            rope_scaling = None
+        if yarn_only_types:
+            assert layer_types is not None
+            if layer_types[self.layer_idx] not in yarn_only_types:
+                rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
             sliding_window = sliding_window
@@ -304,6 +307,7 @@ class FusedMoEBlock(nn.Module):
 
         self.ep_size = get_ep_group().device_group.size()
         config = vllm_config.model_config.hf_config
+        assert isinstance(config, Step3p5Config)
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -349,6 +353,7 @@ class FusedMoEBlock(nn.Module):
             else None
         )
         if swiglu_limit not in (None, 0):
+            assert swiglu_limit is not None
             swiglu_limit = float(swiglu_limit)
             assert swiglu_limit == 7.0, (
                 "Swiglu limit in fused moe block only support 7.0 now."
@@ -408,6 +413,7 @@ class Step3p5DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        assert isinstance(config, Step3p5Config)
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
@@ -419,20 +425,18 @@ class Step3p5DecoderLayer(nn.Module):
             num_attention_heads = None
             num_attention_groups = None
             head_dim = None
+            attention_other_setting = config.attention_other_setting
+            layer_types = config.layer_types
             if (
-                getattr(config, "attention_other_setting", None)
-                and getattr(config, "layer_types", [])
-                and config.layer_types[layer_idx]
-                == config.attention_other_setting["attention_type"]
+                attention_other_setting
+                and layer_types
+                and layer_types[layer_idx] == attention_other_setting["attention_type"]
             ):
-                num_attention_heads = config.attention_other_setting[
-                    "num_attention_heads"
-                ]
-                num_attention_groups = config.attention_other_setting[
-                    "num_attention_groups"
-                ]
-                head_dim = config.attention_other_setting["head_dim"]
+                num_attention_heads = attention_other_setting["num_attention_heads"]
+                num_attention_groups = attention_other_setting["num_attention_groups"]
+                head_dim = attention_other_setting["head_dim"]
             partial_rotary_factors = getattr(config, "partial_rotary_factors", [])
+            assert config.max_position_embeddings is not None
             self.self_attn = Step3p5Attention(
                 hidden_size=self.hidden_size,
                 num_heads=num_attention_heads
@@ -539,6 +543,7 @@ class Step3p5Model(nn.Module):
 
         self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
+        assert isinstance(config, Step3p5Config)
         self.vocab_size = config.vocab_size
         self.config = config
 
@@ -605,8 +610,8 @@ class Step3p5Model(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         config = self.config
         assert config.num_attention_groups > 1, "Only support GQA"
-        qkv_params_mapping = []
-        stacked_params_mapping = [
+        qkv_params_mapping: list[tuple[str, str, float, float]] = []
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -622,7 +627,7 @@ class Step3p5Model(nn.Module):
         )
 
         # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
-        expert_params_mapping = [
+        expert_params_mapping: list[tuple[str, str, str]] = [
             (
                 f".moe.experts.routed_experts.{base_layer}w13_weight",
                 ".moe.gate_proj.weight",
@@ -758,16 +763,16 @@ class Step3p5Model(nn.Module):
                         # Not an expert proj — use default loader
                         # (e.g. share_expert weights if they matched)
                         param = params_dict[local_name]
-                        weight_loader = getattr(
+                        fallback_loader = getattr(
                             param,
                             "weight_loader",
                             default_weight_loader,
                         )
-                        weight_loader(param, loaded_weight)
+                        fallback_loader(param, loaded_weight)
                         loaded_params.add(local_name)
                 continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if weight_name not in local_name:
                     continue
                 if any(
@@ -782,11 +787,11 @@ class Step3p5Model(nn.Module):
                     continue
                 param = params_dict[replaced_name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, stacked_shard_id)
                 loaded_params.add(replaced_name)
                 break
             else:
-                for param_name, weight_name, shard_id in expert_params_mapping:
+                for param_name, weight_name, expert_shard_id in expert_params_mapping:
                     if weight_name not in local_name:
                         continue
                     replaced_name = local_name.replace(weight_name, param_name)
@@ -823,7 +828,7 @@ class Step3p5Model(nn.Module):
                             param,
                             loaded_weight_expert,
                             replaced_name,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                         )
                     loaded_params.add(replaced_name)
@@ -861,10 +866,10 @@ class Step3p5Model(nn.Module):
                         if local_name not in params_dict:
                             continue
                         param = params_dict[local_name]
-                        weight_loader = getattr(
+                        fallback_loader = getattr(
                             param, "weight_loader", default_weight_loader
                         )
-                        weight_loader(param, loaded_weight)
+                        fallback_loader(param, loaded_weight)
                         loaded_params.add(local_name)
         return loaded_params
 
@@ -918,6 +923,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 self.moe_layers.append(layer.moe.experts)
 
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
+        assert example_layer is not None
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0

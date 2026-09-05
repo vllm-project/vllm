@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 
+from .interfaces import supports_pp
 from .step3_vl import Step3VLForConditionalGeneration
 from .step_vl import PerceptionEncoder
 from .utils import WeightsMapper, init_vllm_registered_model, maybe_prefix
@@ -41,7 +42,7 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
         super(Step3VLForConditionalGeneration, self).__init__()
 
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -72,8 +73,10 @@ class Step3p7ForConditionalGeneration(Step3VLForConditionalGeneration):
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
+        language_model = self.get_language_model()
+        assert supports_pp(language_model)
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+            language_model.make_empty_intermediate_tensors
         )
 
     def _get_vision_model_output(

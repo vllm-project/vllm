@@ -318,6 +318,7 @@ class SarvamMLAMoE(nn.Module):
 
         self.score_function = getattr(config, "score_function", "sigmoid")
         self.num_shared_experts = getattr(config, "num_shared_experts", 1)
+        self.shared_experts: SarvamMLAMLP | None
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -548,6 +549,9 @@ class SarvamMLAModel(nn.Module):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
+    moe_layers: list[MoERunner]
+    moe_mlp_layers: list[SarvamMLAMoE]
+
     def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
@@ -583,12 +587,6 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
                 fused.n_redundant_experts = self.num_redundant_experts
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
-
-    def set_eplb_state(self, eplb_state) -> None:
-        self.eplb_state = eplb_state
-        for moe in self.moe_layers:
-            if hasattr(moe, "set_eplb_state"):
-                moe.set_eplb_state(eplb_state)
 
 
 class SarvamMLAForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SarvamMixtureOfExperts):
