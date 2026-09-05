@@ -23,7 +23,6 @@ from tests.parser.engine.replay_harness import (
     DUMMY_TOOLS,
     MockTokenizer,
     _test_request,
-    assert_no_terminal_leakage,
     assert_parse_output,
     collect_output,
     make_mock_tokenizer,
@@ -152,7 +151,10 @@ def test_delegating_replay(parser_cls, sample, chunk_size):
         sample.tokens,
         chunk_size=chunk_size,
         finished_on_last=True,
-        tools=sample.tools,
+        # Samples without tool defs would otherwise default to
+        # tool_choice="none", which skips tool extraction. Dummy tools
+        # keep this replay on the auto path (tools enabled).
+        tools=sample.tools or DUMMY_TOOLS,
         prompt_token_ids=sample.prompt_token_ids,
     )
     output = collect_output(deltas)
@@ -173,8 +175,11 @@ _TOOL_CALL_SAMPLES = [
     ids=lambda v: v.id if hasattr(v, "id") else "",
 )
 def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
-    """Non-streaming parse() with tool_choice='none' via DelegatingParser
-    must not leak special tokens into content."""
+    """Non-streaming parse() with tool_choice='none' skips tool extraction.
+
+    Remaining text after reasoning is returned as content, including
+    tool-call markup. Reasoning must still not contain parser terminals.
+    """
     tokenizer = make_mock_tokenizer(sample)
     validated_tools = (
         _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None
@@ -200,8 +205,13 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
         for v in set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
         if len(v) > 1
     )
-    assert_no_terminal_leakage(
-        output,
-        terminals,
-        context=f"parser={parser_name}",
-    )
+    for terminal in terminals:
+        assert terminal not in output.reasoning, (
+            f"{terminal!r} leaked into reasoning (parser={parser_name})"
+        )
+    tool_start = cfg.terminals.get("TOOL_START")
+    if tool_start:
+        assert tool_start in output.content, (
+            f"tool_choice=none should preserve tool markup in content "
+            f"(parser={parser_name})"
+        )
