@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.host_register import host_register
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
@@ -191,30 +192,11 @@ def _canonical_block_sizes(
 
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
-    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
-    if not current_platform.is_cuda_alike():
-        logger.info(
-            "Skipping mmap host registration on %s; cudaHostRegister is only "
-            "available on CUDA/ROCm.",
-            current_platform.device_name,
-        )
-        return
-
-    rank = region.rank
-
-    base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
-    if result.value != 0:
-        logger.warning(
-            "cudaHostRegister failed for rank=%d (code=%d) — "
-            "transfers will still work but may be slower (unpinned DMA)",
-            rank,
-            result,
-        )
-    else:
+    """Register the entire mmap as pinned memory for faster DMA."""
+    if host_register(region._base.data_ptr(), region.total_size_bytes):
         logger.debug(
-            "cudaHostRegister rank=%d %.2f GB",
-            rank,
+            "Host-registered mmap region rank=%d %.2f GB",
+            region.rank,
             region.total_size_bytes / 1e9,
         )
         region.is_pinned = True
