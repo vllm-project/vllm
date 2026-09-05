@@ -19,10 +19,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     serialize_vllm_model,
     tensorizer_weights_iterator,
 )
-from vllm.model_executor.model_loader.utils import (
-    get_model_architecture,
-    initialize_model,
-)
+from vllm.model_executor.model_loader.utils import get_model_architecture
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -64,27 +61,6 @@ class TensorizerLoader(BaseModelLoader):
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
-
-    def _load_model_serialized_cpu(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> nn.Module:
-        """Load a serialized model with tensorizer to the CPU.
-
-        This is only necessary when the model isn't vLLM-tensorized (see
-        examples/features/tensorize_vllm_model.py) This should still
-        be faster than default HuggingFace loading, but will be slower than
-        loading a vLLM-tensorized model.
-        """
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-        with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
-                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
-
-            model.load_weights(self._get_weights_iterator())
-        return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self.tensorizer_config.verify_with_model_config(model_config)
@@ -136,7 +112,9 @@ class TensorizerLoader(BaseModelLoader):
                     )
             self.load_weights(model, model_config)
             return model
-        return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
+        return super().load_model(
+            vllm_config=vllm_config, model_config=model_config, prefix=prefix
+        )
 
     @staticmethod
     def save_model(
