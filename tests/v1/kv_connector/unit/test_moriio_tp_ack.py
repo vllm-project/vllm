@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     MoRIIOTransferAck,
+    TransferError,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnector,
@@ -16,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
     get_moriio_remote_tp_rank,
     resolve_moriio_transfer_ack,
     validate_moriio_heterogeneous_tp_kv_heads,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
 )
 
 
@@ -277,6 +282,9 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
             self.lock = threading.Lock()
             self.sent = []
 
+        # Exercise the real batch verdict rather than restating it here.
+        poll_transfer_batch = MoRIIOWrapper.poll_transfer_batch
+
         def send_notify(
             self,
             transfer_id,
@@ -292,13 +300,18 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
     worker.moriio_wrapper = FakeWrapper()
-    worker._recving_transfers = {"req": {"layer0": DoneStatus()}}
+    # A layer maps to the list of reads posted for it (a KDA layer posts two).
+    worker._recving_transfers = {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
     # Transfer-timeout reaping state consulted by _pop_done_transfers.
     worker._recving_transfers_start = {}
+    # Load-error bookkeeping cleared alongside a completed transfer.
+    worker._recving_local_blocks = {}
+    worker._invalid_block_ids = set()
 
     assert worker._pop_done_transfers() == {"tx-release"}
     assert worker.moriio_wrapper.sent == [
@@ -312,6 +325,86 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     ]
     assert worker._recving_transfers == {}
     assert worker._recving_transfers_callback_addr == {}
+
+
+def test_read_completion_waits_for_every_posted_read():
+    class Status:
+        def __init__(self, done: bool):
+            self.done = done
+
+        def Succeeded(self):
+            return self.done
+
+        def Failed(self):
+            return False
+
+    class FakeWrapper:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.sent = []
+
+        poll_transfer_batch = MoRIIOWrapper.poll_transfer_batch
+
+        def send_notify(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.world_size = 8
+    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_wrapper = FakeWrapper()
+    worker._recving_transfers = {
+        "req": {"kda_layer": [Status(done=True), Status(done=False)]}
+    }
+    worker._recving_transfers_callback_addr = {
+        "req": ("127.0.0.1", "7000", "tx-pending")
+    }
+    worker._recving_transfers_start = {"req": float("inf")}
+    worker._recving_local_blocks = {"req": [1, 2]}
+    worker._invalid_block_ids = set()
+
+    assert worker._pop_done_transfers() == set()
+    assert "req" in worker._recving_transfers
+    assert worker.moriio_wrapper.sent == []
+
+
+@pytest.mark.parametrize(
+    ("has_mamba", "expected_invalid"),
+    [(False, {1, 2}), (True, set())],
+)
+def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker._recving_local_blocks = {"req": [1, 2]}
+    worker._invalid_block_ids = set()
+
+    worker._record_failed_recv("req")
+
+    assert worker.get_block_ids_with_load_errors() == expected_invalid
+
+
+def test_hybrid_step_barrier_fails_closed(monkeypatch):
+    class FailingWrapper:
+        def waiting_for_transfer_complete(self, _statuses):
+            raise TransferError("failed")
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker._has_mamba = True
+    worker._reads_issued_this_step = [object()]
+    worker._mamba_reads_this_step = [object()]
+    worker.moriio_wrapper = FailingWrapper()
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.get_forward_context",
+        lambda: SimpleNamespace(cudagraph_runtime_mode=None),
+    )
+
+    with pytest.raises(TransferError, match="failed"):
+        worker._await_reads_issued_this_step()
 
 
 def test_requested_cudagraph_mode_is_never_overridden():
