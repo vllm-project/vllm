@@ -38,6 +38,10 @@ class LazyDict(Mapping[str, _V], Generic[_V]):
 
     def __setitem__(self, key: str, value: Callable[[], _V]):
         self._factory[key] = value
+        # Drop any value already produced by the previous factory, otherwise a
+        # key that was read before being overwritten keeps returning the stale
+        # value and the new factory is never called.
+        self._dict.pop(key, None)
 
     def __iter__(self):
         return iter(self._factory)
