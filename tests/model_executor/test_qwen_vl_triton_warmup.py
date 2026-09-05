@@ -54,7 +54,7 @@ def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:
     ]
 
 
-def test_mrope_warmup_reads_model_config_on_v2_runner() -> None:
+def test_mrope_warmup_launches_triton_shapes() -> None:
     from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 
     launched: list[tuple[torch.Size, torch.Size]] = []
@@ -72,19 +72,26 @@ def test_mrope_warmup_reads_model_config_on_v2_runner() -> None:
             launched.append((positions.shape, query.shape))
             return query, key
 
-    model = torch.nn.Module()
-    model.rotary_emb = FakeRope()
+    class FakeMropeModel(torch.nn.Module):
+        supports_mrope = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.rotary_emb = FakeRope()
+
+        def get_mrope_input_positions(self, input_tokens, mm_features):
+            raise AssertionError("warmup must not build live M-RoPE positions")
+
     runner = SimpleNamespace(
+        num_query_heads=4,
         model_config=SimpleNamespace(
-            uses_mrope=True,
-            get_num_attention_heads=lambda parallel_config: 4,
             get_num_kv_heads=lambda parallel_config: 2,
         ),
         parallel_config=object(),
         dtype=torch.bfloat16,
         device=torch.device("cpu"),
     )
-    _warm_mrope(runner, model)
+    _warm_mrope(runner, FakeMropeModel())
     assert [shape for shape, _ in launched] == [
         torch.Size((3, 1)),
         torch.Size((3, 2)),
@@ -92,12 +99,13 @@ def test_mrope_warmup_reads_model_config_on_v2_runner() -> None:
     ]
 
 
-def test_mrope_warmup_skips_when_model_config_disables_mrope() -> None:
+def test_mrope_warmup_skips_models_without_supports_mrope() -> None:
     def fail(*_args, **_kwargs):
-        raise AssertionError("M-RoPE warmup must not run when uses_mrope is false")
+        raise AssertionError("M-RoPE warmup must not run without SupportsMRoPE")
 
     runner = SimpleNamespace(
-        model_config=SimpleNamespace(uses_mrope=False),
+        num_query_heads=4,
+        model_config=SimpleNamespace(get_num_kv_heads=fail),
         get_model=fail,
     )
     _warm_mrope(runner, torch.nn.Module())

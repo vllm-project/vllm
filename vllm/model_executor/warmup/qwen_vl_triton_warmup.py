@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm Qwen3-VL / Qwen3.5-VL Triton kernels (ViT interpolate, rotary, M-RoPE)."""
+"""Warm Qwen3-VL ViT kernels and M-RoPE for SupportsMRoPE models."""
 
 from typing import TYPE_CHECKING
 
@@ -55,68 +55,40 @@ def _warm_vision(model: torch.nn.Module) -> None:
         )
 
 
-def _runner_uses_mrope(runner: object) -> bool:
-    uses_mrope = getattr(runner, "uses_mrope", None)
-    if uses_mrope is not None:
-        return bool(uses_mrope)
-    model_config = getattr(runner, "model_config", None)
-    return bool(getattr(model_config, "uses_mrope", False))
-
-
-def _runner_num_query_heads(runner: object) -> int:
-    num_query_heads = getattr(runner, "num_query_heads", None)
-    if num_query_heads is not None:
-        return int(num_query_heads)
-    model_config = getattr(runner, "model_config", None)
-    parallel_config = getattr(runner, "parallel_config", None)
-    return int(model_config.get_num_attention_heads(parallel_config))
-
-
 def _warm_mrope(runner: "GPUModelRunner", model: torch.nn.Module) -> None:
-    if not _runner_uses_mrope(runner):
+    from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
+    from vllm.model_executor.models.interfaces import supports_mrope
+
+    is_mrope_model = supports_mrope(model)
+    if not is_mrope_model:
         return
 
-    from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
+    rope = next(
+        (module for module in model.modules() if isinstance(module, MRotaryEmbedding)),
+        None,
+    )
+    if rope is None:
+        return
 
-    num_query_heads = _runner_num_query_heads(runner)
+    num_query_heads = int(runner.num_query_heads)
     num_kv_heads = int(runner.model_config.get_num_kv_heads(runner.parallel_config))
-    seen: set[tuple[object, ...]] = set()
-
-    for rope in model.modules():
-        if not isinstance(rope, MRotaryEmbedding):
-            continue
-        key = (
-            rope.head_size,
-            rope.rotary_dim,
-            tuple(rope.mrope_section or ()),
-            rope.mrope_interleaved,
-            rope.is_neox_style,
-            runner.dtype,
+    for num_tokens in _MROPE_TOKEN_COUNTS:
+        positions = torch.arange(
+            num_tokens, dtype=torch.long, device=runner.device
+        ).expand(3, -1)
+        query = torch.empty(
+            (num_tokens, num_query_heads * rope.head_size),
+            dtype=runner.dtype,
+            device=runner.device,
         )
-        if key in seen:
-            continue
-        seen.add(key)
-
-        for num_tokens in _MROPE_TOKEN_COUNTS:
-            positions = torch.arange(
-                num_tokens, dtype=torch.long, device=runner.device
-            ).expand(3, -1)
-            query = torch.empty(
-                (num_tokens, num_query_heads * rope.head_size),
-                dtype=runner.dtype,
-                device=runner.device,
-            )
-            key_tensor = torch.empty(
-                (num_tokens, num_kv_heads * rope.head_size),
-                dtype=runner.dtype,
-                device=runner.device,
-            )
-            rope(positions, query, key_tensor)
-
-    if seen:
-        logger.info(
-            "Warmed M-RoPE Triton kernels for %d compile-key shape(s).", len(seen)
+        key_tensor = torch.empty(
+            (num_tokens, num_kv_heads * rope.head_size),
+            dtype=runner.dtype,
+            device=runner.device,
         )
+        rope(positions, query, key_tensor)
+
+    logger.info("Warmed M-RoPE Triton kernels.")
 
 
 def _synchronize_device(device: torch.device) -> None:
@@ -126,12 +98,8 @@ def _synchronize_device(device: torch.device) -> None:
 
 @torch.inference_mode()
 def qwen_vl_triton_warmup(runner: "GPUModelRunner") -> None:
-    """Warm Qwen3-VL / Qwen3.5-VL kernels dummy runs do not compile.
-
-    Detects ``Qwen3_VisionTransformer`` (Qwen3-VL, Qwen3-VL-MoE, Qwen3.5-VL)
-    and ``MRotaryEmbedding``. Not gated on GDN model types.
-    """
+    """Warm Qwen3-VL ViT kernels and M-RoPE for ``SupportsMRoPE`` models."""
     model = runner.get_model()
     _warm_vision(model)
     _warm_mrope(runner, model)
-    _synchronize_device(getattr(runner, "device", torch.device("cuda")))
+    _synchronize_device(runner.device)

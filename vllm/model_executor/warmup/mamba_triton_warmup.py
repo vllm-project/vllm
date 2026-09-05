@@ -14,15 +14,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _has_mamba_style_cache(runner: object) -> bool:
+def _has_mamba_style_cache(runner: "GPUModelRunner") -> bool:
     from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
-    kv_cache_config = getattr(runner, "kv_cache_config", None)
-    groups = getattr(kv_cache_config, "kv_cache_groups", None)
-    if not groups:
-        return False
-    for group in groups:
-        spec = getattr(group, "kv_cache_spec", None)
+    for group in runner.kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.first_spec
         if isinstance(spec, MambaSpec):
@@ -52,8 +48,8 @@ def _warm_batch_memcpy_kernel(device: torch.device) -> None:
 @torch.inference_mode()
 def mamba_triton_warmup(runner: "GPUModelRunner") -> None:
     """Warm prefix-cache memcpy for every Mamba-style KV cache group."""
-    device = getattr(runner, "device", torch.device("cuda"))
-    if getattr(device, "type", None) != "cuda":
+    device = runner.device
+    if device.type != "cuda":
         return
     if not _has_mamba_style_cache(runner):
         return

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
 
@@ -51,7 +52,7 @@ class _QwenGDNWarmupConfig:
         return 2 * self.h * self.k + self.hv * self.v
 
 
-def _is_non_empty_tensor(value: object) -> bool:
+def _is_non_empty_tensor(value: object) -> TypeIs[torch.Tensor]:
     return isinstance(value, torch.Tensor) and value.numel() > 0
 
 
@@ -66,6 +67,7 @@ def _is_qwen_gdn_layer(module: object) -> bool:
             "conv_kernel_size",
             "tp_size",
             "kv_cache",
+            "norm",
             "A_log",
             "dt_bias",
         )
@@ -97,10 +99,10 @@ def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor]
 
 def _gdn_norm_fields(layer: object) -> tuple[torch.dtype | None, bool, str]:
     norm = getattr(layer, "norm", None)
+    if norm is None:
+        return None, False, ""
     weight = getattr(norm, "weight", None)
     if not _is_non_empty_tensor(weight):
-        return None, False, ""
-    if not hasattr(norm, "norm_before_gate") or not hasattr(norm, "activation"):
         return None, False, ""
     return weight.dtype, bool(norm.norm_before_gate), str(norm.activation)
 
@@ -297,29 +299,26 @@ def qwen_triton_warmup(
     model_config: "ModelConfig",
 ) -> None:
     """Warm Qwen GDN Triton kernels reported by the JIT monitor."""
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    model_type = None
-    for config in (hf_text_config, hf_config):
-        model_type = getattr(config, "model_type", None)
-        if model_type is not None:
-            model_type = str(model_type)
-            break
+    model_type = str(
+        getattr(model_config.hf_text_config, "model_type", None)
+        or getattr(model_config.hf_config, "model_type", None)
+        or ""
+    )
     if model_type not in _QWEN_MODEL_TYPES:
         return
 
-    device = getattr(runner, "device", torch.device("cuda"))
+    device = runner.device
     logger.info("Warming up Qwen GDN Triton kernels for model_type=%s.", model_type)
 
-    compilation_config = getattr(runner, "compilation_config", None)
-    static_forward_context = getattr(compilation_config, "static_forward_context", None)
-    gdn_config = _qwen_gdn_warmup_config(static_forward_context)
+    gdn_config = _qwen_gdn_warmup_config(
+        runner.compilation_config.static_forward_context
+    )
     if gdn_config is None:
         return
 
-    max_num_tokens = max(1, int(getattr(runner, "max_num_tokens", 1)))
-    x_dtype = getattr(model_config, "dtype", None) or gdn_config.conv_dtype
-    _warm_gated_rms_norm_kernel(device, gdn_config, max_num_tokens, x_dtype)
+    _warm_gated_rms_norm_kernel(
+        device, gdn_config, max(1, int(runner.max_num_tokens)), model_config.dtype
+    )
     _warm_causal_conv1d_fwd_kernel(device, gdn_config)
     _warm_fused_post_conv_kernel(device, gdn_config)
     # Pooling only runs full prefills; the decode update kernel is unused.
