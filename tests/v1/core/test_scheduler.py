@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from concurrent.futures import Future
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -29,8 +29,16 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import (
+    FCFSRequestQueue,
+    SLORequestQueue,
+    SchedulingPolicy,
+    create_request_queue,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.slo_policy import compute_waiting_token_reserve
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -122,6 +130,334 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+def test_slo_policy_creates_slo_queue():
+    assert isinstance(create_request_queue(SchedulingPolicy.FCFS), FCFSRequestQueue)
+    assert isinstance(create_request_queue(SchedulingPolicy.SLO), SLORequestQueue)
+
+
+def test_slo_request_queue_orders_by_urgency():
+    low, high = create_requests(num_requests=2)
+    low.slo_urgency_score = 1.0
+    high.slo_urgency_score = 10.0
+
+    queue = SLORequestQueue()
+    queue.add_request(low)
+    queue.add_request(high)
+
+    assert queue.pop_request() == high
+    assert queue.pop_request() == low
+
+
+def test_slo_request_queue_handles_equal_score_and_arrival_time():
+    first, second = create_requests(num_requests=2, req_ids=["a", "b"])
+    first.slo_urgency_score = 1.0
+    second.slo_urgency_score = 1.0
+    second.arrival_time = first.arrival_time
+
+    queue = SLORequestQueue()
+    queue.add_request(first)
+    queue.add_request(second)
+
+    assert queue.pop_request() == first
+    assert queue.pop_request() == second
+
+
+def test_slo_request_queue_rebuilds_with_updated_scores():
+    low, high = create_requests(num_requests=2, req_ids=["low", "high"])
+    low.slo_urgency_score = 1.0
+    high.slo_urgency_score = 10.0
+    queue = SLORequestQueue()
+    queue.add_request(low)
+    queue.add_request(high)
+
+    low.slo_urgency_score = 20.0
+    queue.rebuild_with_updated_scores()
+
+    assert queue.pop_request() == low
+
+
+def test_slo_scheduler_sets_default_constraints():
+    scheduler = create_scheduler(policy="slo")
+    (request,) = create_requests(num_requests=1)
+
+    scheduler.add_request(request)
+
+    assert request.ttft_slo_ms == 20000.0
+
+
+@pytest.mark.parametrize(
+    ("priority_bias", "short_ttft_slo_ms", "long_ttft_slo_ms"),
+    [
+        (-10.0, 120000.0, 40000.0),
+        (-5.0, 73360.76817558299, 28340.19204389575),
+        (-2.0, 42743.48422496571, 20685.87105624143),
+        (-1.0, 40000.0, 20000.0),
+        (-0.25, 23125.0, 20000.0),
+        (0.0, 20000.0, 20000.0),
+        (0.25, 20000.0, 23125.0),
+        (1.0, 20000.0, 40000.0),
+        (2.0, 20685.87105624143, 42743.48422496571),
+        (5.0, 28340.19204389575, 73360.76817558299),
+        (10.0, 40000.0, 120000.0),
+    ],
+)
+def test_slo_scheduler_assigns_ttft_targets_by_priority_bias(
+    priority_bias: float, short_ttft_slo_ms: float, long_ttft_slo_ms: float
+):
+    scheduler = create_scheduler(
+        policy="slo",
+        slo_priority_bias=priority_bias,
+        slo_short_request_token_threshold=2048,
+    )
+    (short_request,) = create_requests(
+        num_requests=1, num_tokens=1536, req_ids=["short"]
+    )
+    (long_request,) = create_requests(
+        num_requests=1, num_tokens=6144, req_ids=["long"]
+    )
+
+    scheduler.add_request(short_request)
+    scheduler.add_request(long_request)
+
+    assert short_request.ttft_slo_ms == pytest.approx(short_ttft_slo_ms)
+    assert long_request.ttft_slo_ms == pytest.approx(long_ttft_slo_ms)
+
+
+def test_slo_scheduler_ignores_request_level_ttft_slo_override():
+    scheduler = create_scheduler(
+        policy="slo",
+        slo_priority_bias=1.0,
+        slo_short_request_token_threshold=2048,
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=1536)
+    assert request.sampling_params is not None
+    request.sampling_params.extra_args = {"ttft_slo_ms": 1.0}
+
+    scheduler.add_request(request)
+
+    assert request.ttft_slo_ms == pytest.approx(20000.0)
+
+
+@pytest.mark.parametrize(
+    "invalid_priority_bias",
+    [-10.1, 10.1, float("nan"), float("inf"), float("-inf")],
+)
+def test_slo_scheduler_rejects_invalid_priority_bias(invalid_priority_bias: float):
+    with pytest.raises(ValueError):
+        create_scheduler(policy="slo", slo_priority_bias=invalid_priority_bias)
+
+
+@pytest.mark.parametrize("invalid_threshold", [0, -1])
+def test_slo_scheduler_rejects_invalid_short_request_threshold(
+    invalid_threshold: int,
+):
+    with pytest.raises(ValueError):
+        create_scheduler(
+            policy="slo",
+            slo_short_request_token_threshold=invalid_threshold,
+        )
+
+
+def test_slo_score_increases_with_wait_time():
+    scheduler = create_scheduler(policy="slo")
+    (request,) = create_requests(num_requests=1, num_tokens=100)
+    request.ttft_slo_ms = 1000.0
+    request.arrival_time = 100.0
+
+    earlier_score = scheduler._compute_slo_score(request, now=100.1)
+    later_score = scheduler._compute_slo_score(request, now=100.9)
+
+    assert later_score > earlier_score
+
+
+def test_slo_equal_deadline_prefers_shorter_uncomputed_prompt():
+    scheduler = create_scheduler(policy="slo")
+    (short_request,) = create_requests(num_requests=1, num_tokens=100)
+    (long_request,) = create_requests(num_requests=1, num_tokens=1000)
+    short_request.ttft_slo_ms = long_request.ttft_slo_ms = 1000.0
+    short_request.arrival_time = long_request.arrival_time = 100.0
+
+    short_score = scheduler._compute_slo_score(short_request, now=100.5)
+    long_score = scheduler._compute_slo_score(long_request, now=100.5)
+
+    assert short_score > long_score
+
+
+@pytest.mark.parametrize(
+    (
+        "waiting_token_reserve_ratio",
+        "running_count",
+        "running_decode_count",
+        "reserve_candidates",
+    ),
+    [
+        (0.0, 0, 0, [(10.0, 50)]),
+        (0.1, 0, 0, []),
+        (0.1, 4, 3, [(10.0, 50)]),
+    ],
+    ids=["zero_ratio", "no_candidates", "decode_majority"],
+)
+def test_slo_waiting_token_reserve_disabled(
+    waiting_token_reserve_ratio: float,
+    running_count: int,
+    running_decode_count: int,
+    reserve_candidates: list[tuple[float, int]],
+):
+    reserve = compute_waiting_token_reserve(
+        max_num_scheduled_tokens=100,
+        waiting_token_reserve_ratio=waiting_token_reserve_ratio,
+        running_count=running_count,
+        running_decode_count=running_decode_count,
+        reserve_candidates=reserve_candidates,
+    )
+
+    assert reserve == 0
+
+
+def test_slo_waiting_token_reserve_is_capped_by_ratio():
+    reserve = compute_waiting_token_reserve(
+        max_num_scheduled_tokens=100,
+        waiting_token_reserve_ratio=0.2,
+        running_count=2,
+        running_decode_count=1,
+        reserve_candidates=[(10.0, 50)],
+    )
+
+    assert reserve == 20
+
+
+def test_slo_waiting_token_reserve_is_capped_by_remaining_prompt():
+    reserve = compute_waiting_token_reserve(
+        max_num_scheduled_tokens=100,
+        waiting_token_reserve_ratio=0.2,
+        running_count=2,
+        running_decode_count=1,
+        reserve_candidates=[(10.0, 7)],
+    )
+
+    assert reserve == 7
+
+
+def test_slo_waiting_token_reserve_uses_most_urgent_candidate():
+    reserve = compute_waiting_token_reserve(
+        max_num_scheduled_tokens=100,
+        waiting_token_reserve_ratio=0.2,
+        running_count=2,
+        running_decode_count=1,
+        reserve_candidates=[(10.0, 7), (20.0, 50)],
+    )
+
+    assert reserve == 20
+
+
+def test_slo_score_refresh_uses_four_step_cadence():
+    scheduler = create_scheduler(policy="slo")
+    (request,) = create_requests(num_requests=1, num_tokens=100)
+    request.arrival_time = 60.0
+    scheduler.add_request(request)
+
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.1):
+        scheduler._refresh_slo_scores_if_needed()
+    initial_score = request.slo_urgency_score
+
+    scheduler.current_step += 1
+    scheduler._mark_slo_score_dirty()
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.9):
+        scheduler._refresh_slo_scores_if_needed()
+    assert request.slo_urgency_score == initial_score
+
+    scheduler.current_step += 3
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.9):
+        scheduler._refresh_slo_scores_if_needed()
+    assert request.slo_urgency_score > initial_score
+
+
+def test_slo_queue_change_forces_immediate_score_refresh():
+    scheduler = create_scheduler(policy="slo")
+    first, second = create_requests(num_requests=2, num_tokens=100)
+    first.arrival_time = 60.0
+    second.arrival_time = 60.0
+    scheduler.add_request(first)
+
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.1):
+        scheduler._refresh_slo_scores_if_needed()
+
+    scheduler.current_step += 1
+    scheduler.add_request(second)
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.9):
+        scheduler._refresh_slo_scores_if_needed()
+
+    assert second.slo_urgency_score > 0.0
+    assert scheduler._slo_last_score_refresh_step == scheduler.current_step
+
+
+def test_fcfs_scheduler_ignores_slo_refresh_state():
+    scheduler = create_scheduler(policy="fcfs")
+
+    scheduler._mark_slo_score_dirty(force=True)
+    with patch("vllm.v1.core.sched.scheduler.time.time") as mock_time:
+        scheduler._refresh_slo_scores_if_needed()
+
+    assert isinstance(scheduler.waiting, FCFSRequestQueue)
+    assert not scheduler._slo_score_dirty
+    assert not scheduler._slo_force_score_refresh
+    mock_time.assert_not_called()
+
+
+def test_slo_waiting_admission_does_not_preempt_running_request():
+    scheduler = create_scheduler(
+        policy="slo",
+        max_num_seqs=1,
+        max_num_batched_tokens=200,
+        slo_priority_bias=-10.0,
+        slo_short_request_token_threshold=64,
+    )
+    (low,) = create_requests(num_requests=1, num_tokens=32, req_ids=["low"])
+    (high,) = create_requests(num_requests=1, num_tokens=128, req_ids=["high"])
+    high.arrival_time = low.arrival_time - 60.0
+
+    scheduler.add_request(low)
+    output = scheduler.schedule()
+    assert low.request_id in output.num_scheduled_tokens
+
+    model_output = ModelRunnerOutput(
+        req_ids=["low"],
+        req_id_to_index={"low": 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    scheduler.add_request(high)
+    output = scheduler.schedule()
+
+    assert "low" not in output.preempted_req_ids
+    assert low.status == RequestStatus.RUNNING
+    assert high.status == RequestStatus.WAITING
+    assert any(request.request_id == "low" for request in scheduler.running)
+    assert any(request.request_id == "high" for request in scheduler.waiting)
+
+
+def test_async_slo_scheduler_uses_slo_queue_and_schedules_request():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        policy="slo",
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=8)
+    request.arrival_time = 60.0
+    scheduler.add_request(request)
+
+    with patch("vllm.v1.core.sched.scheduler.time.time", return_value=100.1):
+        output = scheduler.schedule()
+
+    assert isinstance(scheduler, AsyncScheduler)
+    assert isinstance(scheduler.waiting, SLORequestQueue)
+    assert request.slo_urgency_score > 0.0
+    assert request.request_id in output.num_scheduled_tokens
 
 
 def test_finish_request():

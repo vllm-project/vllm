@@ -49,8 +49,16 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
+    SLORequestQueue,
     SchedulingPolicy,
     create_request_queue,
+)
+from vllm.v1.core.sched.slo_policy import (
+    SLO_PREFILL_LENGTH_BONUS,
+    compute_slo_score,
+    compute_waiting_token_reserve,
+    is_waiting_reserve_candidate,
+    set_request_slo_constraints,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
@@ -69,6 +77,8 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+SLO_SCORE_REFRESH_INTERVAL_STEPS = 4
 
 
 class Scheduler(SchedulerInterface):
@@ -199,6 +209,11 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+        self._slo_score_dirty = self.policy == SchedulingPolicy.SLO
+        self._slo_force_score_refresh = self.policy == SchedulingPolicy.SLO
+        self._slo_score_refresh_interval_steps = SLO_SCORE_REFRESH_INTERVAL_STEPS
+        self._slo_last_score_refresh_step = -self._slo_score_refresh_interval_steps
+        self._slo_cached_waiting_token_reserve = 0
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -533,6 +548,10 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        self._refresh_slo_scores_if_needed()
+        slo_waiting_token_reserve = self._get_cached_slo_waiting_token_reserve(
+            token_budget
+        )
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -557,7 +576,10 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while (
+            req_index < len(self.running)
+            and token_budget > slo_waiting_token_reserve
+        ):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -598,7 +620,9 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
+                num_new_tokens,
+                token_budget - slo_waiting_token_reserve,
+                input_budget - draft_slots,
             )
 
             # Make sure the input position does not exceed the max model len.
@@ -1453,6 +1477,7 @@ class Scheduler(SchedulerInterface):
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
         self.reset_preempted_req_ids.add(request.request_id)
+        self._mark_slo_score_dirty(force=True)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1503,6 +1528,7 @@ class Scheduler(SchedulerInterface):
         # the scheduler output.
         self.finished_req_ids = set()
         self.reset_preempted_req_ids = set()
+        self._mark_slo_score_dirty()
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
@@ -1540,12 +1566,19 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.first_token_ts = None
+        if self.policy == SchedulingPolicy.SLO:
+            self._set_default_slo_constraints(session)
+            session.slo_urgency_score = self._compute_slo_score(
+                session, time.time()
+            )
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+        self._mark_slo_score_dirty(force=True)
 
     def _make_cached_request_data(
         self,
@@ -2131,6 +2164,8 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.skipped_waiting.remove_requests(stopped_preempted_reqs)
+        if stopped_running_reqs or stopped_preempted_reqs:
+            self._mark_slo_score_dirty(force=True)
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
@@ -2245,18 +2280,105 @@ class Scheduler(SchedulerInterface):
             self.skipped_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+        self._mark_slo_score_dirty(force=True)
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
         if self.policy == SchedulingPolicy.FCFS:
             return self.skipped_waiting or self.waiting or None
 
-        # PRIORITY mode: compare queue heads when both queues are non-empty.
+        # Priority-based modes compare queue heads when both queues are non-empty.
         if self.waiting and self.skipped_waiting:
             waiting_req = self.waiting.peek_request()
             skipped_req = self.skipped_waiting.peek_request()
+            if self.policy == SchedulingPolicy.SLO:
+                waiting_key = (
+                    -waiting_req.slo_urgency_score,
+                    waiting_req.arrival_time,
+                    waiting_req.request_id,
+                )
+                skipped_key = (
+                    -skipped_req.slo_urgency_score,
+                    skipped_req.arrival_time,
+                    skipped_req.request_id,
+                )
+                return self.waiting if waiting_key <= skipped_key else self.skipped_waiting
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
+
+    def _set_default_slo_constraints(self, request: Request) -> None:
+        set_request_slo_constraints(request, self.scheduler_config)
+
+    def _compute_slo_score(self, request: Request, now: float) -> float:
+        return compute_slo_score(
+            request,
+            now,
+            self.max_model_len,
+            SLO_PREFILL_LENGTH_BONUS,
+        )
+
+    def _mark_slo_score_dirty(self, force: bool = False) -> None:
+        if self.policy == SchedulingPolicy.SLO:
+            self._slo_score_dirty = True
+            self._slo_force_score_refresh |= force
+
+    def _get_cached_slo_waiting_token_reserve(self, token_budget: int) -> int:
+        with record_function_or_nullcontext("schedule: slo_get_cached_reserve"):
+            if self.policy != SchedulingPolicy.SLO or token_budget <= 1:
+                return 0
+            if not self.waiting:
+                return 0
+            return min(self._slo_cached_waiting_token_reserve, token_budget - 1)
+
+    def _refresh_slo_scores_if_needed(self) -> None:
+        if self.policy != SchedulingPolicy.SLO or not self._slo_score_dirty:
+            return
+        if (
+            not self._slo_force_score_refresh
+            and self.current_step - self._slo_last_score_refresh_step
+            < self._slo_score_refresh_interval_steps
+        ):
+            return
+
+        with record_function_or_nullcontext("schedule: slo_refresh_scores"):
+            now = time.time()
+            reserve_candidates: list[tuple[float, int]] = []
+            for queue_name, queue in (
+                ("waiting", self.waiting),
+                ("skipped_waiting", self.skipped_waiting),
+            ):
+                if not isinstance(queue, SLORequestQueue):
+                    continue
+                for request in queue.iter_requests_unordered():
+                    score = self._compute_slo_score(request, now)
+                    request.slo_urgency_score = score
+                    if (
+                        queue_name != "waiting"
+                        or not is_waiting_reserve_candidate(
+                            request,
+                            score,
+                            now,
+                            SLO_PREFILL_LENGTH_BONUS,
+                        )
+                    ):
+                        continue
+                    remaining_prompt = max(
+                        request.num_prompt_tokens - request.num_computed_tokens,
+                        1,
+                    )
+                    reserve_candidates.append((score, remaining_prompt))
+                queue.rebuild_with_updated_scores()
+
+            self._slo_cached_waiting_token_reserve = compute_waiting_token_reserve(
+                self.max_num_scheduled_tokens,
+                self.scheduler_config.slo_waiting_token_reserve_ratio,
+                len(self.running),
+                sum(1 for request in self.running if not request.is_prefill_chunk),
+                reserve_candidates,
+            )
+            self._slo_score_dirty = False
+            self._slo_force_score_refresh = False
+            self._slo_last_score_refresh_step = self.current_step
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -2285,6 +2407,8 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            if request.first_token_ts is None:
+                request.first_token_ts = time.time()
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.
@@ -2410,6 +2534,11 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if self.policy == SchedulingPolicy.SLO:
+                self._set_default_slo_constraints(request)
+                request.slo_urgency_score = self._compute_slo_score(
+                    request, time.time()
+                )
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
@@ -2470,6 +2599,8 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
             self.skipped_waiting.remove_requests(waiting_requests_to_remove)
+        if running_requests_to_remove or waiting_requests_to_remove:
+            self._mark_slo_score_dirty(force=True)
 
         # Second pass: set status and free requests
         for request in valid_requests:
