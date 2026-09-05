@@ -616,6 +616,7 @@ def _deep_ep_v2_moe_backends(
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
 @pytest.mark.parametrize("use_cudagraph", [True, False])
+@pytest.mark.parametrize("combine_overlap", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 @pytest.mark.skipif(
@@ -631,8 +632,13 @@ def test_deep_ep_v2_moe_backends(
     world_dp_size: tuple[int, int],
     experts_backend: str,
     use_cudagraph: bool,
+    combine_overlap: bool,
     workspace_init,
+    monkeypatch,
 ):
+    monkeypatch.setenv(
+        "VLLM_DEEPEP_V2_COMBINE_OVERLAP", "1" if combine_overlap else "0"
+    )
     set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(
