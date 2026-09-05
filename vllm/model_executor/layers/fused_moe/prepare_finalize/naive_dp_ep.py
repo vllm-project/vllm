@@ -13,6 +13,24 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
+def _quantize_input(
+    a1: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    input_sf = (
+        quant_config.a1_gscale if quant_config.use_nvfp4_w4a4 else quant_config.a1_scale
+    )
+    return moe_kernel_quantize_input(
+        a1,
+        input_sf,
+        quant_dtype=quant_config.quant_dtype,
+        per_act_token_quant=quant_config.per_act_token_quant,
+        block_shape=quant_config.block_shape,
+        is_scale_swizzled=False,
+        mx_alignment=quant_config.mx_alignment,
+    )
+
+
 def _quantize_and_setup_dispatch(
     a1: torch.Tensor,
     quant_config: FusedMoEQuantConfig,
@@ -23,25 +41,11 @@ def _quantize_and_setup_dispatch(
         a1q = a1
         a1q_scale = None
     else:
-        input_sf = (
-            quant_config.a1_gscale
-            if quant_config.use_nvfp4_w4a4
-            else quant_config.a1_scale
-        )
-
         # NOTE: swizzling pads the scales to multiple of 128
         # which makes the scales tensor different shape than
         # the hidden states, breaking the A2A kernel. So, we
         # delay the swizzling until after the A2A.
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            input_sf,
-            quant_dtype=quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape,
-            is_scale_swizzled=False,
-            mx_alignment=quant_config.mx_alignment,
-        )
+        a1q, a1q_scale = _quantize_input(a1, quant_config)
 
     # Skip gathering scales if we have static quantization
     # (the scale is a scalar, replicated on all ranks) or
@@ -50,6 +54,21 @@ def _quantize_and_setup_dispatch(
     scales = None if skip_gather_scales else [a1q_scale]
 
     return a1q, scales, a1q_scale
+
+
+def _should_quantize_after_dispatch(
+    quant_config: FusedMoEQuantConfig,
+    defer_input_quant: bool,
+) -> bool:
+    # A dynamic per-tensor scale describes the entire activation tensor. Each
+    # dispatch rank cannot compute that scale independently before its rows are
+    # gathered, because the expert kernel accepts only one scale for all rows.
+    return (
+        not defer_input_quant
+        and quant_config.use_fp8_w8a8
+        and quant_config.is_per_tensor
+        and quant_config.a1_scale is None
+    )
 
 
 def _unwrap_scale_and_prepare_for_moe(
@@ -129,8 +148,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
+        quantize_after_dispatch = _should_quantize_after_dispatch(
+            quant_config, defer_input_quant
+        )
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
+            a1, quant_config, defer_input_quant or quantize_after_dispatch
         )
 
         # When LoRA is active, dispatch the per-token LoRA id along with
@@ -181,6 +203,9 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 )
             else:
                 a1q_scale = a1q_scale_orig
+
+        if quantize_after_dispatch:
+            a1q, a1q_scale = _quantize_input(a1q, quant_config)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -251,8 +276,11 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
 
+        quantize_after_dispatch = _should_quantize_after_dispatch(
+            quant_config, defer_input_quant
+        )
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
+            a1, quant_config, defer_input_quant or quantize_after_dispatch
         )
 
         res = get_ep_group().dispatch_router_logits(
@@ -270,6 +298,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             assert len(res) == 3
             a1q, router_logits, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
+
+        if quantize_after_dispatch:
+            a1q, a1q_scale = _quantize_input(a1q, quant_config)
 
         return a1q, a1q_scale, router_logits
 
