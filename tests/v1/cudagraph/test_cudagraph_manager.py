@@ -190,7 +190,7 @@ def _create_decode_vllm_config(
     else:
         speculative_config = MagicMock()
         speculative_config.uses_dynamic_speculative_decoding.return_value = True
-        speculative_config.num_speculative_tokens_per_batch_size = dynamic_spec_schedule
+        speculative_config.speculative_token_schedule = dynamic_spec_schedule
         vllm_config.speculative_config = speculative_config
     return vllm_config
 

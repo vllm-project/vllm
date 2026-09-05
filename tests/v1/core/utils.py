@@ -68,7 +68,7 @@ def create_scheduler(
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
-    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
+    speculative_token_schedule: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
@@ -151,9 +151,9 @@ def create_scheduler(
         spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
-        if num_speculative_tokens_per_batch_size is not None:
-            spec_kwargs["num_speculative_tokens_per_batch_size"] = (
-                num_speculative_tokens_per_batch_size
+        if speculative_token_schedule is not None:
+            spec_kwargs["speculative_token_schedule"] = (
+                speculative_token_schedule
             )
         if speculative_method is not None:
             spec_kwargs["method"] = speculative_method
