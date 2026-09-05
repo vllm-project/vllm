@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -50,6 +51,47 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
+
+_PROBE_TEXT = "zZ_vllm_sse_probe_Zz"
+_PROBE_INDEX = 987654321
+
+
+def _delta_frame_template(
+    request_id: str, created_time: int, model_name: str
+) -> tuple[str, str, str] | None:
+    """Split a probe chunk into the parts of a plain-delta SSE frame that are
+    constant for a stream, so only index and text are rendered per chunk.
+
+    Taking them from the serializer keeps frames byte-identical to
+    ``model_dump_json(exclude_unset=True)`` if the models gain fields.
+
+    Returns:
+        ``(prefix, infix, suffix)``, or None if the sentinels are ambiguous.
+    """
+    probe = CompletionStreamResponse(
+        id=request_id,
+        object="text_completion",
+        created=created_time,
+        model=model_name,
+        choices=[
+            CompletionResponseStreamChoice(
+                index=_PROBE_INDEX,
+                text=_PROBE_TEXT,
+                logprobs=None,
+                finish_reason=None,
+                stop_reason=None,
+                prompt_token_ids=None,
+                token_ids=None,
+            )
+        ],
+    )
+    frame = f"data: {probe.model_dump_json(exclude_unset=True)}\n\n"
+    index, text = str(_PROBE_INDEX), json.dumps(_PROBE_TEXT)
+    if frame.count(index) != 1 or frame.count(text) != 1:
+        return None
+    prefix, rest = frame.split(index, 1)
+    infix, suffix = rest.split(text, 1)
+    return prefix, infix, suffix
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -305,6 +347,19 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         last_res: RequestOutput | None = None
         try:
+            # Requests that can only emit plain delta chunks render them from a
+            # per-stream template; everything else uses the model path below.
+            delta_template = None
+            if (
+                not request.echo
+                and request.logprobs is None
+                and not request.return_token_ids
+                and not include_continuous_usage
+            ):
+                delta_template = _delta_frame_template(
+                    request_id, created_time, model_name
+                )
+
             async for prompt_idx, res in result_generator:
                 last_res = res
                 prompt_token_ids = res.prompt_token_ids
@@ -398,6 +453,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     stop_reason = output.stop_reason
 
                     self._raise_if_error(finish_reason, request_id)
+
+                    if delta_template is not None and finish_reason is None:
+                        prefix, infix, suffix = delta_template
+                        yield (
+                            f"{prefix}{i}{infix}"
+                            f"{json.dumps(delta_text, ensure_ascii=False)}"
+                            f"{suffix}"
+                        )
+                        continue
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
