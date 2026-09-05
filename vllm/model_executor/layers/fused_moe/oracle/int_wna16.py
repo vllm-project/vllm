@@ -566,14 +566,27 @@ def _process_weights_marlin(
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
 
+    Inputs arrive in canonical N-first layout ``[E, N, K_packed]``.
+
     Steps
     -----
-    1. Optional FP8 preprocessing of packed weights / scales.
-    2. Sort / reset g_idx tensors for act-order handling.
-    3. Repack weights via ``gptq_marlin_moe_repack``.
-    4. Permute scales (and optionally extract INT8 global scales).
-    5. Permute bias tensors.
+    1. Transpose canonical N-first to K-first for Marlin.
+    2. Optional FP8 preprocessing of packed weights / scales.
+    3. Sort / reset g_idx tensors for act-order handling.
+    4. Repack weights via ``gptq_marlin_moe_repack``.
+    5. Permute scales (and optionally extract INT8 global scales).
+    6. Permute bias tensors.
     """
+    # Canonical N-first → K-first for Marlin.
+    w13_qweight = w13_qweight.transpose(1, 2).contiguous()
+    w2_qweight = w2_qweight.transpose(1, 2).contiguous()
+    w13_scales = w13_scales.transpose(1, 2).contiguous()
+    w2_scales = w2_scales.transpose(1, 2).contiguous()
+    if w13_qzeros is not None:
+        w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+    if w2_qzeros is not None:
+        w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
+
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
     marlin_w13_qweight: torch.Tensor
@@ -935,7 +948,12 @@ def _process_weights_cpu(
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """CPU INT4 W4A16 weight post-processing."""
+    """CPU INT4 W4A16 weight post-processing.
+
+    Non-AWQ inputs arrive in canonical N-first layout and are transposed
+    to K-first internally.  AWQ uses a different packing axis and arrives
+    in its native format.
+    """
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         prepare_int4_moe_layer_for_cpu,
     )
@@ -946,15 +964,9 @@ def _process_weights_cpu(
         AutoGPTQConfig,
     )
 
-    # Detect packing format.
-    # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
-    # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
-    # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
     if isinstance(quant_config, AutoAWQConfig):
-        # AWQ: K is stored unpacked in dim 1.
         cpu_quant_algo = ops.CPUQuantAlgo.AWQ
     elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
-        # GPTQ / compressed-tensors: K//8 is stored packed in dim 1.
         if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
             raise NotImplementedError(
                 "CPU WNA16 MoE backend does not support GPTQ with "
@@ -962,6 +974,15 @@ def _process_weights_cpu(
                 "reordering support."
             )
         cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+        # Canonical N-first → K-first for CPU kernel.
+        w13 = w13.transpose(1, 2).contiguous()
+        w2 = w2.transpose(1, 2).contiguous()
+        w13_scale = w13_scale.transpose(1, 2).contiguous()
+        w2_scale = w2_scale.transpose(1, 2).contiguous()
+        if w13_qzeros is not None:
+            w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+        if w2_qzeros is not None:
+            w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
     else:
         raise TypeError(
             "CPU WNA16 MoE backend requires AutoAWQConfig, AutoGPTQConfig "
@@ -1035,41 +1056,28 @@ def _process_weights_xpu(
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
-    """Repack GPTQ-format INT4 MoE weights into the layout
-    `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects:
+    """Repack INT4 MoE weights into the layout
+    `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects.
 
-        w13: [E, 2*N, K] int4 (uint8 storage [E, 2*N, K // 2])
-        w13_scales: [E, 2*N, K // group_size] params_dtype
-        w2:  [E, K, N]   int4 (uint8 storage [E, K, N // 2])
-        w2_scales:  [E, K, N // group_size]   params_dtype
-
-    Input GPTQ layout from MoERunner.weight_loader:
-        w13: [E, K // 8, 2*N] int32 (8 nibbles per int32 along the input dim)
-        w13_scales: [E, K // group_size, 2*N] params_dtype
-        w2:  [E, N // 8, K] int32
-        w2_scales:  [E, N // group_size, K] params_dtype
-
-    Transpose dim 1 ↔ dim 2 then view int32 → uint8 to recover sequential
-    int4-packed bytes along the input dim. Each packed int32 holds 8 nibbles
-    `(n7<<28)|(n6<<24)|...|(n1<<4)|n0` in ascending K order; on a
-    little-endian host the int32→uint8 view exposes them as bytes
-    `[n1<<4|n0, n3<<4|n2, n5<<4|n4, n7<<4|n6]`, i.e. two nibbles per byte
-    with the lower nibble = lower input-K index. xpu_fused_moe(is_int4=True)
-    expects this convention; on a big-endian host the byte order reverses
-    and the kernel would silently miscompute, so we hard-fail.
+    Inputs arrive in canonical N-first layout ``[E, N, K_packed]`` int32.
+    The int32 → uint8 view recovers sequential int4-packed bytes along
+    the input dim.  Each packed int32 holds 8 nibbles in ascending K order;
+    on a little-endian host the view exposes them as two nibbles per byte
+    with the lower nibble = lower input-K index.  xpu_fused_moe(is_int4=True)
+    expects this convention; big-endian hosts are unsupported.
     """
     del layer, quant_config  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
-            "_process_weights_xpu requires a little-endian host: the GPTQ "
+            "_process_weights_xpu requires a little-endian host: the "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
 
-    w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
-    w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
-    w13_scales_xpu = w13_scales.transpose(1, 2).contiguous()
-    w2_scales_xpu = w2_scales.transpose(1, 2).contiguous()
+    w13_xpu = w13_qweight.contiguous().view(torch.uint8)
+    w2_xpu = w2_qweight.contiguous().view(torch.uint8)
+    w13_scales_xpu = w13_scales.contiguous()
+    w2_scales_xpu = w2_scales.contiguous()
 
     return (
         w13_xpu,
@@ -1318,16 +1326,23 @@ def _process_weights_emulation_gptq(
 ) -> tuple:
     """Dequantize int4 weights to BF16 for the emulation backend.
 
-    Inputs are in GPTQ packed format:
-        w13: [E, K//8, 2*N]   int32  (gate+up proj stacked on dim 2)
-        w2:  [E, N//8, K]     int32
-        w13_scale: [E, K//gs, 2*N]  float16
-        w2_scale:  [E, N//gs, K]    float16
+    Inputs arrive in canonical N-first layout and are transposed to
+    K-first internally for the GPTQ dequantization routines.
 
     Outputs (what TritonExperts expects):
         w13_out: [E, 2*N, K]  bfloat16
         w2_out:  [E, K, N]    bfloat16
     """
+    # Canonical N-first → K-first for dequantization.
+    w13 = w13.transpose(1, 2).contiguous()
+    w2 = w2.transpose(1, 2).contiguous()
+    w13_scale = w13_scale.transpose(1, 2).contiguous()
+    w2_scale = w2_scale.transpose(1, 2).contiguous()
+    if w13_qzeros is not None:
+        w13_qzeros = w13_qzeros.transpose(1, 2).contiguous()
+    if w2_qzeros is not None:
+        w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
+
     # w13: packed along K (dim 1), output cols are 2*N (dim 2)
     # transpose_output=True yields [E, 2*N, K]
     w13_bf16 = _unpack_and_dequant_int4_gptq(
@@ -1451,6 +1466,10 @@ def convert_to_wna16_moe_kernel_format(
     | None
 ):
     """Dispatch weight post-processing to the appropriate per-backend handler.
+
+    All non-AWQ frontends must supply weights and scales in N-first
+    canonical layout ``[E, N_out, K_packed]``.  AWQ uses a different
+    packing axis and is handled by dedicated per-backend helpers.
 
     To add a new backend, implement a ``_process_weights_<name>`` helper and
     add a branch here. Backends that rewrite the layer's parameters in place
@@ -1640,67 +1659,33 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
         )
     elif backend == WNA16MoEBackend.TRITON:
-        # Two possible input layouts depending on the quantization source:
-        #
-        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
-        #   → just view as uint8 (no-op)
-        #
-        # AutoGPTQ/compressed-tensors (int32, K-first):
-        #   (E, K // pack32, N_out)
-        #   → transpose to N-first, then view as uint8 to get
-        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
-        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
-        from vllm.model_executor.layers.quantization.auto_gptq import (
-            AutoGPTQConfig,
-        )
+        # All inputs arrive in canonical N-first format; view as uint8.
+        w13_uint8 = w13.contiguous().view(torch.uint8)
+        w2_uint8 = w2.contiguous().view(torch.uint8)
 
-        if isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
-            # These integrations build in K-first format even when the Triton
-            # backend is selected. Transpose to N-first first.
-            w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
-            w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
-            w13_scale = w13_scale.transpose(1, 2).contiguous()
-            w2_scale = w2_scale.transpose(1, 2).contiguous()
-            # Zero points from compressed-tensors checkpoints are K-first int32
-            # with 8 int4 ZPs packed per element: shape (E, K//gs, N//8).
-            # fused_moe_kernel_gptq_awq expects N-first uint8 with 2 int4 ZPs
-            # per byte: shape (E, N//2, K//gs), indexed as
-            # (offs_bn // 2) * stride_bzn + offs_k_group * stride_bzk.
-            # Conversion steps:
-            #   (E, K//gs, N//8) int32
-            #   → transpose(1,2) → (E, N//8, K//gs) int32
-            #   → view(uint8)    → (E, N//8, K//gs*4)  [each int32 → 4 bytes]
-            #   → reshape(…,4)   → (E, N//8, K//gs, 4) [isolate byte index]
-            #   → permute(0,1,3,2) → (E, N//8, 4, K//gs) [byte index before K]
-            #   → reshape         → (E, N//2, K//gs)   [kernel expected layout]
-            # After this, element [e, offs_bn//2, k_group] is the uint8 byte
-            # holding the two int4 ZPs for output channels offs_bn and offs_bn+1.
-            if w13_qzeros is not None:
-                E13, Kg13, Np13 = w13_qzeros.shape
-                w13_qzeros = (
-                    w13_qzeros.transpose(1, 2)
-                    .contiguous()
-                    .view(torch.uint8)
-                    .reshape(E13, Np13, Kg13, 4)
-                    .permute(0, 1, 3, 2)
-                    .reshape(E13, Np13 * 4, Kg13)
-                    .contiguous()
-                )
-            if w2_qzeros is not None:
-                E2, Kg2, Np2 = w2_qzeros.shape
-                w2_qzeros = (
-                    w2_qzeros.transpose(1, 2)
-                    .contiguous()
-                    .view(torch.uint8)
-                    .reshape(E2, Np2, Kg2, 4)
-                    .permute(0, 1, 3, 2)
-                    .reshape(E2, Np2 * 4, Kg2)
-                    .contiguous()
-                )
-        else:
-            # MoeWNA16 uses N-first uint8 weights and scales.
-            w13_uint8 = w13.view(torch.uint8)
-            w2_uint8 = w2.view(torch.uint8)
+        # Repack N-first int32 zero-points to uint8:
+        # [E, N//pf, K//gs] int32 → [E, N*4//pf, K//gs] uint8
+        if w13_qzeros is not None and w13_qzeros.dtype == torch.int32:
+            E13, Np13, Kg13 = w13_qzeros.shape
+            w13_qzeros = (
+                w13_qzeros.contiguous()
+                .view(torch.uint8)
+                .reshape(E13, Np13, Kg13, 4)
+                .permute(0, 1, 3, 2)
+                .reshape(E13, Np13 * 4, Kg13)
+                .contiguous()
+            )
+        if w2_qzeros is not None and w2_qzeros.dtype == torch.int32:
+            E2, Np2, Kg2 = w2_qzeros.shape
+            w2_qzeros = (
+                w2_qzeros.contiguous()
+                .view(torch.uint8)
+                .reshape(E2, Np2, Kg2, 4)
+                .permute(0, 1, 3, 2)
+                .reshape(E2, Np2 * 4, Kg2)
+                .contiguous()
+            )
+
         return (
             w13_uint8,
             w2_uint8,
