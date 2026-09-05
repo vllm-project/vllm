@@ -60,6 +60,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
@@ -194,6 +195,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.xgrammar_bitmask_backend = current_platform.get_xgrammar_bitmask_backend(
+            vllm_config.structured_outputs_config.bitmask_backend
+        )
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
@@ -484,6 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
                 mask_stride=self.decode_query_len,
                 num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
+                bitmask_backend=self.xgrammar_bitmask_backend,
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:

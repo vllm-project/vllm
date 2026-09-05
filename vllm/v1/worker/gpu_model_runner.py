@@ -519,6 +519,9 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.xgrammar_bitmask_backend = current_platform.get_xgrammar_bitmask_backend(
+            vllm_config.structured_outputs_config.bitmask_backend
+        )
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
@@ -4682,7 +4685,11 @@ class GPUModelRunner(
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits
+                scheduler_output,
+                grammar_output,
+                self.input_batch,
+                logits,
+                bitmask_backend=self.xgrammar_bitmask_backend,
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):

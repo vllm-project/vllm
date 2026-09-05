@@ -4,10 +4,13 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 
 def _build_grammar_mapping(
@@ -44,6 +47,7 @@ class StructuredOutputsWorker:
         device: torch.device,
         mask_stride: int,
         num_bonus_tokens: int,
+        bitmask_backend: str = "auto",
     ):
         self.logits_indices = torch.zeros(
             max_num_logits, dtype=torch.int32, device=device
@@ -51,6 +55,16 @@ class StructuredOutputsWorker:
         self.grammar_bitmask = torch.zeros(
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
+        self.xgrammar_bitmask = (
+            torch.empty(
+                (max_num_logits, cdiv(vocab_size, 32)),
+                dtype=torch.int32,
+                device=device,
+            )
+            if bitmask_backend != "auto"
+            else None
+        )
+        self.bitmask_backend = bitmask_backend
         self.device = device
         self.copy_stream = torch.cuda.Stream()
         self.mask_stride = mask_stride
@@ -103,21 +117,61 @@ class StructuredOutputsWorker:
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = 8192
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
-        _apply_grammar_bitmask_kernel[grid](
-            logits,
-            logits.stride(0),
-            logits_indices,
-            input_batch.cu_num_logits,
-            bitmask,
-            bitmask.stride(0),
-            vocab_size,
-            MASK_STRIDE=self.mask_stride,
-            BLOCK_SIZE=BLOCK_SIZE,
-        )
+        if self.bitmask_backend == "auto":
+            _apply_grammar_bitmask_kernel[grid](
+                logits,
+                logits.stride(0),
+                logits_indices,
+                input_batch.cu_num_logits,
+                bitmask,
+                bitmask.stride(0),
+                vocab_size,
+                MASK_STRIDE=self.mask_stride,
+                BLOCK_SIZE=BLOCK_SIZE,
+            )
+        else:
+            self._apply_xgrammar_bitmask(
+                logits, bitmask, logits_indices, input_batch.cu_num_logits
+            )
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
         self.copy_stream.wait_stream(current_stream)
+
+    def _apply_xgrammar_bitmask(
+        self,
+        logits: torch.Tensor,
+        bitmask: torch.Tensor,
+        mapping: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+    ) -> None:
+        """Apply a selected XGrammar backend using the V2 request-to-logit map."""
+        assert self.xgrammar_bitmask is not None
+
+        request_indices = torch.div(
+            mapping, self.mask_stride, rounding_mode="floor"
+        ).to(torch.long)
+        position_indices = torch.remainder(mapping, self.mask_stride)
+        logit_starts = cu_num_logits[request_indices]
+        num_request_logits = cu_num_logits[request_indices + 1] - logit_starts
+        valid = position_indices < num_request_logits
+        logit_indices = (logit_starts + position_indices)[valid]
+
+        # XGrammar indexes the bitmask with the output-logit indices. Build a
+        # dense, aligned view because V2's source bitmasks are request-ordered.
+        aligned_bitmask = self.xgrammar_bitmask[: logits.shape[0]]
+        aligned_bitmask.fill_(-1)
+        aligned_bitmask.index_copy_(
+            0,
+            logit_indices.to(torch.long),
+            bitmask[valid],
+        )
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            aligned_bitmask,
+            indices=logit_indices,
+            backend=self.bitmask_backend,
+        )
 
 
 # Adapted from
