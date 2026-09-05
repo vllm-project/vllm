@@ -145,8 +145,8 @@ def _index_block_score_kernel(
             + page * stride_ik_blk
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
-        )
-        qk = tl.dot(q, k)
+        ).to(q.dtype)  # upcast: the index cache may be fp8 (e4m3)
+        qk = tl.dot(q, k, out_dtype=tl.float32)
         # apply causal mask as needed
         if q_start < i + BLOCK_SIZE_K:
             qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
@@ -372,10 +372,11 @@ def _decode_index_score_kernel(
             + page * stride_ik_blk
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
-        )  # [N,D]
-        # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k are
-        # loaded in their stored dtype (bf16 or e4m3) and the MMA accumulates in
-        # fp32 so the per-block max score is exact for the fp8 indexer too.
+        ).to(q.dtype)  # [N,D] (upcast: the index cache may be fp8/e4m3)
+        # The explicit upcast matches what Triton's mixed-input dot lowers to
+        # anyway (no fp8 x bf16 MMA exists), but also compiles on Triton
+        # front-ends that reject fp8 dot operands outright. fp32 accumulation
+        # keeps the per-block max score exact for the fp8 indexer.
         kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
