@@ -4,7 +4,7 @@
 import gc
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -1823,3 +1823,107 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+class TestSyncNumAcceptedTokens:
+    """Test GPUModelRunner._sync_num_accepted_tokens() behavior
+    for async and non-async modes."""
+
+    def test_async_mamba_align_accepted_counts_race(self):
+        num_reqs = 3
+        runner = Mock(spec=GPUModelRunner)
+        runner.use_async_scheduling = True
+        runner.num_accepted_tokens = SimpleNamespace(
+            np=np.array([4, 3, 2, 0, 0], dtype=np.int32),
+        )
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu=np.array([9, 9, 9, 0, 0], dtype=np.int32)
+        )
+        runner.prev_positions = SimpleNamespace(np=np.array([0, 2, -1], dtype=np.int32))
+
+        GPUModelRunner._sync_num_accepted_tokens(
+            runner, num_reqs, {"req_a": 0, "req_c": 2}
+        )
+        expected = np.array([4, 2, 1], dtype=np.int32)
+        np.testing.assert_array_equal(
+            runner.num_accepted_tokens.np[:num_reqs], expected
+        )
+        np.testing.assert_array_equal(
+            runner.input_batch.num_accepted_tokens_cpu[:num_reqs], expected
+        )
+
+    def test_async_initial_step_empty_prev_index(self):
+        num_reqs = 2
+        runner = Mock(spec=GPUModelRunner)
+        runner.use_async_scheduling = True
+        runner.num_accepted_tokens = SimpleNamespace(np=np.zeros(5, dtype=np.int32))
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu=np.zeros(5, dtype=np.int32)
+        )
+
+        GPUModelRunner._sync_num_accepted_tokens(runner, num_reqs, {})
+        expected = np.array([1, 1], dtype=np.int32)
+        np.testing.assert_array_equal(
+            runner.num_accepted_tokens.np[:num_reqs], expected
+        )
+        np.testing.assert_array_equal(
+            runner.input_batch.num_accepted_tokens_cpu[:num_reqs], expected
+        )
+
+    def test_non_async_mode_direct_copy(self):
+        num_reqs = 2
+        runner = Mock(spec=GPUModelRunner)
+        runner.use_async_scheduling = False
+        runner.num_accepted_tokens = SimpleNamespace(
+            np=np.array([5, 4, 0, 0, 0], dtype=np.int32)
+        )
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu=np.zeros(5, dtype=np.int32)
+        )
+
+        GPUModelRunner._sync_num_accepted_tokens(runner, num_reqs, None)
+        expected = np.array([5, 4], dtype=np.int32)
+        np.testing.assert_array_equal(
+            runner.num_accepted_tokens.np[:num_reqs], expected
+        )
+        np.testing.assert_array_equal(
+            runner.input_batch.num_accepted_tokens_cpu[:num_reqs], expected
+        )
+
+    @patch("vllm.v1.worker.gpu_model_runner.mamba_utils.postprocess_mamba_align_gpu")
+    def test_d2h_target_is_runner_buffer(self, mock_postprocess):
+        """Verify _update_states_after_model_execute passes
+        runner.num_accepted_tokens.cpu to postprocess_mamba_align_gpu
+        instead of input_batch's tensor.
+        """
+        runner = Mock(spec=GPUModelRunner)
+        runner.speculative_config = Mock()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner.num_accepted_tokens = SimpleNamespace(
+            cpu=Mock(), gpu=torch.zeros(5, dtype=torch.int64)
+        )
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu_tensor=Mock())
+        runner._get_mamba_bufs = Mock(return_value=Mock())
+        runner.kv_cache_config = Mock()
+        runner.compilation_config = SimpleNamespace(static_forward_context=Mock())
+        runner.model = SimpleNamespace(
+            get_mamba_state_copy_func=Mock(return_value=Mock())
+        )
+        runner.num_accepted_tokens_event = Mock()
+
+        GPUModelRunner._update_states_after_model_execute(
+            runner,
+            output_token_ids=torch.tensor([[1, 2, -1], [1, -1, -1]]),
+            scheduler_output=Mock(),
+        )
+
+        mock_postprocess.assert_called_once()
+        _, kwargs = mock_postprocess.call_args
+        assert (
+            kwargs["num_accepted_tokens_cpu_tensor"] is runner.num_accepted_tokens.cpu
+        )
+        assert (
+            kwargs["num_accepted_tokens_cpu_tensor"]
+            is not runner.input_batch.num_accepted_tokens_cpu_tensor
+        )
