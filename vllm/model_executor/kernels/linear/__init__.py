@@ -214,6 +214,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.triton_fp8_w8a16 import (
+    TritonW8A16Fp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
     XPUW8A8FP8LinearKernel,
@@ -467,7 +470,9 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         MarlinFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
-        # To be added
+        # gfx90a only; is_supported() rejects every other ROCm target,
+        # so this list is still empty in effect on gfx942/RDNA.
+        TritonW8A16Fp8LinearKernel,
     ],
     PlatformEnum.CPU: [
         # To be added
@@ -1205,6 +1210,7 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "TritonW8A16Fp8LinearKernel",
     "ZentorchInt8ScaledMMLinearKernel",
     "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
