@@ -1,0 +1,152 @@
+group: Models - Basic XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (H200 MIG 18GB) Basic Models (Initialization)'
+  device: intel_gpu
+  timeout_in_minutes: 25
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/test_initialization.py::test_can_initialize_small_subset || true'
+- label: ':nvidia: (H200 MIG 35GB) Basic Models (Extra Initialization) Shard %N'
+  device: intel_gpu
+  timeout_in_minutes: 100
+  parallelism: 4
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install open-clip-torch --no-deps &&
+    cd tests &&
+    pytest -v -s models/test_initialization.py -k not test_can_initialize_small_subset --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[DFlashLagunaForCausalLM]" --deselect="tests/models/test_initialization.py::test_can_initialize_large_subset[MistralLarge3ForCausalLM]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
+- label: ':nvidia: (H200 MIG 35GB) Basic Models (Other)'
+  device: intel_gpu
+  timeout_in_minutes: 35
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - tests/models/test_terratorch.py
+  - tests/models/transformers/test_backend.py
+  - tests/models/test_registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py || true'
+- label: ':nvidia: (B200) Inkling'
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/inkling
+  source_file_dependencies:
+  - vllm/models/inkling/
+  - vllm/cute_utils/
+  - cmake/external_projects/tml_fa4.cmake
+  - tests/models/inkling/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/inkling --ignore models/inkling/rocm || true'
+- label: ':nvidia: (B200) Kimi K3'
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py
+  source_file_dependencies:
+  - vllm/models/kimi_k3/
+  - csrc/libtorch_stable/kimi_k3/
+  - tests/models/kimi_k3/
+  - tests/kernels/attention/test_kimi_k3_mla_fused_epilogue.py
+  - tests/kernels/test_bf16_skinny_gemm.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/kimi_k3 kernels/attention/test_kimi_k3_mla_fused_epilogue.py kernels/test_bf16_skinny_gemm.py || true'
+- label: ':nvidia: (H200) Qwen4 Exp'
+  device: intel_gpu
+  timeout_in_minutes: 40
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/transformers_utils/configs/qwen4_exp.py
+  - vllm/config/compilation.py
+  - vllm/v1/attention/backends/short_conv_attn.py
+  - tests/models/qwen4_exp/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/qwen4_exp/test_hc_ops.py models/qwen4_exp/test_qsa_pre_indexer.py models/qwen4_exp/test_qsa_reference.py || true'

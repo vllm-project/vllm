@@ -1,0 +1,28 @@
+group: Benchmarks XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (H200 MIG 18GB) Benchmarks CLI'
+  device: intel_gpu
+  timeout_in_minutes: 45
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s benchmarks/
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
+  - rust/src/bench/tests/python_serve_flags.txt
+  - tests/benchmarks/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s benchmarks/ || true'
