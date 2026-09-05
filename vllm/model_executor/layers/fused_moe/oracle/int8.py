@@ -73,10 +73,15 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             ArmCPUExpertsInt8,
             CPUExpertsInt8,
+            PowerCPUExpertsInt8,
             ZenCPUExpertsInt8,
         )
-
-        return [ZenCPUExpertsInt8, ArmCPUExpertsInt8, CPUExpertsInt8]
+        return [
+            PowerCPUExpertsInt8,
+            ZenCPUExpertsInt8,
+            ArmCPUExpertsInt8,
+            CPUExpertsInt8,
+        ]
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 

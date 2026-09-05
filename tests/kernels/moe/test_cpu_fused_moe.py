@@ -589,3 +589,115 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+def test_cpu_fused_moe_unaligned_intermediate_size_swigluoai(default_vllm_config):
+    """swigluoai's interleaved gate/up layout isn't padded automatically. On
+    AMX-capable CPUs this must raise rather than silently falling back to
+    the (correct but much slower) per-expert torch loop; elsewhere it should
+    fall back exactly as before."""
+    set_random_seed(0)
+    expert_num = 8
+    hidden_size = 128
+    intermediate_size = UNALIGNED_INTERMEDIATE_DIM
+    dtype = torch.bfloat16
+    up_dim = 2 * intermediate_size
+
+    layer = _StubMoELayer(
+        torch.randn((expert_num, up_dim, hidden_size), dtype=dtype),
+        torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype),
+        MoEActivation.SWIGLUOAI,
+    )
+
+    if torch.cpu._is_amx_tile_supported():
+        with pytest.raises(RuntimeError):
+            CPUFusedMOE(layer)
+    else:
+        cpu_moe = CPUFusedMOE(layer)
+        assert cpu_moe.forward_method == cpu_moe.forward_torch
+
+
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC,
+    reason="Requires POWER (ppc64le) CPU",
+)
+@pytest.mark.parametrize("batch_size", BATCH_SIZE)
+@pytest.mark.parametrize("expert_num", EXPERT_NUM)
+@pytest.mark.parametrize("hidden_size", HIDDEN_DIM)
+@pytest.mark.parametrize("intermediate_size", INTERMEDIATE_DIM)
+@pytest.mark.parametrize("use_bias", USE_BIAS)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("act", ACT)
+@pytest.mark.parametrize("isa", ["vsx"])
+def test_cpu_fused_moe_int8_power(
+    batch_size: int,
+    expert_num: int,
+    hidden_size: int,
+    intermediate_size: int,
+    use_bias: bool,
+    dtype: torch.dtype,
+    act: MoEActivation,
+    isa: str,
+):
+    """Test cpu_fused_moe_int8 on POWER VSX against pure-torch reference."""
+    set_random_seed(0)
+    if hidden_size % 32 != 0 or intermediate_size % 32 != 0:
+        pytest.skip("VSX kernel requires dims divisible by 32")
+
+    topk_num = max(expert_num // 2, 1)
+    up_dim = 2 * intermediate_size
+
+    input = torch.randn((batch_size, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w13_fp = torch.randn((expert_num, up_dim, hidden_size), dtype=dtype) / (
+        0.5 * hidden_size**0.5
+    )
+    w2_fp = torch.randn((expert_num, hidden_size, intermediate_size), dtype=dtype) / (
+        0.5 * intermediate_size**0.5
+    )
+    w13, w13_scale = quantize_per_channel(w13_fp)
+    w2, w2_scale = quantize_per_channel(w2_fp)
+
+    w13_bias = None
+    w2_bias = None
+    if use_bias:
+        w13_bias = torch.randn((expert_num, up_dim), dtype=dtype) / (0.5 * up_dim**0.5)
+        w2_bias = torch.randn((expert_num, hidden_size), dtype=dtype) / (
+            0.5 * hidden_size**0.5
+        )
+
+    router_logits = torch.randn((batch_size, expert_num), dtype=dtype)
+    score = torch.softmax(router_logits, dim=-1, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(score, topk_num)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_output = ref_fused_moe_int8(
+        input,
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act,
+    )
+    packed_w13 = cpu_prepack_moe_weight_int8(w13, isa)
+    packed_w2 = cpu_prepack_moe_weight_int8(w2, isa)
+    output = cpu_fused_moe_int8(
+        input,
+        packed_w13,
+        packed_w2,
+        w13_scale,
+        w2_scale,
+        w13_bias,
+        w2_bias,
+        topk_weights,
+        topk_ids,
+        act.value,
+        isa,
+    )
+
+    torch.testing.assert_close(output, ref_output, atol=1e-1, rtol=1e-1)
