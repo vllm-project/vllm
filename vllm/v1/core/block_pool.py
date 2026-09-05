@@ -479,14 +479,8 @@ class BlockPool:
                 entry is partial within the owning cache block.
 
         Returns:
-            The hash key with group ID if a partial entry was registered.
-            ``None`` if the entry was refused: either ``block`` is a null
-            block, or ``block`` already carries a hash covering at least
-            ``num_tokens``, which means this boundary has been superseded
-            (see the promotion note below). Callers that key follow-up
-            bookkeeping off this value -- e.g.
-            ``MambaManager._cache_partial_tail_block`` -- must treat both
-            refusals the same way: nothing was registered.
+            The hash key with group ID, or ``None`` for a null block or a
+            boundary superseded by the block's current hash.
         """
         if block.is_null:
             return None
@@ -505,20 +499,8 @@ class BlockPool:
                 block_hash_with_group_id, block.block_id
             )
         )
-        # The two branches below split on the direction of the comparison
-        # between the hash the block already carries and the one being
-        # registered, and they are not symmetric.
-        #
-        # Existing hash covers *fewer* tokens: a partial entry is growing
-        # forward inside its block (8 -> 10 tokens). The shorter key is
-        # genuinely superseded, so retire it and register the longer one.
-        #
-        # Existing hash covers *at least as many* tokens: the block has been
-        # promoted past this boundary -- cache_full_blocks already removed the
-        # partial key and announced it as BlockRemoved. Re-registering here
-        # would resurrect a retired key in cached_block_hash_to_block and emit
-        # a contradictory BlockStored for a hash the server has already told
-        # subscribers is gone. Refuse instead.
+        # Do not resurrect a shorter boundary removed during full-block
+        # promotion. Forward growth is handled by the removal branch below.
         if (
             not already_cached
             and block.block_hash_num_tokens is not None
