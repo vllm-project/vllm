@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
+    FusedMoEParameterLoadSpec,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -596,9 +597,10 @@ class RoutedExperts(PluggableLayer):
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
-        shard_id: str,
-        expert_id: int,
+        shard_id: str | None,
+        expert_id: int | None,
         return_success: Literal[False],
+        fused_spec: FusedMoEParameterLoadSpec | None = None,
     ) -> None: ...
 
     @overload
@@ -607,9 +609,10 @@ class RoutedExperts(PluggableLayer):
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
-        shard_id: str,
-        expert_id: int,
+        shard_id: str | None,
+        expert_id: int | None,
         return_success: Literal[True],
+        fused_spec: FusedMoEParameterLoadSpec | None = None,
     ) -> bool: ...
 
     def weight_loader(
@@ -617,10 +620,45 @@ class RoutedExperts(PluggableLayer):
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         weight_name: str,
-        shard_id: str,
-        expert_id: int,
+        shard_id: str | None,
+        expert_id: int | None,
         return_success: bool = False,
+        fused_spec: FusedMoEParameterLoadSpec | None = None,
     ) -> bool | None:
+        if fused_spec is not None:
+            if shard_id is not None or expert_id is not None:
+                raise ValueError(
+                    "A fused MoE parameter load cannot specify an expert or shard"
+                )
+            if weight_name != fused_spec.checkpoint_name:
+                raise ValueError(
+                    f"Fused MoE load spec {fused_spec.checkpoint_name!r} does not "
+                    f"match checkpoint weight {weight_name!r}"
+                )
+            if (
+                tuple(param.shape) != fused_spec.shape
+                or param.dtype != fused_spec.dtype
+            ):
+                raise RuntimeError(
+                    f"Fused MoE destination {fused_spec.parameter_name!r} no longer "
+                    "matches its declared shape or dtype"
+                )
+            if tuple(loaded_weight.shape) != fused_spec.shape:
+                raise ValueError(
+                    f"Fused MoE weight {weight_name!r} has shape "
+                    f"{tuple(loaded_weight.shape)}, expected {fused_spec.shape}"
+                )
+            if loaded_weight.dtype != fused_spec.dtype:
+                raise ValueError(
+                    f"Fused MoE weight {weight_name!r} has dtype "
+                    f"{loaded_weight.dtype}, expected {fused_spec.dtype}"
+                )
+            param.data.copy_(loaded_weight)
+            return True if return_success else None
+
+        if shard_id is None or expert_id is None:
+            raise ValueError("Per-expert MoE loads require both shard_id and expert_id")
+
         quant_config_name = self.quant_config and self.quant_config.get_name()
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
@@ -890,11 +928,104 @@ class RoutedExperts(PluggableLayer):
 
         return False if return_success else None
 
+    @staticmethod
+    def _validate_fused_parameter_load_specs(
+        layer: torch.nn.Module,
+        specs: tuple[FusedMoEParameterLoadSpec, ...],
+    ) -> dict[str, FusedMoEParameterLoadSpec]:
+        specs_by_name: dict[str, FusedMoEParameterLoadSpec] = {}
+        parameter_names: set[str] = set()
+        for spec in specs:
+            if not spec.checkpoint_name:
+                raise ValueError("Fused MoE checkpoint names cannot be empty")
+            if spec.checkpoint_name in specs_by_name:
+                raise ValueError(
+                    f"Duplicate fused MoE checkpoint name {spec.checkpoint_name!r}"
+                )
+            if spec.parameter_name in parameter_names:
+                raise ValueError(
+                    f"Duplicate fused MoE destination {spec.parameter_name!r}"
+                )
+            param = getattr(layer, spec.parameter_name, None)
+            if not isinstance(param, torch.nn.Parameter):
+                raise AttributeError(
+                    f"Layer has no parameter destination {spec.parameter_name!r}"
+                )
+            if not callable(getattr(param, "weight_loader", None)):
+                raise AttributeError(
+                    f"Parameter {spec.parameter_name!r} has no weight_loader"
+                )
+            if tuple(param.shape) != spec.shape or param.dtype != spec.dtype:
+                raise ValueError(
+                    f"Fused MoE spec for {spec.parameter_name!r} does not match "
+                    "the destination tensor"
+                )
+            specs_by_name[spec.checkpoint_name] = spec
+            parameter_names.add(spec.parameter_name)
+        return specs_by_name
+
+    def get_fused_parameter_load_specs(
+        self,
+    ) -> tuple[FusedMoEParameterLoadSpec, ...]:
+        specs = self.quant_method.get_fused_parameter_load_specs(self)
+        self._validate_fused_parameter_load_specs(self, specs)
+        return specs
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
+        get_specs = getattr(
+            getattr(self, "quant_method", None),
+            "get_fused_parameter_load_specs",
+            None,
+        )
+        fused_specs = tuple(get_specs(self)) if callable(get_specs) else ()
+        fused_specs_by_name = RoutedExperts._validate_fused_parameter_load_specs(
+            self, fused_specs
+        )
+        expected_fused_names = set(fused_specs_by_name)
+        loaded_fused_names: set[str] = set()
+        loaded_legacy_weight = False
+
+        expert_mapping = None
         for expert_name, loaded_weight in weights:
+            if fused_spec := fused_specs_by_name.get(expert_name):
+                if loaded_legacy_weight:
+                    raise ValueError(
+                        f"Layer {self.layer_name} mixes fused and per-expert MoE "
+                        "weight records"
+                    )
+                if expert_name in loaded_fused_names:
+                    raise ValueError(
+                        f"Layer {self.layer_name} received duplicate fused MoE "
+                        f"weight {expert_name!r}"
+                    )
+                param = getattr(self, fused_spec.parameter_name)
+                success = param.weight_loader(
+                    param=param,
+                    loaded_weight=loaded_weight,
+                    weight_name=expert_name,
+                    shard_id=None,
+                    expert_id=None,
+                    return_success=True,
+                    fused_spec=fused_spec,
+                )
+                if not success:
+                    raise RuntimeError(
+                        f"Failed to load fused MoE weight {expert_name!r}"
+                    )
+                loaded_fused_names.add(expert_name)
+                yield fused_spec.parameter_name
+                continue
+
+            if loaded_fused_names:
+                raise ValueError(
+                    f"Layer {self.layer_name} mixes fused and per-expert MoE "
+                    "weight records"
+                )
+            loaded_legacy_weight = True
+            if expert_mapping is None:
+                expert_mapping = self.get_expert_mapping(include_fused=True)
             qual_name = f"{self.layer_name}.{expert_name}"
             # Fused expert weights can be identified by their 3D tensors
             is_fused = loaded_weight.dim() == 3
@@ -976,6 +1107,13 @@ class RoutedExperts(PluggableLayer):
                             self.layer_name,
                         )
                         yield param_name
+
+        if loaded_fused_names != expected_fused_names and loaded_fused_names:
+            missing = sorted(expected_fused_names - loaded_fused_names)
+            raise ValueError(
+                f"Layer {self.layer_name} received an incomplete fused MoE load; "
+                f"missing {missing}"
+            )
 
     def get_expert_mapping(
         self,

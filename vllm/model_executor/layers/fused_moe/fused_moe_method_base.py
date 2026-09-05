@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
@@ -23,6 +24,24 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class FusedMoEParameterLoadSpec:
+    """One complete MoE parameter accepted as a single loader record.
+
+    ``checkpoint_name`` is relative to the ``RoutedExperts`` module. The
+    declared shape is the exact checkpoint-format destination shape on this
+    rank, after vLLM has accounted for TP, EP, EPLB, and padding. ``sharding``
+    states whether the expert dimension is rank-local or global across experts.
+    """
+
+    checkpoint_name: str
+    parameter_name: str
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    sharding: Literal["rank_local", "global_experts"]
+    scale_domain: Literal["weight", "input"] | None = None
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
@@ -67,6 +86,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         'weight_scale_2' pattern instead of the standard 'weight_scale' pattern.
         """
         return False
+
+    def get_fused_parameter_load_specs(
+        self, layer: "RoutedExperts"
+    ) -> tuple[FusedMoEParameterLoadSpec, ...]:
+        """Declare complete checkpoint-format parameters loadable in one call.
+
+        Quantization methods opt in explicitly. A non-empty tuple is one
+        all-or-nothing bundle: every declared name must be loaded exactly once.
+        The default keeps the existing per-expert checkpoint loader unchanged.
+        """
+        return ()
 
     def maybe_roundup_sizes(
         self,

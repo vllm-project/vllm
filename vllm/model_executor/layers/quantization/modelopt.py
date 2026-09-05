@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from torch.nn.parameter import Parameter
@@ -23,6 +23,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParameterLoadSpec,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
@@ -842,6 +843,35 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         FP4 variants use 'weight_scale_2' pattern for per-tensor weight scales.
         """
         return True
+
+    def get_fused_parameter_load_specs(
+        self, layer: RoutedExperts
+    ) -> tuple[FusedMoEParameterLoadSpec, ...]:
+        parameters: tuple[tuple[str, Literal["weight", "input"] | None], ...] = (
+            ("w13_weight", None),
+            ("w13_weight_scale", "weight"),
+            ("w13_weight_scale_2", "weight"),
+            ("w13_input_scale", "input"),
+            ("w2_weight", None),
+            ("w2_weight_scale", "weight"),
+            ("w2_weight_scale_2", "weight"),
+            ("w2_input_scale", "input"),
+        )
+        return tuple(
+            FusedMoEParameterLoadSpec(
+                checkpoint_name=name,
+                parameter_name=name,
+                shape=tuple(getattr(layer, name).shape),
+                dtype=getattr(layer, name).dtype,
+                sharding=(
+                    "global_experts"
+                    if scale_domain == "input" and self.use_global_sf
+                    else "rank_local"
+                ),
+                scale_domain=scale_domain,
+            )
+            for name, scale_domain in parameters
+        )
 
     def create_weights(
         self,

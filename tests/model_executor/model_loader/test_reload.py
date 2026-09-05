@@ -14,6 +14,10 @@ import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEParameterLoadSpec,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -36,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
 )
+from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.platforms import current_platform
 
 
@@ -730,6 +735,83 @@ def test_online_processing_waits_for_late_registered_bias():
     layer.bias.weight_loader(layer.bias, loaded_bias)
     assert quant_method.bias_at_process is not None
     assert torch.equal(quant_method.bias_at_process, loaded_bias)
+
+
+class _LayerFusedReloadQuantMethod(QuantizeMethodBase):
+    def __init__(self):
+        self.process_count = 0
+
+    def create_weights(self, layer, *weight_args, **extra_weight_attrs):
+        raise NotImplementedError
+
+    def apply(self, layer, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.process_count += 1
+
+    def get_fused_parameter_load_specs(self, layer):
+        return tuple(
+            FusedMoEParameterLoadSpec(
+                checkpoint_name=name,
+                parameter_name=name,
+                shape=tuple(getattr(layer, name).shape),
+                dtype=getattr(layer, name).dtype,
+                sharding="rank_local",
+            )
+            for name in ("w13_weight", "w2_weight")
+        )
+
+
+class _LayerFusedReloadLayer(torch.nn.Module):
+    weight_loader = RoutedExperts.weight_loader
+    load_weights = RoutedExperts.load_weights
+
+    def __init__(self):
+        super().__init__()
+        self.layer_name = "model.layers.0.mlp.experts"
+        self.quant_config = None
+        self.quant_method = _LayerFusedReloadQuantMethod()
+        for name in ("w13_weight", "w2_weight"):
+            param = torch.nn.Parameter(torch.zeros(2, 3, 4), requires_grad=False)
+            param.weight_loader = self.weight_loader
+            self.register_parameter(name, param)
+
+
+@pytest.mark.skip_global_cleanup
+def test_layer_fused_reload_uses_normal_processing_and_preserves_storage():
+    layer = _LayerFusedReloadLayer()
+    model = torch.nn.Module()
+    model.add_module("experts", layer)
+    original_params = {
+        name: param for name, param in layer.named_parameters(recurse=False)
+    }
+    original_ptrs = {name: param.data_ptr() for name, param in original_params.items()}
+    loaded_weights = [
+        (name, torch.full_like(param, index + 1))
+        for index, (name, param) in enumerate(original_params.items())
+    ]
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    info = reload_layerwise.get_layerwise_info(layer)
+
+    def checkpoint():
+        yield f"experts.{loaded_weights[0][0]}", loaded_weights[0][1]
+        assert info.can_load()
+        assert info.load_numel == loaded_weights[0][1].numel()
+        yield f"experts.{loaded_weights[1][0]}", loaded_weights[1][1]
+
+    loaded_names = AutoWeightsLoader(model).load_weights(checkpoint())
+
+    assert loaded_names == {"experts.w13_weight", "experts.w2_weight"}
+    assert not info.can_load()
+    assert layer.quant_method.process_count == 1
+    for name, expected in loaded_weights:
+        param = getattr(layer, name)
+        assert param is original_params[name]
+        assert param.data_ptr() == original_ptrs[name]
+        assert torch.equal(param, expected)
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
