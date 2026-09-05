@@ -199,6 +199,24 @@ class MultiModalRegistry:
     ) -> InputProcessingContext:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
+            # Multimodal HF processors (e.g. Qwen3VLProcessor) resolve image
+            # placeholder token ids at construction time via
+            # tokenizer.convert_tokens_to_ids(...). When skip_tokenizer_init=True
+            # the call above returns None, and forwarding that None into
+            # AutoProcessor.from_pretrained crashes deep inside transformers.
+            # Mirror SGLang: engine's user-facing tokenizer can still be skipped,
+            # but the multimodal processor construction path always needs a real
+            # tokenizer. Load it independently here.
+            if tokenizer is None:
+                from vllm.tokenizers import cached_get_tokenizer
+
+                tokenizer = cached_get_tokenizer(
+                    model_config.tokenizer,
+                    runner_type=model_config.runner_type,
+                    tokenizer_mode=model_config.tokenizer_mode,
+                    revision=model_config.tokenizer_revision,
+                    trust_remote_code=model_config.trust_remote_code,
+                )
 
         return InputProcessingContext(model_config, tokenizer)
 
