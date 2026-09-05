@@ -130,6 +130,9 @@ class TieringMetricsTracker:
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         )
 
+    def on_hit_pending_timeout(self) -> None:
+        self._stats.increase_counter(TieringOffloadingMetrics.HIT_PENDING_TIMEOUTS)
+
     def take_stats(self) -> OffloadingConnectorStats | None:
         active_transfer_stats = OffloadingConnectorStats()
         self._observe_active_transfer_stats(active_transfer_stats)
