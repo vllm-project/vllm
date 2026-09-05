@@ -12,6 +12,11 @@ from vllm import envs, ir
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
+from vllm.utils.flashinfer import (
+    flashinfer_gemma_fused_add_rmsnorm,
+    flashinfer_gemma_rmsnorm,
+    has_flashinfer_gemma_norm,
+)
 
 logger = init_logger(__name__)
 
@@ -127,6 +132,24 @@ class RMSNorm(CustomOp):
         return s
 
 
+def _flashinfer_gemma_norm_supported(
+    x: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor | None
+) -> bool:
+    if not has_flashinfer_gemma_norm():
+        return False
+    if x.dim() != 2 or x.numel() == 0 or x.stride(-1) != 1:
+        return False
+    if weight.shape != x.shape[-1:] or weight.dtype != x.dtype:
+        return False
+    if weight.stride(-1) != 1:
+        return False
+    return residual is None or (
+        residual.shape == x.shape
+        and residual.dtype == x.dtype
+        and residual.stride(-1) == 1
+    )
+
+
 # --8<-- [start:gemma_rms_norm]
 @CustomOp.register("gemma_rms_norm")
 class GemmaRMSNorm(CustomOp):
@@ -164,7 +187,13 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(x, residual)
+        weight = self.weight.data
+        if not _flashinfer_gemma_norm_supported(x, weight, residual):
+            return self.forward_native(x, residual)
+        if residual is None:
+            return flashinfer_gemma_rmsnorm(x, weight, self.variance_epsilon)
+        flashinfer_gemma_fused_add_rmsnorm(x, residual, weight, self.variance_epsilon)
+        return x, residual
 
     def forward_xpu(
         self,
