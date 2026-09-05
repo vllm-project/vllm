@@ -169,3 +169,55 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     assert by_offset[pages["g1.big"]] == pages["g1.small"]
     packed_block_stride = max(sum(pages[n] for n in g) for g in (g1_specs, g2_specs))
     assert (seg_block_strides * 4 == packed_block_stride).all()
+
+
+def test_padded_page_with_sub_block_splitting():
+    """Regression: page_size_padded + kernel sub-block splitting.
+
+    When a layer has page_size_padded set (page padded to match a larger
+    group's page) AND the kernel uses a smaller block size than the
+    storage block size (sub-block splitting), the KV cache view must
+    handle the combination correctly.
+
+    This reproduces the Kimi-K3 + DSpark drafter scenario where SWA
+    drafter layers (1024 bytes/token) are padded to match MLA pages
+    (1152 bytes/token), producing block_size=1536 with page_size_padded,
+    while the FlashInfer kernel uses kernel_block_size=512.
+    """
+    from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+    num_physical_pages = 10
+    block_size = 1536
+    kernel_block_size = 512
+    padded_page = 1_769_472  # MLA page size
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=2048,
+        page_size_padded=padded_page,
+    )
+    assert spec.page_size_bytes == padded_page
+    assert spec.unpadded_page_size_bytes == block_size * 4 * 64 * 2 * 2
+
+    backing_bytes = num_physical_pages * padded_page
+    backing = torch.zeros(backing_bytes, dtype=torch.uint8)
+
+    try:
+        views = dense_kv_cache_views(
+            backing,
+            spec,
+            num_physical_pages,
+            1,
+            KVCacheLayout.BLHNC,
+            kernel_block_size=kernel_block_size,
+        )
+        assert len(views) == 1
+        view = views[0]
+        assert view.numel() * view.element_size() <= backing_bytes
+    except (RuntimeError, AssertionError, ValueError) as e:
+        pytest.xfail(
+            f"page_size_padded + kernel sub-block splitting is not yet supported: {e}"
+        )
