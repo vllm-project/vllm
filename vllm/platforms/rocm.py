@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 try:
     from amdsmi import (
         AmdSmiException,
@@ -572,6 +573,7 @@ class RocmPlatform(Platform):
         device_capability: DeviceCapability,
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -612,6 +614,15 @@ class RocmPlatform(Platform):
             else:
                 valid_backends_priorities.append((backend, priority))
 
+        from vllm.v1.attention.backends.utils import (
+            drop_layout_incompatible_backends,
+        )
+
+        valid_backends_priorities = drop_layout_incompatible_backends(
+            valid_backends_priorities,
+            layout_constraint,
+            lambda candidate: candidate[0].get_class(),
+        )
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
@@ -620,6 +631,7 @@ class RocmPlatform(Platform):
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -667,6 +679,7 @@ class RocmPlatform(Platform):
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
+            layout_constraint=layout_constraint,
         )
         reasons_str = (
             "{"

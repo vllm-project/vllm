@@ -374,6 +374,7 @@ class CudaPlatformBase(Platform):
         device_capability: DeviceCapability,
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> tuple[
         list[_BackendCandidate],
         dict[AttentionBackendEnum, tuple[int, list[str]]],
@@ -408,6 +409,15 @@ class CudaPlatformBase(Platform):
                     _BackendCandidate(backend_class, backend, priority)
                 )
 
+        from vllm.v1.attention.backends.utils import (
+            drop_layout_incompatible_backends,
+        )
+
+        valid_backends_priorities = drop_layout_incompatible_backends(
+            valid_backends_priorities,
+            layout_constraint,
+            lambda candidate: candidate.backend_class,
+        )
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
@@ -436,6 +446,7 @@ class CudaPlatformBase(Platform):
         selected_backend: AttentionBackendEnum | None,
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
@@ -468,6 +479,7 @@ class CudaPlatformBase(Platform):
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
+            layout_constraint=layout_constraint,
         )
         reasons_str = (
             "{"
