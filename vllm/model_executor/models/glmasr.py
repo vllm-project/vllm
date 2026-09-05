@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -28,6 +29,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -53,6 +55,7 @@ from .glmasr_utils import (
     DEFAULT_CONV_PARAMS,
     DEFAULT_MAX_AUDIO_LEN_S,
     DEFAULT_MERGE_FACTOR,
+    _calculate_conv_output_length,
     _flatten_audio_features_by_length,
     _get_audio_output_lengths_for_tower,
     _group_audio_embeddings,
@@ -928,6 +931,8 @@ class GlmAsrForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_tower_connector_lora = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -975,6 +980,69 @@ class GlmAsrForConditionalGeneration(
             tower_model="audio_tower.",
         )
 
+    def _get_audio_merge_ratio(self) -> int:
+        audio_config = self.config.audio_config
+        return audio_config.intermediate_size // audio_config.hidden_size
+
+    def _get_num_tower_tokens_per_chunk(self) -> int:
+        # The processor pads every chunk to the feature extractor's max length
+        # (30s -> 3000 mel frames), which the conv stack downsamples to
+        # `max_position_embeddings` (1500) frames, so every chunk occupies
+        # exactly that many rows in the tower's linear layers.
+        return self.config.audio_config.max_position_embeddings
+
+    def _get_num_connector_tokens_per_chunk(self) -> int:
+        # The projector consumes the frame-merged tower output *before* the
+        # padded frames are trimmed, so it sees a fixed number of rows per
+        # chunk. This is also the number of LM tokens a full chunk yields;
+        # only the last chunk of an audio can yield fewer.
+        return self._get_num_tower_tokens_per_chunk() // self._get_audio_merge_ratio()
+
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        num_chunks = math.ceil(
+            num_audio_tokens / self._get_num_connector_tokens_per_chunk()
+        )
+        return num_chunks * self._get_num_tower_tokens_per_chunk()
+
+    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        num_chunks = num_encoder_tokens // self._get_num_tower_tokens_per_chunk()
+        return num_chunks * self._get_num_connector_tokens_per_chunk()
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality
+
+        input_features = mm_kwargs.get("input_features") if mm_kwargs else None
+        if input_features is None or not isinstance(input_features.data, torch.Tensor):
+            num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
+            return (
+                num_encoder_tokens,
+                self.get_num_mm_connector_tokens(num_encoder_tokens),
+            )
+
+        # `num_mm_embeds` is not invertible when the last chunk is nearly
+        # empty (it yields zero LM tokens but still occupies a full chunk in
+        # the tower), so derive the counts from the chunks themselves.
+        num_chunks, _, chunk_length = input_features.data.shape
+        conv_params = getattr(self.config, "conv_params", DEFAULT_CONV_PARAMS)
+        tower_tokens_per_chunk = chunk_length
+        for padding, kernel_size, stride in conv_params:
+            tower_tokens_per_chunk = _calculate_conv_output_length(
+                tower_tokens_per_chunk, padding, kernel_size, stride
+            )
+        connector_tokens_per_chunk = (
+            tower_tokens_per_chunk // self._get_audio_merge_ratio()
+        )
+        return (
+            num_chunks * tower_tokens_per_chunk,
+            num_chunks * connector_tokens_per_chunk,
+        )
+
     def _parse_and_validate_audio_input(self, **kwargs: object) -> GlmAsrInputs | None:
         audio_embeds = kwargs.pop("audio_embeds", None)
         if audio_embeds is not None:
@@ -1017,9 +1085,8 @@ class GlmAsrForConditionalGeneration(
 
         # GLM-ASR merges consecutive frames: 4 frames with hidden_size=1280
         # -> 1 frame with intermediate_size=5120
-        hidden_size = self.config.audio_config.hidden_size
         intermediate_size = self.config.audio_config.intermediate_size
-        merge_ratio = intermediate_size // hidden_size
+        merge_ratio = self._get_audio_merge_ratio()
 
         # Truncate sequence length to be divisible by merge_ratio
         seq_len = audio_hidden_states.shape[1]
