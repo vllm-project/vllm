@@ -3640,6 +3640,120 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert engine_core_output.finish_reason == FinishReason.ERROR
 
 
+def test_missing_req_id_in_model_runner_output_fails_request():
+    """When a scheduled request is missing from the model runner output
+    (e.g. a worker OOM killed execution partway through), the scheduler
+    should fail that request gracefully instead of crashing the engine
+    with a KeyError."""
+    scheduler = object.__new__(Scheduler)
+    sampling_params = SamplingParams(max_tokens=10)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    # Two requests: "present" will be in model runner output,
+    # "missing" will be scheduled but absent from model runner output.
+    present_req = Request(
+        request_id="present",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    present_req.status = RequestStatus.RUNNING
+    present_req.num_computed_tokens = present_req.num_tokens
+
+    missing_req = Request(
+        request_id="missing",
+        prompt_token_ids=[0, 1, 2],
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    missing_req.status = RequestStatus.RUNNING
+    missing_req.num_computed_tokens = missing_req.num_tokens
+
+    scheduler.perf_metrics = None
+    scheduler.connector = None
+    scheduler.ec_connector = None
+    scheduler.structured_output_manager = Mock()
+    scheduler.structured_output_manager.should_advance.return_value = False
+    scheduler.requests = {
+        "present": present_req,
+        "missing": missing_req,
+    }
+    scheduler.running = [present_req, missing_req]
+    scheduler.waiting = Mock()
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
+    scheduler.kv_event_publisher = Mock()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.grammar_compile_error_reqs = set()
+    scheduler.vllm_config = Mock()
+    scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
+    scheduler.return_sampling_mask = False
+    scheduler.recompute_kv_load_failures = False
+    scheduler.defer_block_free = False
+    scheduler.make_stats = Mock(return_value=None)
+    scheduler.max_model_len = 128
+
+    def free_request(req: Request, delay_free_blocks: bool = False):
+        scheduler.finished_req_ids.add(req.request_id)
+        scheduler.requests.pop(req.request_id, None)
+        return None, None
+
+    scheduler._free_request = Mock(side_effect=free_request)
+
+    # Schedule both requests.
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"present": 1, "missing": 1},
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    # Model runner output only contains "present" — "missing" is absent.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=["present"],
+        req_id_to_index={"present": 0},
+        sampled_token_ids=[[42]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Before the fix this would raise KeyError and kill EngineCore.
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    # "missing" should be finished with error.
+    assert missing_req.status == RequestStatus.FINISHED_ERROR
+    assert "missing" not in scheduler.requests
+
+    # "present" should have been processed normally.
+    present_outputs = [
+        o
+        for outs in engine_core_outputs.values()
+        for o in outs.outputs
+        if o.request_id == "present"
+    ]
+    assert len(present_outputs) == 1
+    assert present_outputs[0].new_token_ids == [42]
+
+    # "missing" should have an error output.
+    missing_outputs = [
+        o
+        for outs in engine_core_outputs.values()
+        for o in outs.outputs
+        if o.request_id == "missing"
+    ]
+    assert len(missing_outputs) == 1
+    assert missing_outputs[0].finish_reason == FinishReason.ERROR
+
+
 @pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]

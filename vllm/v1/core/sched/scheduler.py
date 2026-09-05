@@ -1872,6 +1872,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        missing_output_req_ids: set[str] | None = None
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -1900,7 +1901,20 @@ class Scheduler(SchedulerInterface):
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = model_runner_output.req_id_to_index.get(req_id)
+            if req_index is None:
+                # The model runner did not produce output for this request
+                # (e.g. a worker OOM killed execution partway through).
+                # Fail the request instead of crashing the engine.
+                logger.error(
+                    "Request %s was scheduled but missing from model "
+                    "runner output. Failing the request.",
+                    req_id,
+                )
+                if missing_output_req_ids is None:
+                    missing_output_req_ids = set()
+                missing_output_req_ids.add(req_id)
+                continue
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
@@ -2136,6 +2150,8 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+        if missing_output_req_ids:
+            error_req_ids.update(missing_output_req_ids)
 
         if error_req_ids:
             error_reqs = self.finish_requests(
