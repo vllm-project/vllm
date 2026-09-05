@@ -31,6 +31,18 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
+MAX_NUM_ALLOWED_TOKEN_IDS = 1024
+"""Upper bound on `SamplingParams.allowed_token_ids` list length. Must match
+the per-request row width allocated by `LogitBiasState`."""
+
+MAX_NUM_LOGIT_BIAS_TOKENS = 1024
+"""Upper bound on `SamplingParams.logit_bias` dict length. Must match
+the per-request row width allocated by `LogitBiasState`."""
+
+MAX_NUM_STOP_TOKEN_IDS = 128
+"""Upper bound on stop token IDs set size. Must match the per-request
+row width allocated by `LogitBiasState`."""
+
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
     if not isinstance(value, int):
@@ -876,6 +888,14 @@ class SamplingParams(
         if not self.stop_token_ids:
             return
 
+        if len(self.stop_token_ids) > MAX_NUM_STOP_TOKEN_IDS:
+            raise VLLMValidationError(
+                f"Too many stop token IDs: {len(self.stop_token_ids)}. "
+                f"The max size is {MAX_NUM_STOP_TOKEN_IDS}.",
+                parameter="stop_token_ids",
+                value=len(self.stop_token_ids),
+            )
+
         # stop_token_ids are used as column indices into the logits tensor,
         # whose width is the model's vocab size (LogitsProcessor is built from
         # config.vocab_size, InputBatch.vocab_size comes from
@@ -900,6 +920,14 @@ class SamplingParams(
         """Validate logit_bias token IDs are within vocabulary range."""
         if not self.logit_bias:
             return
+
+        if len(self.logit_bias) > MAX_NUM_LOGIT_BIAS_TOKENS:
+            raise VLLMValidationError(
+                f"Too many logit bias tokens: {len(self.logit_bias)}. "
+                f"The max size is {MAX_NUM_LOGIT_BIAS_TOKENS}.",
+                parameter="logit_bias",
+                value=len(self.logit_bias),
+            )
 
         vocab_size = model_config.get_vocab_size()
         invalid_token_ids = [
@@ -988,6 +1016,14 @@ class SamplingParams(
                 "allowed_token_ids is not None and empty!",
                 parameter="allowed_token_ids",
                 value=allowed_token_ids,
+            )
+
+        if len(allowed_token_ids) > MAX_NUM_ALLOWED_TOKEN_IDS:
+            raise VLLMValidationError(
+                f"Too many allowed token IDs: {len(allowed_token_ids)}. "
+                f"The max size is {MAX_NUM_ALLOWED_TOKEN_IDS}.",
+                parameter="allowed_token_ids",
+                value=len(allowed_token_ids),
             )
 
         # allowed_token_ids are client-supplied ids used as column indices

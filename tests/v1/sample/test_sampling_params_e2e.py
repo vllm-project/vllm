@@ -173,6 +173,47 @@ def test_allowed_token_ids(llm):
     with pytest.raises(VLLMValidationError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
 
+    # Reject exceeding max size (MAX_NUM_ALLOWED_TOKEN_IDS = 1024).
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=list(range(2000))))
+
+
+def test_logit_bias_size_limit(llm):
+    """Check that exceeding logit_bias size limit raises an error
+    instead of crashing the engine."""
+
+    # Reject exceeding max size (MAX_NUM_LOGIT_BIAS_TOKENS = 1024).
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(logit_bias={i: 1.0 for i in range(2000)}),
+        )
+
+
+def test_stop_token_ids_size_limit(llm):
+    """Check that exceeding stop_token_ids size limit raises an error
+    instead of crashing the engine."""
+
+    # Reject exceeding max size (MAX_NUM_STOP_TOKEN_IDS = 128).
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(stop_token_ids=list(range(200))),
+        )
+
+    # Boundary: 128 user-supplied stop IDs that exclude the model EOS (id=2
+    # for hmellor/tiny-random-LlamaForCausalLM). After EOS merge the set
+    # becomes 129 > MAX_NUM_STOP_TOKEN_IDS. min_tokens=1 activates the
+    # engine path that indexes by stop IDs.
+    with pytest.raises(VLLMValidationError):
+        _ = llm.generate(
+            PROMPT,
+            SamplingParams(
+                stop_token_ids=list(range(3, 131)),
+                min_tokens=1,
+            ),
+        )
+
 
 def test_seed(llm):
     """Check that seed impacts randomness."""
