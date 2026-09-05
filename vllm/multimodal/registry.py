@@ -243,13 +243,16 @@ class MultiModalRegistry:
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         processor: BaseMultiModalProcessor | None = None,
+        seq_len: int | None = None,
     ) -> MultiModalInput:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by `model_config`.
+        The model is identified by `model_config`. If `seq_len` is omitted,
+        use the model's full context length for profiling.
         """
-        seq_len = model_config.max_model_len
+        if seq_len is None:
+            seq_len = model_config.max_model_len
 
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)
