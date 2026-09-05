@@ -99,6 +99,12 @@ class EPLBConfig:
     - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
 
+    enable_migration_batching: bool = True
+    """Schedule expert migrations in batches where each rank communicates with
+    at most one peer. This reduces per-rank network contention at the cost of
+    additional sequential communication steps. Set to False to use one
+    communication step for all migrations."""
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
