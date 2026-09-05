@@ -889,7 +889,7 @@ def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
 
     device = torch.device("cpu")
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
-    builder.use_dedicated_xqa = True
+    builder.use_xqa = True
     qo_indptr = torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32, device=device)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
@@ -909,11 +909,100 @@ def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypatch):
+    """Non-ragged XQA keeps one query/output row per padded request."""
+    import unittest.mock
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 1.0
+    impl.bmm1_scale = None
+    impl.bmm2_scale = None
+    impl.kv_cache_dtype = "auto"
+    impl.is_kvcache_nvfp4 = False
+    impl.head_size = 16
+    impl.dcp_world_size = 1
+    impl.o_sf_scale = None
+    impl.window_left = -1
+    impl.sinks = None
+    impl.cache_config = unittest.mock.Mock()
+    impl.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
+
+    layer = unittest.mock.Mock(
+        _q_scale=torch.tensor(1.0),
+        _q_scale_float=1.0,
+        _k_scale_float=1.0,
+        _v_scale_float=1.0,
+    )
+    decode = flashinfer_backend.FlashInferTrtllmAPIDecode(
+        kernel=flashinfer_backend.FlashInferDecodeKernel.XQA,
+        block_tables=torch.zeros((4, 1), dtype=torch.int32),
+        seq_lens=torch.tensor([8, 8, 0, 0], dtype=torch.int32),
+        max_seq_len=8,
+        q_len_per_req=1,
+    )
+    attn_metadata = flashinfer_backend.FlashInferMetadata(
+        num_actual_tokens=2,
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+        q_data_type_prefill=torch.bfloat16,
+        q_data_type_decode=torch.bfloat16,
+        num_decodes=4,
+        num_decode_tokens=2,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        causal=True,
+        prefill=None,
+        decode=decode,
+        use_cascade=False,
+        cascade_wrapper=None,
+    )
+
+    seen_shapes = {}
+
+    def mock_xqa(**kwargs):
+        seen_shapes["query"] = kwargs["query"].shape
+        seen_shapes["out"] = kwargs["out"].shape
+        seen_shapes["block_tables"] = kwargs["block_tables"].shape
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "_get_trtllm_workspace_buffer",
+        lambda: torch.empty(1, dtype=torch.uint8),
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "flashinfer_xqa_batch_decode_with_kv_cache", mock_xqa
+    )
+
+    query = torch.zeros((4, 1, 16), dtype=torch.bfloat16)
+    output = torch.empty_like(query)
+    result = impl.forward(
+        layer,
+        query,
+        torch.empty_like(query),
+        torch.empty_like(query),
+        torch.zeros((1, 1, 1, 32), dtype=torch.bfloat16),
+        attn_metadata,
+        output,
+    )
+
+    assert result is output
+    assert seen_shapes == {
+        "query": torch.Size([4, 1, 16]),
+        "out": torch.Size([4, 1, 16]),
+        "block_tables": torch.Size([4, 1]),
+    }
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
     builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
-    builder.use_dedicated_xqa = True
+    builder.use_xqa = True
     qo_indptr = torch.tensor([0, 3, 3, 3], dtype=torch.int32)
 
     q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
@@ -927,6 +1016,31 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     assert q_lens == [3, 0, 0]
     assert q_cu_seq_lens is not None
     assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_trtllm_gen_padded_decode_uses_varlen_offsets():
+    """Padded speculative decode keeps its actual packed query width."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_xqa = False
+    qo_indptr = torch.tensor([0, 3, 3], dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=2,
+        num_decode_tokens=3,
+    )
+
+    assert q_len == 3
+    assert q_lens is None
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 3]
 
 
 @pytest.mark.skipif(
@@ -961,10 +1075,12 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     reason="FlashInfer is not available.",
 )
 def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
-    ):
-        pytest.skip("Native FlashInfer prefill with sinks requires SM12x.")
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("Native FlashInfer prefill with sinks requires SM90 or SM12x.")
 
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
@@ -995,7 +1111,7 @@ def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
     reason="FlashInfer is not available.",
 )
 def test_flashinfer_xqa_decode_correctness(default_vllm_config):
-    """FlashInfer should route supported decode through XQA and match SDPA."""
+    """FlashInfer should route SM90/SM12x decode through XQA and match SDPA."""
     supported = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(120)
@@ -1066,16 +1182,23 @@ def test_flashinfer_xqa_decode_correctness(default_vllm_config):
             )
             attn_metadata = builder.build(0, common_attn_metadata)
 
-    expected_cg_support = (
-        AttentionCGSupport.UNIFORM_BATCH
-        if current_platform.is_device_capability_family(120)
-        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
     assert (
         flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
             vllm_config, kv_cache_spec
         )
-        == expected_cg_support
+        == AttentionCGSupport.UNIFORM_BATCH
+    )
+    wide_head_kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=kv_cache_spec.num_kv_heads,
+        head_size=512,
+        dtype=vllm_config.model_config.dtype,
+    )
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, wide_head_kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
     assert isinstance(
         attn_metadata.decode,
