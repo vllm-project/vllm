@@ -1106,6 +1106,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# Hybrid-model tests require the CUDA extensions from these exact upstream
+# tags. Build them once in the stable test-dependency layer instead of once per
+# parallel GPU shard.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation \
+        'git+https://github.com/state-spaces/mamba@v2.3.0' \
+    && CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation \
+        'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' \
+    && python3 -c "from importlib.metadata import version; import causal_conv1d, mamba_ssm; assert version('mamba_ssm') == '2.3.0'; assert version('causal_conv1d') == '1.6.0'"
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
