@@ -323,6 +323,7 @@ def _ple_conv_kernel(
     w_ptr,
     residual_ptr,
     state_idx_ptr,
+    state_idx_stride,
     qsl_ptr,
     num_acc_ptr,
     has_init_ptr,
@@ -386,7 +387,7 @@ def _ple_conv_kernel(
         else:
             slot_off = tl.full([], 0, tl.int32)
 
-    sid = tl.load(state_idx_ptr + r).to(tl.int64)
+    sid = tl.load(state_idx_ptr + r * state_idx_stride).to(tl.int64)
     state_ok = sid != NULL_STATE_ID
     sid_safe = tl.where(state_ok, sid, 0)
     if HAS_INIT:
@@ -479,6 +480,7 @@ def _ple_conv_writeback_kernel(
     x_ptr,
     state_ptr,
     state_idx_ptr,
+    state_idx_stride,
     qsl_ptr,
     num_acc_ptr,
     has_init_ptr,
@@ -501,7 +503,7 @@ def _ple_conv_writeback_kernel(
     c_offs = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
     c_mask = c_offs < C
 
-    sid = tl.load(state_idx_ptr + r).to(tl.int64)
+    sid = tl.load(state_idx_ptr + r * state_idx_stride).to(tl.int64)
     state_ok = sid != NULL_STATE_ID
     if not state_ok:
         return
@@ -621,6 +623,7 @@ def ple_conv(
         conv_weights,
         residual,
         state_indices,
+        state_indices.stride(0),
         query_start_loc,
         num_accepted_tokens,
         has_initial_states,
@@ -649,6 +652,7 @@ def ple_conv(
             inputs,
             conv_state,
             state_indices,
+            state_indices.stride(0),
             query_start_loc,
             num_accepted_tokens,
             has_initial_states,
