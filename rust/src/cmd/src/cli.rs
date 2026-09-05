@@ -454,6 +454,7 @@ impl SharedRuntimeArgs {
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
+        _control_channel_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
         data_parallel_size: usize,
@@ -642,6 +643,10 @@ pub struct FrontendArgs {
     /// `stats_update_address`.
     #[arg(long)]
     pub coordinator_address: Option<String>,
+    /// Optional Python-owned frontend-side Control Channel socket address for
+    /// coordinating Elastic EP rank when using Ray as distributed executor.
+    #[arg(long)]
+    pub control_channel_address: Option<String>,
     /// First data-parallel engine rank expected to register with this
     /// bootstrapped frontend.
     #[arg(long, default_value_t = 0)]
@@ -667,6 +672,7 @@ impl FrontendArgs {
             self.input_address,
             self.output_address,
             self.coordinator_address,
+            self.control_channel_address,
             self.engine_start_index,
             self.engine_count,
             data_parallel_size,
