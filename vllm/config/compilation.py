@@ -586,6 +586,10 @@ class CompilationConfig:
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
 
+    Extra endpoints must be in (1, max_num_batched_tokens). 1 and
+    max_num_batched_tokens are ignored as redundant; values above the
+    cap are ignored with a warning.
+
     If a range overlaps with the compile size, graph for compile size
     will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
     graph for compile size 4 will be compiled and used instead of the graph

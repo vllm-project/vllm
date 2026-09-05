@@ -2314,12 +2314,28 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        # User endpoints are extra split points in (1, max_num_batched_tokens).
+        # 1 and the cap are redundant with the auto-added last range; values
+        # above the cap cannot be compiled.
         if compilation_config.compile_ranges_endpoints is not None:
+            skipped_endpoints: list[int] = []
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range endpoint: {x}"
-                if compile_range_end is not None and x < compile_range_end and x > 1:
+                if compile_range_end is not None and 1 < x < compile_range_end:
                     computed_compile_ranges_endpoints.append(x)
+                elif compile_range_end is not None and x > compile_range_end:
+                    skipped_endpoints.append(x)
+            if skipped_endpoints:
+                # #52471: do not silently drop endpoints above the batch-token cap.
+                logger.warning(
+                    "compile_ranges_endpoints values %s are greater than "
+                    "max_num_batched_tokens=%d and will be ignored. "
+                    "Raise --max-num-batched-tokens to compile ranges "
+                    "above this cap.",
+                    skipped_endpoints,
+                    compile_range_end,
+                )
         compilation_config.compile_ranges_endpoints = sorted(
             computed_compile_ranges_endpoints
         )
