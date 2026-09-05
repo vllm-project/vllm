@@ -29,6 +29,18 @@
 #include "marlin_mma.h"
 #include "core/scalar_type.hpp"
 
+#if defined(VLLM_MARLIN_LDMATRIX_S4_ENABLED) && CUDART_VERSION >= 13040 && \
+    ((defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ == 900) || \
+     (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                            \
+      (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1070 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1100 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1200 ||                            \
+       __CUDA_ARCH_FAMILY_SPECIFIC__ == 1210)))
+  #define VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED 1
+#endif
+
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
                     std::is_same<scalar_t, nv_bfloat16>::value, \
@@ -99,6 +111,21 @@ __device__ inline void ldsm(typename MarlinScalarType<type_id>::FragA& frag_a,
   } else {
     static_assert(count == 1 || count == 2 || count == 4, "invalid count");
   }
+}
+
+template <int count>
+__device__ inline void ldsm_s4(uint32_t (&registers)[count],
+                               const void* smem_ptr) {
+  static_assert(count == 4);
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED)
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n16.x4.shared::cta.s8.s4 "
+      "{%0,%1,%2,%3}, [%4];\n"
+      : "=r"(registers[0]), "=r"(registers[1]), "=r"(registers[2]),
+        "=r"(registers[3])
+      : "r"(smem));
+  #endif
 }
 
 // Multiply dequantized values by the corresponding quantization scale; used
@@ -337,6 +364,12 @@ __global__ void Marlin(
   }
 
   constexpr bool is_a_8bit = a_type.size_bits() == 8;
+  #if defined(VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED)
+  constexpr bool use_ldmatrix_s4 =
+      a_type == vllm::kS8 && b_type == vllm::kU4B8 && group_blocks != 0;
+  #else
+  constexpr bool use_ldmatrix_s4 = false;
+  #endif
   constexpr bool is_8bit_scale = s_type.size_bits() == 8;
   if constexpr (!is_a_8bit) {
     static_assert(std::is_same<scalar_t, c_scalar_t>::value);
@@ -767,6 +800,7 @@ __global__ void Marlin(
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
   I4 frag_b_quant[2][b_thread_vecs];
+  FragB frag_b_ldmatrix[2][4];
   FragC frag_c[thread_m_blocks][is_a_8bit ? 2 : 4][2];
   FragC frag_c_tmp[thread_m_blocks][is_a_8bit ? 2 : 4][2];
   FragS frag_s[2][4];  // No act-order
@@ -940,10 +974,26 @@ __global__ void Marlin(
           frag_a[k % 2][i], &sh_a_stage[a_sh_rd_trans[k % b_sh_wr_iters][i]]);
     int4* sh_b_stage = sh_b + b_sh_stage * pipe;
 
+    if constexpr (use_ldmatrix_s4) {
+      constexpr int half_tile_bytes = 4 * 8 * 16 / 2;
+      int lane = threadIdx.x % 32;
+      int tile_offset = b_sh_stride * (k % b_sh_wr_iters) + b_sh_rd - lane;
+      uint8_t* tile = reinterpret_cast<uint8_t*>(&sh_b_stage[tile_offset]);
+      uint32_t b0[4];
+      uint32_t b1[4];
+      ldsm_s4(b0, &tile[lane * 8]);
+      ldsm_s4(b1, &tile[half_tile_bytes + lane * 8]);
   #pragma unroll
-    for (int i = 0; i < b_thread_vecs; i++) {
-      frag_b_quant[k % 2][i] = *reinterpret_cast<I4*>(
-          &sh_b_stage[b_sh_stride * (k % b_sh_wr_iters) + b_sh_rd + i]);
+      for (int i = 0; i < 4; i++) {
+        reinterpret_cast<uint32_t*>(&frag_b_ldmatrix[k % 2][i])[0] = b0[i];
+        reinterpret_cast<uint32_t*>(&frag_b_ldmatrix[k % 2][i])[1] = b1[i];
+      }
+    } else {
+  #pragma unroll
+      for (int i = 0; i < b_thread_vecs; i++) {
+        frag_b_quant[k % 2][i] = *reinterpret_cast<I4*>(
+            &sh_b_stage[b_sh_stride * (k % b_sh_wr_iters) + b_sh_rd + i]);
+      }
     }
   };
 
@@ -1298,7 +1348,10 @@ __global__ void Marlin(
     for (int j = 0; j < 2; j++) {
       FragB frag_b[2];
 
-      if (is_a_8bit && b_type.size_bits() == 4 && !has_zp) {
+      if constexpr (use_ldmatrix_s4) {
+        frag_b[0] = frag_b_ldmatrix[k2][j * 2];
+        frag_b[1] = frag_b_ldmatrix[k2][j * 2 + 1];
+      } else if (is_a_8bit && b_type.size_bits() == 4 && !has_zp) {
         dequant_data(frag_b_quant[k2][0][j * 2],
                      reinterpret_cast<scalar_32bit_t*>(&frag_b));
         dequant_data(frag_b_quant[k2][0][j * 2 + 1],
@@ -2079,3 +2132,5 @@ __global__ void Marlin(
 }  // namespace MARLIN_NAMESPACE_NAME
 
 #endif
+
+#undef VLLM_MARLIN_LDMATRIX_S4_DEVICE_ENABLED

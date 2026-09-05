@@ -150,6 +150,8 @@ def prepare_fp8_layer_for_marlin(
         size_k=padded_k,
         size_n=padded_n,
         num_bits=8,
+        is_a_8bit=False,
+        is_w4a8_int8=False,
     )
     replace_parameter(layer, "weight", marlin_qweight)
 
@@ -295,7 +297,13 @@ def prepare_fp8_moe_layer_for_marlin(
             qweight = qweight.T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
-                b_q_weight=qweight, perm=perm, size_k=size_k, size_n=size_n, num_bits=8
+                b_q_weight=qweight,
+                perm=perm,
+                size_k=size_k,
+                size_n=size_n,
+                num_bits=8,
+                is_a_8bit=False,
+                is_w4a8_int8=False,
             )
             tensor_list.append(marlin_qweight)
 
@@ -481,6 +489,8 @@ def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
         size_k=padded_k,
         size_n=padded_n,
         num_bits=8,
+        is_a_8bit=False,
+        is_w4a8_int8=False,
     )
     replace_parameter(layer, "weight", marlin_qweight)
 
@@ -575,6 +585,8 @@ def prepare_mxfp8_moe_layer_for_marlin(
                 size_k=size_k,
                 size_n=size_n,
                 num_bits=8,
+                is_a_8bit=False,
+                is_w4a8_int8=False,
             )
             tensor_list.append(marlin_qweight)
         return torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
@@ -637,6 +649,7 @@ def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
         size_n=size_n,
         num_bits=8,
         is_a_8bit=is_a_8bit,
+        is_w4a8_int8=False,
     )
 
     marlin_scales = marlin_permute_scales(
