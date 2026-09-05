@@ -233,6 +233,10 @@ class EngineCoreOutput(
     # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    # Per-token multi-label token-probe probabilities.
+    # Appended last so `array_like` positional serialization stays compatible.
+    new_token_probe_probs: list[dict[str, float]] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

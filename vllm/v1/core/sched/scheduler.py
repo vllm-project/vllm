@@ -28,6 +28,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )
+from vllm.model_executor.models.token_probe.output import TokenProbeOutputManager
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -369,6 +370,9 @@ class Scheduler(SchedulerInterface):
             vllm_config.model_config.enable_return_routed_experts
         )
         self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
+        self.token_probe_output = TokenProbeOutputManager(
+            vllm_config.model_config.probe_ckpt
+        )
 
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -1822,6 +1826,11 @@ class Scheduler(SchedulerInterface):
         kv_connector_output = model_runner_output.kv_connector_output
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        token_probe_batch = self.token_probe_output.start_batch(
+            scores=model_runner_output.token_probe_scores,
+            req_ids=model_runner_output.req_ids,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -2010,6 +2019,15 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
+            new_token_probe_probs = token_probe_batch.record(
+                request_id=req_id,
+                num_tokens_scheduled=num_tokens_scheduled,
+                is_prefill=num_output_tokens_before == 0,
+                is_spec_decode=bool(scheduled_spec_token_ids),
+                num_raw_output_tokens=len(generated_token_ids),
+                num_output_tokens=len(new_token_ids),
+            )
+
             routed_experts = None
             if (
                 self.enable_return_routed_experts
@@ -2117,6 +2135,7 @@ class Scheduler(SchedulerInterface):
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        new_token_probe_probs=new_token_probe_probs,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
@@ -2490,6 +2509,8 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+
+        self.token_probe_output.save(request.request_id)
 
         self._inflight_prefills.discard(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)

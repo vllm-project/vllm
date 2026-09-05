@@ -84,6 +84,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
+from .token_probe import TokenProbe, TokenProbeForwardContext
 from .utils import (
     PPMissingLayer,
     WeightsMapper,
@@ -1283,6 +1284,7 @@ class BailingMoeV3DecoderLayer(nn.Module):
         "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
+        "token_probe_context": 0,
     }
 )
 class BailingMoeV3Model(nn.Module):
@@ -1327,6 +1329,7 @@ class BailingMoeV3Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers, layer_fn, prefix=f"{prefix}.layers"
         )
+        self.token_probe = TokenProbe.from_config(vllm_config)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1346,6 +1349,7 @@ class BailingMoeV3Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        token_probe_context: TokenProbeForwardContext | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             hidden_states = (
@@ -1359,7 +1363,19 @@ class BailingMoeV3Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        self.token_probe.begin_forward(
+            positions=positions,
+            context=token_probe_context,
+        )
+        for layer_id, layer in enumerate(
+            self.layers[self.start_layer : self.end_layer],
+            start=self.start_layer,
+        ):
+            self.token_probe.capture(
+                layer_id=layer_id,
+                hidden_states=hidden_states,
+                residual=residual,
+            )
             hidden_states, residual = layer(hidden_states, positions, residual)
 
         if not get_pp_group().is_last_rank:
@@ -1370,7 +1386,7 @@ class BailingMoeV3Model(nn.Module):
             hidden_states, _ = self.norm(hidden_states, residual)
         else:
             hidden_states = self.norm(hidden_states)
-        return hidden_states
+        return self.token_probe.finish_forward(hidden_states)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
@@ -1421,8 +1437,15 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        token_probe_context: TokenProbeForwardContext | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+        return self.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            token_probe_context,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor(self.lm_head, hidden_states)
@@ -1537,4 +1560,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 continue
 
             load_param(name, weight)
+        loaded_params.update(
+            self.model.token_probe.parameter_names(prefix="model.token_probe")
+        )
         return loaded_params

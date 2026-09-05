@@ -248,6 +248,8 @@ class ModelConfig:
     equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    probe_ckpt: str | None = None
+    """Path to a token-probe checkpoint."""
     return_sampling_mask: bool = False
     """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)

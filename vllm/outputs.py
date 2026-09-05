@@ -53,6 +53,8 @@ class CompletionOutput:
             ``--per-request-spec-decode-metrics`` is enabled; None otherwise.
             Surfaced in the response as ``metrics.speculative_decoding`` for
             single-sequence (``n == 1``) requests.
+        token_probe_probs: Per-token multi-label probabilities from the configured
+            token probe, if enabled without file output.
     """
 
     index: int
@@ -61,6 +63,7 @@ class CompletionOutput:
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
+    token_probe_probs: list[dict[str, float]] | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -76,6 +79,7 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"token_probe_probs={self.token_probe_probs}, "
             f"sampling_mask={self.sampling_mask}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
@@ -189,6 +193,12 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
+                        if next_completion.token_probe_probs:
+                            if completion.token_probe_probs is None:
+                                completion.token_probe_probs = []
+                            completion.token_probe_probs.extend(
+                                next_completion.token_probe_probs
+                            )
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

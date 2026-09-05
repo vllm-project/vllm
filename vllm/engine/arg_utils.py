@@ -106,6 +106,9 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
+from vllm.model_executor.models.token_probe.validation import (
+    validate_engine_args as validate_token_probe_engine_args,
+)
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -427,6 +430,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    probe_ckpt: str | None = ModelConfig.probe_ckpt
     return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
@@ -889,6 +893,7 @@ class EngineArgs:
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
         )
+        model_group.add_argument("--probe-ckpt", **model_kwargs["probe_ckpt"])
         model_group.add_argument(
             "--return-sampling-mask",
             **model_kwargs["return_sampling_mask"],
@@ -1794,6 +1799,7 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            probe_ckpt=self.probe_ckpt,
             return_sampling_mask=self.return_sampling_mask,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
@@ -2339,6 +2345,7 @@ class EngineArgs:
             target_model_config=model_config,
             target_parallel_config=parallel_config,
         )
+        validate_token_probe_engine_args(self, model_config, speculative_config)
         diffusion_config = self.create_diffusion_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(

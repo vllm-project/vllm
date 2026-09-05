@@ -220,6 +220,9 @@ class GenerateResponseChoice(BaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("token_ids")
     @classmethod
@@ -236,6 +239,9 @@ class GenerateResponseStreamChoice(BaseModel):
     token_ids: list[int] | None = None
     routed_experts: str | None = None
     sampling_mask: list[list[int]] | None = None
+    token_probe_probs: list[dict[str, float]] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class GenerateStreamResponse(BaseModel):
