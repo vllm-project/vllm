@@ -16,6 +16,7 @@ from vllm.config.multimodal import (
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from .context import BaseProcessingInfo
 from .inputs import ProcessorInputs
@@ -92,6 +93,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             dummy_prompt = []
         else:
             from .processor import cached_encode
+
+            if is_mistral_tokenizer(tokenizer):
+                # The dummy text contains special placeholder tokens
+                # (e.g. "[IMG]") which mistral-common never encodes from text.
+                tokenizer = tokenizer.transformers_tokenizer_with_special_tokens  # type: ignore[assignment]
 
             dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
 
