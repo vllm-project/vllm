@@ -511,3 +511,33 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+@pytest.mark.parametrize("device", ["cpu"])
+def test_update_req_spec_token_ids_sanitizes_grammar_padding_sentinel(
+    device: str,
+):
+    """-1 padding must not be written to token_ids_cpu."""
+    input_batch = InputBatch(
+        max_num_reqs=4,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        device=torch.device(device),
+        pin_memory=False,
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+    )
+    req = _construct_cached_request_state(0)
+    req_index = input_batch.add_request(req)
+    num_tokens_no_spec = int(input_batch.num_tokens_no_spec[req_index])
+
+    padded_spec_tokens = [-1, 42, -1, -1]
+    input_batch.update_req_spec_token_ids(req, {req.req_id: padded_spec_tokens})
+
+    start = num_tokens_no_spec
+    end = start + len(padded_spec_tokens)
+    written = input_batch.token_ids_cpu[req_index, start:end].tolist()
+    assert written == [0, 42, 0, 0]
+    # Original sentinel list is preserved in spec_token_ids for bookkeeping.
+    assert input_batch.spec_token_ids[req_index] == padded_spec_tokens
