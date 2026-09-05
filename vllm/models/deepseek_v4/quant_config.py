@@ -188,6 +188,13 @@ class DeepseekV4FP8Config(Fp8Config):
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,
                     )
+                from vllm.models.deepseek_v4.fp4_dequant import (
+                    DsV4Fp4DequantMoEMethod,
+                    dsv4_fp4_dequant_enabled,
+                )
+
+                if dsv4_fp4_dequant_enabled():
+                    return DsV4Fp4DequantMoEMethod(layer)
                 return Mxfp4MoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.

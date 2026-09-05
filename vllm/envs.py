@@ -196,6 +196,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
+    VLLM_DSV4_FP4_DEQUANT: bool = False
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_USE_DIRECT_DCP_A2A: bool | None = None
@@ -1561,6 +1562,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    # Losslessly re-encode DeepSeek-V4 MXFP4 experts to block-FP8 at load time
+    # and run them through the FP8 MoE kernel (faster prefill on Hopper, at the
+    # cost of larger expert weight memory). Opt-in; MXFP4/Marlin is the default.
+    "VLLM_DSV4_FP4_DEQUANT": lambda: bool(int(os.getenv("VLLM_DSV4_FP4_DEQUANT", "0"))),
     # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
     "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
         int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))
