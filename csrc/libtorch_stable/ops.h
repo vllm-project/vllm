@@ -644,6 +644,7 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
+    std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,
     std::optional<torch::stable::Tensor> const& request_ids,

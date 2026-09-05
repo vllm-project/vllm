@@ -203,6 +203,7 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
     int32_t* __restrict__ miss_mask,  // [num_rows, top_k] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, region_stride]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
+    unsigned long long* __restrict__ stats,       // [2] hits,misses or nullptr
     const int32_t* __restrict__ request_state_indices,  // [num_requests] or
                                                         // nullptr
     const int32_t request_state_count, const int64_t host_rows,
@@ -552,6 +553,11 @@ __global__ __launch_bounds__(1024) void hisparse_resolve_residency_kernel(
   if (swap_counts != nullptr && tid == 0) {
     swap_counts[batch_row] = total_misses;
   }
+  if (stats != nullptr && tid == 0) {
+    atomicAdd(&stats[0], static_cast<unsigned long long>(total_hits));
+    atomicAdd(&stats[1], static_cast<unsigned long long>(total_misses));
+  }
+
   // Phase 4: write back the LRU order: stale evictables at the front,
   // freshly loaded misses next, then hits at MRU.
   const int total_evictable = hot_size - total_hits;
@@ -779,6 +785,7 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride,
     std::optional<torch::stable::Tensor> const& miss_mask,
+    std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,
     std::optional<torch::stable::Tensor> const& request_ids,
@@ -997,6 +1004,17 @@ void hisparse_resolve_residency(
     miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
   }
 
+  unsigned long long* stats_ptr = nullptr;
+  if (stats.has_value()) {
+    auto const& st = stats.value();
+    STD_TORCH_CHECK(
+        st.is_cuda() && st.is_contiguous() && st.dim() == 1 &&
+            st.scalar_type() == torch::headeronly::ScalarType::UInt64 &&
+            st.numel() == 2,
+        "stats must be a contiguous two-element uint64 CUDA tensor");
+    stats_ptr = static_cast<unsigned long long*>(st.mutable_data_ptr());
+  }
+
   int32_t* attention_indices_ptr = nullptr;
   if (attention_indices.has_value()) {
     auto const& indices = attention_indices.value();
@@ -1046,7 +1064,7 @@ void hisparse_resolve_residency(
       swap_counts_ptr, hot_indices.mutable_data_ptr<int32_t>(),
       attention_indices_ptr, miss_mask_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
-      lru_slots.mutable_data_ptr<int16_t>(), request_state_ptr,
+      lru_slots.mutable_data_ptr<int16_t>(), stats_ptr, request_state_ptr,
       request_state_count, host_rows, hot_block_table.stride(0), hot_block_size,
       top_k, hot_size, hash_size, region_stride, attention_block_stride,
       source_bt_stride, source_num_reqs, source_num_blocks,

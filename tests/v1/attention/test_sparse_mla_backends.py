@@ -2033,6 +2033,21 @@ def test_hisparse_swap_in_preserves_rows_across_eviction():
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
         torch.testing.assert_close(gathered, expected)
 
+    runtime.index_group.swap_stats.zero_()
+    runtime.swap_in(
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=topk.clone(),
+        block_size=block_size,
+    )
+    torch.accelerator.synchronize()
+    expected_stats = torch.tensor(
+        [(topk.shape[1] - 1) * num_reqs, 0],
+        dtype=torch.uint64,
+        device=device,
+    )
+    torch.testing.assert_close(runtime.index_group.swap_stats, expected_stats)
+
 
 @requires_hisparse_ops
 def test_hisparse_multi_step_swaps_match_independent():

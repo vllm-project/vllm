@@ -29,6 +29,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
 )
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
+from vllm.v1.metrics.stats import HiSparseStats
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
@@ -46,7 +47,36 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._metrics_calls = 0
+    worker._metrics_event = MagicMock()
+    worker._metrics_pending = False
+    worker.leader_runtimes = []
     return worker
+
+
+def test_hisparse_worker_finish_step_reads_completed_snapshot(monkeypatch):
+    worker = _make_hisparse_worker()
+    worker.is_host_writer = False
+    worker._finish_mirror_phase = MagicMock()
+    worker._submit_transfers = MagicMock()
+    worker._release_completed_dma_descriptors = MagicMock()
+    worker._post_forward_transfers = []
+    worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
+    worker._metrics_pending = False
+    worker._metrics_event = MagicMock()
+    worker._metrics_event.query.return_value = True
+    group = SimpleNamespace(
+        swap_stats=torch.tensor([12, 4], dtype=torch.uint64),
+        swap_stats_host=torch.empty(2, dtype=torch.uint64),
+        stats_row_bytes=16,
+    )
+    worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    assert worker.finish_step() is None
+    worker._metrics_event.record.assert_called_once_with()
+    assert group.swap_stats.tolist() == [0, 0]
+    assert worker.finish_step() == HiSparseStats(12, 4, 64)
 
 
 def test_hisparse_row_mirrors_follow_runner_request_order():
@@ -1004,7 +1034,7 @@ def test_hisparse_runtime_takes_eager_host_mirror_from_config(
         row_width=8,
         kv_dtype=torch.float32,
         device="cpu",
-        index_group=SimpleNamespace(followers=[]),
+        index_group=SimpleNamespace(followers=[], stats_row_bytes=0),
     )
 
     assert runtime.eager_host_mirror is eager_host_mirror

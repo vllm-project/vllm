@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.metrics.stats import HiSparseStats
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -259,6 +260,9 @@ class KVConnectorBase_V1(ABC):
         after the model execution.
         """
         self._connector_metadata = None
+
+    def finish_step(self) -> "HiSparseStats | None":
+        return None
 
     def _get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.

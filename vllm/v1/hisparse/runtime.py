@@ -441,6 +441,11 @@ class HiSparseIndexGroup:
         )
         self.logical_topk_ready = logical_topk_ready
         self.followers: list[HiSparseRuntime] = []
+        self.swap_stats = torch.zeros(2, dtype=torch.uint64, device=device)
+        self.swap_stats_host = torch.empty(
+            2, dtype=torch.uint64, device="cpu", pin_memory=True
+        )
+        self.stats_row_bytes = 0
 
 
 class HiSparseRuntime:
@@ -503,6 +508,7 @@ class HiSparseRuntime:
         else:
             index_group.followers.append(self)
         self.index_group = index_group
+        index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
         self.resident_source_index = -1
@@ -616,6 +622,7 @@ class HiSparseRuntime:
         compute_stream.wait_stream(group.copy_stream)
         group.device_global_indices.fill_(-1)
         group.lru_slots.copy_(group.lru_init.expand_as(group.lru_slots))
+        group.swap_stats.zero_()
         group.copy_stream.wait_stream(compute_stream)
 
     def invalidate_slots(
@@ -729,6 +736,7 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             None,
+            group.swap_stats,
             physical_topk_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
