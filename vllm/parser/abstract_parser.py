@@ -547,8 +547,11 @@ class DelegatingParser(Parser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         if (
             self._tool_parser is None
+            or self._tool_parser.engine_based_streaming
             or self._tool_parser.structural_tag_model is None
             or not request.tools
+            or request.structured_outputs is not None
+            and request.structured_outputs.structural_tag is not None
         ):
             return request
 

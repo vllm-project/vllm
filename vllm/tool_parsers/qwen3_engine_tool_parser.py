@@ -5,4 +5,4 @@ from vllm.parser.engine.registered_adapters import Qwen3ParserToolAdapter
 
 
 class Qwen3EngineToolParser(Qwen3ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = "qwen_3_coder"
+    """Legacy tool-parser name backed by the Qwen3 parser engine."""

@@ -39,6 +39,8 @@ from vllm.parser.engine.parser_engine_config import (
 )
 
 if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
@@ -110,6 +112,13 @@ def deepseek_v32_config() -> ParserEngineConfig:
 
 
 class DeepSeekV32Parser(ParserEngine):
+    structural_tag_model = "deepseek_v3_2"
+    supports_required_and_named = False
+
+    def adjust_request(self, request: ChatCompletionRequest | ResponsesRequest):
+        request.skip_special_tokens = False
+        return super().adjust_request(request)
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
