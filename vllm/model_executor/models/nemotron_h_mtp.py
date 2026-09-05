@@ -88,10 +88,12 @@ class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
 
     def forward(
         self,
-        inputs_embeds: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        *,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Start projections (Fusion)
         if self.has_start_projections:
@@ -175,10 +177,11 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
 
     def forward(
         self,
-        inputs_embeds: torch.Tensor,
-        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
+        *,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Start projections (Fusion)
         if self.has_start_projections:
@@ -289,13 +292,14 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
+            assert input_ids is not None
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         residual = None
@@ -371,14 +375,15 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
+        assert hidden_states is not None
         hidden_states = self.model(
             input_ids,
             positions,
@@ -513,6 +518,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            assert weight_loader is not None
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 

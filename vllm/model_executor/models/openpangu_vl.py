@@ -22,7 +22,7 @@
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, TypeAlias, TypedDict
 
 import torch
 import torch.nn as nn
@@ -627,7 +627,7 @@ class OpenPanguVisionTransformer(nn.Module):
             pad[-(dim + 1) * 2 + 1] = pad_len
             return F.pad(w, pad, mode="constant", value=0)
 
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, str | int]] = [
             ("attn.qkv.", "attn.q.", "q"),
             ("attn.qkv.", "attn.k.", "k"),
             ("attn.qkv.", "attn.v.", "v"),
@@ -677,15 +677,11 @@ class OpenPanguVLProcessingInfo(Qwen2_5_VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.model_config.hf_config
 
-    def get_hf_processor(
-        self,
-        *,
-        min_pixels: int | None = None,
-        max_pixels: int | None = None,
-        size: dict[str, int] | None = None,
-        fps: float | list[float] | None = None,
-        **kwargs: object,
-    ):
+    def get_hf_processor(self, **kwargs: object):
+        kwargs.pop("min_pixels", None)
+        kwargs.pop("max_pixels", None)
+        kwargs.pop("size", None)
+        fps = kwargs.pop("fps", None)
         if fps is not None:
             kwargs["fps"] = fps
 
@@ -747,11 +743,24 @@ class OpenPanguVLVideoEmbeddingInputs(TensorSchema):
     ]
 
 
+OpenPanguVLImageInputs: TypeAlias = (
+    OpenPanguVLImagePixelInputs | OpenPanguVLImageEmbeddingInputs
+)
+OpenPanguVLVideoInputs: TypeAlias = (
+    OpenPanguVLVideoPixelInputs | OpenPanguVLVideoEmbeddingInputs
+)
+
+
+class OpenPanguVLMultiModalInputs(TypedDict, total=False):
+    image: OpenPanguVLImageInputs | None
+    video: OpenPanguVLVideoInputs | None
+
+
 class OpenPanguVLMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, any],
+        hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -878,10 +887,12 @@ class OpenPanguVLForConditionalGeneration(
         self.do_rescale = image_processor.do_rescale
         self.rescale_factor = image_processor.rescale_factor
         self.do_normalize = image_processor.do_normalize
-        self.image_mean = tuple(image_processor.image_mean)
-        self.image_std = tuple(image_processor.image_std)
+        self.image_mean: tuple[float, ...] = tuple(image_processor.image_mean)
+        self.image_std: tuple[float, ...] = tuple(image_processor.image_std)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+    def _maybe_ignore_quant_config(
+        self, quant_config: QuantizationConfig | None
+    ) -> QuantizationConfig | None:
         if isinstance(quant_config, AutoGPTQConfig):
             return None
         return quant_config
@@ -904,7 +915,9 @@ class OpenPanguVLForConditionalGeneration(
         else:
             return torch.concat(mm_input)
 
-    def _parse_and_validate_image_input(self, **kwargs: object):
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> OpenPanguVLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -932,26 +945,27 @@ class OpenPanguVLForConditionalGeneration(
                 image_grid_thw=image_grid_thw,
             )
 
-        if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds"
-            )
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw"
-            )
+        assert image_embeds is not None
+        image_embeds = self._validate_and_reshape_mm_tensor(
+            image_embeds, "image embeds"
+        )
+        image_grid_thw = self._validate_and_reshape_mm_tensor(
+            image_grid_thw, "image grid_thw"
+        )
 
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-            return OpenPanguVLImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
+        if not isinstance(image_embeds, torch.Tensor):
+            raise ValueError(
+                f"Incorrect type of image embeddings. Got type: {type(image_embeds)}"
             )
+        return OpenPanguVLImageEmbeddingInputs(
+            type="image_embeds",
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
+        )
 
-    def _parse_and_validate_video_input(self, **kwargs: object):
+    def _parse_and_validate_video_input(
+        self, **kwargs: object
+    ) -> OpenPanguVLVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
@@ -973,27 +987,28 @@ class OpenPanguVLForConditionalGeneration(
                 video_grid_thw=video_grid_thw,
             )
 
-        if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds"
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw"
-            )
+        assert video_embeds is not None
+        video_embeds = self._validate_and_reshape_mm_tensor(
+            video_embeds, "video embeds"
+        )
+        video_grid_thw = self._validate_and_reshape_mm_tensor(
+            video_grid_thw, "video grid_thw"
+        )
 
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError(
-                    "Incorrect type of video embeddings. "
-                    f"Got type: {type(video_embeds)}"
-                )
-            return OpenPanguVLVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
+        if not isinstance(video_embeds, torch.Tensor):
+            raise ValueError(
+                f"Incorrect type of video embeddings. Got type: {type(video_embeds)}"
             )
+        return OpenPanguVLVideoEmbeddingInputs(
+            type="video_embeds",
+            video_embeds=video_embeds,
+            video_grid_thw=video_grid_thw,
+        )
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        mm_input_by_modality = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> OpenPanguVLMultiModalInputs:
+        mm_input_by_modality: OpenPanguVLMultiModalInputs = {}
         for input_key in kwargs:
             if (
                 input_key in ("pixel_values", "image_embeds")
@@ -1019,16 +1034,19 @@ class OpenPanguVLForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         for modality in mm_input_by_modality:
-            multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
+                image_input = mm_input_by_modality["image"]
+                assert image_input is not None
+                vision_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings = (
                     multimodal_embeddings
                     if not vision_embeddings
                     else (multimodal_embeddings + vision_embeddings)
                 )
             if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
+                video_input = mm_input_by_modality["video"]
+                assert video_input is not None
+                video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings = (
                     multimodal_embeddings
                     if not video_embeddings
@@ -1039,19 +1057,24 @@ class OpenPanguVLForConditionalGeneration(
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings=None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.embed_input_ids(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [self.config.image_token_id, self.config.video_token_id],
-            )
-        return inputs_embeds
+        if multimodal_embeddings is None:
+            return self.language_model.embed_input_ids(input_ids)
 
-    def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
+        mm_token_ids = input_ids.new_tensor(
+            [self.config.image_token_id, self.config.video_token_id]
+        )
+        is_multimodal = torch.isin(input_ids, mm_token_ids)
+        return self.embed_input_ids(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+    def _process_image_input(
+        self, image_input: OpenPanguVLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         if grid_thw.ndim != 2:
             raise ValueError(f"grid_thw.ndim must be 2, but it is {grid_thw.ndim}")
@@ -1082,7 +1105,9 @@ class OpenPanguVLForConditionalGeneration(
         sizes = grid_thw.prod(-1) // merge_size // merge_size
         return image_embeds.split(sizes.tolist())
 
-    def _process_video_input(self, video_input) -> torch.Tensor:
+    def _process_video_input(
+        self, video_input: OpenPanguVLVideoInputs
+    ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         if grid_thw.ndim != 2:
             raise ValueError(f"grid_thw.ndim must be 2, but it is {grid_thw.ndim}")
@@ -1157,8 +1182,13 @@ class OpenPanguVLForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             modality = mm_feature.modality
+            feature_data = mm_feature.data
+            assert feature_data is not None
             if modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                grid_thw_item = feature_data["image_grid_thw"]
+                grid_thw = grid_thw_item.data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield (
                     modality,
@@ -1168,7 +1198,10 @@ class OpenPanguVLForConditionalGeneration(
                     w // spatial_merge_size,
                 )
             elif modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                grid_thw_item = feature_data["video_grid_thw"]
+                grid_thw = grid_thw_item.data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 yield (
                     modality,
                     offset,
@@ -1280,14 +1313,17 @@ def normalize(image, mean, std):
 @lru_cache(maxsize=10)
 def _fuse_mean_std_and_rescale_factor(
     do_normalize: bool | None = None,
-    image_mean: float | list[float] | None = None,
-    image_std: float | list[float] | None = None,
+    image_mean: float | tuple[float, ...] | None = None,
+    image_std: float | tuple[float, ...] | None = None,
     do_rescale: bool | None = None,
     rescale_factor: float | None = None,
     device: Optional["torch.device"] = None,
 ) -> tuple:
     if do_rescale and do_normalize:
         # Fused rescale and normalize
+        assert rescale_factor is not None
+        assert image_mean is not None
+        assert image_std is not None
         image_mean = torch.tensor(image_mean, device=device) * (1.0 / rescale_factor)
         image_std = torch.tensor(image_std, device=device) * (1.0 / rescale_factor)
         do_rescale = False
@@ -1299,8 +1335,8 @@ def rescale_and_normalize(
     do_rescale: bool,
     rescale_factor: float,
     do_normalize: bool,
-    image_mean: float | list[float],
-    image_std: float | list[float],
+    image_mean: float | tuple[float, ...],
+    image_std: float | tuple[float, ...],
     dtype: torch.dtype = torch.bfloat16,
 ) -> "torch.Tensor":
     """

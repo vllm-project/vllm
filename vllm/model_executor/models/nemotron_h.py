@@ -62,6 +62,7 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     HasInnerState,
     IsHybrid,
+    MambaStateShapes,
     MixtureOfExperts,
     SupportsEagle,
     SupportsEagle3,
@@ -132,6 +133,7 @@ class NemotronHMoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        assert parallel_config is not None
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
 
@@ -182,6 +184,8 @@ class NemotronHMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.fc1_latent_proj: ReplicatedLinear | None
+        self.fc2_latent_proj: ReplicatedLinear | None
         if self.use_latent_moe:
             self.fc1_latent_proj = ReplicatedLinear(
                 input_size=config.hidden_size,
@@ -705,7 +709,7 @@ class NemotronHForCausalLM(
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True
-    is_non_gated_moe: bool = True
+    is_non_gated_moe = True
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model", "mtp": None},
@@ -756,7 +760,7 @@ class NemotronHForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, ...], ...]:
+    ) -> MambaStateShapes:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -840,6 +844,7 @@ class NemotronHForCausalLM(
                     self.moe_layers.append(layer.mixer.experts)
 
             self.num_moe_layers = len(self.moe_layers)
+            assert example_moe is not None
             self.num_logical_experts = example_moe.n_logical_experts
             self.num_physical_experts = example_moe.n_physical_experts
             self.num_local_physical_experts = example_moe.n_local_physical_experts  # noqa: E501
