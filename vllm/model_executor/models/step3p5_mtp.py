@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -154,10 +154,11 @@ class Step3p5AMultiTokenPredictor(nn.Module):
 class Step3p5MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
-        self.vllm_config = vllm_config
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        self.config = draft_model_config.hf_config
         self.model = Step3p5AMultiTokenPredictor(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            vllm_config=replace(vllm_config, model_config=draft_model_config),
+            prefix=maybe_prefix(prefix, "model"),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

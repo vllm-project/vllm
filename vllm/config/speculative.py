@@ -937,6 +937,8 @@ class SpeculativeConfig:
         if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[
             0
         ] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration"):
+            from vllm.transformers_utils.configs.step3p5 import Step3p5Config
+
             quantization_config = getattr(hf_config, "quantization_config", None)
             hf_config = getattr(hf_config, "text_config", hf_config)
             if (
@@ -946,6 +948,25 @@ class SpeculativeConfig:
                 hf_config.update({"quantization_config": quantization_config})
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            # MTP layers index layer_types at [num_hidden_layers + i], but
+            # Step3p5Config crops the list for HF validation and keeps the
+            # tail in mtp_layer_types; re-append it for the draft config.
+            # Keyed on the class, not model_type: Step-3.7's HF text config
+            # also declares "step3p5" but keeps its own full list.
+            if isinstance(hf_config, Step3p5Config):
+                layer_types = hf_config.layer_types
+                if layer_types is not None:
+                    mtp_layer_types = hf_config.mtp_layer_types
+                    if len(mtp_layer_types) < n_predict:
+                        raise ValueError(
+                            "Step-3.5 MTP needs one layer_types entry per "
+                            f"MTP layer, but the checkpoint's layer_types "
+                            f"has only {len(mtp_layer_types)} entries "
+                            f"beyond num_hidden_layers="
+                            f"{hf_config.num_hidden_layers} while "
+                            f"num_nextn_predict_layers={n_predict}."
+                        )
+                    hf_config.layer_types = [*layer_types, *mtp_layer_types]
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
         if initial_architecture == "MistralLarge3ForCausalLM":

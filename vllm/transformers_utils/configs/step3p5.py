@@ -80,9 +80,14 @@ class Step3p5Config(PretrainedConfig):
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
-        # For some reason the checkpoint has longer layer_types than num_hidden_layers
+        # Step-3.5 checkpoints extra MTP entries in layer_types beyond
+        # num_hidden_layers. Crop to pass HF validation; keep the MTP tail for
+        # SpeculativeConfig.hf_config_override to re-append it to the draft config.
         if layer_types is not None:
+            self.mtp_layer_types = layer_types[self.num_hidden_layers :]
             layer_types = layer_types[: self.num_hidden_layers]
+        else:
+            self.mtp_layer_types = []
         self.layer_types = layer_types
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types
