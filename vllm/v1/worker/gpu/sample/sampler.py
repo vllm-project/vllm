@@ -87,6 +87,10 @@ class Sampler:
                 self.thinking_budget_state.enabled
                 and self.thinking_budget_state.use_thinking_budget[req_idx]
             )
+            or (
+                self.thinking_budget_state.loop_break_enabled
+                and self.thinking_budget_state.use_loop_break[req_idx]
+            )
             or (temperature != 0.0 and temperature != 1.0)
             or states.min_p.np[req_idx] != 0.0
             or states.top_k.np[req_idx] != states.vocab_size

@@ -17,6 +17,18 @@ if TYPE_CHECKING:
 _INT32_MAX = np.iinfo(np.int32).max
 _COLD_SCAN_BLOCK = 1024
 
+# Sentinel budget for requests tracked only for reasoning loop breaking: the
+# largest value the int32 budget tensor holds, so the budget countdown never
+# trips and only a loop detection can force the end sequence. It also keeps the
+# request inside the marker-cache and forcing kernels, which both skip a
+# negative budget.
+_LOOP_BREAK_ONLY_BUDGET = _INT32_MAX
+
+# Per-request loop-break state, held on device in a single int32 tensor. The
+# detection kernel flips ARMED to 1 (fired) and back; only the host writes OFF.
+_LOOP_BREAK_OFF = -1
+_LOOP_BREAK_ARMED = 0
+
 
 class ThinkingBudgetState:
     """Model Runner V2 state for per-request thinking token budgets."""
@@ -46,6 +58,7 @@ class ThinkingBudgetState:
             else reasoning_config.natural_reasoning_end_token_ids or []
         )
         self.enabled = bool(start_ids and end_ids and natural_end_ids)
+        self.loop_break_enabled = False
         if not self.enabled:
             return
 
@@ -78,16 +91,84 @@ class ThinkingBudgetState:
             end_ids, dtype=torch.int32, device=self.device
         )
 
+        self._init_loop_break(reasoning_config)
+
+    def _init_loop_break(self, reasoning_config: "ReasoningConfig | None") -> None:
+        """Set up reasoning-scoped loop breaking, if the server configured it.
+
+        Detection semantics mirror ``check_sequence_repetition``, which rejects
+        a degenerate parameter set rather than firing on it; the equivalent
+        rejection here has to happen on the host, because a ``min_count`` below
+        2 would make the on-device tail comparison vacuously true.
+        """
+        max_pattern = getattr(reasoning_config, "loop_break_max_pattern_size", 0)
+        min_pattern = getattr(reasoning_config, "loop_break_min_pattern_size", 0)
+        min_count = getattr(reasoning_config, "loop_break_min_count", 0)
+        if min_pattern <= 0:
+            min_pattern = 1
+        if max_pattern <= 0 or min_count < 2 or min_pattern > max_pattern:
+            return
+
+        self.loop_break_enabled = True
+        self.lb_min_pattern_size = min_pattern
+        self.lb_max_pattern_size = max_pattern
+        self.lb_min_count = min_count
+        self.lb_min_reasoning_tokens = getattr(
+            reasoning_config, "loop_break_min_reasoning_tokens", 256
+        )
+        self.lb_check_interval = max(
+            1, getattr(reasoning_config, "loop_break_check_interval", 16)
+        )
+
+        self.use_loop_break = np.zeros(self.max_num_reqs, dtype=bool)
+        # -1 off, 0 armed, 1 fired. Written per request on the host and flipped
+        # on device by the detection kernel.
+        self.loop_break_fired = torch.full(
+            (self.max_num_reqs,), _LOOP_BREAK_OFF, dtype=torch.int32, device=self.device
+        )
+        # Reasoning-section length at the last detection run, so a check costs
+        # nothing until ``loop_break_check_interval`` more tokens are accepted.
+        self.loop_break_last_check = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self._lb_reset_reqs: list[int] = []
+        self._lb_reset_vals: list[int] = []
+
+    def _loop_break_active_for(self, sampling_params: SamplingParams) -> bool:
+        """Server-configured loop breaking, minus a per-request opt-out.
+
+        ``thinking_loop_break=False`` opts a request out; ``None`` (the default)
+        follows the server configuration. ``True`` cannot enable the feature on
+        a server that has not configured it, because the detection parameters
+        live in ``ReasoningConfig``.
+        """
+        if not self.loop_break_enabled:
+            return False
+        override = sampling_params.thinking_loop_break
+        if override is None:
+            return True
+        return bool(override)
+
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         if not self.enabled:
             return
         budget = sampling_params.thinking_token_budget
         self.use_thinking_budget[req_idx] = budget is not None
+        loop_break = self._loop_break_active_for(sampling_params)
         if budget is None:
-            budget = -1
+            budget = _LOOP_BREAK_ONLY_BUDGET if loop_break else -1
         else:
             budget = min(budget, _INT32_MAX)
+        if budget >= 0:
             self._reset_reqs.append(req_idx)
+        if self.loop_break_enabled:
+            # Always staged, including the opt-out: the slot may still hold a
+            # fired flag from the request that previously occupied it.
+            self.use_loop_break[req_idx] = loop_break
+            self._lb_reset_reqs.append(req_idx)
+            self._lb_reset_vals.append(
+                _LOOP_BREAK_ARMED if loop_break else _LOOP_BREAK_OFF
+            )
         if self.thinking_token_budget.np[req_idx] != budget:
             self.thinking_token_budget.np[req_idx] = budget
             self._budget_dirty = True
@@ -103,6 +184,17 @@ class ThinkingBudgetState:
             self.cached_last_end.index_fill_(0, idx, -1)
             self.cached_scan_pos.index_fill_(0, idx, 0)
             self._reset_reqs.clear()
+        if self.loop_break_enabled and self._lb_reset_reqs:
+            idx = async_tensor_h2d(
+                self._lb_reset_reqs, dtype=torch.int64, device=self.device
+            )
+            vals = async_tensor_h2d(
+                self._lb_reset_vals, dtype=torch.int32, device=self.device
+            )
+            self.loop_break_fired.index_copy_(0, idx, vals)
+            self.loop_break_last_check.index_fill_(0, idx, 0)
+            self._lb_reset_reqs.clear()
+            self._lb_reset_vals.clear()
         if self._budget_dirty:
             self.thinking_token_budget.copy_to_uva()
             self._budget_dirty = False
@@ -116,7 +208,12 @@ class ThinkingBudgetState:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> None:
-        if not self.enabled or not np.any(self.use_thinking_budget[idx_mapping_np]):
+        if not self.enabled:
+            return
+        active = self.use_thinking_budget[idx_mapping_np]
+        if self.loop_break_enabled:
+            active = active | self.use_loop_break[idx_mapping_np]
+        if not np.any(active):
             return
 
         apply_thinking_budget(
@@ -134,6 +231,25 @@ class ThinkingBudgetState:
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
             self.reasoning_end_token_ids,
+            loop_break_fired=(
+                self.loop_break_fired if self.loop_break_enabled else None
+            ),
+            loop_break_last_check=(
+                self.loop_break_last_check if self.loop_break_enabled else None
+            ),
+            loop_break_min_pattern_size=(
+                self.lb_min_pattern_size if self.loop_break_enabled else 0
+            ),
+            loop_break_max_pattern_size=(
+                self.lb_max_pattern_size if self.loop_break_enabled else 0
+            ),
+            loop_break_min_count=(self.lb_min_count if self.loop_break_enabled else 0),
+            loop_break_min_reasoning_tokens=(
+                self.lb_min_reasoning_tokens if self.loop_break_enabled else 0
+            ),
+            loop_break_check_interval=(
+                self.lb_check_interval if self.loop_break_enabled else 1
+            ),
         )
 
 
@@ -255,6 +371,103 @@ def _update_committed_marker_cache_kernel(
 
 
 @triton.jit
+def _loop_break_detect_kernel(
+    req_ids_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    total_len_ptr,
+    cached_last_start_ptr,
+    cached_last_end_ptr,
+    loop_break_fired_ptr,
+    loop_break_last_check_ptr,
+    START_LEN: tl.constexpr,
+    MIN_PATTERN: tl.constexpr,
+    MAX_PATTERN: tl.constexpr,
+    MIN_COUNT: tl.constexpr,
+    MIN_REASONING_TOKENS: tl.constexpr,
+    CHECK_INTERVAL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Flag requests whose open reasoning section ends in a repeating pattern.
+
+    Runs on committed tokens only -- the same tokens the V1 detection sees --
+    after ``_update_committed_marker_cache_kernel`` has refreshed the section
+    boundary, and before ``_thinking_budget_kernel`` reads the flag.
+    """
+    req_state_idx = tl.load(req_ids_ptr + tl.program_id(0))
+    fired = tl.load(loop_break_fired_ptr + req_state_idx)
+    if fired < 0:
+        # Loop breaking is off for this request.
+        return
+
+    last_start = tl.load(cached_last_start_ptr + req_state_idx)
+    last_end = tl.load(cached_last_end_ptr + req_state_idx)
+    if last_start < 0 or last_start <= last_end:
+        # No reasoning section is open; re-arm for the next one. This is also
+        # what clears the flag once the forced end sequence lands in the
+        # committed tokens.
+        tl.store(loop_break_fired_ptr + req_state_idx, 0)
+        tl.store(loop_break_last_check_ptr + req_state_idx, 0)
+        return
+    if fired > 0:
+        # Already forcing. Under speculative decoding a forced end token can be
+        # rejected, so the flag stays set and _thinking_budget_kernel
+        # re-asserts the end sequence every step until the section closes.
+        return
+
+    total_len = tl.load(total_len_ptr + req_state_idx)
+    think_len = total_len - last_start - START_LEN
+    if think_len < MIN_REASONING_TOKENS:
+        return
+
+    last_check = tl.load(loop_break_last_check_ptr + req_state_idx)
+    if think_len < last_check:
+        # The section shrank behind the checkpoint (a rewind, or a new section
+        # that starts further right); re-arm rather than stall the interval.
+        last_check = 0
+    if think_len - last_check < CHECK_INTERVAL:
+        return
+    tl.store(loop_break_last_check_ptr + req_state_idx, think_len)
+
+    # The tail comparison never reaches back further than
+    # max_pattern_size * min_count, and is clamped to the section start so a
+    # pattern cannot span a previous section or the prompt.
+    avail = MAX_PATTERN * MIN_COUNT
+    if think_len < avail:
+        avail = think_len
+
+    offs = tl.arange(0, BLOCK)
+    found = 0
+    for pattern_len in tl.range(MIN_PATTERN, MAX_PATTERN + 1):
+        # ``pattern_len`` only grows, so skipping an oversized candidate is the
+        # same as the host implementation's early return.
+        if found == 0 and pattern_len * MIN_COUNT <= avail:
+            mask = offs < pattern_len
+            base = total_len - pattern_len + offs
+            tail = tl.load(
+                all_token_ids_ptr + req_state_idx * all_token_ids_stride + base,
+                mask=mask,
+                other=0,
+            )
+            mismatches = 0
+            for m in tl.static_range(1, MIN_COUNT):
+                prev = tl.load(
+                    all_token_ids_ptr
+                    + req_state_idx * all_token_ids_stride
+                    + base
+                    - pattern_len * m,
+                    mask=mask,
+                    other=0,
+                )
+                mismatches += tl.sum(tl.where(mask & (prev != tail), 1, 0), axis=0)
+            if mismatches == 0:
+                found = 1
+
+    if found == 1:
+        tl.store(loop_break_fired_ptr + req_state_idx, 1)
+
+
+@triton.jit
 def _thinking_budget_kernel(
     logits_ptr,
     logits_stride,
@@ -267,12 +480,14 @@ def _thinking_budget_kernel(
     expanded_local_pos_ptr,
     cached_last_start_ptr,
     cached_last_end_ptr,
+    loop_break_fired_ptr,
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
     END_LEN: tl.constexpr,
+    HAS_LOOP_BREAK: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -336,7 +551,17 @@ def _thinking_budget_kernel(
     # reasoning content, count it against the remaining budget.
     num_reasoning_tokens = effective_len - reasoning_start
     if num_reasoning_tokens < budget:
-        return
+        # The budget is not exhausted, so only a detected reasoning loop can
+        # force the end sequence here. Both paths share every line below, and
+        # therefore share the rejected-end continuation and the multi-token
+        # marker handling. The load has to sit inside the constexpr guard: an
+        # early return does not stop Triton from compiling what follows it, so
+        # a null pointer would still be dereferenced at codegen time.
+        fired = 0
+        if HAS_LOOP_BREAK:
+            fired = tl.load(loop_break_fired_ptr + req_state_idx)
+        if fired <= 0:
+            return
 
     # If the tail already ends with a prefix of the forced end sequence
     # (even from a resumed prompt), continue from the next marker token.
@@ -384,6 +609,13 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    loop_break_fired: torch.Tensor | None = None,
+    loop_break_last_check: torch.Tensor | None = None,
+    loop_break_min_pattern_size: int = 0,
+    loop_break_max_pattern_size: int = 0,
+    loop_break_min_count: int = 0,
+    loop_break_min_reasoning_tokens: int = 0,
+    loop_break_check_interval: int = 1,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
@@ -407,6 +639,25 @@ def apply_thinking_budget(
         BLOCK=_COLD_SCAN_BLOCK,
     )
 
+    if loop_break_fired is not None:
+        _loop_break_detect_kernel[(req_ids.shape[0],)](
+            req_ids,
+            all_token_ids,
+            all_token_ids.stride(0),
+            total_len,
+            cached_last_start,
+            cached_last_end,
+            loop_break_fired,
+            loop_break_last_check,
+            START_LEN=start_len,
+            MIN_PATTERN=loop_break_min_pattern_size,
+            MAX_PATTERN=loop_break_max_pattern_size,
+            MIN_COUNT=loop_break_min_count,
+            MIN_REASONING_TOKENS=loop_break_min_reasoning_tokens,
+            CHECK_INTERVAL=loop_break_check_interval,
+            BLOCK=triton.next_power_of_2(loop_break_max_pattern_size),
+        )
+
     _thinking_budget_kernel[(num_tokens,)](
         logits,
         logits.stride(0),
@@ -419,10 +670,12 @@ def apply_thinking_budget(
         expanded_local_pos,
         cached_last_start,
         cached_last_end,
+        loop_break_fired,
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
         END_LEN=end_len,
+        HAS_LOOP_BREAK=loop_break_fired is not None,
     )

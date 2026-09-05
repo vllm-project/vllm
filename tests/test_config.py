@@ -294,9 +294,9 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
-def test_reasoning_loop_breaking_falls_back_to_v1_model_runner():
-    """V2's ThinkingBudgetState enforces budgets only. Without this the
-    documented loop-break config is silently inert on a default-V2 model."""
+def test_reasoning_loop_breaking_keeps_the_v2_model_runner():
+    """V2's ThinkingBudgetState detects reasoning loops on device, so enabling
+    the feature must not demote the request onto the deprecated V1 runner."""
     from vllm.config.reasoning import ReasoningConfig
 
     config = VllmConfig()
@@ -309,9 +309,7 @@ def test_reasoning_loop_breaking_falls_back_to_v1_model_runner():
     config.reasoning_config.loop_break_max_pattern_size = 64
     config.reasoning_config.loop_break_min_pattern_size = 4
     config.reasoning_config.loop_break_min_count = 3
-    assert "reasoning loop breaking" in (
-        config._get_v2_model_runner_unsupported_features()
-    )
+    assert config._get_v2_model_runner_unsupported_features() == []
 
 
 def test_dflash2_draft_forces_v2_model_runner():
