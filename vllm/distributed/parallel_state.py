@@ -2400,19 +2400,19 @@ def in_the_same_node_as(
                     is_in_the_same_node[rank] = 1
     except Exception as e:
         logger.error("Error ignored in is_in_the_same_node: %s", e)
+
+    try:
+        if isinstance(pg, ProcessGroup):
+            torch.distributed.barrier(group=pg)
+        else:
+            pg.barrier()
     finally:
-        if shm:
-            shm.close()
-
-    if isinstance(pg, ProcessGroup):
-        torch.distributed.barrier(group=pg)
-    else:
-        pg.barrier()
-
-    # clean up the shared memory segment
-    with contextlib.suppress(OSError):
-        if rank == source_rank and shm:
-            shm.unlink()
+        # clean up the shared memory segment after all ranks have reached the barrier
+        with contextlib.suppress(OSError):
+            if shm:
+                shm.close()
+            if rank == source_rank and shm:
+                shm.unlink()
 
     if isinstance(pg, ProcessGroup):
         torch.distributed.all_reduce(is_in_the_same_node, group=pg)
