@@ -23,6 +23,7 @@ from vllm.config.multimodal import (
 )
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.rope import RequestStaticYarnConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
@@ -224,6 +225,13 @@ class ModelConfig:
     - -1 or 'auto' -> Automatically choose the maximum model length that fits in
       GPU memory. This will use the model's maximum context length if it fits,
       otherwise it will find the largest length that can be accommodated."""
+    request_static_yarn_factors: list[float] | None = None
+    """Sorted YaRN factors to precompute and select per request from its
+    admitted prompt-plus-output token budget. Currently requires mRoPE."""
+    request_static_yarn_config: RequestStaticYarnConfig | None = field(
+        default=None, init=False
+    )
+    """Validated runtime state for request-static YaRN."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: QuantizationMethods | str | None = None
@@ -449,6 +457,7 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
+            "request_static_yarn_config",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
@@ -638,6 +647,12 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.request_static_yarn_config = RequestStaticYarnConfig.from_hf_config(
+            self.request_static_yarn_factors,
+            self.hf_text_config,
+        )
+        if self.request_static_yarn_config is not None:
+            self.request_static_yarn_config.apply_to_hf_config(self.hf_text_config)
         self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None

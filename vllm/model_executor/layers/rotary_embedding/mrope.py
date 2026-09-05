@@ -251,14 +251,28 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         mrope_interleaved: bool = False,
         # YaRN parameters.
         *,
-        scaling_factor: float | None = None,
+        scaling_factor: float | list[float] | tuple[float, ...] | None = None,
         extrapolation_factor: float = 1,
         attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
         truncate: bool = True,
     ) -> None:
-        self.scaling_factor = scaling_factor
+        self.scaling_factor: float | None
+
+        if isinstance(scaling_factor, (list, tuple)):
+            factors = tuple(float(factor) for factor in scaling_factor)
+            if not factors or factors != tuple(sorted(set(factors))):
+                raise ValueError(
+                    "Request-static YaRN factors must be non-empty, unique, and sorted"
+                )
+            if any(factor < 1.0 for factor in factors):
+                raise ValueError("Request-static YaRN factors must be at least 1")
+            self.scaling_factors: tuple[float, ...] | None = factors
+            self.scaling_factor = factors[-1]
+        else:
+            self.scaling_factors = None
+            self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
         self.attn_factor = attn_factor
         self.beta_fast = beta_fast
@@ -294,9 +308,31 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         return YaRNScalingRotaryEmbedding._compute_inv_freq(self, base)
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
-        if self.scaling_factor is None:
-            return super()._compute_cos_sin_cache()
-        return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
+        if self.scaling_factors is None:
+            if self.scaling_factor is None:
+                return super()._compute_cos_sin_cache()
+            return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
+
+        caches = []
+        offsets: dict[float, int] = {}
+        offset = 0
+        for factor in self.scaling_factors:
+            self.scaling_factor = factor
+            self.mscale = float(yarn_get_mscale(factor) * self.attn_factor)
+            cache = YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
+            offsets[factor] = offset
+            caches.append(cache)
+            offset += cache.shape[0]
+        self.scaling_factor = self.scaling_factors[-1]
+        self.mscale = float(yarn_get_mscale(self.scaling_factor) * self.attn_factor)
+        self._scaling_factor_to_offset = offsets
+        return torch.cat(caches, dim=0)
+
+    @property
+    def scaling_factor_to_offset(self) -> dict[float, int]:
+        if self.scaling_factors is None:
+            raise AttributeError("This mRoPE instance has one scaling factor")
+        return self._scaling_factor_to_offset
 
     def forward_native(
         self,

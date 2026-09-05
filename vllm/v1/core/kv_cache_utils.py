@@ -605,12 +605,21 @@ def generate_block_hash_extra_keys(
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )
+    rope_profile_keys: list[tuple[str, str]] = (
+        [("rope_profile", request.rope_profile_id)]
+        if start_token_idx == 0 and request.rope_profile_id is not None
+        else []
+    )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + rope_profile_keys
+        + prompt_embeds_keys
     )
 
     if not extra_keys:

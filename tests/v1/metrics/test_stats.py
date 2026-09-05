@@ -75,12 +75,14 @@ def test_prefill_kv_computed_with_cache():
         max_tokens_param=100,
         req_stats=req_stats,
         num_cached_tokens=1200,
+        rope_profile_factor=2.0,
     )
 
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.num_prompt_tokens == 10000
     assert finished_req.num_cached_tokens == 1200
     assert finished_req.request_id == "test-req-001"
+    assert finished_req.rope_profile_factor == 2.0
 
     # Verify calculation: prefill KV = prompt tokens - cached tokens
     prefill_kv_computed = finished_req.num_prompt_tokens - max(

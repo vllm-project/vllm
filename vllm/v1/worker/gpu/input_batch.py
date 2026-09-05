@@ -330,7 +330,10 @@ def _prepare_pos_seq_lens_kernel(
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
+    rope_pos_ptr,
+    rope_position_offsets_ptr,
     max_num_reqs,
+    HAS_ROPE_POSITION_OFFSETS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_id = tl.program_id(0)
@@ -345,6 +348,9 @@ def _prepare_pos_seq_lens_kernel(
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
+    rope_position_offset = 0
+    if HAS_ROPE_POSITION_OFFSETS:
+        rope_position_offset = tl.load(rope_position_offsets_ptr + req_state_idx)
 
     start = tl.load(query_start_loc_ptr + req_id)
     end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -358,6 +364,12 @@ def _prepare_pos_seq_lens_kernel(
         mask = block < query_len
         pos = num_computed_tokens + block
         tl.store(pos_ptr + start + block, pos, mask=mask)
+        if HAS_ROPE_POSITION_OFFSETS:
+            tl.store(
+                rope_pos_ptr + start + block,
+                pos + rope_position_offset,
+                mask=mask,
+            )
 
 
 def prepare_pos_seq_lens(
@@ -366,7 +378,10 @@ def prepare_pos_seq_lens(
     num_computed_tokens: torch.Tensor,
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
+    rope_pos: torch.Tensor | None = None,
+    rope_position_offsets: torch.Tensor | None = None,
 ) -> None:
+    assert (rope_pos is None) == (rope_position_offsets is None)
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.
@@ -376,8 +391,17 @@ def prepare_pos_seq_lens(
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
+        rope_pos if rope_pos is not None else pos,
+        (
+            rope_position_offsets
+            if rope_position_offsets is not None
+            else num_computed_tokens
+        ),
         seq_lens.shape[0],
         BLOCK_SIZE=1024,
+        HAS_ROPE_POSITION_OFFSETS=(
+            rope_pos is not None and rope_position_offsets is not None
+        ),
     )
 
 

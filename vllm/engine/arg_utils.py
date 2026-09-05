@@ -452,6 +452,9 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int = ModelConfig.seed
     max_model_len: int = ModelConfig.max_model_len
+    request_static_yarn_factors: list[float] | None = (
+        ModelConfig.request_static_yarn_factors
+    )
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -876,6 +879,10 @@ class EngineArgs:
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
+        model_group.add_argument(
+            "--request-static-yarn-factors",
+            **model_kwargs["request_static_yarn_factors"],
+        )
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
         model_group.add_argument(
             "--quantization-config", **model_kwargs["quantization_config"]
@@ -1789,6 +1796,7 @@ class EngineArgs:
             model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
+            request_static_yarn_factors=self.request_static_yarn_factors,
             quantization=self.quantization,
             quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,

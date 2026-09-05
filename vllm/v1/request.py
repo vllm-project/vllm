@@ -70,6 +70,8 @@ class Request:
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
+        rope_profile_factor: float | None = None,
+        rope_profile_id: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
@@ -181,6 +183,8 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        self.rope_profile_factor = rope_profile_factor
+        self.rope_profile_id = rope_profile_id
 
         # Multi-modal related
         self.mm_features = mm_features or []
@@ -252,6 +256,8 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,
+            rope_profile_factor=request.rope_profile_factor,
+            rope_profile_id=request.rope_profile_id,
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,

@@ -49,8 +49,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils impo
     lmcache_get_or_create_config,
     mla_enabled,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_request_config import (
+    extract_request_configs,
+)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
-from vllm.sampling_params import SamplingParams
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionMetadata
@@ -97,24 +99,6 @@ class DisaggSpec:
 
 
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
-
-
-def extract_request_configs(sampling_params: SamplingParams) -> dict | None:
-    request_configs = None
-    if (
-        sampling_params.extra_args is not None
-        and "kv_transfer_params" in sampling_params.extra_args
-    ):
-        kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
-        if kv_transfer_params is None:
-            return None
-        assert isinstance(kv_transfer_params, dict)
-        for k, v in kv_transfer_params.items():
-            if k.startswith("lmcache."):
-                if request_configs is None:
-                    request_configs = {}
-                request_configs[k] = v
-    return request_configs
 
 
 @dataclass
@@ -190,10 +174,10 @@ class RequestTracker:
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
-        if new_request.sampling_params:
-            request_configs = extract_request_configs(new_request.sampling_params)
-        else:
-            request_configs = None
+        request_configs = extract_request_configs(
+            new_request.sampling_params,
+            new_request.rope_profile_id,
+        )
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
@@ -1179,10 +1163,10 @@ class LMCacheConnectorV1Impl:
             apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
             token_ids = token_ids_tensor.tolist()
 
-        if request.sampling_params:
-            request_configs = extract_request_configs(request.sampling_params)
-        else:
-            request_configs = None
+        request_configs = extract_request_configs(
+            request.sampling_params,
+            request.rope_profile_id,
+        )
 
         if self.skip_last_n_tokens > 0:
             assert token_ids is not None

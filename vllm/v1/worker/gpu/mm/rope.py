@@ -113,6 +113,7 @@ class RopeState:
         query_start_loc: torch.Tensor,
         prefill_lens: torch.Tensor,
         num_computed_tokens: torch.Tensor,
+        rope_position_offsets: torch.Tensor | None = None,
     ) -> None:
         num_reqs = idx_mapping.shape[0]
         _prepare_rope_positions_kernel[(num_reqs,)](
@@ -126,8 +127,14 @@ class RopeState:
             query_start_loc,
             prefill_lens,
             num_computed_tokens,
+            (
+                rope_position_offsets
+                if rope_position_offsets is not None
+                else num_computed_tokens
+            ),
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
+            HAS_ROPE_POSITION_OFFSETS=rope_position_offsets is not None,
         )
 
 
@@ -175,11 +182,16 @@ def _prepare_rope_positions_kernel(
     query_start_loc_ptr,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
+    rope_position_offsets_ptr,
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
+    HAS_ROPE_POSITION_OFFSETS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    rope_position_offset = 0
+    if HAS_ROPE_POSITION_OFFSETS:
+        rope_position_offset = tl.load(rope_position_offsets_ptr + req_state_idx)
 
     prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
     num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
@@ -204,9 +216,10 @@ def _prepare_rope_positions_kernel(
                     + j * prefill_positions_stride1
                     + orig_pos,
                     mask=mask,
-                )
+                ).to(tl.int64)
             else:
-                pos = orig_pos + delta
+                pos = (orig_pos + delta).to(tl.int64)
+            pos += rope_position_offset
             tl.store(
                 positions_ptr + j * positions_stride + query_start + block,
                 pos,
