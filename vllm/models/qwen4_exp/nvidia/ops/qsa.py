@@ -15,6 +15,16 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
+from .qsa_tile_union import (
+    QSATileUnionConfig,
+    QSATileUnionInputs,
+    qsa_tile_union_attention,
+    qsa_tile_union_config,
+    qsa_tile_union_eligible,
+    qsa_tile_union_layout,
+    warmup_qsa_tile_union,
+)
+
 
 @lru_cache(maxsize=1)
 def _is_sm120() -> bool:
@@ -603,6 +613,7 @@ def qsa_sparse_paged_attention(
     v_scale: float | None = None,
     *,
     output_gate: torch.Tensor,
+    tile_union: QSATileUnionInputs | None = None,
 ) -> torch.Tensor:
     """Run sparse GQA directly over paged BF16 or FP8-e4m3 K/V caches.
 
@@ -616,6 +627,11 @@ def qsa_sparse_paged_attention(
     the expand kernel; never a token index). The kernel reads it as the
     tile-loop bound. use_prefill_config only steers the top of the config table; see
     _select_config.
+
+    tile_union carries the indexer's selection before expansion for a batch
+    the owner already found eligible (qsa_tile_union_eligible); the
+    tile-union kernels (qsa_tile_union.py) then run instead of the split-K
+    kernel, and logical_indices is not read.
     """
     if q.ndim != 3 or k_cache.ndim != 4 or v_cache.shape != k_cache.shape:
         raise ValueError("QSA sparse attention received invalid Q/K/V shapes")
@@ -665,6 +681,31 @@ def qsa_sparse_paged_attention(
     output_gate_view = output_gate.view_as(q)
     if not q.shape[0]:
         return out
+
+    if tile_union is not None:
+        # The owner decided eligibility before the indexer ran and may have
+        # skipped the expansion, so logical_indices can be undefined here: a
+        # fallback would read garbage. Misuse is an error, never silent.
+        config = qsa_tile_union_config()
+        if (
+            not use_prefill_config
+            or config is None
+            or not qsa_tile_union_eligible(
+                tile_union, q.shape[0], k_cache, block_table, config
+            )
+        ):
+            raise RuntimeError("QSA tile-union inputs given for an ineligible batch")
+        return qsa_tile_union_attention(
+            q,
+            k_cache,
+            v_cache,
+            block_table,
+            token_to_req,
+            out,
+            output_gate_view,
+            tile_union,
+            config,
+        )
 
     group_size = q.shape[1] // k_cache.shape[2]
     block_m = triton.next_power_of_2(group_size)
@@ -1053,8 +1094,14 @@ def qsa_compress_groups_with_ratio(
 
 
 __all__ = [
+    "QSATileUnionConfig",
+    "QSATileUnionInputs",
     "qsa_compress_groups_with_ratio",
     "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
+    "qsa_tile_union_config",
+    "qsa_tile_union_eligible",
+    "qsa_tile_union_layout",
     "warmup_qsa_sparse_paged_attention",
+    "warmup_qsa_tile_union",
 ]
