@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import cast
 
@@ -203,6 +204,11 @@ class CustomAllreduce:
                 "group does not have MNNVL-capable GPUs on every rank."
             )
             return
+
+        if os.getenv("NCCL_P2P_DISABLE") == "1":
+            logger.warning("Custom allreduce is disabled because NCCL_P2P_DISABLE=1.")
+            return
+
         device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
