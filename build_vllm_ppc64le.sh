@@ -40,9 +40,31 @@ try_install_from_devpi() {
 cd "$REPO_ROOT"
 TORCH_VERSION=${TORCH_VERSION:-$(grep -E '^torch==.+==\s*"ppc64le"' requirements/cpu.txt | grep -Eo '\b[0-9\.]+\b' || true)}
 TORCH_VERSION=${TORCH_VERSION:-2.11.0}
+TORCHAUDIO_VERSION="${TORCH_VERSION}"
+TORCH_MAJOR_MINOR=$(echo "${TORCH_VERSION}" | cut -d. -f1,2)
 
-TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.26.0}
-TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-${TORCH_VERSION}}
+case "${TORCH_MAJOR_MINOR}" in
+    2.13)
+        TORCHVISION_VERSION="0.28.0"
+        TORCHAUDIO_VERSION="2.11.0"
+        ;;
+    2.12)
+        TORCHVISION_VERSION="0.27.0"
+        ;;
+    2.11)
+        TORCHVISION_VERSION="0.26.0"
+        ;;
+    2.10)
+        TORCHVISION_VERSION="0.25.0"
+        ;;
+    2.9)
+        TORCHVISION_VERSION="0.24.0"
+        ;;
+    *)
+        echo "ERROR: Unsupported torch version: ${TORCH_VERSION}"
+        exit 1
+        ;;
+esac
 
 export TORCH_VERSION
 export TORCHVISION_VERSION
@@ -64,7 +86,7 @@ microdnf install -y \
     llvm15-devel libraqm-devel libtiff-devel libwebp-devel libxcb-devel \
     ninja-build openjpeg2-devel pkgconfig \
     tcl-devel tk-devel xsimd-devel zeromq-devel zlib-devel patchelf file openblas openblas-devel protobuf numactl numactl-devel openmpi openmpi-devel
-    
+
 rpm -ivh --nodeps \
     https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-17.el9.ppc64le.rpm
 
@@ -115,35 +137,192 @@ export MAX_JOBS=${MAX_JOBS:-$(nproc)}
 export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 ########################################
-# Install Packages From Devpi
+# Install Torch packages from DevPI or build from source
+########################################
+
+is_available_on_devpi() {
+    local pkg=$1
+    local version=$2
+
+    echo "Checking DevPI for ${pkg}==${version}..."
+
+    if pip index versions "${pkg}" \
+        --index-url "${IBM_DEVPI_URL}" 2>/dev/null |
+        grep -F "${version}" >/dev/null; then
+
+        echo "${pkg}==${version} is available on DevPI"
+        return 0
+    fi
+
+    echo "${pkg}==${version} is NOT available on DevPI"
+    return 1
+}
+
+########################################
+# Common packages from DevPI
 ########################################
 uv pip install numpy==2.3.5 pillow==12.2.0 --extra-index-url "$IBM_DEVPI_URL"
 try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
-try_install_from_devpi "torch==${TORCH_VERSION}"
-try_install_from_devpi "torchvision==${TORCHVISION_VERSION}"
 
 ########################################
-# torch audio
+# Check Torch / Torchvision / Torchaudio
 ########################################
 
-TEMP_BUILD_DIR=$(mktemp -d)
-cd "${TEMP_BUILD_DIR}"
-export BUILD_SOX=1 BUILD_KALDI=1 BUILD_RNNT=1 USE_FFMPEG=0 USE_ROCM=0 USE_CUDA=0
-export TORCHAUDIO_TEST_ALLOW_SKIP_IF_NO_FFMPEG=1
-git clone --recursive https://github.com/pytorch/audio.git -b "v${TORCHAUDIO_VERSION}"
-cd audio
-#patching 
-sed -i '
-s|_CSRC_DIR / "_torchaudio.cpp"|str(_CSRC_DIR / "_torchaudio.cpp")|;
-s|_CSRC_DIR / "utils.cpp"|str(_CSRC_DIR / "utils.cpp")|;
-s|sources=\[_CSRC_DIR / s for s in sources\]|sources=[str(_CSRC_DIR / s) for s in sources]|;
-' tools/setup_helpers/extension.py
-MAX_JOBS=${MAX_JOBS:-$(nproc)} \
-BUILD_VERSION=${TORCHAUDIO_VERSION} \
-uv build --wheel --out-dir "${WHEEL_DIR}" --no-build-isolation
-uv pip install "${WHEEL_DIR}"/torchaudio*.whl
-cd "${REPO_ROOT}"
-rm -rf "${TEMP_BUILD_DIR}"
+TORCH_FROM_DEVPI=false
+TORCHVISION_FROM_DEVPI=false
+TORCHAUDIO_FROM_DEVPI=false
+
+if is_available_on_devpi "torch" "${TORCH_VERSION}"; then
+    TORCH_FROM_DEVPI=true
+fi
+
+if is_available_on_devpi "torchvision" "${TORCHVISION_VERSION}"; then
+    TORCHVISION_FROM_DEVPI=true
+fi
+
+if is_available_on_devpi "torchaudio" "${TORCHAUDIO_VERSION}"; then
+    TORCHAUDIO_FROM_DEVPI=true
+fi
+
+########################################
+# Torch
+########################################
+
+if [[ "${TORCH_FROM_DEVPI}" == "true" ]]; then
+    echo "Installing torch==${TORCH_VERSION} from DevPI"
+
+    uv pip install \
+        --extra-index-url "${IBM_DEVPI_URL}" \
+        --index-strategy unsafe-best-match \
+        --only-binary=:all: \
+        --no-build-isolation \
+        "torch==${TORCH_VERSION}"
+else
+    echo "Torch wheel not available on DevPI. Building torch==${TORCH_VERSION} from source."
+
+    TEMP_BUILD_DIR=$(mktemp -d)
+    cd "${TEMP_BUILD_DIR}"
+
+    git clone \
+        --recursive \
+        https://github.com/pytorch/pytorch.git \
+        -b "v${TORCH_VERSION}"
+
+    cd pytorch
+
+    export BLAS=OpenBLAS
+    export USE_OPENMP=1
+    export USE_MKLDNN=OFF
+    export USE_MKLDNN_CBLAS=OFF
+    export _GLIBCXX_USE_CXX11_ABI=1
+    uv pip install maturin
+    pip install -r requirements.txt --extra-index-url "$IBM_DEVPI_URL"
+    python setup.py develop
+    rm -f dist/torch*+git*whl
+    MAX_JOBS=${MAX_JOBS:-$(nproc)} \
+    PYTORCH_BUILD_VERSION=${TORCH_VERSION} PYTORCH_BUILD_NUMBER=1 uv build --wheel --out-dir ${WHEEL_DIR}
+    uv pip install "${WHEEL_DIR}"/torch*.whl
+    cd "${REPO_ROOT}"
+    rm -rf "${TEMP_BUILD_DIR}"
+fi
+
+########################################
+# Torchvision
+########################################
+
+if [[ "${TORCHVISION_FROM_DEVPI}" == "true" ]]; then
+    echo "Installing torchvision==${TORCHVISION_VERSION} from DevPI"
+
+    uv pip install \
+        --extra-index-url "${IBM_DEVPI_URL}" \
+        --index-strategy unsafe-best-match \
+        --only-binary=:all: \
+        --no-build-isolation \
+        "torchvision==${TORCHVISION_VERSION}"
+else
+    echo "Torchvision wheel not available on DevPI. Building torchvision==${TORCHVISION_VERSION} from source."
+
+    TEMP_BUILD_DIR=$(mktemp -d)
+    cd "${TEMP_BUILD_DIR}"
+
+    export TORCHVISION_USE_NVJPEG=0 TORCHVISION_USE_FFMPEG=0
+    git clone \
+        --recursive \
+        https://github.com/pytorch/vision.git \
+        -b "v${TORCHVISION_VERSION}"
+
+    cd vision
+    uv pip install standard-pkg-resources --no-build-isolation
+    MAX_JOBS=${MAX_JOBS:-$(nproc)} \
+    BUILD_VERSION=${TORCHVISION_VERSION} \
+    uv build --wheel --out-dir ${WHEEL_DIR} --no-build-isolation
+
+    export BUILD_VERSION="${TORCHVISION_VERSION}"
+
+    uv build \
+        --wheel \
+        --out-dir "${WHEEL_DIR}" \
+        --no-build-isolation
+
+    uv pip install "${WHEEL_DIR}"/torchvision*.whl
+
+    cd "${REPO_ROOT}"
+    rm -rf "${TEMP_BUILD_DIR}"
+fi
+
+########################################
+# Torchaudio
+########################################
+
+if [[ "${TORCHAUDIO_FROM_DEVPI}" == "true" ]]; then
+    echo "Installing torchaudio==${TORCHAUDIO_VERSION} from DevPI"
+
+    uv pip install \
+        --extra-index-url "${IBM_DEVPI_URL}" \
+        --index-strategy unsafe-best-match \
+        --only-binary=:all: \
+        --no-build-isolation \
+        "torchaudio==${TORCHAUDIO_VERSION}"
+else
+    echo "Torchaudio wheel not available on DevPI. Building torchaudio==${TORCHAUDIO_VERSION} from source."
+
+    TEMP_BUILD_DIR=$(mktemp -d)
+    cd "${TEMP_BUILD_DIR}"
+
+    export BUILD_SOX=1
+    export BUILD_KALDI=1
+    export BUILD_RNNT=1
+    export USE_FFMPEG=0
+    export USE_ROCM=0
+    export USE_CUDA=0
+    export TORCHAUDIO_TEST_ALLOW_SKIP_IF_NO_FFMPEG=1
+
+    git clone \
+        --recursive \
+        https://github.com/pytorch/audio.git \
+        -b "v${TORCHAUDIO_VERSION}"
+
+    cd audio
+
+    # Patches required for newer Python versions
+    sed -i '
+    s|_CSRC_DIR / "_torchaudio.cpp"|str(_CSRC_DIR / "_torchaudio.cpp")|;
+    s|_CSRC_DIR / "utils.cpp"|str(_CSRC_DIR / "utils.cpp")|;
+    s|sources=\[_CSRC_DIR / s for s in sources\]|sources=[str(_CSRC_DIR / s) for s in sources]|;
+    ' tools/setup_helpers/extension.py
+
+    MAX_JOBS="${MAX_JOBS}" \
+    BUILD_VERSION="${TORCHAUDIO_VERSION}" \
+    uv build \
+        --wheel \
+        --out-dir "${WHEEL_DIR}" \
+        --no-build-isolation
+
+    uv pip install "${WHEEL_DIR}"/torchaudio*.whl
+
+    cd "${REPO_ROOT}"
+    rm -rf "${TEMP_BUILD_DIR}"
+fi
 
 ########################################
 # Xgrammar
