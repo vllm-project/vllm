@@ -162,16 +162,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         remote_region_groups = self.dst_region_group_ids[engine_id]
         local_region_groups = self.region_group_ids or remote_region_groups
-        if not local_block_ids:
-            read_specs = [
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=[],
-                    remote_block_ids=[],
-                )
-                for rank in plan.all_source_ranks
-            ]
-        elif meta.hisparse_host_block_ids is not None:
+        if meta.hisparse_host_block_ids is not None:
             if self._hisparse_destination is None:
                 raise RuntimeError("HiSparse NIXL metadata requires its destination")
             self._hisparse_destination.read_host_blocks(
@@ -182,7 +173,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_region_groups,
             )
             return
-        elif local_region_groups != remote_region_groups:
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ:
             if not self.use_mla or self._has_mamba:
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts are only supported for "
@@ -212,9 +204,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
 
             def group_ids(block_ids: BlockIds, rank: int) -> list[list[int]]:
                 return [
-                    list(block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
+                    list(block_ids[g]) if rank in plan.source_ranks_per_group[g] else []
                     for g in range(num_groups)
                 ]
 
@@ -245,9 +235,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         remote_info.remote_physical_blocks_per_logical,
                     )
                 else:
-                    local_physical_ids = group_ids(
-                        meta.local_physical_block_ids, rank
-                    )
+                    local_physical_ids = group_ids(meta.local_physical_block_ids, rank)
                     remote_physical_ids = group_ids(meta.remote.block_ids, rank)
                 read_specs.append(
                     ReadSpec(
@@ -300,6 +288,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
+                remote_host=meta.remote.host,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
@@ -323,6 +312,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
+        remote_host: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
         expected_consumers: int,
@@ -456,6 +446,21 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_descs_ids=remote_block_descs_ids,
                     notif_agent=self._remote_agents[dst_engine_id][(0, remote_rank)],
                     notif_id=notif_id,
+                )
+                return True
+            if host_stager := self._maybe_init_host_stager(remote_host):
+                # Same-host destination is host memory: read into device staging
+                # and copy down, instead of letting UCX use TCP loopback.
+                # Notify the remote only once every chunk has landed, which the
+                # stager reports through _get_finished_host_staging.
+                self._pending_recv_notifs.setdefault(request_id, []).append(
+                    (self._remote_agents[dst_engine_id][(0, remote_rank)], notif_id)
+                )
+                host_stager.submit(
+                    request_id,
+                    remote_block_descs_ids,
+                    local_block_descs_ids,
+                    remote_xfer_side_handle,
                 )
                 return True
             handle = self.nixl_wrapper.make_prepped_xfer(

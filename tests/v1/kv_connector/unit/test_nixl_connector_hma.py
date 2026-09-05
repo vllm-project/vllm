@@ -3,18 +3,25 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.nixl import (
+    HiSparseNixlDestination,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
+    RemoteMeta,
+    ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
@@ -452,69 +459,6 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
-    )
-
-
-@pytest.mark.cpu_test
-def test_divergent_regions_notify_prefill_when_decode_request_is_aborted():
-    """An aborted decode request must release remote KV without local blocks."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlConnectorMetadata,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
-        NixlPullConnectorWorker,
-    )
-
-    worker = object.__new__(NixlPullConnectorWorker)
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker._engine_last_active = {}
-    worker._recving_transfers = {}
-    worker._bidirectional_kv_xfer_enabled = False
-    worker._has_mamba = False
-    worker._hisparse_destination = None
-    worker.use_mla = True
-    worker.dcp_size = 1
-    worker.region_group_ids = [0, 1]
-
-    remote_engine_id = "remote-engine"
-    remote_info = MagicMock()
-    remote_info.remote_block_size = 16
-    remote_info.remote_dcp_size = 1
-    remote_info.remote_physical_blocks_per_logical = 1
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.get_engine_info.return_value = remote_info
-    worker.transfer_topo.tp_ratio.return_value = 1
-    worker.transfer_topo.block_size_ratio.return_value = 1
-
-    plan = MagicMock()
-    plan.all_source_ranks = (0,)
-    plan.local_consumers = 1
-    worker.tp_mappings = {remote_engine_id: plan}
-    worker.dst_region_group_ids = {remote_engine_id: [0]}
-    worker.src_xfer_handles_by_block_size = {16: 1}
-    worker.dst_xfer_side_handles = {remote_engine_id: {0: 2}}
-    worker._remote_agents = {remote_engine_id: {(0, 0): "remote-agent"}}
-    worker.nixl_wrapper = MagicMock()
-
-    metadata = NixlConnectorMetadata()
-    metadata.add_new_req_to_recv(
-        request_id="aborted-request",
-        local_block_ids=[],
-        kv_transfer_params={
-            "remote_block_ids": [[3, 4]],
-            "remote_engine_id": remote_engine_id,
-            "remote_request_id": "prefill-request",
-            "remote_host": "localhost",
-            "remote_port": 1234,
-        },
-    )
-
-    worker._read_blocks_for_req(
-        "aborted-request", metadata.reqs_to_recv["aborted-request"]
-    )
-
-    worker.nixl_wrapper.send_notif.assert_called_once_with(
-        "remote-agent", notif_msg=b"prefill-request:1"
     )
 
 
@@ -2032,6 +1976,83 @@ def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
 
     assert request_metadata.hisparse_host_block_ids == [5, 6]
     assert request_metadata.local_block_ids == ([10, 11], [20])
+
+
+@pytest.mark.cpu_test
+def test_hisparse_same_host_import_stages_host_regions():
+    """Host regions use GPU staging while device-only regions transfer directly."""
+    destination = object.__new__(HiSparseNixlDestination)
+    destination.host_regions = [(1_000, 16), None]
+    destination._descriptor_offsets = [0, None]
+    destination._xfer_handle = 100
+    destination._host_desc_lens = np.full(4, 16, dtype=np.int64)
+    destination._host_addrs = np.arange(1_000, 1_064, 16, dtype=np.uint64)
+    host_buffer = torch.empty(64, dtype=torch.uint8)
+    destination._host_pools = {host_buffer.data_ptr(): (host_buffer, [])}
+
+    worker = MagicMock()
+    worker._has_mamba = False
+    worker.use_mla = True
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+        remote_physical_blocks_per_logical=1,
+        remote_block_size=64,
+    )
+    worker.transfer_topo.tp_ratio.return_value = 1
+    worker._block_ids_by_region.side_effect = [
+        [[1, 2], [1, 2]],
+        [[3, 4], [5, 6]],
+    ]
+    worker._apply_prefix_caching_by_region.side_effect = lambda local, remote: (
+        local,
+        remote,
+    )
+    worker._compute_desc_ids.side_effect = [
+        np.array([10, 11, 20, 21]),
+        np.array([30, 31]),
+    ]
+    worker.dst_num_blocks = {"remote": 8, "local": 8}
+    worker.dst_region_num_blocks = {"remote": [8, 8]}
+    worker.region_num_blocks = [8, 8]
+    worker.region_group_ids = [0, 1]
+    worker.num_regions = 2
+    worker.engine_id = "local"
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.src_xfer_handles_by_block_size = {64: 200}
+    worker.dst_xfer_side_handles = {"remote": {0: 300}}
+    worker._remote_agents = {"remote": {(0, 0): "agent"}}
+    worker._pending_recv_notifs = {}
+    worker._recving_transfers = {}
+    worker.nixl_wrapper.make_prepped_xfer.return_value = 400
+    stager = MagicMock()
+    worker._maybe_init_host_stager_for_buffers.return_value = stager
+
+    meta = ReqMeta(
+        local_block_ids=([3, 4], [5, 6]),
+        local_physical_block_ids=([3, 4], [5, 6]),
+        tp_size=1,
+        remote=RemoteMeta(
+            block_ids=([1, 2], [1, 2]),
+            host="local-host",
+            port=1234,
+            engine_id="remote",
+            request_id="remote-request",
+        ),
+        hisparse_host_block_ids=[0, 1],
+    )
+    plan = MagicMock(all_source_ranks=(0,), local_consumers=1)
+
+    destination.read_host_blocks(worker, "request", meta, plan, [0, 1])
+
+    stager.submit.assert_called_once()
+    submit_args = stager.submit.call_args.args
+    assert submit_args[0] == "request"
+    np.testing.assert_array_equal(submit_args[1], [10, 11])
+    np.testing.assert_array_equal(submit_args[2], [0, 1])
+    assert submit_args[3] == 300
+    worker.nixl_wrapper.make_prepped_xfer.assert_called_once()
+    worker.nixl_wrapper.transfer.assert_called_once_with(400)
+    assert worker._recving_transfers == {"request": [400]}
 
 
 @pytest.mark.cpu_test

@@ -33,12 +33,16 @@ class HiSparseNixlDestination:
         self._forward_context = vllm_config.compilation_config.static_forward_context
         self.host_regions: list[tuple[int, int] | None] = []
         self._host_pools: dict[int, tuple[torch.Tensor, list[HiSparseRuntime]]] = {}
+        self._host_desc_lens = np.empty(0, dtype=np.int64)
+        self._host_addrs = np.empty(0, dtype=np.uint64)
         self._descriptor_offsets: list[int | None] = []
         self._xfer_handle: int | None = None
 
     def reset_regions(self) -> None:
         self.host_regions.clear()
         self._host_pools.clear()
+        self._host_desc_lens = np.empty(0, dtype=np.int64)
+        self._host_addrs = np.empty(0, dtype=np.uint64)
         self._descriptor_offsets.clear()
         self._xfer_handle = None
 
@@ -110,7 +114,7 @@ class HiSparseNixlDestination:
             error = cudart.cudaHostUnregister(pool.data_ptr())
             if error.value != 0:
                 raise RuntimeError(
-                    f"HiSparse cudaHostUnregister failed before NIXL registration: "
+                    "HiSparse cudaHostUnregister failed before NIXL registration: "
                     f"{error}"
                 )
             for runtime in runtimes:
@@ -140,6 +144,10 @@ class HiSparseNixlDestination:
                 for block_id in range(self.host_num_blocks)
             )
         descs = worker.nixl_wrapper.get_xfer_descs(blocks, "DRAM")
+        self._host_addrs = np.asarray([block[0] for block in blocks], dtype=np.uint64)
+        self._host_desc_lens = np.asarray(
+            [block[1] for block in blocks], dtype=np.int64
+        )
         self._xfer_handle = worker.nixl_wrapper.prep_xfer_dlist(
             "NIXL_INIT_AGENT", descs, backends=worker.nixl_backends
         )
@@ -242,18 +250,25 @@ class HiSparseNixlDestination:
         local_device_handle = worker.src_xfer_handles_by_block_size[
             remote_info.remote_block_size
         ]
+        host_local_ids_array = np.asarray(host_local_ids, dtype=np.int64)
+        host_remote_ids_array = np.asarray(host_remote_ids, dtype=np.int64)
+        host_stager = worker._maybe_init_host_stager_for_buffers(
+            meta.remote.host,
+            self._host_desc_lens,
+            self._host_addrs,
+            [pool for pool, _ in self._host_pools.values()],
+        )
         transfer_specs = [
-            (
-                self._xfer_handle,
-                np.asarray(host_local_ids, dtype=np.int64),
-                np.asarray(host_remote_ids, dtype=np.int64),
-            ),
             (
                 local_device_handle,
                 device_local_ids,
                 np.asarray(device_remote_ids, dtype=np.int64),
-            ),
+            )
         ]
+        if host_stager is None:
+            transfer_specs.insert(
+                0, (self._xfer_handle, host_local_ids_array, host_remote_ids_array)
+            )
 
         notif_id = f"{meta.remote.request_id}:{plan.local_consumers}".encode()
         agents = worker._remote_agents[engine_id]
@@ -277,6 +292,13 @@ class HiSparseNixlDestination:
                         remote_handle,
                         selected_remote_ids,
                     )
+                )
+            if host_stager is not None and len(host_local_ids_array):
+                host_stager.submit(
+                    request_id,
+                    host_remote_ids_array,
+                    host_local_ids_array,
+                    remote_handle,
                 )
             worker._recving_transfers.setdefault(request_id, [])
             for handle in handles:
