@@ -3,6 +3,7 @@
 """Scheduler-side manager for SimpleCPUOffloadConnector."""
 
 import contextlib
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -150,6 +151,16 @@ class SimpleCPUOffloadScheduler:
             * self.cp_world_size
         )
         assert self.block_size % self.fa_block_size == 0
+        # update_state_after_alloc() splits a load into whole CPU blocks for
+        # every group, and into whole scheduler blocks for its own bookkeeping,
+        # so a load has to be aligned to all of those spans at once.
+        self.load_alignment = math.lcm(
+            self.block_size,
+            *(
+                group.kv_cache_spec.block_size * self.cp_world_size
+                for group in self.cpu_kv_cache_config.kv_cache_groups
+            ),
+        )
 
         logger.info(
             "SimpleCPUOffloadScheduler: Allocating %d offload blocks "
@@ -306,6 +317,11 @@ class SimpleCPUOffloadScheduler:
         cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
             remaining_hashes, max_hit_len
         )
+        # A hybrid model reconciles the hit to the shortest group's alignment,
+        # and DCP shards attention groups only, so the reconciled length can be
+        # finer than the blocks a load is split into. Drop the unaligned tail
+        # instead of reporting a length that cannot be split.
+        hit_length -= hit_length % self.load_alignment
 
         if hit_length > 0:
             pin_blocks = [

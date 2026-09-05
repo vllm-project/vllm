@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -2075,3 +2076,185 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 19: hybrid + DCP loads stay aligned to every group's block span
+# ---------------------------------------------------------------------------
+def _make_hybrid_kv_cache_config(num_blocks: int) -> KVCacheConfig:
+    """Full-attention plus Mamba groups, the layout DCP allows for hybrids.
+
+    Kimi-K3's KDA layers form a Mamba-style group alongside full attention.
+    Only the attention group is sharded by DCP, which is what lets a
+    reconciled hit land off the attention group's DCP-scaled span.
+    """
+    layer_names = [["layer_attn"], ["layer_kda"]]
+    specs: list[FullAttentionSpec | MambaSpec] = [
+        FullAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=NUM_KV_HEADS,
+            head_size=HEAD_SIZE,
+            dtype=DTYPE,
+        ),
+        MambaSpec(
+            block_size=BLOCK_SIZE,
+            shapes=((HEAD_SIZE,),),
+            dtypes=(DTYPE,),
+            page_size_padded=_BYTES_PER_BLOCK,
+        ),
+    ]
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=_BYTES_PER_BLOCK * num_blocks,
+                layers=list(names),
+                layer_stride=_BYTES_PER_BLOCK * num_blocks,
+                block_stride=_BYTES_PER_BLOCK,
+            )
+            for names in layer_names
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(names, spec) for names, spec in zip(layer_names, specs)
+        ],
+    )
+
+
+def _make_hybrid_cp_scheduler(
+    *,
+    dcp_world_size: int,
+    num_cpu_blocks: int = 32,
+    num_gpu_blocks: int = 32,
+) -> SchedulerFixture:
+    """Hybrid scheduler that hashes at the unscaled block size.
+
+    A hybrid model reconciles its prefix-cache hit to the shortest group's
+    alignment, so hits arrive at hash-block granularity while the attention
+    group's CPU blocks span ``block_size * dcp_world_size``.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config(num_gpu_blocks)
+    vllm_config = _make_cp_vllm_config(dcp_world_size)
+
+    sched = SimpleCPUOffloadScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        cpu_capacity_bytes=_BYTES_PER_BLOCK * num_cpu_blocks * 2,
+        scheduler_block_size=BLOCK_SIZE * dcp_world_size,
+        hash_block_size=BLOCK_SIZE,
+    )
+
+    gpu_block_pool = BlockPool(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_caching=True,
+        hash_block_size=BLOCK_SIZE,
+    )
+    sched.bind_gpu_block_pool(gpu_block_pool)
+
+    return SchedulerFixture(
+        scheduler=sched,
+        gpu_block_pool=gpu_block_pool,
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        num_groups=2,
+    )
+
+
+def _stub_cache_hit(
+    sched: SimpleCPUOffloadScheduler,
+    monkeypatch: pytest.MonkeyPatch,
+    hit_length: int,
+    num_groups: int,
+) -> None:
+    """Make find_longest_cache_hit report ``hit_length``.
+
+    The reconciliation that produces an unusable length lives in the
+    coordinator, so it is stubbed here to keep the test on the manager. The
+    blocks are null, which the load path already skips, so the hit needs no
+    block-pool bookkeeping and only the length is under test.
+    """
+    null_block = sched.cpu_block_pool.null_block
+    num_blocks = max(1, hit_length // sched.hash_block_size)
+
+    def fake_find_longest_cache_hit(block_hashes, max_length):
+        blocks = tuple([null_block] * num_blocks for _ in range(num_groups))
+        return blocks, hit_length, None
+
+    monkeypatch.setattr(
+        sched.cpu_coordinator,
+        "find_longest_cache_hit",
+        fake_find_longest_cache_hit,
+    )
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+def test_hybrid_dcp_load_alignment_covers_every_group(dcp_world_size: int) -> None:
+    """A load is split into whole CPU blocks per group and whole scheduler
+    blocks for its own bookkeeping, so load_alignment has to be a multiple of
+    all of those spans at once."""
+    sched = _make_hybrid_cp_scheduler(dcp_world_size=dcp_world_size).scheduler
+
+    assert sched.load_alignment % sched.block_size == 0
+    for group in sched.cpu_kv_cache_config.kv_cache_groups:
+        group_span = group.kv_cache_spec.block_size * dcp_world_size
+        assert sched.load_alignment % group_span == 0
+
+
+def test_hybrid_dcp_unaligned_hit_is_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a reconciled hit that is hash-aligned but not aligned to a
+    group's DCP-scaled span must be reported short rather than passed through.
+
+    Reported unchanged it reaches update_state_after_alloc(), which splits it
+    into whole per-group blocks and trips ``num_external_tokens not aligned to
+    group``, killing the engine mid-serving. The GPU path accepts the same
+    length because it rounds up with cdiv; only the offload path asserts.
+    """
+    fix = _make_hybrid_cp_scheduler(dcp_world_size=4)
+    sched = fix.scheduler
+    alignment = sched.load_alignment
+
+    # Hash-aligned but one hash block past an alignment boundary, mirroring the
+    # 64512-token hit seen on Kimi-K3 against a 12288-token attention span.
+    unaligned_hit = alignment + sched.hash_block_size
+    assert unaligned_hit % sched.hash_block_size == 0
+    assert unaligned_hit % alignment != 0
+
+    req = _make_cp_request(num_blocks=8, virtual_block_size=BLOCK_SIZE)
+    _stub_cache_hit(sched, monkeypatch, unaligned_hit, fix.num_groups)
+
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+
+    assert hit_tokens == alignment, (
+        f"expected the hit to be dropped to {alignment}, got {hit_tokens}"
+    )
+    assert is_async is True
+
+    # The reported length must survive the per-group split that used to assert.
+    gpu_blocks = tuple(
+        fix.gpu_block_pool.get_new_blocks(hit_tokens // sched.block_size)
+        for _ in range(fix.num_groups)
+    )
+    sched.update_state_after_alloc(
+        req, KVCacheBlocks(blocks=gpu_blocks), num_external_tokens=hit_tokens
+    )
+    assert req.request_id in sched._reqs_to_load
+
+
+def test_hybrid_dcp_hit_below_alignment_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit shorter than one alignment unit cannot be split at all, so it is
+    reported as a miss and leaves no pinned blocks behind."""
+    fix = _make_hybrid_cp_scheduler(dcp_world_size=4)
+    sched = fix.scheduler
+    assert sched.load_alignment > sched.hash_block_size
+
+    req = _make_cp_request(num_blocks=8, virtual_block_size=BLOCK_SIZE)
+    _stub_cache_hit(sched, monkeypatch, sched.hash_block_size, fix.num_groups)
+
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req, num_computed_tokens=0)
+
+    assert hit_tokens == 0
+    assert is_async is False
+    assert req.request_id not in sched._pending_cpu_hits
