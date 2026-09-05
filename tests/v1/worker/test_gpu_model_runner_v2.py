@@ -3,6 +3,7 @@
 
 import contextlib
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import torch
@@ -27,23 +28,29 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.dcp_size = 1
     runner.dcp_rank = 0
     runner.cp_interleave = 1
-    runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    runner.cache_config = cast(Any, SimpleNamespace(enable_prefix_caching=True))
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=1,
         cp_kv_cache_interleave_size=1,
     )
-    runner.parallel_config = parallel_config
-    runner.vllm_config = SimpleNamespace(
-        parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+    runner.parallel_config = cast(Any, parallel_config)
+    runner.vllm_config = cast(
+        Any,
+        SimpleNamespace(
+            parallel_config=parallel_config,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        ),
     )
-    runner.model_state = SimpleNamespace(
-        get_additional_cg_support=lambda: (),
-        num_new_sampled_tokens_per_step=1,
+    runner.model_state = cast(
+        Any,
+        SimpleNamespace(
+            get_additional_cg_support=lambda: (),
+            num_new_sampled_tokens_per_step=1,
+        ),
     )
     runner.speculator = None
-    runner.req_states = []
-    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    runner.req_states = cast(Any, [])
+    runner.input_buffers = cast(Any, SimpleNamespace(query_start_loc=None))
     runner.vocab_size = 1
     runner.max_num_reqs = 1
     runner.max_num_tokens = 2
@@ -158,11 +165,14 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
     )
-    runner = SimpleNamespace(
-        max_model_len=max_model_len,
-        is_encoder_decoder=False,
-        vllm_config=vllm_config,
-        parallel_config=parallel_config,
+    runner = cast(
+        GPUModelRunner,
+        SimpleNamespace(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            vllm_config=vllm_config,
+            parallel_config=parallel_config,
+        ),
     )
 
     class _CapturedWidths(Exception):
@@ -198,9 +208,9 @@ def test_append_block_ids_rejects_write_past_row_capacity():
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
     block_tables.blocks_per_kv_block = [1]
-    block_tables.block_tables = [_BlockTable()]
-    block_tables.num_blocks = SimpleNamespace(
-        np=torch.tensor([[0, 3]], dtype=torch.int32)
+    block_tables.block_tables = [cast(Any, _BlockTable())]
+    block_tables.num_blocks = cast(
+        Any, SimpleNamespace(np=torch.tensor([[0, 3]], dtype=torch.int32))
     )
 
     with pytest.raises(
@@ -220,22 +230,28 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
-    runner.cudagraph_manager = SimpleNamespace(
-        needs_capture=lambda: captured,
-        capture=lambda *args, **kwargs: None,
+    runner.model_state = cast(Any, SimpleNamespace(supports_mm_inputs=False))
+    runner.cudagraph_manager = cast(
+        Any,
+        SimpleNamespace(
+            needs_capture=lambda: captured,
+            capture=lambda *args, **kwargs: None,
+        ),
     )
     runner.lora_config = None
-    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    # Stub the bound method on a hand-built runner: LoRA setup is out of scope.
+    runner.maybe_setup_dummy_loras = cast(  # type: ignore[method-assign]
+        Any, lambda _cfg: contextlib.nullcontext()
+    )
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    runner.input_buffers = cast(Any, None)
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = cast(Any, None)
+    runner.attn_groups = cast(Any, None)
+    runner.kv_cache_config = cast(Any, None)
     runner.use_aux_hidden_state_outputs = False
     return runner
 

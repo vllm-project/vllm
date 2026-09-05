@@ -468,6 +468,7 @@ def test_cpu_spec_create_worker_rank_assignment(
         world_size=world_size,
         replicated_layout=replicated_layout,
     )
+    assert isinstance(spec, CPUOffloadingSpec)
 
     region_calls: list[dict[str, Any]] = []
 

@@ -12,9 +12,15 @@ import torch
 from torch import nn
 
 import vllm.config as vllm_config_module
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.fused_moe import utils as fused_moe_utils
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_counts
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
@@ -142,6 +148,7 @@ def get_fse_test_model_config(
     model_type: str,
     quantization_config: dict[str, Any],
 ) -> tuple[object, type[nn.Module]]:
+    config: object
     if model_type == "minimax_m3":
         config = MiniMaxM3TextConfig(
             hidden_size=128,
@@ -299,7 +306,7 @@ def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        object(), "model.layers.0.mlp"
+        cast(QuantizationConfig, object()), "model.layers.0.mlp"
     )
 
 
@@ -314,7 +321,7 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 
     assert (
         fused_moe_utils.resolve_layer_fused_shared_expert(
-            object(), "model.layers.0.mlp"
+            cast(QuantizationConfig, object()), "model.layers.0.mlp"
         )
         is False
     )
@@ -323,7 +330,7 @@ def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
 def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quant_config = object()
+    quant_config = cast(QuantizationConfig, object())
     monkeypatch.setattr(
         fused_moe_utils.rocm_aiter_ops,
         "is_fusion_moe_shared_experts_enabled",
@@ -372,7 +379,7 @@ def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     )
 
     assert not fused_moe_utils.resolve_layer_fused_shared_expert(
-        object(), "model.layers.0.mlp"
+        cast(QuantizationConfig, object()), "model.layers.0.mlp"
     )
     assert "shared experts are excluded" in caplog.text
 
@@ -405,7 +412,7 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     )
 
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        DeepseekV4Config(),
+        cast(QuantizationConfig, DeepseekV4Config()),
         "model.layers.2.ffn.experts",
         "model.layers.2.ffn.shared_experts",
     )
@@ -480,19 +487,22 @@ def test_models_fse_init(
         model_type, quantization_config
     )
     vllm_config = VllmConfig()
-    vllm_config.model_config = SimpleNamespace(
-        hf_config=config,
-        hf_text_config=config,
-        dtype=torch.bfloat16,
-        max_model_len=128,
-        is_diffusion=False,
-        head_dtype=None,
-        is_mm_prefix_lm=False,
-        multimodal_config=None,
-        quantization_config=None,
-        runner_type="generate",
-        is_moe=True,
-        logits_processors=None,
+    vllm_config.model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            hf_config=config,
+            hf_text_config=config,
+            dtype=torch.bfloat16,
+            max_model_len=128,
+            is_diffusion=False,
+            head_dtype=None,
+            is_mm_prefix_lm=False,
+            multimodal_config=None,
+            quantization_config=None,
+            runner_type="generate",
+            is_moe=True,
+            logits_processors=None,
+        ),
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -548,12 +558,15 @@ def test_models_fse_init(
                     DeepSeekV4MTP,
                 )
 
-                vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config),
-                    method="mtp",
-                    parallel_drafting=False,
-                    enable_adaptive_verification=False,
-                    use_dspark=lambda: False,
+                vllm_config.speculative_config = cast(
+                    SpeculativeConfig,
+                    SimpleNamespace(
+                        draft_model_config=SimpleNamespace(hf_config=config),
+                        method="mtp",
+                        parallel_drafting=False,
+                        enable_adaptive_verification=False,
+                        use_dspark=lambda: False,
+                    ),
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
@@ -875,7 +888,7 @@ def test_quark_packed_layer_config_must_match_global_config() -> None:
 
 def test_non_quark_shared_expert_fse_is_incompatible() -> None:
     compatible, reason = is_shared_expert_quant_fse_compatible(
-        object(),
+        cast(QuantizationConfig, object()),
         "model.layers.0.mlp.experts",
         "model.layers.0.mlp.shared_experts",
     )

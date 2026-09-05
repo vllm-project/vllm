@@ -3,6 +3,7 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -10,7 +11,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config import VllmConfig
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.sequence import IntermediateTensors
 
 
 # Helper function to print input IDs with coalesced audio/video tokens.
@@ -148,17 +151,22 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
 
     # Create processing info
     info = Qwen3OmniMoeThinkerProcessingInfo(mock_ctx)
-    info._get_expected_hidden_size = lambda: 100
-    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)
-    info.get_hf_processor = Mock(return_value=mock_processor)
-    info.get_tokenizer = Mock(return_value=mock_tokenizer)
-    info.get_image_processor = Mock(return_value=mock_image_processor)
+    info._get_expected_hidden_size = lambda: 100  # type: ignore[method-assign]
+    info.get_hf_config = Mock(return_value=mock_qwen3_omni_config)  # type: ignore[method-assign]
+    info.get_hf_processor = Mock(return_value=mock_processor)  # type: ignore[method-assign]
+    info.get_tokenizer = Mock(return_value=mock_tokenizer)  # type: ignore[method-assign]
+    info.get_image_processor = Mock(return_value=mock_image_processor)  # type: ignore[method-assign]
 
     # Create a mock dummy_inputs builder
     mock_dummy_inputs = Mock()
 
-    # Create the processor
-    processor = Qwen3OmniMoeThinkerMultiModalProcessor(info, mock_dummy_inputs)
+    # Create the processor. The registry pairs this processor with
+    # Qwen3OmniMoeThinkerProcessingInfo, but the base class is still
+    # parameterized on Qwen2_5OmniThinkerProcessingInfo.
+    processor = Qwen3OmniMoeThinkerMultiModalProcessor(
+        info,  # type: ignore[arg-type]
+        mock_dummy_inputs,
+    )
 
     # Test parameters from reference video
     # https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4
@@ -244,12 +252,15 @@ def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
             return input_ids
 
     model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
-        Qwen3OmniMoeThinkerForConditionalGeneration
+        Qwen3OmniMoeThinkerForConditionalGeneration  # type: ignore[type-abstract]
     )
     nn.Module.__init__(model)
     model.language_model = DummyLanguageModel()
 
     assert supports_eagle3(model)
+    # nn.Module matches the type[object] overload of supports_eagle3(), so its
+    # TypeIs narrows model to type[SupportsEagle3]; restore the instance type.
+    model = cast(Qwen3OmniMoeThinkerForConditionalGeneration, model)
     model.set_aux_hidden_state_layers((1, 2))
     assert model.language_model.model.aux_hidden_state_layers == (1, 2)
 
@@ -281,11 +292,16 @@ def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
         "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
         return_value=pp_group,
     ):
-        output, aux_hidden_states = model.forward(
-            input_ids=None,
-            positions=torch.tensor([0]),
-            inputs_embeds=inputs_embeds,
-            deepstack_input_embeds=deepstack_inputs,
+        # aux_hidden_state_layers is set, so forward() returns the
+        # (hidden_states, aux_hidden_states) tuple rather than a bare tensor.
+        output, aux_hidden_states = cast(
+            tuple[torch.Tensor, list[torch.Tensor]],
+            model.forward(
+                input_ids=None,
+                positions=torch.tensor([0]),
+                inputs_embeds=inputs_embeds,
+                deepstack_input_embeds=cast(IntermediateTensors, deepstack_inputs),
+            ),
         )
 
     torch.testing.assert_close(output, torch.tensor([[15.0]]))
@@ -313,7 +329,9 @@ def test_qwen3_dspark_rejects_incomplete_vocab_weights(
 ):
     from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
-    model = Qwen3DSparkForCausalLM.__new__(Qwen3DSparkForCausalLM)
+    model = Qwen3DSparkForCausalLM.__new__(
+        Qwen3DSparkForCausalLM  # type: ignore[type-abstract]
+    )
     nn.Module.__init__(model)
     object.__setattr__(
         model,
@@ -384,7 +402,9 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
             return_value=None,
         ),
     ):
-        loaded_model = dspark_utils.load_dspark_model(target_model, vllm_config)
+        loaded_model = dspark_utils.load_dspark_model(
+            target_model, cast(VllmConfig, vllm_config)
+        )
 
     assert loaded_model.model.embed_tokens is target_embedding
 

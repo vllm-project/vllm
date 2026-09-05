@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import inspect
+from collections.abc import Callable
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
@@ -405,6 +406,8 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
     layer.orig_dtype = torch.float16
     layer.params_dtype = torch.float16
 
+    # Each variant's prepare function takes the layer plus defaulted extras.
+    prepare: Callable[[torch.nn.Module], None]
     if variant == "fp8":
         prepare = marlin_utils_fp8.prepare_fp8_layer_for_marlin
 

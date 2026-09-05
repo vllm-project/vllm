@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import uuid
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -19,6 +20,8 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    OffloadingSpec,
+    OffloadKey,
     OffloadPolicy,
     ReqContext,
     ScheduleEndContext,
@@ -90,12 +93,12 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 
 def _job_metadata(
     job_id: int,
-    keys: list[bytes] | None = None,
+    keys: list[OffloadKey] | None = None,
     block_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
-        keys = [b"key1"]
+        keys = [OffloadKey(b"key1")]
     if block_ids is None:
         block_ids = list(range(len(keys)))
     return TransferJob(
@@ -144,7 +147,8 @@ class TestInitHashSeed:
             lambda **k: SimpleNamespace(get_run_config=lambda: {}),
         )
         return P2PSecondaryTierManager(
-            offloading_spec=_init_offloading_spec(),
+            # A SimpleNamespace duck-types the attributes the manager reads.
+            offloading_spec=cast(OffloadingSpec, _init_offloading_spec()),
             primary_kv_view=memoryview(bytearray(16)),
         )
 
@@ -212,29 +216,29 @@ class TestLookup:
     def test_lookup_returns_miss_without_kv_params(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=None)
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params={"remote_prefiller": {"remote_host": "x"}})
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_prefiller_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
     def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-2"))
-        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.HIT
 
     def test_lookup_returns_miss_without_prefill_key(self):
         """No ``remote_prefiller`` sub-dict means the request was not routed for
@@ -242,7 +246,7 @@ class TestLookup:
         returns MISS even when a stale ``remote_decoder`` block is present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
-        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+        assert mgr.lookup(OffloadKey(b"key"), ctx) is LookupResult.MISS
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +317,7 @@ class TestServeExternalRequests:
         mgr._failed_serve_ctxs = [ctx]
         sess_a = _RecordingSession()
         sess_b = _RecordingSession()
-        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[dict-item]
 
         parent = _RecordingParent()
         mgr.serve_external_requests(parent)  # type: ignore[arg-type]
@@ -328,7 +332,7 @@ class TestServeExternalRequests:
     def test_no_failed_serves_still_serves_sessions(self):
         mgr = _make_manager()
         sess = _RecordingSession()
-        mgr._sessions = {"a": sess}  # type: ignore[assignment]
+        mgr._sessions = {"a": sess}  # type: ignore[dict-item]
 
         parent = _RecordingParent()
         mgr.serve_external_requests(parent)  # type: ignore[arg-type]
@@ -365,7 +369,7 @@ class TestSubmitStore:
         mgr = _make_manager()
         job = _job_metadata(
             job_id=1,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             block_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
@@ -396,7 +400,7 @@ class TestSubmitStore:
         # the kv_request_id → session fast path.
         job = _job_metadata(
             job_id=7,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             block_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
@@ -462,7 +466,7 @@ class TestSubmitLoad:
         mgr._sessions[peer_id] = existing  # type: ignore[assignment]
         job = _job_metadata(
             job_id=42,
-            keys=[b"k1", b"k2"],
+            keys=[OffloadKey(b"k1"), OffloadKey(b"k2")],
             block_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
@@ -523,7 +527,7 @@ class TestOnRequestFinished:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
-        mgr._sessions[peer_id] = session
+        mgr._sessions[peer_id] = session  # type: ignore[assignment]
         ctx = _req_context(kv_params=_remote_prefiller_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
@@ -535,7 +539,7 @@ class TestOnRequestFinished:
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
-        mgr._sessions[peer_id] = session
+        mgr._sessions[peer_id] = session  # type: ignore[assignment]
         ctx = _req_context(kv_params=_remote_kv_source_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
@@ -561,8 +565,8 @@ class TestOnRequestFinished:
 
         mgr = _make_manager()
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
@@ -753,7 +757,7 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr._unbound_stores["req-fresh"] = [
-            _UnboundStoreBatch(job_id=99, keys=[b"k"], block_ids=[0])
+            _UnboundStoreBatch(job_id=99, keys=[OffloadKey(b"k")], block_ids=[0])
         ]
         list(mgr.get_finished_jobs())
         assert "req-fresh" in mgr._unbound_stores
@@ -765,12 +769,12 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
-        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0])
+        stale = _UnboundStoreBatch(job_id=10, keys=[OffloadKey(b"k")], block_ids=[0])
         # Backdate the submission so the head batch is past the deadline.
         stale.submitted_at = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S - 1.0
         mgr._unbound_stores["req-stale"] = [
             stale,
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=11, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         results = list(mgr.get_finished_jobs())
@@ -1154,7 +1158,7 @@ class TestBidirectionalManager:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=100,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 block_ids=[0],
                 kv_params=a_prefiller_params,
             )
@@ -1162,7 +1166,7 @@ class TestBidirectionalManager:
         mgr_b.submit_store(
             _job_metadata(
                 job_id=200,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 block_ids=[0],
                 kv_params=b_prefiller_params,
             )
@@ -1172,7 +1176,7 @@ class TestBidirectionalManager:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=101,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 block_ids=[0],
                 kv_params=a_decoder_params,
             )
@@ -1180,7 +1184,7 @@ class TestBidirectionalManager:
         mgr_b.submit_load(
             _job_metadata(
                 job_id=201,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 block_ids=[0],
                 kv_params=b_decoder_params,
             )
@@ -1232,7 +1236,7 @@ class TestAcceptNewPeers:
         mgr._sessions[peer_id] = existing  # type: ignore[assignment]
 
         new_conn = _RecordingConn(peer_id)
-        mgr._accept_new_peers([new_conn])
+        mgr._accept_new_peers([new_conn])  # type: ignore[list-item]
 
         # Manager swallowed the ValueError and closed the duplicate conn.
         assert new_conn.close_calls == 1
@@ -1277,7 +1281,7 @@ class TestAcceptNewPeers:
             def close(self) -> None:
                 self.alive = False
 
-        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[list-item]
 
         assert peer_id in mgr._sessions
         assert mgr._sessions[peer_id].connected is True
@@ -1361,8 +1365,8 @@ class TestPollOnce:
         )
         mgr._sessions[peer] = sess  # type: ignore[assignment]
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=5, keys=[OffloadKey(b"k1")], block_ids=[0]),
+            _UnboundStoreBatch(job_id=6, keys=[OffloadKey(b"k2")], block_ids=[1]),
         ]
 
         class _Ctrl:
@@ -1450,12 +1454,15 @@ class TestDrainJobs:
         # If drain_jobs sleeps when nothing is pending, that's a regression.
         import vllm.v1.kv_offload.tiering.p2p.manager as m
 
+        def _record_sleep(secs: float) -> None:
+            sleeps.append(secs)
+
         original_sleep = m.time.sleep
-        m.time.sleep = lambda s: sleeps.append(s)  # type: ignore[assignment]
+        m.time.sleep = _record_sleep  # type: ignore[assignment]
         try:
             mgr.drain_jobs()
         finally:
-            m.time.sleep = original_sleep  # type: ignore[assignment]
+            m.time.sleep = original_sleep
 
         assert sleeps == []
 
@@ -1572,7 +1579,7 @@ class TestConnectionDeathMidTransfer:
         mgr_a.submit_store(
             _job_metadata(
                 job_id=900,
-                keys=[b"a-block"],
+                keys=[OffloadKey(b"a-block")],
                 block_ids=[0],
                 kv_params=a_prefiller_params,
             )
@@ -1580,7 +1587,7 @@ class TestConnectionDeathMidTransfer:
         mgr_a.submit_load(
             _job_metadata(
                 job_id=901,
-                keys=[b"b-block"],
+                keys=[OffloadKey(b"b-block")],
                 block_ids=[0],
                 kv_params=a_decoder_params,
             )
@@ -1676,8 +1683,10 @@ class TestBindHostPortDefaults:
                 parallel=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
-        mgr = P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
-        mgr._test_calls = calls
+        mgr = P2PSecondaryTierManager(
+            cast(OffloadingSpec, spec), memoryview(b""), **kwargs
+        )
+        mgr._test_calls = calls  # type: ignore[attr-defined]
         return mgr
 
     def test_defaults_from_env_unset(self, monkeypatch):
@@ -1722,12 +1731,13 @@ class TestBindHostPortDefaults:
         # The ZMQ identity is the verbatim host:port; the NIXL agent name is a
         # uuid, distinct from the identity and never used as an address.
         mgr = self._construct(monkeypatch, host="127.0.0.1", port=5710)
-        assert mgr._test_calls["zmq_host"] == "127.0.0.1"
-        assert mgr._test_calls["zmq_port"] == 5710
-        assert mgr._test_calls["zmq_id"] == "127.0.0.1:5710"
+        calls = mgr._test_calls  # type: ignore[attr-defined]
+        assert calls["zmq_host"] == "127.0.0.1"
+        assert calls["zmq_port"] == 5710
+        assert calls["zmq_id"] == "127.0.0.1:5710"
         assert mgr._local_id == "127.0.0.1:5710"
         # nixl_name is a valid uuid4 and not the host:port identity.
-        nixl_name = mgr._test_calls["nixl_name"]
+        nixl_name = calls["nixl_name"]
         assert nixl_name != mgr._local_id
         assert uuid.UUID(nixl_name).version == 4
 

@@ -3,12 +3,17 @@
 
 import json
 
-from tests.parser.engine.replay_harness import MockTokenizer, _test_request
+from tests.parser.engine.replay_harness import (
+    MockTokenizer,
+    _test_request,
+    as_tokenizer,
+)
 from vllm.reasoning import ReasoningParserManager
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 
 
-def _tokenizer() -> MockTokenizer:
+def _tokenizer() -> TokenizerLike:
     vocab = {
         "<think>": 1,
         "</think>": 2,
@@ -19,7 +24,7 @@ def _tokenizer() -> MockTokenizer:
         "<arg_value>": 7,
         "</arg_value>": 8,
     }
-    return MockTokenizer(vocab=vocab, tokens=[])
+    return as_tokenizer(MockTokenizer(vocab=vocab, tokens=[]))
 
 
 def test_ling3_registered():

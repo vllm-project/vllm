@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import bind_kv_cache
 
 
@@ -40,10 +42,13 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         layer_names[1]: _packed_replayssm_cache(4),
         layer_names[0]: _packed_replayssm_cache(4),
     }
-    kv_cache_groups = [
-        SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
-        SimpleNamespace(layer_names=[layer_names[1]]),
-    ]
+    kv_cache_groups = cast(
+        list[KVCacheGroupSpec],
+        [
+            SimpleNamespace(layer_names=[layer_names[0], layer_names[2]]),
+            SimpleNamespace(layer_names=[layer_names[1]]),
+        ],
+    )
 
     bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 

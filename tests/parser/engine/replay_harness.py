@@ -12,11 +12,16 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
 )
+
+if TYPE_CHECKING:
+    from vllm.tokenizers import TokenizerLike
 
 
 @dataclass
@@ -31,7 +36,7 @@ class Sample:
     expected_reasoning: str | None
     expected_content: str | None
     expected_tool_calls: list[dict] | None
-    tools: list[dict] | None = None
+    tools: list[ChatCompletionToolsParam] | None = None
     chat_template_kwargs: dict | None = None
     prompt_token_ids: list[int] | None = None
 
@@ -109,6 +114,17 @@ class MockTokenizer:
 CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
 
 
+def as_tokenizer(tokenizer: MockTokenizer) -> TokenizerLike:
+    """Present a :class:`MockTokenizer` as a ``TokenizerLike``.
+
+    ``MockTokenizer`` implements only the members the parsers actually
+    touch (``get_vocab``/``encode``/``decode`` and the special-token
+    attributes) rather than the full protocol, so call sites annotated
+    with ``TokenizerLike`` need this explicit widening.
+    """
+    return cast("TokenizerLike", tokenizer)
+
+
 def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
     """Build a mock tokenizer from a sample's vocab and token data."""
     return MockTokenizer(
@@ -118,7 +134,7 @@ def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
 
 
 def _test_request(
-    tools: list[dict] | None = None,
+    tools: list[ChatCompletionToolsParam] | None = None,
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model="test-model",
@@ -127,11 +143,17 @@ def _test_request(
     )
 
 
-DUMMY_TOOLS = [
-    {
-        "type": "function",
-        "function": {"name": "stub", "parameters": {"type": "object"}},
-    },
+# Validated rather than left as raw dicts: ``ChatCompletionRequest`` is not
+# configured with ``validate_assignment``, so ``request.tools = DUMMY_TOOLS``
+# would otherwise hand the parser a list of dicts, which every tool-schema
+# helper (``find_tool_name``, ``find_tool_properties``) skips over.
+DUMMY_TOOLS: list[ChatCompletionToolsParam] = [
+    ChatCompletionToolsParam.model_validate(
+        {
+            "type": "function",
+            "function": {"name": "stub", "parameters": {"type": "object"}},
+        }
+    ),
 ]
 
 
@@ -164,7 +186,7 @@ def replay_streaming(
     chunk_size: int | None = None,
     holdback_chars: int = 0,
     finished_on_last: bool = False,
-    tools: list[dict] | None = None,
+    tools: list[ChatCompletionToolsParam] | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
@@ -264,7 +286,7 @@ def replay_with_text_holdback(
     parser,
     tokens: list[tuple[int, str]],
     text_delay: int = 1,
-    tools: list[dict] | None = None,
+    tools: list[ChatCompletionToolsParam] | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Replay token-by-token with text arriving *text_delay* steps late.

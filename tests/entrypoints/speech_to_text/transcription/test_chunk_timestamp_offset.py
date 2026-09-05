@@ -41,12 +41,14 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
         overlap_chunk_second=1,
         min_energy_split_window_size=1600,
     )
-    serving.model_cls = MagicMock()
-    serving.model_cls.validate_language.side_effect = lambda lang: lang
-    serving.model_cls.supports_explicit_language_detection = False
-    serving.model_cls.get_generation_prompt.return_value = {}
+    model_cls = MagicMock()
+    model_cls.validate_language.side_effect = lambda lang: lang
+    model_cls.supports_explicit_language_detection = False
+    model_cls.get_generation_prompt.return_value = {}
+    serving.model_cls = model_cls
     serving.model_config = MagicMock()
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     serving.renderer = MagicMock()
     serving.renderer.render_cmpl_async = AsyncMock(
         return_value=[MagicMock()] * len(chunks)
