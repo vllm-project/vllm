@@ -12,6 +12,19 @@ IMAGE_NAME="cpu-test-${NUMA_NODE}${AGENT_SLOT:+-${AGENT_SLOT}}"
 TIMEOUT_VAL=$1
 TEST_COMMAND=$2
 
+# KV-cache sizing. Every job defaults to a fixed, generous budget so the
+# fraction-of-available-memory auto-sizing path (VLLM_CPU_KVCACHE_SPACE
+# unset) never runs on these uncapped hosts. A caller that wants to
+# exercise that path for real (the cgroup-clamp regression test) sets
+# VLLM_CPU_KVCACHE_SPACE="" explicitly to opt out of the default.
+VLLM_CPU_KVCACHE_SPACE=${VLLM_CPU_KVCACHE_SPACE-16}
+
+# Optional container memory cap (docker --memory syntax, e.g. "4g" or a
+# plain byte count) for jobs that need to run under a real cgroup limit,
+# such as the cgroup-clamp regression test. Unset by default so existing
+# jobs keep running against the host's full memory.
+CONTAINER_MEMORY_LIMIT=${CONTAINER_MEMORY_LIMIT:-}
+
 # Disk hygiene knobs. Reclaim space only once the Docker root filesystem crosses
 # DISK_USAGE_THRESHOLD percent, and cap the shared BuildKit cache at
 # BUILDKIT_CACHE_MAX so subsequent builds keep reusing the hottest layers.
@@ -83,6 +96,23 @@ while true; do
 done
 rm -f "$build_log"
 
+KVCACHE_ENV_ARGS=()
+if [ -n "${VLLM_CPU_KVCACHE_SPACE}" ]; then
+    KVCACHE_ENV_ARGS+=(-e "VLLM_CPU_KVCACHE_SPACE=${VLLM_CPU_KVCACHE_SPACE}")
+fi
+
+# --memory-swap pinned to the same value disables swap headroom, so a
+# regression that over-allocates actually OOMs here instead of being
+# masked by swap.
+MEMORY_ARGS=()
+if [ -n "${CONTAINER_MEMORY_LIMIT}" ]; then
+    MEMORY_ARGS+=(
+        --memory="${CONTAINER_MEMORY_LIMIT}"
+        --memory-swap="${CONTAINER_MEMORY_LIMIT}"
+        -e "CONTAINER_MEMORY_LIMIT=${CONTAINER_MEMORY_LIMIT}"
+    )
+fi
+
 # Run the image, setting --shm-size=4g for tensor parallel.
-docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 --shm-size=4g "$IMAGE_NAME" \
+docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN "${KVCACHE_ENV_ARGS[@]}" -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 --shm-size=4g "${MEMORY_ARGS[@]}" "$IMAGE_NAME" \
         timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"
