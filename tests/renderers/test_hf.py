@@ -9,10 +9,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
     _consolidate_system_messages,
-    _convert_developer_to_system,
     _detect_developer_role_support,
     _get_hf_base_chat_template_params,
     _try_extract_ast,
+    convert_developer_to_system,
     resolve_chat_template,
     resolve_chat_template_content_format,
     resolve_chat_template_kwargs,
@@ -599,7 +599,7 @@ class TestConvertDeveloperToSystem:
             {"role": "developer", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
-        result = _convert_developer_to_system(conversation)
+        result = convert_developer_to_system(conversation)
         assert result[0]["role"] == "system"
         assert result[0]["content"] == "You are helpful."
         assert result[1]["role"] == "user"
@@ -612,15 +612,27 @@ class TestConvertDeveloperToSystem:
                 "tools": [{"type": "function"}],
             },
         ]
-        result = _convert_developer_to_system(conversation)
+        result = convert_developer_to_system(conversation)
         assert "tools" not in result[0]
+
+    def test_keeps_tools_key(self):
+        conversation = [
+            {
+                "role": "developer",
+                "content": "Instructions",
+                "tools": [{"type": "function"}],
+            },
+        ]
+        result = convert_developer_to_system(conversation, keep_tools=True)
+        assert result[0]["role"] == "system"
+        assert result[0]["tools"] == [{"type": "function"}]
 
     def test_no_developer_messages_unchanged(self):
         conversation = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
         ]
-        result = _convert_developer_to_system(conversation)
+        result = convert_developer_to_system(conversation)
         assert result[0]["role"] == "system"
         assert result[1]["role"] == "user"
 
@@ -631,7 +643,7 @@ class TestConvertDeveloperToSystem:
             "tools": [{"type": "function"}],
         }
         conversation = [original]
-        _convert_developer_to_system(conversation)
+        convert_developer_to_system(conversation)
         assert original["role"] == "developer"
         assert "tools" in original
 
