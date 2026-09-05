@@ -11,12 +11,15 @@ The traditional flow of text data for a Large Language Model goes from text to t
 To input multi-modal data, follow this schema in [vllm.inputs.EmbedsPrompt][]:
 
 - `prompt_embeds`: A torch tensor representing a sequence of prompt/token embeddings. This has the shape (sequence_length, hidden_size), where sequence length is the number of tokens embeddings and hidden_size is the hidden size (embedding size) of the model.
+- `prompt_token_ids` and `prompt_is_token_ids`: Optional fields for inputs that keep token IDs alongside embeddings, such as mixed token/embed prompts or model paths that consult token IDs while preparing positions. For an all-embedding prompt, pass the token IDs used to produce the embeddings and set every `prompt_is_token_ids` entry to `false`.
 
 ### Hugging Face Transformers Inputs
 
 You can pass prompt embeddings from Hugging Face Transformers models to the  `'prompt_embeds'` field of the prompt embedding dictionary, as shown in the following examples:
 
 [examples/features/prompt_embed/prompt_embed_offline.py](../../examples/features/prompt_embed/prompt_embed_offline.py)
+
+Some multimodal model paths, including Qwen-style M-RoPE deployments, can still consult token IDs while preparing positions even when the forward pass consumes pre-computed embeddings. Providing `prompt_token_ids` with a `prompt_is_token_ids` mask keeps that relationship explicit and also demonstrates the shape used by mixed token/embed prompts. A `false` value means vLLM should use the corresponding row from `prompt_embeds`; a `true` value means vLLM should use the model's embedding lookup for that token ID.
 
 ## Online Serving
 
