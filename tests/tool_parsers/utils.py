@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+import random
+from collections.abc import Iterable, Sequence
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
@@ -124,6 +125,140 @@ def split_string_into_token_deltas(tokenizer: TokenizerLike, text: str) -> list[
         previously_decoded_text = current_text
         deltas.append(new_text)
     return deltas
+
+
+def group_token_deltas(deltas: Sequence[str], lengths: Sequence[int]) -> list[str]:
+    """Batch per-token *deltas* into chunks of the given *lengths*.
+
+    A server batches several tokens into one streamed delta, so the text
+    a parser sees is an arbitrary grouping of the token stream rather
+    than one token at a time.  Any leftover tokens form a final chunk.
+    """
+    chunks: list[str] = []
+    start = 0
+    for length in lengths:
+        if start >= len(deltas):
+            break
+        end = min(start + length, len(deltas))
+        chunks.append("".join(deltas[start:end]))
+        start = end
+    if start < len(deltas):
+        chunks.append("".join(deltas[start:]))
+    return chunks
+
+
+def two_chunk_groupings(n_deltas: int) -> list[list[int]]:
+    """Every way to batch *n_deltas* tokens into exactly two deltas.
+
+    Exhaustive and cheap (``n_deltas - 1`` groupings).  A tool-call tag
+    that is only mishandled when it straddles one particular delta
+    boundary is invisible to single-token streaming but is always caught
+    here.
+    """
+    return [[i, n_deltas - i] for i in range(1, n_deltas)]
+
+
+def random_groupings(
+    n_deltas: int,
+    *,
+    count: int,
+    seed: int,
+    max_chunk: int = 4,
+) -> list[list[int]]:
+    """Sample *count* random batchings of *n_deltas* tokens.
+
+    Chunk lengths are drawn uniformly from ``1..max_chunk``.  ``seed``
+    makes the set reproducible so a failure can be replayed exactly.
+    """
+    rng = random.Random(seed)
+    groupings: list[list[int]] = []
+    for _ in range(count):
+        lengths: list[int] = []
+        remaining = n_deltas
+        while remaining > 0:
+            length = min(rng.randint(1, max_chunk), remaining)
+            lengths.append(length)
+            remaining -= length
+        groupings.append(lengths)
+    return groupings
+
+
+def split_string_into_token_stream(
+    tokenizer: TokenizerLike, text: str
+) -> tuple[list[str], list[int]]:
+    """Split *text* into per-token texts alongside their token ids.
+
+    ``split_string_into_token_deltas`` returns only the texts, so a
+    caller that batches tokens has to re-tokenize the joined text to
+    recover ids.  Re-tokenization does not round-trip (``"<|a|>"`` as one
+    string may tokenize differently than its pieces), which would make a
+    batched replay feed the parser ids the model never generated.
+    """
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    texts: list[str] = []
+    previously_decoded_text = ""
+    for i in range(1, len(token_ids) + 1):
+        current_text = tokenizer.decode(token_ids[:i])
+        texts.append(current_text[len(previously_decoded_text) :])
+        previously_decoded_text = current_text
+    return texts, token_ids
+
+
+def run_tool_extraction_streaming_batched(
+    tool_parser: ToolParser,
+    token_texts: Sequence[str],
+    token_ids: Sequence[int],
+    lengths: Sequence[int],
+    request: ChatCompletionRequest | None = None,
+    assert_one_tool_per_delta: bool = True,
+) -> StreamingToolReconstructor:
+    """Stream a token sequence batched into deltas of *lengths* tokens.
+
+    Unlike :func:`run_tool_extraction_streaming`, the real token ids are
+    carried through the batching instead of being recovered by
+    re-tokenizing each delta, which matches what the server passes to
+    ``extract_tool_calls_streaming``.
+    """
+    request = request or ChatCompletionRequest(messages=[], model="test-model")
+    reconstructor = StreamingToolReconstructor(
+        assert_one_tool_per_delta=assert_one_tool_per_delta
+    )
+    previous_text = ""
+    previous_tokens: list[int] = []
+    for start, end in _batch_bounds(len(token_texts), lengths):
+        delta = "".join(token_texts[start:end])
+        token_delta = list(token_ids[start:end])
+        current_text = previous_text + delta
+        current_tokens = previous_tokens + token_delta
+        delta_message = tool_parser.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta,
+            previous_tokens,
+            current_tokens,
+            token_delta,
+            request,
+        )
+        if delta_message is not None:
+            reconstructor.append_delta(delta_message)
+        previous_text = current_text
+        previous_tokens = current_tokens
+    return reconstructor
+
+
+def _batch_bounds(n_tokens: int, lengths: Sequence[int]) -> list[tuple[int, int]]:
+    """Turn per-delta *lengths* into ``(start, end)`` pairs over the stream."""
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for length in lengths:
+        if start >= n_tokens:
+            break
+        end = min(start + length, n_tokens)
+        bounds.append((start, end))
+        start = end
+    if start < n_tokens:
+        bounds.append((start, n_tokens))
+    return bounds
 
 
 def run_tool_extraction_streaming(
