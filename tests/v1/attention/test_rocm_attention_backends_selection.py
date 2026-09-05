@@ -385,3 +385,86 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+def test_unified_attn_supports_kv_connector(mock_vllm_config, mock_get_cdna_version):
+    """ROCM_AITER_UNIFIED_ATTN resolves with use_kv_connector."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_kv_connector=True,
+    )
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        attn_selector_config=attn_selector_config,
+    )
+
+    assert backend_path == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
+
+
+def test_rocm_attn_rejects_kv_connector(mock_vllm_config, mock_get_cdna_version):
+    """ROCM_ATTN is unsupported for KV connectors and raises."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    with pytest.raises(ValueError, match="KV connector not supported"):
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype="auto",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_kv_connector=True,
+        )
+
+        RocmPlatform.get_attn_backend_cls(
+            selected_backend=AttentionBackendEnum.ROCM_ATTN,
+            attn_selector_config=attn_selector_config,
+        )
+
+
+def test_auto_selection_excludes_rocm_attn_for_kv_connector(
+    mock_vllm_config, mock_get_cdna_version
+):
+    """Auto-selection with use_kv_connector never resolves to ROCM_ATTN."""
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_kv_connector=True,
+    )
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None, attn_selector_config=attn_selector_config
+    )
+
+    assert backend_path != AttentionBackendEnum.ROCM_ATTN.get_path()
+
+
+def test_unified_attn_prefers_block_contiguous_layout():
+    """Unified attn prefers a block-first KV layout, hence ok with kv connectors."""
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    unified_preferred = RocmAiterUnifiedAttentionBackend.supported_kv_cache_layouts()[0]
+    rocm_attn_preferred = RocmAttentionBackend.supported_kv_cache_layouts()[0]
+
+    assert unified_preferred.is_block_contiguous is True
+    assert rocm_attn_preferred.is_block_contiguous is False

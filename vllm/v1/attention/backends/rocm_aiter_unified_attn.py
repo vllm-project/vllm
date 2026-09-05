@@ -84,6 +84,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_non_causal(cls) -> bool:
         return False
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        return True
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
