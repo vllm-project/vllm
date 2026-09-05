@@ -296,12 +296,22 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
 
-            # On CPU and XPU, use the Marlin linear method which uses
+            # On CPU, XPU and ROCm, use the Marlin linear method which uses
             # choose_mp_linear_kernel to select the best available kernel
-            # (CPUWNA16LinearKernel on CPU, XPUwNa16LinearKernel on XPU).
-            # The AWQ checkpoint is converted to the standard GPTQ-like format
-            # in process_weights_after_loading before being handed to the kernel.
-            if current_platform.is_cpu() or current_platform.is_xpu():
+            # (CPUWNA16LinearKernel on CPU, XPUwNa16LinearKernel on XPU, and
+            # the RDNA/Triton W4A16 kernels on ROCm). The AWQ checkpoint is
+            # converted to the standard GPTQ-like format in
+            # process_weights_after_loading before being handed to the kernel.
+            if (
+                current_platform.is_cpu()
+                or current_platform.is_xpu()
+                or (
+                    current_platform.is_rocm()
+                    and check_marlin_supported(
+                        self.quant_type, self.group_size, self.zero_point
+                    )
+                )
+            ):
                 return AutoAWQMarlinLinearMethod(self)
 
             # Check if Marlin is supported and not using batch invariant mode
