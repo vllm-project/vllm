@@ -444,6 +444,12 @@ class KVCacheManager:
                 "external computed tokens"
             )
 
+        block_activity_before = (
+            self.block_pool.get_block_activity()
+            if request.prefill_stats is not None
+            else None
+        )
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
@@ -548,6 +554,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
+            self._record_prefill_block_activity(request, block_activity_before)
             return self.create_kv_cache_blocks(new_blocks)
 
         # NOTE(woosuk): We want to commit (cache) up to num_local_computed_tokens
@@ -561,7 +568,24 @@ class KVCacheManager:
         )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
+        self._record_prefill_block_activity(request, block_activity_before)
+
         return self.create_kv_cache_blocks(new_blocks)
+
+    def _record_prefill_block_activity(
+        self,
+        request: Request,
+        before: tuple[int, int, int] | None,
+    ) -> None:
+        """Record block-pool deltas while a request's prefill is in flight."""
+        if before is None or request.prefill_stats is None:
+            return
+        after = self.block_pool.get_block_activity()
+        request.prefill_stats.record_block_activity(
+            num_block_allocations=after[0] - before[0],
+            num_block_evictions=after[1] - before[1],
+            num_new_full_blocks=after[2] - before[2],
+        )
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -755,7 +779,13 @@ class KVCacheManager:
                 that are already cached and tokens to be cached.
         """
         if self.enable_caching:
+            block_activity_before = (
+                self.block_pool.get_block_activity()
+                if request.prefill_stats is not None
+                else None
+            )
             self.coordinator.cache_blocks(request, num_computed_tokens)
+            self._record_prefill_block_activity(request, block_activity_before)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

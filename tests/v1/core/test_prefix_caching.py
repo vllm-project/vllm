@@ -2089,6 +2089,62 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+def test_prefill_block_activity_is_attributed_to_allocating_request():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 4),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+    first = make_request("first", list(range(8)), block_size, sha256)
+    assert manager.allocate_slots(first, 8) is not None
+    assert first.prefill_stats is not None
+    assert first.prefill_stats.num_block_allocations == 2
+    assert first.prefill_stats.num_block_evictions == 0
+    assert first.prefill_stats.num_new_full_blocks == 2
+    manager.free(first)
+
+    # Three physical blocks remain after the null block. Allocating all three
+    # for a different request reuses one uncached block and evicts the two
+    # cached blocks created by ``first``.
+    second = make_request("second", list(range(100, 112)), block_size, sha256)
+    assert manager.allocate_slots(second, 12) is not None
+    assert second.prefill_stats is not None
+    assert second.prefill_stats.num_block_allocations == 3
+    assert second.prefill_stats.num_block_evictions == 2
+    assert second.prefill_stats.num_new_full_blocks == 3
+
+    # Attribution is immutable after the first request's prefill operations.
+    assert first.prefill_stats.num_block_allocations == 2
+    assert first.prefill_stats.num_block_evictions == 0
+
+
+def test_delayed_cache_creation_is_attributed_to_request_prefill():
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 4),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    request = make_request("async-load", list(range(8)), block_size, sha256)
+
+    assert manager.allocate_slots(request, 8, delay_cache_blocks=True) is not None
+    assert request.prefill_stats is not None
+    assert request.prefill_stats.num_block_allocations == 2
+    assert request.prefill_stats.num_new_full_blocks == 0
+
+    # Async KV paths commit block hashes after the transfer completes, outside
+    # allocate_slots(). The later cache operation must retain request attribution.
+    manager.cache_blocks(request, 8)
+    assert request.prefill_stats.num_new_full_blocks == 2
+    assert request.prefill_stats.num_block_allocations == 2
+
+
 def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)

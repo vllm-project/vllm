@@ -467,7 +467,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, total_completion_tokens
+                            last_metrics,
+                            total_completion_tokens,
+                            last_res.prefill_stats if last_res is not None else None,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
@@ -625,7 +627,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     last_final_res.metrics if last_final_res is not None else None
                 )
                 per_request_metrics = build_per_request_timing_metrics(
-                    last_metrics, num_generated_tokens
+                    last_metrics,
+                    num_generated_tokens,
+                    (
+                        last_final_res.prefill_stats
+                        if last_final_res is not None
+                        else None
+                    ),
                 )
             spec_stats = build_spec_decoding_metrics(last_final_res)
             if spec_stats is not None:

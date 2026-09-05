@@ -846,7 +846,9 @@ class OpenAIServingChat(GenerateBaseServing):
                             last_res.metrics if last_res is not None else None
                         )
                         stream_per_request_metrics = build_per_request_timing_metrics(
-                            last_metrics, completion_tokens
+                            last_metrics,
+                            completion_tokens,
+                            last_res.prefill_stats if last_res is not None else None,
                         )
                     spec_stats = build_spec_decoding_metrics(last_res)
                     if spec_stats is not None:
@@ -1149,7 +1151,9 @@ class OpenAIServingChat(GenerateBaseServing):
         if (request.n or 1) == 1:
             if self.enable_per_request_metrics:
                 per_request_metrics = build_per_request_timing_metrics(
-                    final_res.metrics, num_generated_tokens
+                    final_res.metrics,
+                    num_generated_tokens,
+                    final_res.prefill_stats,
                 )
             spec_stats = build_spec_decoding_metrics(final_res)
             if spec_stats is not None:

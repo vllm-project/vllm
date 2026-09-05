@@ -210,6 +210,9 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+        # Token position where the active input chunk begins. Cache-creation
+        # accounting excludes retained session KV before this boundary.
+        self.prefill_stats_cache_creation_start = 0
 
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on

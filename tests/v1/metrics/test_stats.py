@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
-from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -45,6 +47,36 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats.iteration_details == iteration_details
 
 
+def test_prefill_stats_serialization_includes_request_kv_activity():
+    prefill_stats = PrefillStats(
+        num_prompt_tokens=64,
+        num_computed_tokens=32,
+        num_cached_tokens=32,
+        num_local_cached_tokens=24,
+        num_external_cached_tokens=8,
+        num_cache_creation_tokens=16,
+        num_new_full_blocks=2,
+        num_block_allocations=3,
+        num_block_evictions=1,
+        num_prefill_chunks=2,
+    )
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                request_id="request-123",
+                new_token_ids=[42],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.outputs[0].request_id == "request-123"
+    assert decoded.outputs[0].prefill_stats == prefill_stats
+
+
 def test_compute_iteration_details_includes_encoder_stats():
     scheduler_output = SchedulerOutput.make_empty()
     scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
@@ -68,6 +100,18 @@ def test_prefill_kv_computed_with_cache():
     req_stats.num_generation_tokens = 50
 
     # Case 1: With prefix cache (1200 tokens cached)
+    prefill_stats = PrefillStats(
+        num_prompt_tokens=10000,
+        num_computed_tokens=8800,
+        num_cached_tokens=1200,
+        num_local_cached_tokens=1000,
+        num_external_cached_tokens=200,
+        num_cache_creation_tokens=8000,
+        num_new_full_blocks=550,
+        num_block_allocations=551,
+        num_block_evictions=3,
+        num_prefill_chunks=4,
+    )
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
         request_id="test-req-001",
@@ -75,12 +119,17 @@ def test_prefill_kv_computed_with_cache():
         max_tokens_param=100,
         req_stats=req_stats,
         num_cached_tokens=1200,
+        prefill_stats=prefill_stats,
     )
 
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.num_prompt_tokens == 10000
     assert finished_req.num_cached_tokens == 1200
     assert finished_req.request_id == "test-req-001"
+    assert finished_req.prefill_stats is prefill_stats
+    assert finished_req.prefill_stats.num_external_cached_tokens == 200
+    assert finished_req.prefill_stats.num_block_evictions == 3
+    assert finished_req.prefill_time == pytest.approx(0.4)
 
     # Verify calculation: prefill KV = prompt tokens - cached tokens
     prefill_kv_computed = finished_req.num_prompt_tokens - max(

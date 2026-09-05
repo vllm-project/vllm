@@ -1715,6 +1715,8 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 1
     assert output.num_scheduled_tokens[req.request_id] == 50
+    assert req.prefill_stats is not None
+    assert req.prefill_stats.num_prefill_chunks == 1
 
     # Update from output (no sampled token since still prefilling)
     req_to_index = {req.request_id: 0}
@@ -1746,6 +1748,8 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert req.request_id not in output.scheduled_spec_decode_tokens, (
         "Spec tokens should not be scheduled with prefill chunks"
     )
+    assert req.prefill_stats is not None
+    assert req.prefill_stats.num_prefill_chunks == 2
 
     # Update from output with a sampled token (prefill complete)
     model_runner_output = ModelRunnerOutput(
@@ -1756,7 +1760,10 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
         prompt_logprobs_dict={},
         pooler_output=[],
     )
-    scheduler.update_from_output(output, model_runner_output)
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+    prefill_stats = engine_core_outputs[0].outputs[0].prefill_stats
+    assert prefill_stats is not None
+    assert prefill_stats.num_prefill_chunks == 2
 
     # Now provide draft tokens - should be accepted since prefill is complete
     draft_token_ids = DraftTokenIds([req.request_id], [[1, 2, 3]])

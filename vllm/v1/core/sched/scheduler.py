@@ -57,6 +57,7 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
+    PrefillStats,
     PrefixCacheStats,
     RequestSpecDecodeMetrics,
     SchedulerStats,
@@ -1467,6 +1468,11 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            if (
+                request.prefill_stats is not None
+                and request.num_computed_tokens < request.num_prompt_tokens
+            ):
+                request.prefill_stats.num_prefill_chunks += 1
             request.num_computed_tokens += num_scheduled_token
             request.num_in_flight_tokens += num_scheduled_token
             if self.defer_block_free:
@@ -1513,6 +1519,21 @@ class Scheduler(SchedulerInterface):
         Discards the last sampled output token from the prior input chunk.
         """
 
+        # Start a fresh scheduler-side accumulator for this input chunk. The
+        # output processor merges emitted chunk snapshots for the public,
+        # session-cumulative view. The continuation starts after every token
+        # with valid retained KV, including generated tokens in a partial
+        # cache block, so none of that prior state is reported as new cache
+        # creation.
+        session.prefill_stats = PrefillStats()
+        session.prefill_stats_cache_creation_start = session.num_computed_tokens
+        new_prompt_tokens = update.prompt_token_ids or ()
+        session.prefill_stats.set(
+            num_prompt_tokens=len(new_prompt_tokens),
+            num_local_cached_tokens=0,
+            num_external_cached_tokens=0,
+        )
+
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
         num_computed_tokens = session.num_computed_tokens
@@ -1533,8 +1554,8 @@ class Scheduler(SchedulerInterface):
                 )
             session.mm_features.extend(update.mm_features)
 
-        session._all_token_ids.extend(update.prompt_token_ids or ())
-        session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        session._all_token_ids.extend(new_prompt_tokens)
+        session.prompt_token_ids.extend(new_prompt_tokens)
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
@@ -2056,8 +2077,15 @@ class Scheduler(SchedulerInterface):
             if should_emit_output:
                 prefill_stats = request.take_prefill_stats()
                 if prefill_stats is not None:
-                    prefill_stats.finalize(
+                    current_cached_tokens = (
                         self.kv_cache_manager.estimate_cached_tokens(request)
+                    )
+                    prefill_stats.finalize(
+                        max(
+                            0,
+                            current_cached_tokens
+                            - request.prefill_stats_cache_creation_start,
+                        )
                     )
 
             finish_reason = None
