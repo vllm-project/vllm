@@ -61,13 +61,28 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.online_renderer import OnlineRenderer, prompt_declares_tools
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
+
+
+def _parser_chat_template_kwargs(
+    request: ChatCompletionRequest, chat_template_kwargs: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The parser's own copy of the template kwargs, carrying whether the
+    rendered prompt declares tools.
+
+    Kept separate from the kwargs used for rendering so the private flag
+    cannot reach the chat template.
+    """
+    return {
+        **(chat_template_kwargs or {}),
+        "_vllm_prompt_has_tools": prompt_declares_tools(request, chat_template_kwargs),
+    }
 
 
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
@@ -269,7 +284,9 @@ class OpenAIServingChat(GenerateBaseServing):
             parser = self.parser_cls(
                 tokenizer,
                 request.tools,
-                chat_template_kwargs=chat_template_kwargs,
+                chat_template_kwargs=_parser_chat_template_kwargs(
+                    request, chat_template_kwargs
+                ),
                 model_config=self.model_config,
             )
         result = await self.render_chat_request(request)
@@ -488,11 +505,14 @@ class OpenAIServingChat(GenerateBaseServing):
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
+                parser_chat_template_kwargs = _parser_chat_template_kwargs(
+                    request, chat_template_kwargs
+                )
                 parsers: list[Parser | None] = [
                     self.parser_cls(
                         tokenizer,
                         request.tools,
-                        chat_template_kwargs=chat_template_kwargs,
+                        chat_template_kwargs=parser_chat_template_kwargs,
                         model_config=self.model_config,
                     )
                     for _ in range(num_choices)

@@ -112,7 +112,7 @@ class Parser:
     def __init__(
         self,
         tokenizer: TokenizerLike,
-        tools: list[Tool] | None = None,
+        tools: Sequence[Tool] | None = None,
         *args,
         model_config=None,
         **kwargs,
@@ -125,7 +125,9 @@ class Parser:
                 tokenizer, *args, model_config=model_config, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
+            self._tool_parser = self.__class__.tool_parser_cls(
+                tokenizer, None if tools is None else list(tools)
+            )
 
         self._engine_based = (
             self._reasoning_parser is None
