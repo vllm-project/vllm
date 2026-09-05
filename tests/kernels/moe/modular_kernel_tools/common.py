@@ -492,12 +492,24 @@ class RankTensors:
 
         expert_map = None
         if config.world_size > 1:
-            expert_map = torch.full(
-                (global_num_experts,), fill_value=-1, dtype=torch.int32
-            )
             s = pgi.rank * num_local_experts
             e = s + num_local_experts
-            expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
+            if config.fused_experts_type.consumes_expert_mask:
+                # Mirror determine_expert_map(..., return_expert_mask=True):
+                # ROCm AITER kernels read expert_map as a 0/1 local-expert
+                # mask (plus a trailing zero sentinel), not the canonical
+                # -1/local-slot index map every other backend expects. Real
+                # serving picks the right one per FusedMoEExperts.consumes_
+                # expert_mask (see RoutedExperts.expert_map); this harness
+                # has no RoutedExperts layer, so it must gate the same way
+                # or AITER reads local ids as a mask and walks out of bounds.
+                expert_map = torch.zeros((global_num_experts + 1,), dtype=torch.int32)
+                expert_map[s:e] = 1
+            else:
+                expert_map = torch.full(
+                    (global_num_experts,), fill_value=-1, dtype=torch.int32
+                )
+                expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
             expert_map = expert_map.to(device=device, dtype=torch.int32)
 
         return RankTensors(
