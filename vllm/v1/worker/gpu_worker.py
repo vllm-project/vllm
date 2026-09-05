@@ -844,14 +844,6 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
-        # Warmup is over on every path that reaches here. A completed capture
-        # locks the workspace itself, but capture_model() returns early when
-        # both capture modes are disabled and is skipped entirely under
-        # enforce_eager, so those paths would start serving with the workspace
-        # still growable past the capacity KV sizing was told to expect.
-        if is_workspace_manager_initialized():
-            lock_workspace()
-
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
             hasattr(self, "cudagraph_memory_estimate")
@@ -962,6 +954,15 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        # Every warmup that can size a workspace has run by now. A completed
+        # capture locks it itself, but capture_model() returns early when both
+        # capture modes are disabled and is skipped entirely under
+        # enforce_eager, so those paths would otherwise start serving with the
+        # workspace still growable past the capacity KV sizing was told to
+        # expect. Locking here keeps the sampler warmup above free to grow it.
+        if is_workspace_manager_initialized():
+            lock_workspace()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

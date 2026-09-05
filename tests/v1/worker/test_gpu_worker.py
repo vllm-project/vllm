@@ -139,7 +139,11 @@ def test_warmup_locks_the_workspace_on_every_path(monkeypatch, enforce_eager):
     monkeypatch.setattr(
         gpu_worker_module, "lock_workspace", lambda: events.append("lock")
     )
-    monkeypatch.setattr(gpu_worker_module, "warmup_kernels", lambda *a, **k: None)
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "warmup_kernels",
+        lambda *a, **k: events.append("warmup_kernels"),
+    )
     monkeypatch.setattr(gpu_worker_module, "set_random_seed", lambda seed: None)
     monkeypatch.setattr(gpu_worker_module, "freeze_gc_heap", lambda: None)
     monkeypatch.setattr(
@@ -155,7 +159,10 @@ def test_warmup_locks_the_workspace_on_every_path(monkeypatch, enforce_eager):
 
     worker.compile_or_warm_up_model()
 
-    assert "lock" in events
+    # The warmup below the lock executes real requests, so an attention wrapper
+    # can still grow the workspace there; the lock has to come after it.
+    assert events.index("lock") == len(events) - 1
+    assert "warmup_kernels" in events
     if enforce_eager:
         assert "capture" not in events
 
