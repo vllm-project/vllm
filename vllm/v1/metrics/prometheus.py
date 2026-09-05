@@ -46,7 +46,15 @@ def get_prometheus_registry() -> CollectorRegistry:
     if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
         logger.debug("Using multiprocess registry for prometheus metrics")
         registry = CollectorRegistry()
-        multiprocess.MultiProcessCollector(registry)
+        try:
+            multiprocess.MultiProcessCollector(registry)
+        except Exception as e:
+            logger.warning(
+                "Failed to initialize MultiProcessCollector for prometheus metrics (%s). "
+                "Falling back to global registry.",
+                e,
+            )
+            return REGISTRY
         return registry
 
     return REGISTRY
