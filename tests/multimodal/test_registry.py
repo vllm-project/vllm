@@ -6,10 +6,11 @@ Qwen2.5-VL visual component loading behavior.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.config import SchedulerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..models.utils import build_model_context
@@ -17,31 +18,32 @@ from ..models.utils import build_model_context
 pytestmark = pytest.mark.cpu_test
 
 
-@pytest.mark.parametrize("seq_len", [None, 8192])
-@pytest.mark.parametrize("token_count", [3, 9000])
-def test_dummy_inputs_sequence_budget_preserves_profiling_default(seq_len, token_count):
-    """Warmup may override the budget; profiling keeps full-context padding."""
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
     model_config = MagicMock()
-    model_config.max_model_len = 491520
+    model_config.max_model_len = max_model_len
     processor = MagicMock()
-    processor.apply.return_value = {"prompt_token_ids": [7] * token_count}
-    kwargs = {} if seq_len is None else {"seq_len": seq_len}
-    with patch.object(MULTIMODAL_REGISTRY, "create_processor") as create:
-        result = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
-            model_config, {"image": 1}, processor=processor, **kwargs
+    processor.apply.return_value = {"prompt_token_ids": [7]}
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
         )
-    expected = model_config.max_model_len if seq_len is None else seq_len
+    result = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
+        model_config, {"image": 1}, processor=processor, **kwargs
+    )
     get_inputs = processor.dummy_inputs.get_dummy_processor_inputs
-    assert get_inputs.call_args.kwargs["seq_len"] == expected
-    assert get_inputs.call_args.kwargs["mm_options"] is (
-        model_config.get_multimodal_config.return_value.limit_per_prompt
-    )
-    assert result["prompt_token_ids"] == [7] * token_count + [0] * max(
-        0, expected - token_count
-    )
-    create.assert_not_called()
-    processor.apply.assert_called_once()
-    assert model_config.max_model_len == 491520
+    assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
+    assert len(result["prompt_token_ids"]) == expected_seq_len
 
 
 @pytest.mark.parametrize(

@@ -247,18 +247,14 @@ class BaseRenderer(ABC, Generic[_T]):
         log_prefix: str,
     ) -> None:
         model_config = self.model_config
-        scheduler_config = self.config.scheduler_config
         mm_limits = {k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0}
-        seq_len = model_config.max_model_len
-        if scheduler_config.enable_chunked_prefill:
-            seq_len = min(seq_len, scheduler_config.max_num_batched_tokens)
 
         start_time = time.perf_counter()
         _ = mm_registry.get_dummy_mm_inputs(
             model_config,
             mm_counts=dict.fromkeys(mm_limits, 1),
             processor=processor,
-            seq_len=seq_len,
+            scheduler_config=self.config.scheduler_config,
         )
 
         elapsed = time.perf_counter() - start_time

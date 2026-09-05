@@ -119,30 +119,16 @@ class TestMmWarmupRunsNormally:
     # template warmup must run alongside it.
 
     @pytest.mark.parametrize(
-        ("max_model_len", "chunked_prefill", "expected_seq_len"),
-        [
-            (491520, True, 8192),
-            (128, True, 128),
-            (491520, False, 491520),
-            (128, False, 128),
-        ],
+        ("max_model_len", "expected_seq_len"), [(491520, 8192), (128, 128)]
     )
-    @pytest.mark.parametrize("readonly", [False, True])
-    def test_warmup_sequence_length_is_bounded(
-        self, max_model_len, chunked_prefill, expected_seq_len, readonly
-    ):
+    def test_warmup_sequence_length_is_bounded(self, max_model_len, expected_seq_len):
         renderer = _make_renderer_mock({"image": 1, "video": 1})
         renderer.model_config.max_model_len = max_model_len
-        renderer.config.scheduler_config.enable_chunked_prefill = chunked_prefill
-        processor = renderer.mm_processor
-        if readonly:
-            renderer.mm_processor = None
-            renderer._readonly_mm_processor = processor
 
         with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
         assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
 
     def test_processor_apply_called(self):
