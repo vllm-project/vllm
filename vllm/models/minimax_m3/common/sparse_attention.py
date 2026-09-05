@@ -27,6 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 # AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
 # every other platform uses the generic common.ops implementation.
@@ -66,6 +67,13 @@ def _minimax_m3_aiter_sparse_pa_requested() -> bool:
     return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
 
 
+# K/V sides sharing one block, which is how many sides' pages a block spans.
+# The attend publishes two head slots and the indexer's side cache one, and
+# specs that mix HNC shapes narrow the resolved layout to a block-compact one
+# (LHBNC is not), so this path always lands on an interleaved block.
+PAGE16_SIDES_PER_BLOCK = 2
+
+
 def minimax_m3_rebase_slots_to_page16(
     slot_mapping: torch.Tensor,
     block_size: int,
@@ -84,8 +92,28 @@ def minimax_m3_rebase_slots_to_page16(
         out = torch.empty_like(slot_mapping)
     torch.clamp(slot_mapping, min=0, out=out)
     return (
-        out.div_(block_size, rounding_mode="floor").mul_(block_size).add_(slot_mapping)
+        out.div_(block_size, rounding_mode="floor")
+        .mul_(block_size * (PAGE16_SIDES_PER_BLOCK - 1))
+        .add_(slot_mapping)
     )
+
+
+def minimax_m3_rebase_block_table_to_page16(
+    block_table: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Rebase a logical page table onto AITER's page-16 page numbering.
+
+    The page ids AITER's top-k emits for the attend are
+    ``block_table[blk] * pages_per_block + j``, and ``pages_per_block`` is fixed
+    at AITER build time to one side's pages. An interleaved block spans both
+    sides, so the only way to reach its pages through that kernel is to hand it
+    a table already scaled to the wider stride. Done here once per step, since
+    every sparse layer resolves its selection through the same table.
+    """
+    if out is None:
+        out = torch.empty_like(block_table)
+    return torch.mul(block_table, PAGE16_SIDES_PER_BLOCK, out=out)
 
 
 def minimax_m3_query_token_positions(
@@ -109,13 +137,23 @@ def minimax_m3_query_token_positions(
     return query_req_id, query_abs_pos
 
 
-def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype."""
+def minimax_m3_use_aiter_sparse_pa(
+    num_kv_heads: int, *, emits_sparse_block_table: bool = False
+) -> bool:
+    """Whether to use the ROCm AITER page-16 sparse PA prototype.
+
+    More than one KV head per rank is only servable off the page table the
+    indexer's top-k emits, which folds the head into the page id. The Triton
+    builders this path otherwise falls back to write one row per token with
+    unfolded ids, which address a single head's cache.
+    """
     requested = _minimax_m3_aiter_sparse_pa_requested()
-    if requested and num_kv_heads != 1:
+    if requested and num_kv_heads != 1 and not emits_sparse_block_table:
         raise ValueError(
             "MiniMax M3 AITER sparse paged attention requires "
-            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}."
+            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
+            "unless the indexer emits the page table. Select the AITER indexer "
+            "with an fp8 index cache to enable more heads per rank."
         )
     return requested
 
@@ -190,6 +228,11 @@ class MiniMaxM3SparsePrefillMetadata:
     query_req_id: torch.Tensor | None = None
     query_abs_pos: torch.Tensor | None = None
 
+    # ``block_table`` scaled to the page-16 numbering, for the indexer top-k
+    # that emits the attend's page table. See
+    # ``minimax_m3_rebase_block_table_to_page16``.
+    page16_block_table: torch.Tensor | None = None
+
 
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
@@ -199,6 +242,11 @@ class MiniMaxM3SparseDecodeMetadata:
     seq_lens: torch.Tensor  # [num_decodes] int32
     block_table: torch.Tensor
     decode_query_len: int
+
+    # ``block_table`` scaled to the page-16 numbering, for the indexer top-k
+    # that emits the attend's page table. See
+    # ``minimax_m3_rebase_block_table_to_page16``.
+    page16_block_table: torch.Tensor | None = None
 
 
 @dataclass
@@ -249,17 +297,33 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
             dtype=torch.int32,
             device=device,
         )
-        # Every sparse layer shares one slot mapping, so the AITER page-16
-        # rebase is done here once per step instead of once per layer. Stable
-        # buffer for the same reason as the context lengths above.
-        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
-            kv_cache_spec.num_kv_heads
-        )
+        # Every sparse layer shares one slot mapping and one block table, so the
+        # AITER page-16 rebases are done here once per step instead of once per
+        # layer. Stable buffers for the same reason as the context lengths
+        # above: build() runs outside the graph, so the addresses a replay holds
+        # have to be refreshed in place.
+        #
+        # Whether more than one KV head per rank is servable is a property of
+        # the impl the layer selected, not of this builder; model.py has already
+        # resolved it (and raised) by the time a builder exists.
+        self.use_aiter_sparse_pa = _minimax_m3_aiter_sparse_pa_requested()
         self.page16_slot_mapping_buffer: torch.Tensor | None = None
+        self.page16_block_table_buffer: torch.Tensor | None = None
         if self.use_aiter_sparse_pa:
             self.page16_slot_mapping_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 dtype=torch.int64,
+                device=device,
+            )
+            self.page16_block_table_buffer = torch.empty(
+                (
+                    vllm_config.scheduler_config.max_num_seqs,
+                    cdiv(
+                        vllm_config.model_config.max_model_len,
+                        kv_cache_spec.block_size,
+                    ),
+                ),
+                dtype=torch.int32,
                 device=device,
             )
 
@@ -284,6 +348,20 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         )
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
+
+        page16_block_table = None
+        if self.page16_block_table_buffer is not None:
+            rows, cols = block_table.shape
+            # An out= that does not already match gets resized, which would move
+            # the address a captured replay writes through.
+            max_rows, max_cols = self.page16_block_table_buffer.shape
+            assert rows <= max_rows and cols <= max_cols, (
+                f"block table {(rows, cols)} exceeds the page-16 rebase buffer "
+                f"{tuple(self.page16_block_table_buffer.shape)}"
+            )
+            page16_block_table = minimax_m3_rebase_block_table_to_page16(
+                block_table, out=self.page16_block_table_buffer[:rows, :cols]
+            )
 
         # Decode-first batch: context lengths into the stable cudagraph buffer.
         context_lens = self.context_len_buffer[:num_reqs]
@@ -327,6 +405,11 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
                 total_kv_blocks=prefill_total_kv_blocks,
                 query_req_id=query_req_id,
                 query_abs_pos=query_abs_pos,
+                page16_block_table=(
+                    None
+                    if page16_block_table is None
+                    else page16_block_table[num_decodes:]
+                ),
             )
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
@@ -343,6 +426,11 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],
                 decode_query_len=decode_query_len,
+                page16_block_table=(
+                    None
+                    if page16_block_table is None
+                    else page16_block_table[:num_decodes]
+                ),
             )
 
         page16_slot_mapping = None
@@ -514,6 +602,7 @@ def select_main_backend_and_impl_cls(
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
+    emits_sparse_block_table: bool = False,
 ) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
     """Pick the main attention backend and implementation.
 
@@ -523,7 +612,9 @@ def select_main_backend_and_impl_cls(
     back to Triton. The MSA modules are imported lazily to avoid import errors
     on unsupported platforms.
     """
-    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
+    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
+        num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
+    )
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -560,10 +651,12 @@ def select_main_impl_cls(
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
+    emits_sparse_block_table: bool = False,
 ) -> type[MiniMaxM3SparseImpl]:
     """Backward-compatible implementation-only selector."""
     return select_main_backend_and_impl_cls(
         topk_blocks=topk_blocks,
         kv_cache_dtype=kv_cache_dtype,
         num_kv_heads=num_kv_heads,
+        emits_sparse_block_table=emits_sparse_block_table,
     )[1]
