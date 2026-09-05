@@ -326,6 +326,23 @@ def select_unquantized_moe_backend(
     )
 
 
+def aiter_moe_intermediate_alignment(intermediate: int) -> int:
+    """Intermediate-size alignment required by AITER's CK 2stages MoE heuristic.
+
+    With no tuned config, AITER dispatches on ``inter_dim <= 192``: below the
+    threshold both stages use 64-wide tiles, above it at least one stage uses a
+    128-wide tile at every reachable ``block_m`` (stage 1 checks
+    ``inter_dim % NPerBlock``, stage 2 ``inter_dim % KPerBlock``), and CK's
+    ``IsSupportedArgument`` rejects the shape otherwise. Mirror that split rather
+    than always padding to 128: ``inter_dim == 192`` is unaligned but valid, and
+    padding it would miss its tuned-config rows (``inter_dim`` is a lookup key).
+
+    Rounding up never crosses the branch boundary (the largest sub-192 input
+    rounds to 192), so the result always satisfies the branch it dispatches to.
+    """
+    return 64 if intermediate <= 192 else 128
+
+
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
     moe_config: FusedMoEConfig,
@@ -333,6 +350,8 @@ def convert_to_unquantized_kernel_format(
     w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
+        # Intermediate padding is applied at allocation time by
+        # UnquantizedFusedMoEMethod.maybe_roundup_sizes.
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
         w13_weight.is_shuffled = True
         w2_weight.is_shuffled = True

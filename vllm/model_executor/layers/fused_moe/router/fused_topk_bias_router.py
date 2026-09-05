@@ -109,6 +109,23 @@ def _aiter_get_num_expert_group(num_experts: int) -> int:
     while num_experts % g != 0:
         g += 1
     assert num_experts % g == 0, f"{num_experts=} not divisible by {g=}"
+    # The AITER biased_grouped_topk kernel is only instantiated for
+    # NUM_GRP in {1, 2, 4, 8}. Round the group count to a kernel-supported
+    # power of two that still divides num_experts. Grouping is a no-op here
+    # (topk_group == num_expert_group), so any such value gives identical
+    # routing; prefer the largest one to keep groups small. If no supported
+    # count fits, keep g as-is: it fails the topk >= num_expert_group check
+    # at the call site, so routing falls back to the generic path.
+    if g not in (1, 2, 4, 8):
+        g = next(
+            (
+                c
+                for c in (8, 4, 2)
+                if num_experts % c == 0
+                and num_experts // c <= _AITER_MAX_EXPERTS_PER_GROUP
+            ),
+            g,
+        )
     assert num_experts // g <= _AITER_MAX_EXPERTS_PER_GROUP, (
         f"group size {num_experts // g} exceeds limit {_AITER_MAX_EXPERTS_PER_GROUP}"
     )
