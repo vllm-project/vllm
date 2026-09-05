@@ -15,6 +15,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -2177,6 +2178,23 @@ class Scheduler(SchedulerInterface):
                     else scheduler_kv_connector_stats
                 )
 
+        # Worker-side EC connector stats from the model runner output.
+        ec_connector_stats: ECConnectorStats | None = (
+            ec_connector_output.ec_connector_stats if ec_connector_output else None
+        )
+        if self.ec_connector:
+            # Scheduler-side EC connector stats collected after connector update.
+            scheduler_ec_connector_stats = self.ec_connector.get_ec_connector_stats()
+            if (
+                scheduler_ec_connector_stats is not None
+                and not scheduler_ec_connector_stats.is_empty()
+            ):
+                ec_connector_stats = (
+                    ec_connector_stats.aggregate(scheduler_ec_connector_stats)
+                    if ec_connector_stats is not None
+                    else scheduler_ec_connector_stats
+                )
+
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
@@ -2221,6 +2239,7 @@ class Scheduler(SchedulerInterface):
                 kv_connector_stats,
                 cudagraph_stats,
                 perf_stats,
+                ec_connector_stats=ec_connector_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2688,6 +2707,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
+        ec_connector_stats: ECConnectorStats | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2706,6 +2726,9 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.to_dict() if kv_connector_stats else None
         )
+        ec_connector_stats_payload = (
+            ec_connector_stats.data if ec_connector_stats else None
+        )
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -2718,6 +2741,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
+            ec_connector_stats=ec_connector_stats_payload,
         )
 
     def make_spec_decoding_stats(

@@ -18,6 +18,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -5188,6 +5189,86 @@ def test_scheduler_kv_connector_stats():
         final_stats = next(
             iter(engine_core_outputs.values())
         ).scheduler_stats.kv_connector_stats
+        assert final_stats == expected_data
+
+
+def test_scheduler_ec_connector_stats():
+    """Test worker-side, scheduler-side, and combined EC connector stats."""
+
+    class GenericECConnectorStats(ECConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: ECConnectorStats) -> ECConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    test_cases = (
+        ({"worker": 1}, None, {"worker": 1}),
+        (None, {"scheduler": 2}, {"scheduler": 2}),
+        ({"worker": 1}, {"scheduler": 2}, {"worker": 1, "scheduler": 2}),
+    )
+
+    for worker_data, scheduler_data, expected_data in test_cases:
+        scheduler = create_scheduler()
+        worker_stats = (
+            GenericECConnectorStats(data=worker_data) if worker_data else None
+        )
+        scheduler_stats = (
+            GenericECConnectorStats(data=scheduler_data) if scheduler_data else None
+        )
+        scheduler.ec_connector = Mock()
+        scheduler.ec_connector.get_ec_connector_stats.return_value = (
+            scheduler_stats if worker_stats is None else None
+        )
+
+        def update_connector_output(
+            ec_connector_output: ECConnectorOutput,
+            scheduler=scheduler,
+            scheduler_stats=scheduler_stats,
+        ):
+            scheduler.ec_connector.get_ec_connector_stats.return_value = scheduler_stats
+
+        scheduler.ec_connector.update_connector_output.side_effect = (
+            update_connector_output
+        )
+
+        model_output = ModelRunnerOutput(
+            req_ids=["req_0"],
+            req_id_to_index={"req_0": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            ec_connector_output=ECConnectorOutput(ec_connector_stats=worker_stats)
+            if worker_stats
+            else None,
+        )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=None,
+            num_scheduled_tokens={"req_0": 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[0],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+
+        final_stats = next(
+            iter(engine_core_outputs.values())
+        ).scheduler_stats.ec_connector_stats
         assert final_stats == expected_data
 
 
