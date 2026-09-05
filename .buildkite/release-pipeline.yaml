@@ -959,6 +959,24 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
+  - trigger: "perf-eval"
+    label: "Trigger perf-eval"
+    key: trigger-perf-eval
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
+    depends_on:
+      - build-release-image-x86
+      - build-rocm-release-image
+    async: true
+    soft_fail: true
+    build:
+      branch: "main"
+      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT"
+      env:
+        NIGHTLY: 1 # run all perf-eval workloads
+        VLLM_COMMIT: "$BUILDKITE_COMMIT"
+        VLLM_IMAGE_CUDA: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
+        VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
+
   # =============================================================================
   # ROCk Release Pipeline (x86_64 only)
   # =============================================================================
