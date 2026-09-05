@@ -177,6 +177,11 @@ class Scheduler(SchedulerInterface):
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
+        # Build list of all connectors that can signal pending push work, so
+        # has_requests() stays general as new connector types are added.
+        self._push_connectors = [
+            c for c in [self.connector, self.ec_connector] if c is not None
+        ]
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -2598,16 +2603,10 @@ class Scheduler(SchedulerInterface):
         # connector still has pending push work (e.g. push-mode WRITE transfers
         # in flight after all "live" requests have finished). Without this hook
         # the engine would quiesce before the connector can drain completions.
-        # TODO: replace with a more general mechanism for connectors to keep
-        # the scheduler alive.
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
-            or (self.connector is not None and self.connector.has_pending_push_work())
-            or (
-                self.ec_connector is not None
-                and self.ec_connector.has_pending_push_work()
-            )
+            or any(c.has_pending_push_work() for c in self._push_connectors)
         )
 
     def reset_prefix_cache(

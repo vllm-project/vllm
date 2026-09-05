@@ -5110,6 +5110,37 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     assert not scheduler.has_finished_requests()
 
 
+
+
+def test_push_connectors_generalizes_has_requests():
+    """has_requests() must use _push_connectors generically.
+
+    Any object with has_pending_push_work() -> True added to
+    _push_connectors should keep the scheduler alive without
+    modifying has_requests() itself.  This validates the
+    generalisation introduced to resolve the hardcoded-connector TODO.
+    """
+    scheduler = create_scheduler()
+
+    # Baseline: no requests, no pending work.
+    assert not scheduler.has_unfinished_requests()
+    assert not scheduler.has_finished_requests()
+    assert not scheduler.has_requests()
+
+    # Inject a connector that reports pending push work.
+    mock_active = Mock()
+    mock_active.has_pending_push_work.return_value = True
+    scheduler._push_connectors = [mock_active]
+    assert scheduler.has_requests(), (
+        "has_requests() must return True when a connector has pending push work"
+    )
+
+    # Once push work drains, scheduler should be idle again.
+    mock_active.has_pending_push_work.return_value = False
+    assert not scheduler.has_requests(), (
+        "has_requests() must return False when all connectors report no pending work"
+    )
+
 def test_scheduler_kv_connector_stats():
     """Test worker-side, scheduler-side, and combined KV connector stats."""
 
