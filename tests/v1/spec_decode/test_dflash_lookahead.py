@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import torch
 
@@ -152,3 +152,26 @@ def test_dflash_drafter_window_reserves_bonus_token():
         speculative_config=SimpleNamespace(use_dflash=lambda: False),
     )
     assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
+
+
+def test_skipped_drafter_returns_empty_draft_tokens():
+    runner = SimpleNamespace(
+        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
+        input_batch=SimpleNamespace(req_ids=["req0", "req1"]),
+        _draft_token_ids=None,
+        _draft_token_req_ids=None,
+        _draft_probs=object(),
+        _draft_prob_req_ids=["old_req"],
+    )
+    runner._get_draft_token_ids_cpu = MethodType(
+        GPUModelRunner._get_draft_token_ids_cpu, runner
+    )
+
+    GPUModelRunner._set_empty_draft_token_ids(runner)
+    draft_token_ids = GPUModelRunner.take_draft_token_ids(runner)
+
+    assert draft_token_ids is not None
+    assert draft_token_ids.req_ids == ["req0", "req1"]
+    assert draft_token_ids.draft_token_ids == [[], []]
+    assert runner._draft_probs is None
+    assert runner._draft_prob_req_ids is None
