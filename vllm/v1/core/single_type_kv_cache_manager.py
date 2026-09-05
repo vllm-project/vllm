@@ -467,11 +467,8 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [request.num_prompt_tokens - 1]
-        if request.shared_prefix_boundary:
-            reachable_boundaries.append(request.shared_prefix_boundary)
+        # retention: the replay hit and any shared-prefix junction.
+        reachable_boundaries = self._reachable_hit_boundaries(request)
 
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
@@ -494,6 +491,54 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+
+    def _partial_tail_boundaries(self, request: Request) -> tuple[int, ...]:
+        """Prefix lengths to publish as partial entries inside a cache block.
+
+        Empty (the default) disables partial-tail publication for the type.
+        """
+        return ()
+
+    def _publish_partial_tail(self, request: Request, num_tokens: int) -> None:
+        """Make prompt-tail prefixes that end inside a cache block reachable.
+
+        Callers opt in from their own ``cache_blocks``; the base never calls
+        this. Whether a mid-block prefix is replayable is type-specific, so the
+        decision stays with each manager.
+        """
+        if self.block_size == self.block_pool.hash_block_size:
+            return
+        boundaries = self._partial_tail_boundaries(request)
+        if not boundaries:
+            return
+
+        blocks = self.req_to_blocks[request.request_id]
+        # Deepest prefix first: it stays the block's primary hash and the
+        # shallower ones attach as aliases rather than evicting it.
+        for boundary_tokens in sorted(set(boundaries), reverse=True):
+            if (
+                boundary_tokens <= 0
+                or boundary_tokens > num_tokens
+                or boundary_tokens % self.block_size == 0
+            ):
+                continue
+            block_idx = boundary_tokens // self.block_size
+            # RSWA nulls out blocks that fall behind its window; never alias one.
+            if block_idx >= len(blocks) or blocks[block_idx].is_null:
+                continue
+            self.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=boundary_tokens,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
+
+    def _reachable_hit_boundaries(self, request: Request) -> list[int]:
+        boundaries = [request.num_prompt_tokens - 1]
+        if request.shared_prefix_boundary:
+            boundaries.append(request.shared_prefix_boundary)
+        return boundaries
 
     @classmethod
     def reachable_block_mask(
@@ -561,6 +606,19 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         raise NotImplementedError
+
+    @classmethod
+    def eagle_drop_tokens(cls, block_size: int, alignment_tokens: int) -> int:
+        """Tokens the eagle peek drops from a matched endpoint.
+
+        The coordinator widens its lookup bound by this amount so the peek can
+        still land on the candidate length. Managers may override this when
+        their usable proof endpoints have a coarser replay quantum than their
+        hash lookup alignment.
+        """
+        if cls.supports_fine_grained_hash_lookup and alignment_tokens < block_size:
+            return alignment_tokens
+        return block_size
 
     @classmethod
     @abstractmethod
@@ -808,40 +866,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         retention_interval: int | None = None,
     ) -> None:
         super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        self._publish_partial_tail(request, num_tokens)
+
+    def _partial_tail_boundaries(self, request: Request) -> tuple[int, ...]:
+        # Only the final prompt hash boundary; intermediate hash boundaries
+        # inside the same cache block are intentionally skipped.
         hash_block_size = self.block_pool.hash_block_size
-        if self.block_size == hash_block_size:
-            return
-        self._cache_partial_tail_block(request, num_tokens)
-
-    def _cache_partial_tail_block(
-        self,
-        request: Request,
-        num_tokens: int,
-    ) -> None:
-        """Cache the prompt tail when it ends inside a cache block.
-
-        Only the final prompt hash boundary is registered as a partial
-        prefix-cache entry; intermediate hash boundaries inside the same cache
-        block are intentionally skipped.
-        """
-        hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
-        if boundary_tokens == 0 or boundary_tokens > num_tokens:
-            return
-        if boundary_tokens % self.block_size == 0:
-            return
-
-        blocks = self.req_to_blocks[request.request_id]
-        block_idx = boundary_tokens // self.block_size
-        if block_idx >= len(blocks):
-            return
-        self.block_pool.cache_partial_block(
-            request=request,
-            block=blocks[block_idx],
-            num_tokens=boundary_tokens,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_size=self.block_size,
-        )
+        return (request.num_prompt_tokens // hash_block_size * hash_block_size,)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -901,6 +932,8 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    supports_fine_grained_hash_lookup: ClassVar[bool] = True
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
@@ -908,6 +941,39 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # multi-module MTP store-side lag can still reconstruct the window from
         # cached blocks.
         self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
+
+    @classmethod
+    def eagle_drop_tokens(cls, block_size: int, alignment_tokens: int) -> int:
+        # Sparse prompt-tail aliases do not exist at every hash boundary. A
+        # physical-page peek always reaches a page endpoint that can prove the
+        # post-drop SWA window, including after fixed-point reconciliation.
+        return block_size
+
+    def _reachable_hit_boundaries(self, request: Request) -> list[int]:
+        boundaries = super()._reachable_hit_boundaries(request)
+        hash_block_size = self.block_pool.hash_block_size
+        if hash_block_size >= self.block_size:
+            return boundaries
+
+        # The lookup is capped at ``num_prompt_tokens - 1``. Convert that cap to
+        # the actual reusable hit before handing it to retention; shared prefix
+        # boundaries are already post-reconciliation hit positions.
+        endpoint = boundaries[0] // hash_block_size * hash_block_size
+        replay_hit = endpoint - self.block_size if self.use_eagle else endpoint
+        boundaries[0] = max(0, replay_hit)
+
+        # A different hybrid group can still rewind reconciliation to the
+        # scheduler-aligned hit that was reachable before fine lookup was
+        # enabled. Keep its SWA page span as a compatibility floor; otherwise
+        # sparse retention can turn an existing coarse hit into a miss.
+        coarse_hit = (
+            (request.num_prompt_tokens - 1)
+            // self.scheduler_block_size
+            * self.scheduler_block_size
+        )
+        if coarse_hit not in boundaries:
+            boundaries.append(coarse_hit)
+        return boundaries
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -940,9 +1006,21 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
-        # Sliding-window cache hits must stay at the group's physical block
-        # granularity. resolve_block_hashes() converts finer-grained hashes to
-        # that view when the hybrid-cache alignment is smaller than block_size.
+        block_size = kv_cache_spec.block_size
+        if alignment_tokens < block_size:
+            assert block_size % alignment_tokens == 0
+            assert alignment_tokens == block_pool.hash_block_size
+            return cls._find_fine_grained_cache_hit(
+                block_hashes=block_hashes,
+                max_length=max_length,
+                kv_cache_group_ids=kv_cache_group_ids,
+                block_pool=block_pool,
+                kv_cache_spec=kv_cache_spec,
+                drop_eagle_block=drop_eagle_block,
+                alignment_tokens=alignment_tokens,
+            )
+
+        assert alignment_tokens % block_size == 0
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -966,7 +1044,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
-        block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
@@ -1021,6 +1098,98 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return computed_blocks, hit_length
 
     @classmethod
+    def _find_fine_grained_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: SlidingWindowSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """Find a hash-granularity SWA hit backed by physical cache pages.
+
+        Candidate endpoints are the physical pages and the sparse partial-block
+        entries published by producers. An endpoint is usable only when every
+        physical page intersecting the post-eagle sliding window is still
+        cached. Returned lists stay in physical-page units, with nulls
+        preserving global block table indices before the live window.
+        """
+        assert isinstance(block_hashes, Sequence)
+        block_size = kv_cache_spec.block_size
+        max_endpoint = (
+            min(
+                max_length // alignment_tokens,
+                len(block_hashes),
+            )
+            * alignment_tokens
+        )
+        eagle_drop = (
+            cls.eagle_drop_tokens(block_size, alignment_tokens)
+            if drop_eagle_block
+            else 0
+        )
+
+        for endpoint in range(max_endpoint, eagle_drop, -alignment_tokens):
+            endpoint_hash = block_hashes[endpoint // alignment_tokens - 1]
+            endpoint_blocks = block_pool.get_cached_block(
+                endpoint_hash, kv_cache_group_ids
+            )
+            if endpoint_blocks is None:
+                continue
+
+            hit_length = endpoint - eagle_drop
+            window_start = max(0, hit_length - (kv_cache_spec.sliding_window - 1))
+            first_page = window_start // block_size
+            end_page = cdiv(hit_length, block_size)
+            endpoint_page = (endpoint - 1) // block_size
+            computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+                [block_pool.null_block] * end_page
+                for _ in range(len(kv_cache_group_ids))
+            )
+
+            complete = True
+            for page_idx in range(first_page, end_page):
+                cached: list[KVCacheBlock] | None
+                if page_idx == endpoint_page:
+                    cached = endpoint_blocks
+                else:
+                    page_end = (page_idx + 1) * block_size
+                    page_hash = block_hashes[page_end // alignment_tokens - 1]
+                    cached = block_pool.get_cached_block(page_hash, kv_cache_group_ids)
+                if cached is None:
+                    complete = False
+                    break
+                for group_blocks, block in zip(computed_blocks, cached):
+                    group_blocks[page_idx] = block
+
+            if complete:
+                return computed_blocks, hit_length
+
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
+        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        self._publish_partial_tail(request, num_tokens)
+
+    def _partial_tail_boundaries(self, request: Request) -> tuple[int, ...]:
+        # floor(N / H) serves a longer consumer; floor((N - 1) / H) is the
+        # latest endpoint an immediate replay can query, since lookup is capped
+        # at N - 1.
+        hash_block_size = self.block_pool.hash_block_size
+        prompt_tokens = request.num_prompt_tokens
+        return (
+            prompt_tokens // hash_block_size * hash_block_size,
+            (prompt_tokens - 1) // hash_block_size * hash_block_size,
+        )
+
+    @classmethod
     def reachable_block_mask(
         cls,
         start_block: int,
@@ -1037,7 +1206,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Fast path: when the coordinator imposes no alignment constraint.
             return None
         block_size = kv_cache_spec.block_size * dcp_world_size
-        if alignment_tokens % block_size != 0:
+        fine_grained = (
+            dcp_world_size == 1 and alignment_tokens < kv_cache_spec.block_size
+        )
+        if not fine_grained and alignment_tokens % block_size != 0:
             # The mask is block-granular, so a sub-block alignment cannot be
             # represented exactly. This happens for hybrid offloading, where
             # ``alignment_tokens`` is the full-attention chunk size and need not
@@ -1045,6 +1217,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # Gemma). Fall back to dense: every block is reachable, which never
             # drops a block that could serve a hit.
             return None
+        if fine_grained:
+            assert kv_cache_spec.block_size % alignment_tokens == 0
 
         # Contiguous blocks a hit needs at a boundary (incl. the EAGLE peek).
         need = cls._contiguous_blocks_for_hit(
@@ -1069,6 +1243,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             else (None if retention_interval == 0 else retention_interval)
         )
         if segment_tokens is not None:
+            if segment_tokens < block_size:
+                return None
             per_segment = segment_tokens // block_size
             if need >= per_segment:
                 # Every block is reachable; cache them all.
@@ -1083,10 +1259,24 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # the ``need``-block tail ending on each boundary explicitly.
         if retention_interval is not None:
             for boundary_tokens in reachable_boundaries:
-                aligned = boundary_tokens // alignment_tokens * alignment_tokens
-                end = aligned // block_size + shift
-                for j in range(max(start_block, end - need), min(end_block, end)):
-                    mask[j - start_block] = True
+                if fine_grained:
+                    hit = boundary_tokens // alignment_tokens * alignment_tokens
+                    endpoint = hit + block_size if use_eagle else hit
+                    first = (
+                        max(0, hit - (kv_cache_spec.sliding_window - 1)) // block_size
+                    )
+                    end = cdiv(hit, block_size)
+                    for j in range(max(start_block, first), min(end_block, end)):
+                        mask[j - start_block] = True
+                    if use_eagle and endpoint > 0:
+                        endpoint_page = (endpoint - 1) // block_size
+                        if start_block <= endpoint_page < end_block:
+                            mask[endpoint_page - start_block] = True
+                else:
+                    aligned = boundary_tokens // alignment_tokens * alignment_tokens
+                    end = aligned // block_size + shift
+                    for j in range(max(start_block, end - need), min(end_block, end)):
+                        mask[j - start_block] = True
 
         return mask
 

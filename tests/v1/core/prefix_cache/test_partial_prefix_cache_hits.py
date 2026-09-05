@@ -14,6 +14,8 @@ import torch
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager, make_request
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.utils.hashing import sha256
+from vllm.utils.math_utils import cdiv
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
     get_block_hash,
@@ -21,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KpoolTailSpec,
@@ -1731,7 +1734,7 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
 
 
-def test_hybrid_sliding_window_group_disables_partial_hash_hits():
+def test_hybrid_sliding_window_group_supports_partial_hash_hits():
     hash_block_size = 2
     sliding_window_block_size = 2 * hash_block_size
     mamba_block_size = 2 * sliding_window_block_size
@@ -1766,7 +1769,7 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
                     dtype=torch.float32,
                     sliding_window=sliding_window_block_size,
                 ),
-                is_eagle_group=True,
+                is_eagle_group=False,
             ),
         ],
     )
@@ -1775,13 +1778,13 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=hash_block_size,
-        use_eagle=True,
+        use_eagle=False,
     )
 
-    tokens = list(range(3 * sliding_window_block_size))
+    tokens = list(range(mamba_block_size + hash_block_size))
     request = make_request("0", tokens, hash_block_size, sha256)
     computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
-    assert not manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator.enable_partial_hash_hits
     assert (
         manager.allocate_slots(request, mamba_block_size, num_computed, computed_blocks)
         is not None
@@ -1798,8 +1801,474 @@ def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     )
     computed_blocks, num_computed, _ = manager.get_computed_blocks(cached_request)
 
-    assert num_computed == mamba_block_size
+    assert num_computed == len(tokens)
     assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
+    swa_source = computed_blocks.blocks[2][-1]
+    assert (
+        manager.allocate_slots(cached_request, 2, num_computed, computed_blocks)
+        is not None
+    )
+    copies, retained = manager.take_kv_cache_block_copies()
+    swa_tail = manager.get_blocks(cached_request.request_id).blocks[2][-1]
+    assert KVCacheBlockCopy(swa_source.block_id, swa_tail.block_id) in copies
+    manager.block_pool.free_blocks(retained)
+
+
+def test_hybrid_sliding_fine_retains_scheduler_fallback():
+    """Fine SWA retention must not discard the previous coarse hit.
+
+    Full attention can reach the 12-token hash boundary, but align-mode Mamba
+    rewinds the joint hit to 8. The SWA producer must retain both page spans so
+    reconciliation can use 8 instead of collapsing to zero.
+    """
+    hash_block_size = 2
+    sliding_window_block_size = 2 * hash_block_size
+    mamba_block_size = 2 * sliding_window_block_size
+    manager = _make_swa_eagle_mamba_manager(
+        hash_block_size,
+        sliding_window_block_size,
+        mamba_block_size,
+        use_eagle=False,
+        retention_interval=0,
+    )
+
+    tokens = list(range(14))
+    owner = make_request("owner", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(owner)
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator.retention_interval == 0
+    assert (
+        manager.allocate_slots(owner, mamba_block_size, num_computed, computed_blocks)
+        is not None
+    )
+    owner.num_computed_tokens = mamba_block_size
+    manager.new_step_starts()
+    assert manager.allocate_slots(owner, len(tokens) - mamba_block_size) is not None
+    owner.num_computed_tokens = len(tokens)
+    manager.free(owner)
+    manager.new_step_starts()
+
+    replay = make_request("replay", tokens, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == mamba_block_size, num_computed
+
+
+def _make_swa_eagle_mamba_manager(
+    hash_block_size: int,
+    sliding_window_block_size: int,
+    mamba_block_size: int,
+    use_eagle: bool = True,
+    retention_interval: int | None = None,
+):
+    """Full + align-mode Mamba + an optional EAGLE SWA draft group."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        prefix_cache_retention_interval=retention_interval,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa_draft"],
+                SlidingWindowSpec(
+                    block_size=sliding_window_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window_block_size,
+                ),
+                is_eagle_group=use_eagle,
+            ),
+        ],
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+    )
+
+
+def _run_swa_eagle_replay(manager, hash_block_size: int, mamba_block_size: int) -> int:
+    """Prefill a producer in two chunks, free it, and replay a longer request."""
+    tokens = list(range(22))
+    owner = make_request("owner", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(owner)
+    assert (
+        manager.allocate_slots(owner, mamba_block_size, num_computed, computed_blocks)
+        is not None
+    )
+    owner.num_computed_tokens = mamba_block_size
+    manager.new_step_starts()
+    assert manager.allocate_slots(owner, len(tokens) - mamba_block_size) is not None
+    owner.num_computed_tokens = len(tokens)
+    manager.free(owner)
+    manager.new_step_starts()
+
+    replay = make_request("replay", tokens + [22, 23], hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(replay)
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.allocate_slots(replay, 2, num_computed, computed_blocks) is not None
+    return num_computed
+
+
+def test_hybrid_sliding_eagle_converges_to_mamba_checkpoint():
+    """A fine EAGLE boundary can sit between restorable Mamba states.
+
+    The peek must span one SWA page, not one hash unit: a shorter peek misses
+    the next matchable endpoint and reconciliation rewinds to zero.
+    """
+    hash_block_size = 2
+    sliding_window_block_size = 2 * hash_block_size
+    mamba_block_size = 2 * sliding_window_block_size
+    manager = _make_swa_eagle_mamba_manager(
+        hash_block_size, sliding_window_block_size, mamba_block_size
+    )
+
+    # SWA hits walk 18 -> 8 -> 8 and settle on the Mamba checkpoint.
+    assert (
+        _run_swa_eagle_replay(manager, hash_block_size, mamba_block_size)
+        == mamba_block_size
+    )
+
+
+def test_hybrid_sliding_eagle_hash_unit_peek_collapses_hit(monkeypatch):
+    """Negative control: dropping SWA's page-sized peek override breaks the hit.
+
+    Falling back to the base hash-unit quantum makes the peek land between
+    published endpoints, so the fixed point walks 20 -> 6 -> 0 instead.
+    """
+    monkeypatch.delattr(SlidingWindowManager, "eagle_drop_tokens")
+    hash_block_size = 2
+    sliding_window_block_size = 2 * hash_block_size
+    mamba_block_size = 2 * sliding_window_block_size
+    manager = _make_swa_eagle_mamba_manager(
+        hash_block_size, sliding_window_block_size, mamba_block_size
+    )
+
+    assert _run_swa_eagle_replay(manager, hash_block_size, mamba_block_size) == 0
+
+
+def test_sliding_window_fine_hit_validates_physical_page_span():
+    hash_block_size = 2
+    block_size = 4
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=6,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=16,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    request = make_request("owner", list(range(12)), hash_block_size, sha256)
+    blocks = pool.get_new_blocks(3)
+    pool.cache_full_blocks(request, blocks, 0, 2, block_size, 0)
+    pool.cache_partial_block(request, blocks[2], 10, 0, block_size)
+
+    def find(drop_eagle_block: bool):
+        return SlidingWindowManager.find_longest_cache_hit(
+            block_hashes=request.block_hashes,
+            max_length=10,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=drop_eagle_block,
+            alignment_tokens=hash_block_size,
+        )
+
+    hit_blocks, hit_length = find(False)
+    assert hit_length == 10
+    assert [block.block_id for block in hit_blocks[0]] == [
+        pool.null_block.block_id,
+        blocks[1].block_id,
+        blocks[2].block_id,
+    ]
+
+    # The eagle peek drops one SWA page from endpoint 10.
+    hit_blocks, hit_length = find(True)
+    assert hit_length == 6
+    assert [block.block_id for block in hit_blocks[0]] == [
+        blocks[0].block_id,
+        blocks[1].block_id,
+    ]
+
+    # A live endpoint is insufficient after an interior window page is evicted.
+    pool._maybe_evict_cached_block(blocks[1])
+    _, hit_length = find(False)
+    assert hit_length == 4
+
+
+def test_sliding_window_publishes_latest_reachable_partial_endpoint():
+    hash_block_size = 2
+    block_size = 6
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=6,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    manager = SlidingWindowManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request = make_request("owner", list(range(10)), hash_block_size, sha256)
+    blocks = pool.get_new_blocks(2)
+    manager.req_to_blocks[request.request_id] = blocks
+
+    manager.cache_blocks(request, num_tokens=10)
+
+    # Lookup is capped at N - 1, so an N-aligned prompt also publishes endpoint
+    # 8. Endpoint 10 remains useful to a longer consumer that shares the full
+    # producer prompt; both aliases point at the same physical page.
+    assert pool.get_cached_block(request.block_hashes[3], [0]) == [blocks[1]]
+    assert pool.get_cached_block(request.block_hashes[4], [0]) == [blocks[1]]
+
+    manager.use_eagle = True
+    request.shared_prefix_boundary = 10
+    # Endpoint 8 minus one SWA page is the replay cap. A shared-prefix boundary
+    # is already a reconciled hit and must not be dropped again.
+    # Sparse retention also protects the old scheduler-aligned fallback.
+    assert manager._reachable_hit_boundaries(request) == [2, 10, 6]
+
+
+def test_sliding_window_fine_retention_pins_physical_page_span():
+    hash_block_size = 2
+    block_size = 4
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=6,
+    )
+
+    def retained(boundary: int, use_eagle: bool):
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=4,
+            alignment_tokens=hash_block_size,
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            retention_interval=0,
+            reachable_boundaries=(boundary,),
+        )
+        assert mask is not None
+        return {idx for idx, keep in enumerate(mask) if keep}
+
+    # Reachable boundaries passed to the mask are actual hit positions. The
+    # 8-token non-EAGLE hit's six-token SWA span intersects pages 0-1.
+    assert retained(8, use_eagle=False) == {0, 1}
+    # The 6-token EAGLE hit is proved by endpoint 10, whose page 2 is pinned on
+    # top of the window pages 0-1.
+    assert retained(6, use_eagle=True) == {0, 1, 2}
+    # A shared-prefix junction is already a post-reconciliation hit. The
+    # 10-token hit spans pages 1-2 and its endpoint-14 proof adds page 3.
+    assert retained(10, use_eagle=True) == {1, 2, 3}
+    assert retained(10, use_eagle=False) == {1, 2}
+
+
+def _sliding_window_spec(block_size: int, sliding_window: int) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+
+
+def test_sliding_window_fine_lookup_rewinds_past_incomplete_spans():
+    hash_block_size = 2
+    block_size = 4
+    spec = _sliding_window_spec(block_size, sliding_window=6)
+
+    def run_one_case(
+        num_pages: int,
+        partial_at: int | None,
+        evict_page: int | None,
+        expected: int,
+    ) -> None:
+        pool = BlockPool(
+            num_gpu_blocks=16,
+            enable_caching=True,
+            hash_block_size=hash_block_size,
+        )
+        request = make_request("owner", list(range(12)), hash_block_size, sha256)
+        blocks = pool.get_new_blocks(3)
+        pool.cache_full_blocks(request, blocks, 0, num_pages, block_size, 0)
+        if partial_at is not None:
+            pool.cache_partial_block(
+                request, blocks[partial_at // block_size], partial_at, 0, block_size
+            )
+        if evict_page is not None:
+            pool._maybe_evict_cached_block(blocks[evict_page])
+        _, hit_length = SlidingWindowManager.find_longest_cache_hit(
+            block_hashes=request.block_hashes,
+            max_length=11,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=False,
+            alignment_tokens=hash_block_size,
+        )
+        assert hit_length == expected
+
+    # Sparse endpoint 10 is usable: its window [5, 10) covers cached pages 1-2.
+    run_one_case(3, 10, None, 10)
+    # Evicting interior page 1 kills endpoint 10 and endpoint 8; the scan must
+    # rewind to page boundary 4 rather than claim a hit with a hole in it.
+    run_one_case(3, 10, 1, 4)
+    # Without a partial entry the deepest endpoint is a page boundary.
+    run_one_case(2, None, None, 8)
+    run_one_case(0, None, None, 0)
+
+
+def test_sliding_window_partial_tail_skips_null_blocks():
+    """Blocks below the window are nulled out, and cannot back an alias."""
+    hash_block_size = 2
+    block_size = 6
+    pool = BlockPool(
+        num_gpu_blocks=8, enable_caching=True, hash_block_size=hash_block_size
+    )
+    manager = SlidingWindowManager(
+        _sliding_window_spec(block_size, sliding_window=6),
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+    request = make_request("owner", list(range(10)), hash_block_size, sha256)
+    blocks = pool.get_new_blocks(1)
+    manager.req_to_blocks[request.request_id] = [blocks[0], pool.null_block]
+
+    manager.cache_blocks(request, num_tokens=10)
+
+    assert pool.get_cached_block(request.block_hashes[4], [0]) is None
+
+
+def test_sliding_window_dense_retention_below_page_keeps_every_block():
+    """A sub-page segment cannot express a tail, so nothing may be skipped."""
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=4,
+        alignment_tokens=2,
+        kv_cache_spec=_sliding_window_spec(block_size=4, sliding_window=6),
+        use_eagle=False,
+        retention_interval=None,
+    )
+    assert mask is None
+
+
+@pytest.mark.parametrize(
+    ("hash_block_size", "block_size", "sliding_window"),
+    [
+        (2, 4, 3),
+        (2, 4, 6),
+        (2, 6, 7),
+        (2, 6, 11),
+        (4, 8, 9),
+        (4, 12, 17),
+    ],
+)
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_sliding_window_fine_lookup_round_trips_across_geometries(
+    hash_block_size: int,
+    block_size: int,
+    sliding_window: int,
+    use_eagle: bool,
+):
+    """Exercise producer publication and lookup across page/window geometries.
+
+    The directed tests above establish the boundary arithmetic and rewind
+    behavior. This parameterization checks that the complete cache pipeline
+    preserves those outcomes for several hash/page/window ratios.
+    """
+    spec = _sliding_window_spec(block_size, sliding_window)
+
+    # Exercise hash boundaries, both sides of physical-page boundaries, and
+    # partial pages. A fresh pool prevents aliases from leaking across cases.
+    prompt_lengths = {
+        block_size - 1,
+        block_size,
+        block_size + 1,
+        block_size + hash_block_size,
+        2 * block_size - 1,
+        2 * block_size,
+        2 * block_size + hash_block_size,
+    }
+    for prompt_length in sorted(prompt_lengths):
+        pool = BlockPool(
+            num_gpu_blocks=32,
+            enable_caching=True,
+            hash_block_size=hash_block_size,
+        )
+        manager = SlidingWindowManager(
+            spec,
+            block_pool=pool,
+            enable_caching=True,
+            kv_cache_group_id=0,
+            scheduler_block_size=block_size,
+        )
+        manager.use_eagle = use_eagle
+        request = make_request(
+            f"owner-{prompt_length}",
+            list(range(prompt_length)),
+            hash_block_size,
+            sha256,
+        )
+        pages = pool.get_new_blocks(cdiv(prompt_length, block_size))
+        manager.req_to_blocks[request.request_id] = pages
+        manager.cache_blocks(request, num_tokens=prompt_length)
+
+        hit_blocks, hit = SlidingWindowManager.find_longest_cache_hit(
+            block_hashes=request.block_hashes,
+            max_length=prompt_length - 1,
+            kv_cache_group_ids=[0],
+            block_pool=pool,
+            kv_cache_spec=spec,
+            drop_eagle_block=use_eagle,
+            alignment_tokens=hash_block_size,
+        )
+
+        endpoint = (prompt_length - 1) // hash_block_size * hash_block_size
+        expected_hit = max(0, endpoint - (block_size if use_eagle else 0))
+        assert hit == expected_hit
+
+        expected_ids = [pool.null_block.block_id] * cdiv(expected_hit, block_size)
+        first_page = max(0, expected_hit - (sliding_window - 1)) // block_size
+        for page_idx in range(first_page, len(expected_ids)):
+            expected_ids[page_idx] = pages[page_idx].block_id
+        assert [block.block_id for block in hit_blocks[0]] == expected_ids
 
 
 def test_opted_out_scratch_group_keeps_partial_hash_hits():

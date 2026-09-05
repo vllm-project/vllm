@@ -384,12 +384,8 @@ class MooncakeStoreCoordinator:
                 # never drops a block, so a widened bound would match past the
                 # attention-verified hit and resume from speculative state (#43559).
                 if drop_eagle_block and not isinstance(spec, MambaSpec):
-                    eagle_margin = (
-                        self.hash_block_size
-                        if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and spec.block_size > self.hash_block_size
-                        else spec.block_size
+                    eagle_margin = manager_cls.eagle_drop_tokens(
+                        spec.block_size, alignment_tokens
                     )
                     _max_length = min(curr_hit_length + eagle_margin, max_length)
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
