@@ -13,7 +13,6 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
 from vllm.triton_utils import HAS_TRITON
-from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 
 class DeviceConfig(NamedTuple):
@@ -45,8 +44,7 @@ if os.getenv("VLLM_TEST_MODEL"):
     if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
         DEVICE_BACKENDS["cuda"] = DeviceConfig(
             available=DEVICE_BACKENDS["cuda"].available,
-            backends=["TRITON_MLA"]
-            + (["FLASH_ATTN_MLA"] if flash_attn_supports_mla() else []),
+            backends=["TRITON_MLA"],
         )
         DEVICE_BACKENDS["xpu"] = DeviceConfig(
             available=DEVICE_BACKENDS["xpu"].available,
