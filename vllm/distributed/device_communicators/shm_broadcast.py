@@ -101,11 +101,14 @@ def to_bytes_big(value: int, size: int) -> bytes:
 
 
 LONG_WAIT_TIME_LOG_MSG = (
-    "No available shared memory broadcast block found "
+    "Shared memory broadcast has not made progress "
     "in %d seconds. This typically happens "
     "when some processes are hanging or doing some "
     "time-consuming work (e.g. compilation, "
-    "weight/kv cache quantization)."
+    "weight/kv cache quantization). "
+    "Wait state: role=%s rank=%s pid=%d slot=%d/%d written_flag=%d "
+    "read_count=%d/%d reader_flags=%s local_reader_ranks=%s%s "
+    "wait_reason=%s waited_s=%.3f"
 )
 
 
@@ -539,6 +542,7 @@ class MessageQueue:
         self._is_writer = True
         self._is_local_reader = False
         self.local_reader_rank = -1
+        self.rank = None
         # rank does not matter for remote readers
         self._is_remote_reader = False
 
@@ -561,6 +565,7 @@ class MessageQueue:
         self = MessageQueue.__new__(MessageQueue)
         self.handle = handle
         self._is_writer = False
+        self.rank = rank
 
         context = Context()
 
@@ -644,6 +649,39 @@ class MessageQueue:
         if self._spin_condition is not None:
             self._spin_condition.cancel()
 
+    def _long_wait_log_args(self, role: str, metadata_buffer, waited_s: float):
+        memory_fence()
+        metadata_snapshot = list(metadata_buffer[: self.buffer.n_reader + 1])
+        written_flag = metadata_snapshot[0]
+        reader_flags = metadata_snapshot[1:]
+        read_count = sum(reader_flags)
+        if self._is_writer:
+            wait_reason = "awaiting_readers"
+        else:
+            wait_reason = "awaiting_write" if not written_flag else "already_read"
+        reader_state = ""
+        if self._is_local_reader:
+            reader_state = (
+                f" local_reader_index={self.local_reader_rank}"
+                f" local_reader_flag={reader_flags[self.local_reader_rank]}"
+            )
+        return (
+            VLLM_RINGBUFFER_WARNING_INTERVAL,
+            role,
+            self.rank if self.rank is not None else "unknown",
+            os.getpid(),
+            self.current_idx,
+            self.buffer.max_chunks,
+            written_flag,
+            read_count,
+            self.buffer.n_reader,
+            reader_flags,
+            self.handle.local_reader_ranks,
+            reader_state,
+            wait_reason,
+            waited_s,
+        )
+
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
         assert self._is_writer, "Only writers can acquire write"
@@ -678,7 +716,10 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
+                            LONG_WAIT_TIME_LOG_MSG,
+                            *self._long_wait_log_args(
+                                "writer", metadata_buffer, elapsed
+                            ),
                         )
                         n_warning += 1
 
@@ -799,7 +840,12 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if read_timeout.should_warn():
                         logger.info(
-                            LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL
+                            LONG_WAIT_TIME_LOG_MSG,
+                            *self._long_wait_log_args(
+                                "local_reader",
+                                metadata_buffer,
+                                time.monotonic() - read_timeout.started,
+                            ),
                         )
 
                     continue
@@ -966,6 +1012,7 @@ class MessageQueue:
             max_chunk_bytes=max_chunk_bytes,
             max_chunks=max_chunks,
         )
+        buffer_io.rank = rank
         handle = buffer_io.export_handle()
         handles = [None] * dist.get_world_size(pg) if rank == reader_rank else None
         dist.gather_object(handle, handles, dst=reader_rank, group=pg)
@@ -1036,6 +1083,7 @@ class MessageQueue:
                     max_chunk_bytes=max_chunk_bytes,
                     max_chunks=max_chunks,
                 )
+            buffer_io.rank = group_rank
             handle = buffer_io.export_handle()
             if isinstance(pg, ProcessGroup):
                 dist.broadcast_object_list(
