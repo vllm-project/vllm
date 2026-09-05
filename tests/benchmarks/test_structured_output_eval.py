@@ -33,6 +33,13 @@ SCHEMA = {
 }
 
 
+def _stub_module(name: str, attrs: dict) -> types.ModuleType:
+    mod = types.ModuleType(name)
+    for key, value in attrs.items():
+        setattr(mod, key, value)
+    return mod
+
+
 def _load_module():
     # Stub the live-serving imports (and vllm itself) so the real module can
     # be imported and scored without a server stack. Keys inserted here are
@@ -40,23 +47,24 @@ def _load_module():
     stubs: dict[str, types.ModuleType] = {}
     for name in ("datasets",):
         stubs[name] = MagicMock()
-    brf = types.ModuleType("backend_request_func")
-    brf.ASYNC_REQUEST_FUNCS = {}
-    brf.RequestFuncInput = MagicMock()
-    brf.RequestFuncOutput = MagicMock()
-    brf.get_tokenizer = MagicMock()
-    stubs["backend_request_func"] = brf
-    for name in (
-        "vllm",
-        "vllm.tokenizers",
-        "vllm.v1",
-        "vllm.v1.structured_output",
-    ):
+    stubs["backend_request_func"] = _stub_module(
+        "backend_request_func",
+        {
+            "ASYNC_REQUEST_FUNCS": {},
+            "RequestFuncInput": MagicMock(),
+            "RequestFuncOutput": MagicMock(),
+            "get_tokenizer": MagicMock(),
+        },
+    )
+    for name in ("vllm", "vllm.v1", "vllm.v1.structured_output"):
         stubs[name] = types.ModuleType(name)
-    stubs["vllm.tokenizers"].get_tokenizer = MagicMock()
-    xgrammar_backend = types.ModuleType("vllm.v1.structured_output.backend_xgrammar")
-    xgrammar_backend.has_xgrammar_unsupported_json_features = MagicMock()
-    stubs["vllm.v1.structured_output.backend_xgrammar"] = xgrammar_backend
+    stubs["vllm.tokenizers"] = _stub_module(
+        "vllm.tokenizers", {"get_tokenizer": MagicMock()}
+    )
+    stubs["vllm.v1.structured_output.backend_xgrammar"] = _stub_module(
+        "vllm.v1.structured_output.backend_xgrammar",
+        {"has_xgrammar_unsupported_json_features": MagicMock()},
+    )
 
     inserted = [name for name in stubs if name not in sys.modules]
     for name in inserted:
@@ -65,6 +73,8 @@ def _load_module():
         spec = importlib.util.spec_from_file_location(
             "benchmark_serving_structured_output", BENCH_PATH
         )
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load benchmark module from {BENCH_PATH}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
     finally:
@@ -164,7 +174,7 @@ def test_unstructured_request_keeps_parseability_semantics(bench):
     assert _score(bench, ret) == 100.0
 
 
-def test_unparseable_response_fails(bench):
+def test_unparsable_response_fails(bench):
     ret = [
         {
             "generated": "no json here",
