@@ -11,7 +11,9 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
-from unittest.mock import patch
+from collections import defaultdict
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -96,6 +98,210 @@ class _RecordingNixl:
 
     def remove_remote_agent(self, agent):
         pass
+
+
+def _make_packed_mla_worker():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheLayout,
+        KVCacheTensor,
+        MLAAttentionSpec,
+        SlidingWindowMLASpec,
+        create_kv_cache_views,
+    )
+
+    specs = {
+        "mla": MLAAttentionSpec(
+            block_size=256, num_kv_heads=1, head_size=2, dtype=torch.float16
+        ),
+        "indexer": MLAAttentionSpec(
+            block_size=256, num_kv_heads=1, head_size=1, dtype=torch.float16
+        ),
+        "compressor": SlidingWindowMLASpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float16,
+            sliding_window=4,
+        ),
+    }
+    stride = specs["mla"].page_size_bytes + specs["indexer"].page_size_bytes
+    tensors = [
+        KVCacheTensor(
+            size=8 * stride,
+            layers=[name],
+            block_stride=stride,
+            layer_stride=spec.page_size_bytes,
+            offset=specs["mla"].page_size_bytes if name == "indexer" else 0,
+        )
+        for name, spec in specs.items()
+    ]
+    layout = KVCacheLayout.BLHNC
+    raw = torch.zeros(8 * stride, dtype=torch.int8)
+    caches = {
+        tensor.layers[0]: create_kv_cache_views(
+            raw, specs[tensor.layers[0]], 8, layout, tensor
+        )[0]
+        for tensor in tensors
+    }
+    worker = object.__new__(bw.NixlBaseConnectorWorker)
+    worker.kv_cache_config = KVCacheConfig(8, tensors, [])
+    worker._layer_specs = specs
+    worker.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    )
+    worker.block_size, worker.num_blocks = 4, 8
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.use_mla = True
+    worker.use_host_buffer = worker._has_mamba = worker._is_csa_linear = False
+    worker.pp_size = worker.pcp_size = worker.dcp_size = worker.world_size = 1
+    worker.tp_rank = 0
+    worker.engine_id, worker.backend_name = "local", "DEEPSEEK_SPARSE_SWA"
+    worker.kv_cache_layout = layout.name
+    worker.kv_buffer_device, worker.nixl_memory_type = "cuda", "VRAM"
+    worker.nixl_backends = ["UCX"]
+    worker.nixl_wrapper = _RecordingNixl()
+    worker.host_xfer_buffers = {}
+    worker.attn_backends = []
+    worker._mamba_ssm_size = (0, 0)
+    worker.block_len_per_layer, worker.block_stride_per_layer = [], []
+    worker._region_is_mla, worker._registered_descs = [], []
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker.src_xfer_handles_by_block_size, worker.dst_num_blocks = {}, {}
+    worker._remote_agents = {}
+    return worker, caches
+
+
+@pytest.mark.cpu_test
+def test_packed_mla_registers_whole_scheduler_blocks():
+    """Compressor block size 4 must not be passed to the 256-token MLA kernel."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+    worker, caches = _make_packed_mla_worker()
+    with (
+        patch.object(bw, "get_current_attn_backends", side_effect=AssertionError),
+        patch.object(bw, "TransferTopology"),
+        patch.object(bw, "compute_nixl_compatibility_hash", return_value="test"),
+    ):
+        worker._sync_block_size_with_kernel()
+        worker.register_kv_caches(caches)
+
+    assert worker.block_size == 4 and worker.num_blocks == 8
+    assert worker._logical_num_blocks == 8
+    assert worker._physical_blocks_per_logical_kv_block == 1
+    assert worker.num_regions == 1
+    storage = caches["mla"].untyped_storage()
+    stride = storage.nbytes() // 8
+    assert worker.block_len_per_layer == worker.block_stride_per_layer == [stride]
+    np.testing.assert_array_equal(
+        worker.src_blocks_data[:, 0], storage.data_ptr() + np.arange(8) * stride
+    )
+    assert (worker.src_blocks_data[:, 1] == stride).all()
+    assert int(worker.src_blocks_data[-1, 0]) + stride == (
+        storage.data_ptr() + storage.nbytes()
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "case",
+    ["host", "non_mla", "layer_outer", "ssm", "empty", "pp", "stride", "uniform"],
+)
+def test_non_packed_mla_path_keeps_kernel_block_splitting(case):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    worker, _ = _make_packed_mla_worker()
+    worker.block_size = 512
+    if case == "host":
+        worker.use_host_buffer = True
+    elif case == "non_mla":
+        worker.use_mla = False
+    elif case == "layer_outer":
+        worker.vllm_config.cache_config.get_resolved_kv_cache_layout = lambda: (
+            KVCacheLayout.LBHNC
+        )
+    elif case == "ssm":
+        worker._layer_specs["ssm"] = object()
+    elif case == "empty":
+        worker.kv_cache_config.kv_cache_tensors = []
+    elif case == "pp":
+        worker.pp_size = 2
+    elif case == "stride":
+        worker.kv_cache_config.kv_cache_tensors[0].block_stride //= 2
+    elif case == "uniform":
+        worker._layer_specs = {"mla": worker._layer_specs["mla"]}
+    backend = MagicMock()
+    backend.get_supported_kernel_block_sizes.return_value = [256]
+    with patch.object(bw, "get_current_attn_backends", return_value=[backend]):
+        worker._sync_block_size_with_kernel()
+    assert not worker._transfer_packed_mla_blocks
+    assert worker.block_size == 256 and worker.num_blocks == 16
+    assert worker._logical_num_blocks == 8
+    assert worker._physical_blocks_per_logical_kv_block == 2
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("remote_tp_size", [1, 2, 4])
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        None,
+        "block_size",
+        "block_strides",
+        "block_lens",
+        "kv_cache_layout",
+        "physical_blocks_per_logical_kv_block",
+    ],
+)
+def test_packed_mla_rejects_incompatible_geometry_before_registering_peer(
+    remote_tp_size, mismatch
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+    worker, caches = _make_packed_mla_worker()
+    with (
+        patch.object(bw, "TransferTopology"),
+        patch.object(bw, "compute_nixl_compatibility_hash", return_value="test"),
+    ):
+        worker._sync_block_size_with_kernel()
+        worker.register_kv_caches(caches)
+    meta = SimpleNamespace(
+        engine_id="remote",
+        block_size=4,
+        physical_blocks_per_logical_kv_block=1,
+        kv_cache_layout=worker.kv_cache_layout,
+        block_lens=worker.block_len_per_layer[:],
+        block_strides=worker.block_stride_per_layer[:],
+    )
+    worker._remote_agents = {"remote": {(0, 0): "existing-peer"}}
+    if mismatch is None:
+        assert (
+            worker.add_remote_agent(meta, remote_tp_size=remote_tp_size)
+            == "existing-peer"
+        )
+    else:
+        setattr(meta, mismatch, None)
+        with pytest.raises(ValueError, match="identical P/D block geometry"):
+            worker.add_remote_agent(meta, remote_tp_size=remote_tp_size)
+
+
+@pytest.mark.cpu_test
+def test_packed_mla_rejects_nonshared_runtime_views():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+
+    worker, caches = _make_packed_mla_worker()
+    caches["indexer"] = caches["indexer"].clone()
+    worker._sync_block_size_with_kernel()
+    with (
+        patch.object(bw, "TransferTopology"),
+        patch.object(bw, "compute_nixl_compatibility_hash", return_value="test"),
+        pytest.raises(ValueError, match="shared whole-block cache views"),
+    ):
+        worker.register_kv_caches(caches)
+    assert worker.nixl_wrapper.dlists == {}
+    assert worker._registered_descs == []
 
 
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):

@@ -357,6 +357,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
+        w._transfer_packed_mla_blocks = False
         # Single non-hybrid attention group, matching the stub block id lists.
         w._has_mamba = False
         w._is_csa_linear = False
