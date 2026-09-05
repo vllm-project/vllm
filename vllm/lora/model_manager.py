@@ -383,6 +383,14 @@ class LoRAModelManager:
             target_prefix = self.mm_mapping.tower_model[0]
         elif mapping.type == LoRAMappingType.CONNECTOR and self.mm_mapping.connector:
             target_prefix = self.mm_mapping.connector[0]
+        elif mapping.type in (LoRAMappingType.TOWER, LoRAMappingType.CONNECTOR):
+            # A TOWER/CONNECTOR mapping for a model that has no such modules
+            # must not fall through to the language wrapper: these mappings are
+            # sized to the encoder token count, so routing one here overwrites
+            # the decode-step metadata and the next language-model forward
+            # reads it against a much smaller batch -- an illegal memory
+            # access inside the LoRA kernels.
+            return
         else:
             target_prefix = self.mm_mapping.language_model[0]
 
