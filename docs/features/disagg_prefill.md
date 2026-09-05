@@ -15,9 +15,32 @@ Two main reasons:
 !!! note
     Disaggregated prefill DOES NOT improve throughput.
 
-## Usage example
+## Usage examples
 
-Now supports 9 types of connectors:
+!!! warning
+    `SharedStorageConnector` was renamed to `ExampleConnector`. Existing configurations should update only the `kv_connector` value; the `shared_storage_path` setting remains unchanged.
+
+    ```bash
+    --kv-transfer-config '{
+      "kv_connector": "ExampleConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "shared_storage_path": "local_storage"
+      }
+    }'
+    ```
+
+`KVConnectorFactory` currently registers 16 connector implementations. Availability may depend on the platform and optional dependencies.
+
+| Category | Registered connectors |
+| --- | --- |
+| Examples and debugging | `ExampleConnector`, `ExampleHiddenStatesConnector`, `DecodeBenchConnector` |
+| LMCache | `LMCacheConnectorV1`, `LMCacheMPConnector` |
+| NIXL | `NixlConnector`, `NixlPullConnector`, `NixlPushConnector` |
+| Composition and local offloading | `MultiConnector`, `OffloadingConnector`, `SimpleCPUOffloadConnector` |
+| Other connector implementations | `MoRIIOConnector`, `MooncakeConnector`, `MooncakeStoreConnector`, `FlexKVConnectorV1`, `HF3FSKVConnector` |
+
+The following examples cover commonly used connectors:
 
 - **ExampleConnector**: refer to [examples/disaggregated/example_connector/run.sh](../../examples/disaggregated/example_connector/run.sh) for the example usage of ExampleConnector disaggregated prefilling.
 - **LMCacheConnectorV1**: refer to [examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh](../../examples/disaggregated/lmcache/disagg_prefill_lmcache_v1/disagg_example_nixl.sh) for the example usage of LMCacheConnectorV1 disaggregated prefilling which uses NIXL as the underlying KV transmission. LMCache also offers a multi-process (MP) mode via `LMCacheMPConnector`, where a standalone `lmcache server` holds the KV cache shared by one or more vLLM instances; see the [LMCache examples](../../examples/disaggregated/lmcache/README.md) and the [LMCache docs](https://docs.lmcache.ai) for setup.
