@@ -1005,6 +1005,16 @@ class ParserEngine(Parser):
         prev = slot.streamed_json
         if final_json and len(final_json) > len(prev):
             if prev and not final_json.startswith(prev):
+                # The streamed prefix cannot be retracted, so the client is
+                # left with whatever was already sent — which is not valid
+                # JSON when this happens. Say so instead of failing silently.
+                logger.warning(
+                    "arg converter: final arguments do not extend the "
+                    "streamed prefix; the client keeps a truncated string "
+                    "(streamed=%r final=%r)",
+                    prev[:120],
+                    final_json[:120],
+                )
                 return None
             diff = final_json[len(prev) :]
             slot.streamed_json = final_json

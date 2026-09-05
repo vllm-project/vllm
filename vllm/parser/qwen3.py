@@ -48,13 +48,24 @@ FUNC_END = "</function>"
 PARAM_START = "<parameter="
 PARAM_END = "</parameter>"
 
+# A parameter NAME never contains whitespace or another tag. Accepting
+# ``[^>]`` here let a malformed element such as ``<parameter=\necho $X\n</parameter>``
+# or ``<parameter=note=\n</parameter>`` turn everything up to the *next* ``>``
+# (the closing tag's) into a key; the partial converter then streamed that key
+# while the final conversion did not produce it, the prefix invariant broke, and
+# the client was left holding an unterminated JSON object
+# (vllm-project/vllm#55495).
+_PARAM_NAME = r"([^>\s<]*)"
 _PARAM_RE = re.compile(
-    r"<\s*parameter\s*=\s*([^>]*)>"
+    r"<\s*parameter\s*=\s*" + _PARAM_NAME + r">"
     r"(.*?)"
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(
+    r"<\s*parameter\s*=\s*([^>\s<]+)>(.*)$",
+    re.DOTALL,
+)
 
 
 def _trim_wrapping_newlines(value: str) -> str:
