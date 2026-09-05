@@ -842,7 +842,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 stop_delta = AnthropicDelta(
                                     stop_reason=self.stop_reason_map.get(
                                         finish_reason or "stop"
-                                    )
+                                    ),
+                                    stop_sequence=None,
                                 )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
