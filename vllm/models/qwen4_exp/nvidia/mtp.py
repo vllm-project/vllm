@@ -256,6 +256,9 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
 
         for attention in self._iter_qsa_attentions():
             attention.indexer.skip_topk = skip
+            # Later steps read this layer's expanded step-0 rows, so the
+            # owner must never skip the expansion for it (tile-union path).
+            attention.indexer.reuses_selection = True
 
     def compact_topk_indices(self, row_indices: torch.Tensor) -> None:
         """Keep each request's target-aligned step-0 sparse-index row."""
