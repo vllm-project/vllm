@@ -40,6 +40,18 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 
 These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
+!!! note
+    `vllm:inter_token_latency_seconds` records one observation per engine step
+    that produced new tokens, measuring the full gap since the previous such
+    step. With speculative decoding, a single step can emit several tokens (the
+    accepted draft tokens plus one), and the observed value is not divided by
+    the number of tokens emitted. Its mean therefore exceeds the true per-token
+    latency by the average number of tokens emitted per step — a
+    workload-dependent factor, so it cannot be corrected by a constant. For a
+    per-token measurement, use `vllm:request_time_per_output_token_seconds`,
+    which amortizes each request's decode time over all of its generated
+    tokens.
+
 ### Grafana Dashboard
 
 vLLM also provides [a reference example](../../examples/observability/prometheus_grafana/README.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
@@ -49,7 +61,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
 - `vllm:prompt_tokens` - Prompt tokens.
 - `vllm:generation_tokens` - Generation tokens.
-- `vllm:inter_token_latency_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
+- `vllm:inter_token_latency_seconds` - Inter-token latency in seconds, recorded per engine step (equals per-token latency only when each step emits one token; see the note above).
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
@@ -238,8 +250,10 @@ statistics relating to that iteration:
   iteration.
 - The prefill intervals for any requests that completed prefill in
   this iteration.
-- The inter-token intervals (Time Per Output Token, TPOT), for all
-  requests included in this iteration.
+- The inter-token intervals — the time since the previous iteration that
+  produced tokens — for all requests included in this iteration. With
+  speculative decoding, one interval can cover several generated tokens,
+  so this is not the same as Time Per Output Token (TPOT).
 - The Time-To-First-Token (TTFT) for any requests that completed
   prefill in this iteration. However, we calculate this interval
   relative to when the request was first received by the frontend
