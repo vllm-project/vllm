@@ -1724,6 +1724,36 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
         )[0]
 
+    async def _call_streaming_prompt_utility_async(
+        self, method: str, request_id: str, *args
+    ) -> dict[str, int | bool | str]:
+        if engine := self.reqs_in_flight.get(request_id):
+            return await self._call_utility_async(
+                method, request_id, *args, engine=engine
+            )
+        return await super().call_utility_async(method, request_id, *args)
+
+    async def append_streaming_prompt_tokens_async(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        return await self._call_streaming_prompt_utility_async(
+            "append_streaming_prompt_tokens", request_id, token_ids
+        )
+
+    async def finalize_streaming_prompt_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return await self._call_streaming_prompt_utility_async(
+            "finalize_streaming_prompt", request_id
+        )
+
+    async def get_streaming_prompt_metrics_async(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        return await self._call_streaming_prompt_utility_async(
+            "get_streaming_prompt_metrics", request_id
+        )
+
     @staticmethod
     async def process_engine_outputs(
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs

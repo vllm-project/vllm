@@ -522,6 +522,7 @@ class AsyncLLM(EngineClient):
         """Add a request whose prompt can be appended before decode starts."""
         if self.errored:
             raise EngineDeadError()
+        self._validate_streaming_input_sampling_params(request.params)
 
         self.input_processor.assign_request_id(request)
         self._run_output_handler()
