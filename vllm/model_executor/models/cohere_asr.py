@@ -1817,16 +1817,6 @@ class CohereASRModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
-                # Convert buffer dtype to match loaded weight for pos_bias tensors
-                if "pos_bias" in name and param.dtype != loaded_weight.dtype:
-                    logger.info(
-                        "Converting buffer %s dtype from %s to %s for loading.",
-                        name,
-                        param.dtype,
-                        loaded_weight.dtype,
-                    )
-                    param.data = param.data.to(loaded_weight.dtype)
-
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
