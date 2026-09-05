@@ -356,22 +356,31 @@ def test_reshape_and_cache_flash(
             dequant_nvfp4_kv_cache,
         )
 
-        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale):
+        def dequant_nvfp4_cache(data_cache, scale_cache, global_scale, swizzle_sf):
             # data_cache:  [B, N, H, data_dim]  logical view (layout in strides)
             # scale_cache: [B, N, H, scale_dim] logical view (layout in strides)
             # Permute to [B, H, N, dim] for the dequant utility.
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
-                data_hnd, scale_hnd, global_scale, head_size, block_size
+                data_hnd,
+                scale_hnd,
+                global_scale,
+                head_size,
+                block_size,
+                swizzle_sf=swizzle_sf,
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [B, N, H, dim]
 
+        # Match the store kernel's layout: K scales are linear on every
+        # arch; V scales are 4x4-swizzled only on CC < 12 (SM100
+        # trtllm-gen), linear on sm12x.
+        v_swizzled = current_platform.get_device_capability().major < 12
         result_key_cache = dequant_nvfp4_cache(
-            nvfp4_key_data, key_scale_cache, k_scale.item()
+            nvfp4_key_data, key_scale_cache, k_scale.item(), swizzle_sf=False
         )
         result_value_cache = dequant_nvfp4_cache(
-            nvfp4_value_data, value_scale_cache, v_scale.item()
+            nvfp4_value_data, value_scale_cache, v_scale.item(), swizzle_sf=v_swizzled
         )
 
         # Flatten [num_blocks, block_size] → [num_slots] and index by slot_mapping.
@@ -478,12 +487,14 @@ def test_nvfp4_4over6_selects_lower_error_scale(
         )
 
         data, block_scales = nvfp4_split_data_scale(key_cache)
+        # K scales are written linearly on every arch.
         return dequant_nvfp4_kv_cache(
             data.permute(0, 2, 1, 3),
             block_scales.permute(0, 2, 1, 3),
             scale.item(),
             head_size,
             block_size,
+            swizzle_sf=False,
         )[0, 0, 0]
 
     default = quantize_and_dequantize("nvfp4")
