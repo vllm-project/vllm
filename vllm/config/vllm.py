@@ -26,6 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -1080,6 +1081,20 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _verify_encoder_only_kv_cache_dtype(self) -> None:
+        model_config = self.model_config
+        cache_dtype = self.cache_config.cache_dtype
+        if (
+            model_config is not None
+            and model_config.attn_type == "encoder_only"
+            and is_quantized_kv_cache(cache_dtype)
+        ):
+            raise ValueError(
+                f"Quantized KV cache dtype {cache_dtype!r} is not supported for "
+                "encoder-only attention. Use --kv-cache-dtype auto or a "
+                "non-quantized dtype."
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1087,6 +1102,7 @@ class VllmConfig:
         self.instance_id = f"{time.time_ns()}"
 
         self._resolve_mm_encoder_only()
+        self._verify_encoder_only_kv_cache_dtype()
 
         if self.performance_mode != "balanced":
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
