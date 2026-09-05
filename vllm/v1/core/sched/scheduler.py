@@ -443,7 +443,18 @@ class Scheduler(SchedulerInterface):
                 max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
             aligned_end = end // block_size * block_size
             if aligned_end > start or block_size <= max_prefill_tokens:
-                end = aligned_end
+                # For multimodal requests, when the encoder-compute budget
+                # caps num_new_tokens below block_size the floor can collapse
+                # aligned_end to start (or below), producing 0 tokens.  The
+                # caller then ``break``s out of the waiting loop, stranding
+                # the entire queue when there are no running requests.
+                # In that case keep the original unaligned end so that the
+                # sub-block chunk still makes forward progress; its Mamba
+                # state simply won't be block-cached for this step.
+                if aligned_end <= start and request.has_encoder_inputs:
+                    pass  # keep original `end`
+                else:
+                    end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
         tail_boundary = (
