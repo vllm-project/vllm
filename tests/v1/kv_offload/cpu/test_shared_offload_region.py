@@ -41,7 +41,7 @@ def _make_region(
     num_blocks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
-    rank: int = 0,
+    rank: int | None = 0,
     barrier=None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
@@ -168,6 +168,9 @@ def _mp_race_construct_and_write(
     for the parent's cleanup signal before tearing down.  The wait gives the
     parent a window to read the raw mmap before the creator removes the file."""
     try:
+        from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+        sor.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_blocks=num_blocks,
@@ -196,6 +199,9 @@ def _mp_barrier_construct_and_hold(
     """Construct with a real cross-process barrier, write, then hold the
     mapping (no cleanup) until the parent SIGKILLs this process."""
     try:
+        from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+        sor.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_blocks=2,
@@ -439,21 +445,8 @@ def test_create_next_worker_view_worker_isolation(iid):
 
 
 # ---------------------------------------------------------------------------
-# Constructor — creator vs joiner semantics
+# Constructor — initialization and joiner semantics
 # ---------------------------------------------------------------------------
-
-
-def test_creator_flag_set_on_first_open(iid):
-    """The first worker to open the file must have _creator == True."""
-    with _region(iid) as r:
-        assert r._creator is True
-
-
-def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False."""
-    with _multi_region(iid, num_workers=2) as (r0, r1):
-        assert r0._creator is True
-        assert r1._creator is False
 
 
 def test_file_exists_after_construction(iid):
@@ -606,20 +599,13 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_multi_worker_race_exactly_one_creator(iid):
-    """When N threads race to create the same region, exactly one becomes creator."""
+def test_multi_worker_race_constructs_one_shared_region(iid):
+    """Concurrent initialization must construct one usable shared region."""
     num_workers = 8
     regions, errors = _race_construct(iid, num_workers=num_workers)
     try:
         assert not errors, f"Workers raised: {errors}"
         assert len(regions) == num_workers, "Some workers failed to construct"
-
-        creators = [r for r in regions if r._creator]
-        assert len(creators) == 1, f"Expected 1 creator, got {len(creators)}"
-        assert sum(1 for r in regions if not r._creator) == num_workers - 1, (
-            f"Expected {num_workers - 1} non-creators, got "
-            f"{sum(1 for r in regions if not r._creator)}"
-        )
 
         for r in regions:
             assert not r.mmap_obj.closed
@@ -709,8 +695,11 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_creator_all_effects(iid):
-    """cleanup() on the creator closes mmap, closes fd, and removes the file."""
+def test_cleanup_singleton_owner_removes_file(iid, monkeypatch):
+    """cleanup() on the local owner closes resources and removes the file."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
     r = _make_region(iid)
     path = r.mmap_path
     fd = r.fd
@@ -719,15 +708,19 @@ def test_cleanup_creator_all_effects(iid):
     r.cleanup()
 
     assert mmap_obj.closed, "mmap should be closed after cleanup"
-    assert not os.path.exists(path), "creator should remove the file"
+    assert not os.path.exists(path), "singleton owner should remove the file"
     with pytest.raises(OSError):
         os.fstat(fd)  # fd should be closed
 
 
-def test_cleanup_non_creator_all_effects(iid):
-    """cleanup() on a non-creator closes mmap and fd, but leaves the file on disk."""
-    r0 = _make_region(iid)  # creator
-    r1 = _make_region(iid)  # joiner
+def test_cleanup_non_owner_leaves_file(iid, monkeypatch):
+    """A non-owner must close local resources without removing the file."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    r0 = _make_region(iid)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    r1 = _make_region(iid)
     path = r0.mmap_path
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
@@ -743,11 +736,83 @@ def test_cleanup_non_creator_all_effects(iid):
         _cleanup_file(path)
 
 
-def test_cleanup_idempotent(iid):
-    """Calling cleanup() twice must not raise any exception."""
-    r = _make_region(iid)
-    r.cleanup()
-    r.cleanup()  # must be a no-op
+def test_joiner_owner_cleans_up_after_initializer_exits(iid, monkeypatch):
+    """A joiner owner must unlink after the initializer releases its resources."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    creator = _make_region(iid)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    owner = _make_region(iid)
+    path = creator.mmap_path
+    try:
+        creator.cleanup()
+        assert os.path.exists(path)
+        owner.cleanup()
+        assert not os.path.exists(path)
+    finally:
+        creator.cleanup()
+        owner.cleanup()
+        _cleanup_file(path)
+
+
+def test_layout_rank_does_not_determine_singleton_owner(iid, monkeypatch):
+    """A replicated-layout slot-0 worker may still be a non-owner."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    with _region(iid, rank=0) as region:
+        assert region.rank == 0
+        assert region._is_singleton_owner is False
+
+
+def test_scheduler_region_is_not_singleton_owner(iid, monkeypatch):
+    """The unranked scheduler mapping must not own the worker path."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    with _region(iid, rank=None) as region:
+        assert region._is_singleton_owner is False
+
+
+def test_worker_and_scheduler_regions_have_one_owner_per_path(iid, monkeypatch):
+    """Only worker local rank 0 may own a path shared with the scheduler."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    local_rank_0 = _make_region(iid, num_workers=2, rank=0)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    local_rank_1 = _make_region(iid, num_workers=2, rank=1)
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    scheduler_region = _make_region(iid, num_workers=2, rank=None)
+    regions = [local_rank_0, local_rank_1, scheduler_region]
+    try:
+        assert sum(region._is_singleton_owner for region in regions) == 1
+        assert local_rank_0._is_singleton_owner is True
+        assert scheduler_region._is_singleton_owner is False
+    finally:
+        for region in regions:
+            region.cleanup()
+        _cleanup_file(local_rank_0.mmap_path)
+
+
+def test_cleanup_disarms_singleton_owner(iid, monkeypatch):
+    """A cleanup owner must not try to unlink the path on a second cleanup."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    unlink = MagicMock(wraps=os.unlink)
+    monkeypatch.setattr(sor.os, "unlink", unlink)
+    region = _make_region(iid)
+    path = region.mmap_path
+    try:
+        region.cleanup()
+        region.cleanup()
+
+        assert unlink.call_count == 1
+        assert region._is_singleton_owner is False
+    finally:
+        _cleanup_file(path)
 
 
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
@@ -847,8 +912,8 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
 
 
-def test_ftruncate_failure_cleans_up_creator(monkeypatch):
-    """A failed creator ftruncate must close and unlink before re-raising."""
+def test_ftruncate_failure_removes_newly_created_file(monkeypatch):
+    """A failed initialization must close and unlink its newly created file."""
     import vllm.v1.kv_offload.cpu.shared_offload_region as region
 
     engine_id = str(uuid.uuid4())
@@ -895,7 +960,7 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
-        assert region._creator is False, "nothing left for cleanup() to unlink"
+        assert region._is_singleton_owner is False
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -905,13 +970,32 @@ def test_backing_file_unlinked_after_barrier(iid):
         _cleanup_file(path)
 
 
-def test_barrier_failure_unlinks_creator_and_raises(iid):
-    """A failed rendezvous must remove the creator's file and re-raise, not
+def test_barrier_failure_unlinks_local_owner_and_raises(iid):
+    """A failed rendezvous must remove the local owner's file and re-raise, not
     leave a stub that wedges the next start in _wait_for_file_size."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
         _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
     assert not os.path.exists(path)
+
+
+def test_ready_joiners_unlink_after_barrier(iid, monkeypatch):
+    """Local rank 0 must unlink a ready stale file without an initializer."""
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: False)
+    initializer = _make_region(iid)
+    path = initializer.mmap_path
+    initializer.cleanup()
+    assert os.path.exists(path)
+
+    monkeypatch.setattr(sor, "is_local_first_rank", lambda: True)
+    joiner = _make_region(iid, barrier=lambda: None)
+    try:
+        assert not os.path.exists(path)
+    finally:
+        joiner.cleanup()
+        _cleanup_file(path)
 
 
 def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
@@ -945,7 +1029,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
 
     assert not os.path.exists(path), "SIGKILL must not leak the file"
     with _region(iid) as restarted:
-        assert restarted._creator is True, "restart must be able to create anew"
+        assert os.path.exists(restarted.mmap_path), "restart must create a new file"
 
 
 def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
@@ -967,8 +1051,8 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
 
 
-def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
-    """A creator that fails after sizing the file must drop it before arriving
+def test_mmap_failure_unlinks_initialized_file_before_releasing_peers(iid, monkeypatch):
+    """A failed initialization must drop its file before arriving
     at the barrier, so the next start does not land on a stale file."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))
