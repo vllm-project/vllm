@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -38,7 +39,6 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionBackend,
@@ -264,12 +264,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         embedding_dim: int,
         ple_dense_layer_id: int,
         prefix: str,
-        layer_name: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        self.layer_name = layer_name
         self.embedding_dim = embedding_dim
         self.ngram_size = int(config.ngram_size)
         self.heads_per_ngram = int(config.heads_per_ngram)
@@ -445,20 +443,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
     ) -> torch.Tensor:
-        # Keep num_reqs-dependent ID generation outside PIECEWISE CUDA graphs,
-        # which dispatch only on the padded token count.
-        # torch.compile requires the splitting op to write graph-owned storage.
-        # Once compilation is removed, the op can return the IDs directly.
-        ngram_ids = input_ids.new_empty(
-            (input_ids.numel(), self.ngram_heads), dtype=torch.long
-        )
-        torch.ops.vllm.qwen4_exp_compute_ple_ngram_ids(
-            input_ids,
-            query_start_loc,
-            ngram_context,
-            ngram_ids,
-            self.layer_name,
-        )
+        ngram_ids = self.compute_ngram_ids(input_ids, query_start_loc, ngram_context)
         return self.ngram_embedding(ngram_ids).flatten(-2)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -563,7 +548,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             int(config.ple_embed_dim),
             self.ple_dense_layer_id,
             prefix=f"{prefix}.ple_embedding",
-            layer_name=prefix,
             quant_config=quant_config,
             params_dtype=model_config.dtype,
         )
@@ -779,6 +763,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 token_indices=non_spec_token_indices,
             )
 
+    # State routing consumes the current request metadata on every replay.
+    @eager_break_during_capture
     def _short_conv(self, inputs: torch.Tensor, residual: torch.Tensor) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -854,70 +840,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             self.norm_conv.weight,
             self.norm_key.eps,
         )
-        # State routing depends on runtime request metadata and remains outside
-        # the piecewise graph; short convolution accumulates into gated_output.
-        torch.ops.vllm.qwen4_exp_ple_short_conv(conv_input, gated_output, self.prefix)
+        self._short_conv(conv_input, gated_output)
         return gated_output
-
-
-def qwen4_exp_compute_ple_ngram_ids(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Compute request-dependent PLE n-gram IDs outside piecewise graphs."""
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer.ple_embedding.compute_ngram_ids(
-        input_ids,
-        query_start_loc,
-        ngram_context,
-        output,
-    )
-
-
-def qwen4_exp_compute_ple_ngram_ids_fake(
-    input_ids: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    ngram_context: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-def qwen4_exp_ple_short_conv(
-    inputs: torch.Tensor,
-    residual_output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    layer._short_conv(inputs, residual_output)
-
-
-def qwen4_exp_ple_short_conv_fake(
-    inputs: torch.Tensor,
-    residual_output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_compute_ple_ngram_ids",
-    op_func=qwen4_exp_compute_ple_ngram_ids,
-    mutates_args=["output"],
-    fake_impl=qwen4_exp_compute_ple_ngram_ids_fake,
-)
-
-
-direct_register_custom_op(
-    op_name="qwen4_exp_ple_short_conv",
-    op_func=qwen4_exp_ple_short_conv,
-    mutates_args=["residual_output"],
-    fake_impl=qwen4_exp_ple_short_conv_fake,
-)
 
 
 __all__ = [
