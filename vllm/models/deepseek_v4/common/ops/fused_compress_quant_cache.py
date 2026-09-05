@@ -7,9 +7,9 @@ Three specialized kernels:
   - _fused_kv_compress_norm_rope_insert_sparse_attn:
         head=512, nope=448 FP8 + rope=64 bf16
   - _fused_kv_compress_norm_rope_insert_indexer_attn:
-        head=128, all FP8, 1 block/token
+        head=128, Hadamard-rotated, all FP8, 1 block/token
   - _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn:
-        head=128, MXFP4 (block=32), 4 ue8m0 bytes
+        head=128, Hadamard-rotated, MXFP4 (block=32), 4 ue8m0 bytes
 
 RoPE is register-based via tl.reshape -> tl.split -> tl.interleave (or the
 even/odd halves are consumed directly for MXFP4, no interleave needed).
@@ -32,7 +32,7 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
-from .fused_indexer_q import _fp32x2_to_fp4x2
+from .fused_indexer_q import _fp32x2_to_fp4x2, _hadamard_rotate
 
 
 def compress_norm_rope_store_triton(
@@ -64,18 +64,14 @@ def compress_norm_rope_store_triton(
     Picks one of the three kernels in this module based on ``head_dim`` and
     ``use_fp4_cache``. Identical launch signature for all three.
     """
+    kernel_kwargs: dict[str, Any] = {}
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
-        num_warps = 4
-        kernel_kwargs = {"SANITIZE_CACHE_NANS": _ON_GFX950}
+        kernel_kwargs["SANITIZE_CACHE_NANS"] = _ON_GFX950
     elif use_fp4_cache:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
-        num_warps = 1
-        kernel_kwargs = {}
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
-        num_warps = 1
-        kernel_kwargs = {}
 
     kernel[(num_actual,)](
         # state cache
@@ -111,7 +107,7 @@ def compress_norm_rope_store_triton(
         TOKEN_STRIDE=token_stride,
         SCALE_DIM=scale_dim,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
-        num_warps=num_warps,
+        num_warps=4,
         **kernel_kwargs,
         **pdl_kwargs,
     )
@@ -709,7 +705,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     SCALE_DIM: tl.constexpr,  # 4 for indexer (1 float32)
     KV_BLOCK_STRIDE: tl.constexpr,
 ):
-    """Fused compress → RMSNorm → RoPE → FP8 quant → store.
+    """Fused compress → RMSNorm → RoPE → Hadamard → FP8 quant → store.
 
     One program per token; early-exits for non-boundary positions.
 
@@ -817,8 +813,10 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
     sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
 
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
+    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
+    # the unfused rotary_embedding flow on every platform.
+    new_even = tl.fma(even, cos_v, -(odd * sin_v))
+    new_odd = tl.fma(odd, cos_v, even * sin_v)
     result = tl.interleave(new_even, new_odd)  # fp32
 
     # ── FP8 UE8M0 quant: single block, flat reduction ────────────────
@@ -829,6 +827,10 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     INV_FP8_MAX: tl.constexpr = 1.0 / FP8_MAX
 
     result_bf16 = result.to(tl.bfloat16).to(tl.float32)
+    # Hadamard rotation (reference rotate_activation) after RoPE, before
+    # quantization.
+    tl.static_assert(TRITON_BLOCK_SIZE == HEAD_SIZE)
+    result_bf16 = _hadamard_rotate(result_bf16, HEAD_SIZE)
     absmax = tl.max(tl.abs(result_bf16), axis=0)  # scalar
     absmax = tl.maximum(absmax, 1e-4)
     raw_scale = absmax * INV_FP8_MAX
@@ -886,7 +888,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
 ):
-    """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
+    """Fused compress → RMSNorm → RoPE → Hadamard → MXFP4 quant → store.
 
     One program per token; early-exits for non-boundary positions.
 
@@ -998,12 +1000,22 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
     sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
 
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
+    # Pinned FMA contraction, matching the fused (NVCC/HIP) contraction of
+    # the unfused rotary_embedding flow on every platform.
+    new_even = tl.fma(even, cos_v, -(odd * sin_v))
+    new_odd = tl.fma(odd, cos_v, even * sin_v)
 
     # bf16 roundtrip for parity with reference / Q-side kernel numerics.
     new_even = new_even.to(tl.bfloat16).to(tl.float32)
     new_odd = new_odd.to(tl.bfloat16).to(tl.float32)
+
+    # Hadamard rotation (reference rotate_activation) after RoPE, before
+    # per-block quant. Rotation mixes all dims, so it must precede the
+    # (N_BLOCKS, HALF_BLOCK) tiling below.
+    x_full = tl.interleave(new_even, new_odd)  # [HEAD_SIZE] fp32
+    x_rot = _hadamard_rotate(x_full, HEAD_SIZE)
+    x_rot2d = tl.reshape(x_rot, (NUM_PAIRS, 2))
+    new_even, new_odd = tl.split(x_rot2d)
 
     # ── MXFP4 quant: tile even/odd halves into (N_BLOCKS, HALF_BLOCK) ──
     # Each MXFP4 block of QUANT_BLOCK elements = HALF_BLOCK consecutive pairs,

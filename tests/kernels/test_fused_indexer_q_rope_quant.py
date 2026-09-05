@@ -2,33 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit test for fused_indexer_q_rope_quant.
 
-Compares the fused Triton kernel against the unfused reference flow used by
-the DeepseekV4 indexer in model_tracking:
-    q_rot = ops.rotary_embedding(positions, q, None, head_dim, cos_sin_cache,
-                                 is_neox_style=False,
-                                 rope_dim_offset=head_dim - rope_dim)
-    q_fp8, q_scale = per_token_group_quant_fp8(q_rot, head_dim, use_ue8m0=True)
+Compares the fused Triton kernel against the unfused reference flow matching
+the DeepSeek-V4 reference indexer (rotate_activation before quantization):
+    q_rot = gptj_rope(positions, q, cos_sin_cache)  # tail ROPE_DIM dims
+    q_rot = q_rot @ H * HEAD_DIM**-0.5              # Hadamard rotation
+    q_fp8, q_scale = per_token_group_quant_fp8(q_rot, HEAD_DIM, use_ue8m0=True)
     weights_out = weights * q_scale * softmax_scale * head_scale
 
-Expects bit-exact equality on both q_fp8 and weights_out.
+Expects bit-exact equality on both q_fp8 and weights_out. The RoPE oracle
+emulates the kernels' pinned FMA contraction in fp64 (plain fp32 eager
+double-rounds and can differ by 1 bf16 ulp, which the full-width rotation
+then spreads across all dims).
 """
-
-import contextlib
-from unittest import mock
 
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
 ROPE_DIM = 64
+NOPE_DIM = HEAD_DIM - ROPE_DIM
 N_HEAD = 64
 MAX_POS = 4096
 
@@ -83,6 +81,41 @@ def quantize_to_mxfp4(
     return packed, scales
 
 
+def _rope_gptj_tail(
+    x: torch.Tensor, positions: torch.Tensor, cos_sin_cache: torch.Tensor
+) -> torch.Tensor:
+    """GPT-J interleaved RoPE on the last ROPE_DIM dims plus a bf16
+    roundtrip, matching the Triton kernels' numerics. The kernels pin FMA
+    contraction (tl.fma); fp32 products are exact in fp64, so emulating the
+    fused form in fp64 and rounding once reproduces it bit-exactly (plain
+    fp32 eager double-rounds and can differ by 1 bf16 ulp)."""
+    cos = cos_sin_cache[positions, : ROPE_DIM // 2].double().unsqueeze(1)
+    sin = cos_sin_cache[positions, ROPE_DIM // 2 :].double().unsqueeze(1)
+    out = x.double()
+    ev, od = out[..., NOPE_DIM::2], out[..., NOPE_DIM + 1 :: 2]
+    r_ev = (ev * cos - (od * sin).float().double()).float()
+    r_od = (od * cos + (ev * sin).float().double()).float()
+    out = out.clone()
+    out[..., NOPE_DIM::2] = r_ev
+    out[..., NOPE_DIM + 1 :: 2] = r_od
+    return out.to(torch.bfloat16).float()
+
+
+def _hadamard_rotate(x: torch.Tensor) -> torch.Tensor:
+    """Sylvester Hadamard rotation y = (H @ x) * n**-0.5 as a matrix-free
+    fp32 butterfly with fixed stage order — every step is a single fp32
+    add/sub, so it bitwise matches the kernels' _hadamard_rotate."""
+    n = x.shape[-1]
+    y = x.float()
+    s = n // 2
+    while s > 0:
+        y = y.reshape(*y.shape[:-1], n // (2 * s), 2, s)
+        a, b = y.unbind(dim=-2)
+        y = torch.stack((a + b, a - b), dim=-2).reshape(*x.shape[:-1], n)
+        s //= 2
+    return y * (n**-0.5)
+
+
 def _reference(
     positions: torch.Tensor,
     q: torch.Tensor,
@@ -92,37 +125,27 @@ def _reference(
     head_scale: float,
     use_fp4: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    q_rot = q.clone()
-    ops.rotary_embedding(
-        positions,
-        q_rot,
-        None,
-        HEAD_DIM,
-        cos_sin_cache,
-        False,  # is_neox_style=False → GPT-J interleaved
-        HEAD_DIM - ROPE_DIM,  # rope_dim_offset → rotate the tail
-        False,
-    )
+    x = _rope_gptj_tail(q, positions, cos_sin_cache)
+    x = _hadamard_rotate(x)
 
     if use_fp4:
-        q_packed, ue8m0 = quantize_to_mxfp4(q_rot.view(-1, N_HEAD, HEAD_DIM))
+        q_packed, ue8m0 = quantize_to_mxfp4(x.view(-1, N_HEAD, HEAD_DIM))
         # Pack 4 ue8m0 bytes into 1 int32
         q_scale = ue8m0.view(torch.int32).squeeze(-1)
         # FP4 path: q_scale stays separate (cannot be folded into a per-token scalar)
         weights_out = weights.to(torch.float32) * softmax_scale * head_scale
         return (q_packed, q_scale), weights_out
 
-    else:
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q_rot.view(-1, HEAD_DIM).contiguous(),
-            HEAD_DIM,
-            use_ue8m0=True,
-        )
-        q_fp8 = q_fp8.view(-1, N_HEAD, HEAD_DIM)
-        q_scale = q_scale.view(-1, N_HEAD)
+    q_fp8, q_scale = per_token_group_quant_fp8(
+        x.view(-1, HEAD_DIM).contiguous(),
+        HEAD_DIM,
+        use_ue8m0=True,
+    )
+    q_fp8 = q_fp8.view(-1, N_HEAD, HEAD_DIM)
+    q_scale = q_scale.view(-1, N_HEAD)
 
-        weights_out = weights.to(torch.float32) * q_scale * softmax_scale * head_scale
-        return q_fp8, weights_out
+    weights_out = weights.to(torch.float32) * q_scale * softmax_scale * head_scale
+    return q_fp8, weights_out
 
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 257, 1023])
@@ -143,14 +166,8 @@ def _reference(
         ),
     ],
 )
-@pytest.mark.parametrize("use_cutedsl", [False, True])
 @torch.inference_mode()
-def test_fused_indexer_q_rope_quant_matches_unfused(
-    num_tokens, cache_dtype, use_fp4, use_cutedsl
-):
-    if use_cutedsl and not has_cutedsl():
-        pytest.skip("cutedsl (cutlass) not installed")
-
+def test_fused_indexer_q_rope_quant_matches_unfused(num_tokens, cache_dtype, use_fp4):
     device = "cuda"
     torch.manual_seed(0)
 
@@ -166,26 +183,15 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
     q_quant_ref, weights_ref = _reference(
         positions, q, cos_sin_cache, weights, softmax_scale, head_scale, use_fp4
     )
-    # use_cutedsl=False: force the triton path even when cutedsl is installed
-    # by patching the dispatcher's has_cutedsl() binding to return False.
-    cutedsl_patch = (
-        mock.patch(
-            "vllm.models.deepseek_v4.common.ops.fused_indexer_q.has_cutedsl",
-            return_value=False,
-        )
-        if not use_cutedsl
-        else contextlib.nullcontext()
+    q_quant_fused, weights_fused = fused_indexer_q_rope_quant(
+        positions,
+        q.clone(),
+        cos_sin_cache,
+        weights,
+        softmax_scale,
+        head_scale,
+        use_fp4,
     )
-    with cutedsl_patch:
-        q_quant_fused, weights_fused = fused_indexer_q_rope_quant(
-            positions,
-            q.clone(),
-            cos_sin_cache,
-            weights,
-            softmax_scale,
-            head_scale,
-            use_fp4,
-        )
 
     if use_fp4:
         q_quant_ref, q_scale_ref = q_quant_ref
