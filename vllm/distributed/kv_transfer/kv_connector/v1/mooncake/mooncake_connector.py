@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
+import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -402,6 +404,9 @@ class PullReqMeta:
     expire_time: float = float("inf")
     # Designed for one D pairing to multiple P
     pull_tasks_count: int = 0
+    # Set once any worker reports a failure, so a success from another worker
+    # for the same request is not counted afterwards.
+    failed: bool = False
 
 
 @dataclass
@@ -550,6 +555,11 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs whose remote KV load failed."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -996,6 +1006,8 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+        # Written from the receiver loop, drained from the worker thread.
+        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
 
         self.xfer_stats = MooncakeKVConnectorStats()
 
@@ -1855,12 +1867,11 @@ class MooncakeConnectorWorker:
                     ret_msg = await sock.recv()
                     response = self._xfer_resp_decoder.decode(ret_msg)
                     if response.status == MooncakeXferResponseStatus.ERROR:
-                        logger.error(
-                            "Error happens during transferring kvcache for %s: %s",
+                        self._handle_failed_recv(
+                            pull_metas,
                             req_ids,
-                            response.err_msg,
+                            response.err_msg or "transfer error",
                         )
-                        self.xfer_stats.record_failed_recv()
                         return
                     self.process_pulling_result(response, pull_metas)
                     if response.status == MooncakeXferResponseStatus.FINISH:
@@ -1868,9 +1879,49 @@ class MooncakeConnectorWorker:
         except zmq.ContextTerminated:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
-            logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
-            self.xfer_stats.record_failed_recv()
+            self._handle_failed_recv(pull_metas, req_ids, f"transfer failed: {e}")
             return
+
+    def _handle_failed_recv(
+        self,
+        pull_metas: dict[ReqId, PullReqMeta],
+        req_ids: Collection[ReqId],
+        reason: str,
+    ) -> None:
+        """Report a failed remote KV load so the scheduler can fail or recompute it."""
+        failed: list[ReqId] = []
+        for req_id in req_ids:
+            pull_meta = pull_metas.get(req_id)
+            if pull_meta is None or pull_meta.failed:
+                continue
+            pull_meta.failed = True
+            failed.append(req_id)
+            self.xfer_stats.record_failed_recv()
+
+            invalid = {b for group in pull_meta.local_block_ids for b in group}
+            if not invalid:
+                # A pull with no local blocks only asks P to release its blocks
+                # for a request that never reached the scheduler (see
+                # AsyncLLM.notify_kv_transfer_request_rejected, which submits an
+                # abort_immediately request just to run request_finished). No D
+                # request is waiting on a load, and reporting one here would trip
+                # the scheduler's `assert req_id in self.requests`.
+                continue
+            self._invalid_block_ids.put(invalid)
+            self.finished_recving_reqs.add(pull_meta.d_req_id)
+
+        if failed:
+            logger.error("pulling kv_caches for %s failed: %s", failed, reason)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Drain the blocks whose remote KV load failed since the last call."""
+        result: set[int] = set()
+        while True:
+            try:
+                result.update(self._invalid_block_ids.get_nowait())
+            except queue.Empty:
+                break
+        return result
 
     def process_pulling_result(
         self,
@@ -1881,6 +1932,8 @@ class MooncakeConnectorWorker:
 
         for req_id in ok_reqs:
             pull_meta = pull_metas[req_id]
+            if pull_meta.failed:
+                continue
             # No race because we are in async loop.
             pull_meta.pull_tasks_count -= 1
             if pull_meta.pull_tasks_count == 0:
@@ -1890,10 +1943,8 @@ class MooncakeConnectorWorker:
             logger.debug("pulling kv_caches for %s finished", ok_reqs)
 
         if response.err_reqs:
-            logger.error(
-                "pulling kv_caches for %s failed: %s",
-                response.err_reqs,
-                response.err_msg,
+            self._handle_failed_recv(
+                pull_metas, response.err_reqs, response.err_msg or "unknown error"
             )
 
     async def _connect_to_prefiller_bootstrap(self, remote_bootstrap_addr: str):
@@ -1971,10 +2022,11 @@ class MooncakeConnectorWorker:
             await self._pending_bootstrap_queries[remote_bootstrap_addr].wait()
 
         if remote_engine_id not in self._remote_agents:
-            logger.error(
-                "Failed to find remote engine_id %s from bootstrap server %s",
-                remote_engine_id,
-                remote_bootstrap_addr,
+            self._handle_failed_recv(
+                pull_metas,
+                list(pull_metas),
+                f"remote engine_id {remote_engine_id} not found from bootstrap "
+                f"server {remote_bootstrap_addr}",
             )
             return
 
