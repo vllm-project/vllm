@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_ROCM_CLONE_MMAP_WEIGHTS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1253,6 +1254,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD": lambda: (
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
+    ),
+    # Materialise each safetensors tensor into anonymous memory before the
+    # host-to-device copy. safetensors maps checkpoints writable, and KFD takes
+    # the fault permission from the VMA rather than from the copy, so the copy
+    # breaks copy-on-write on every resident page and leaves the checkpoint as
+    # anonymous memory instead of evictable page cache (ROCm/ROCm#6523). Costs
+    # one extra host copy per tensor, which does not pay for itself when the
+    # tensors are small.
+    "VLLM_ROCM_CLONE_MMAP_WEIGHTS": lambda: (
+        os.getenv("VLLM_ROCM_CLONE_MMAP_WEIGHTS", "False").lower() in ("true", "1")
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
