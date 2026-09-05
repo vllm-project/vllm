@@ -273,9 +273,13 @@ def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
     ],
 )
 def test_get_c128_boundary(starts, query_start_loc, expected):
+    query_start_loc_tensor = torch.tensor(query_start_loc)
+    query_lens = query_start_loc_tensor[1:] - query_start_loc_tensor[:-1]
     metadata = SimpleNamespace(
-        _num_computed_tokens_cpu=None if starts is None else torch.tensor(starts),
-        query_start_loc_cpu=torch.tensor(query_start_loc),
+        seq_lens_cpu_upper_bound=(
+            None if starts is None else torch.tensor(starts) + query_lens
+        ),
+        query_start_loc_cpu=query_start_loc_tensor,
     )
     assert _get_c128_boundary(metadata) is expected
 

@@ -2144,8 +2144,8 @@ def test_retention_snapshots_handed_off_with_exact_block_ids():
 def test_snapshot_handoff_dense_default_retention():
     """With dense (default) retention, every materialized mamba boundary
     state block is handed off — regular mamba-align + prefix-match-unit
-    deployments get store-able boundary snapshots without setting
-    VLLM_PREFIX_CACHE_RETENTION_INTERVAL."""
+    deployments get store-able boundary snapshots without setting a
+    prefix-cache retention interval."""
     hash_block_size = 2
     block_size = 4
     manager = make_kv_cache_manager(

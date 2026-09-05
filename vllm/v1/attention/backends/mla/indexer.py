@@ -733,7 +733,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
+        self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -746,7 +746,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.use_flattening,
             self.supports_varlen,
             next_n,
-            self.use_fp4_indexer_cache,
+            self.indexer_uses_fp4,
         )
 
         sm_count = num_compute_units(self.device.index)

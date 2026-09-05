@@ -681,9 +681,6 @@ class SpecDecodeBaseProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            # Invalidate the CPU-side shadows to avoid H<>D sync.
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
@@ -817,10 +814,6 @@ class SpecDecodeBaseProposer:
             self.max_model_len,
         )
 
-        if common_attn_metadata._seq_lens_cpu is not None:
-            common_attn_metadata._seq_lens_cpu += 1
-        if common_attn_metadata._num_computed_tokens_cpu is not None:
-            common_attn_metadata._num_computed_tokens_cpu += 1
         if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
             common_attn_metadata.seq_lens_cpu_upper_bound += 1
 
@@ -1155,8 +1148,6 @@ class SpecDecodeBaseProposer:
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc_cpu=query_start_loc_cpu,
-            _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
@@ -1266,8 +1257,6 @@ class SpecDecodeBaseProposer:
             query_start_loc=async_tensor_h2d(new_query_start_loc_cpu, device=device),
             seq_lens=async_tensor_h2d(new_seq_lens_cpu, device=device),
             query_start_loc_cpu=new_query_start_loc_cpu,
-            _seq_lens_cpu=new_seq_lens_cpu,
-            _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=new_seq_lens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
