@@ -2770,8 +2770,8 @@ class TestEagle:
     # Lookup unit tests: call _lookup() directly via request_runner
     # -------------------------------------------------------------------
 
-    def test_full_attn_lookup_pops_one_block(self, request_runner):
-        """Full-attn eagle group with 3 blocks all hit → pop to 2 blocks."""
+    def test_full_attn_lookup_keeps_all_hits(self, request_runner):
+        """Full-attn eagle keeps every prefix hit (no SWA-style pop)."""
         block_size = 4
         groups = [
             KVCacheGroupSpec(
@@ -2800,11 +2800,11 @@ class TestEagle:
         req_status = self._make_req_status(
             sched, num_tokens=12, offload_keys_per_group=[[1, 2, 3]]
         )
-        # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
-        assert sched._lookup(req_status) == 8
+        # 3 hits, no pop → 3 * block_size = 12 tokens loadable
+        assert sched._lookup(req_status) == 12
 
-    def test_full_attn_lookup_single_block_returns_zero(self, request_runner):
-        """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""
+    def test_full_attn_lookup_single_block_keeps_hit(self, request_runner):
+        """Full-attn eagle 1-chunk prefix stays a hit (the DRAM-read veto)."""
         block_size = 4
         groups = [
             KVCacheGroupSpec(
@@ -2833,8 +2833,9 @@ class TestEagle:
         req_status = self._make_req_status(
             sched, num_tokens=4, offload_keys_per_group=[[1]]
         )
-        # 1 hit, pop to 0 → new_num_hit_tokens < block_size → return 0
-        assert sched._lookup(req_status) == 0
+        # 1 verified prompt chunk must remain loadable. The old unconditional
+        # pop turned this into 0 and aborted the whole lookup.
+        assert sched._lookup(req_status) == 4
 
     def test_full_attn_lookup_no_hits_returns_zero(self, request_runner):
         """Full-attn eagle group with 0 hits returns 0 before pop."""
@@ -3004,12 +3005,11 @@ class TestEagle:
         assert sched._lookup(req_status) == 8
 
     def test_eagle_verified_prevents_double_pop(self, request_runner):
-        """Once an eagle group has popped, it doesn't pop again on re-iteration.
+        """Full-attn eagle does not pop, so mixed FA groups keep the prefix.
 
         Setup: group 0 = non-eagle full-attn (3 blocks), group 1 = eagle
-        full-attn (3 blocks). Both see all hits. Eagle pops to 2 and tightens
-        max_hit to 8. Group 0 re-runs (convergence) but since eagle_verified
-        contains group 1, it won't pop again — result stays at 8 tokens.
+        full-attn (3 blocks). Both see all hits. Without a SWA pop there is
+        nothing to tighten; result stays at 12 tokens.
         """
         block_size = 4
         groups = [
@@ -3052,19 +3052,16 @@ class TestEagle:
             offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
         )
         # Group 0: prefix finds 3 → max_hit=12, num_hit=12
-        # Group 1 (eagle): prefix finds 3, pop to 2 → max_hit=8, num_hit=8
-        # num_hit(8) < prev num_hit(12) AND group IS eagle → no clear
-        # No re-iteration triggered (eagle shrink doesn't trigger re-loop)
-        # Final: 8 tokens
-        assert sched._lookup(req_status) == 8
+        # Group 1 (eagle FA): prefix finds 3, no pop → 12
+        assert sched._lookup(req_status) == 12
 
     def test_non_eagle_tighten_clears_eagle_verified(self, request_runner):
-        """Non-eagle group tightening clears eagle_verified → eagle re-pops.
+        """Non-eagle tighten to 1 chunk; full-attn eagle keeps that chunk.
 
         Groups: 0=non-eagle full-attn, 1=eagle full-attn.
         Group 0 has only 1 hit (out of 3 keys) → max_hit tightens to 4.
         This clears eagle_verified. Group 1 runs with max_hit=4 → only 1
-        key queried, 1 hit, pop to 0 → returns 0.
+        key queried, 1 hit, kept (no SWA pop) → 4 tokens.
         """
         block_size = 4
         groups = [
@@ -3110,16 +3107,14 @@ class TestEagle:
         )
         # Group 0 (non-eagle FA): prefix finds 1 hit → max_hit=4, num_hit=4
         # Group 1 (eagle FA): max_hit=4 → num_blocks=1, keys=[1].
-        #   Finds 1 hit, pop to 0 → new_num_hit = 0 < block_size → return 0
-        assert sched._lookup(req_status) == 0
+        #   Finds 1 hit, no pop → 4 tokens (old pop vetoed the whole lookup)
+        assert sched._lookup(req_status) == 4
 
     def test_eagle_verified_survives_eagle_tighten(self, request_runner):
-        """Eagle group tightening does NOT clear eagle_verified.
+        """Full-attn eagle does not pop, so it does not tighten max_hit.
 
         Groups: 0=non-eagle full-attn, 1=eagle full-attn.
-        Group 0 finds 3 hits (max_hit=12). Group 1 finds 3 hits, pops to 2
-        (max_hit=8). Since group 1 IS eagle, eagle_verified is NOT cleared.
-        Result: 8 tokens (eagle only pops once).
+        Both find 3 hits. Without a SWA pop, max_hit stays 12.
         """
         block_size = 4
         groups = [
@@ -3162,9 +3157,8 @@ class TestEagle:
             offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
         )
         # Group 0: 3 hits → max_hit=12, num_hit=12
-        # Group 1 (eagle): 3 hits, pop to 2 → max_hit=8, num_hit=8
-        # Tightened but IS eagle → no clear. No re-iteration.
-        assert sched._lookup(req_status) == 8
+        # Group 1 (eagle FA): 3 hits, no pop → 12
+        assert sched._lookup(req_status) == 12
 
     # -------------------------------------------------------------------
     # Integration tests: store and load via request_runner
