@@ -240,6 +240,8 @@ def create_hisparse_layout(
         source_group=source_group,
         device_groups=gpu_groups,
         host_num_blocks=host_num_blocks,
+        host_block_stride=host_block_stride,
+        shared_host_pool=shared_host_pool,
     )
 
 
