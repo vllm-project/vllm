@@ -133,6 +133,9 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_TRITON_VERIFY_CTX_PARTITION: bool = True
+    VLLM_TRITON_PA_TARGET_PROGRAMS: int = 0
+    VLLM_TRITON_PA_SCRATCH_BUDGET_MB: int = 128
     VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1256,6 +1259,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Partition the cached-context scan in context_attention_fwd across
+    # programs when the query is short and the context is long (the
+    # speculative-decode verify shape). Set to 0 to keep the single-program
+    # -per-head path.
+    "VLLM_TRITON_VERIFY_CTX_PARTITION": lambda: (
+        os.getenv("VLLM_TRITON_VERIFY_CTX_PARTITION", "1") == "1"
+    ),
+    # Number of programs the partitioners aim to launch. 0 means derive it
+    # from the device (4 x multiprocessor count).
+    "VLLM_TRITON_PA_TARGET_PROGRAMS": lambda: (
+        int(os.getenv("VLLM_TRITON_PA_TARGET_PROGRAMS", "0"))
+    ),
+    # Upper bound on the fp32 scratch the partitioners may allocate for
+    # per-partition partials, in MiB. The partition count is chosen to fit.
+    "VLLM_TRITON_PA_SCRATCH_BUDGET_MB": lambda: (
+        int(os.getenv("VLLM_TRITON_PA_SCRATCH_BUDGET_MB", "128"))
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm.
