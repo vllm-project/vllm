@@ -860,6 +860,27 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
     def supports_expert_map(self) -> bool:
         return False
 
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        # convert_weight_packed_scale_zp blocks w1/w2 into AMX tiles
+        # (E, Nc, Kc, buffer_bytes), not the (E, N, K) layout the base
+        # implementation assumes -- N/K aren't recoverable from that shape,
+        # so read them from moe_config instead.
+        E = w1.shape[0]
+        K = a1.size(-1)
+        N = (
+            self.moe_config.intermediate_size_per_partition
+            * self.moe_config.w13_num_shards
+        )
+        M = a1.size(0) if a1.dim() == 2 else a1.size(1)
+        topk = topk_ids.size(1)
+        return E, M, N, K, topk
+
     def workspace_shapes(
         self,
         M: int,
