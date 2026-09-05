@@ -4,7 +4,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import json
+
 import pytest
+
+from vllm import envs
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -33,6 +37,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
+    ToolStrictLevel,
     get_function_parameters,
     get_model_structural_tag,
 )
@@ -488,7 +493,11 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
         tool_choice="auto",
     )
     parser = TestParser(MagicMock(), tools=sample_tools_strict)
-    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+    # A non-thinking request: the tag must be built without the reasoning span.
+    parser.reasoning_parser = MagicMock(
+        adjust_request=lambda request: request,
+        emits_reasoning_span=False,
+    )
 
     parser.adjust_request(request)
 
@@ -694,3 +703,120 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_constrains_auto_without_strict(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """FUNCTION lifts the auto + non-strict gate without touching schemas."""
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+
+
+def test_tool_strict_level_off_is_the_default(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    """Default behaviour is unchanged: auto + non-strict still gets no tag."""
+    assert envs.VLLM_TOOL_STRICT_LEVEL == ToolStrictLevel.OFF.name.lower()
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_function_pins_envelope_only(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """"function" constrains the call envelope but leaves arguments free.
+
+    xgrammar treats an absent ``strict`` as "constrain the arguments", so the
+    level has to switch it off explicitly or it would silently behave like
+    "parameter" and break OpenAI's strict semantics.
+    """
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' not in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_tool_strict_level_parameter_pins_argument_schemas(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "parameter", raising=False
+    )
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_function_keeps_client_strict_tools_strict(
+    sample_tools_strict: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A tool the client marked strict is never downgraded by the level."""
+    monkeypatch.setattr(
+        envs, "VLLM_TOOL_STRICT_LEVEL", "function", raising=False
+    )
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools_strict,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is not None
+    assert '"json_schema": {' in json.dumps(tag.model_dump(), ensure_ascii=False)
+
+
+def test_tool_strict_level_unknown_value_falls_back_to_off(
+    sample_tools: list[ChatCompletionToolsParam],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(envs, "VLLM_TOOL_STRICT_LEVEL", "nonsense", raising=False)
+    assert (
+        get_model_structural_tag(
+            model="deepseek_v4",
+            tools=sample_tools,
+            tool_choice="auto",
+            reasoning=False,
+        )
+        is None
+    )

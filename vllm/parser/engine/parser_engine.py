@@ -214,10 +214,60 @@ class ParserEngine(Parser):
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
 
+    @property
+    def tool_call_stop(self) -> str | None:
+        """The literal that closes a tool-call block, if the format has one.
+
+        Formats whose tool payload is delimited (DeepSeek's
+        ``</｜DSML｜tool_calls>``, Qwen's ``</tool_calls>``, ...) expose it
+        here so the request path can hand it to the sampler as a stop
+        string. Formats without a distinct closer return ``None``.
+        """
+        return self.parser_engine_config.terminals.get("TOOL_END")
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request.skip_special_tokens = False
+        return self._add_tool_call_stop(request)
+
+    def _add_tool_call_stop(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Stop generating once a tool-call block is closed.
+
+        The parser treats the closing tag as a state transition back to
+        CONTENT and keeps consuming, but nothing tells the *sampler* to
+        stop. A model that has just closed a tool-call block is free to
+        open another one, and in agentic workloads (long transcripts, many
+        tools) it does -- repeatedly, until it hits ``max_tokens``.
+        Observed in production on DeepSeek-V4-Flash: 32k output tokens and
+        ~400s spent re-emitting the same block shape, with
+        ``finish_reason`` still reported as ``tool_use``.
+
+        A tool call is a turn boundary: the client has to run the tool and
+        send the result back, so nothing generated after the closer can be
+        used. Handing the closer to the sampler ends the turn where it
+        logically ends.
+        """
+        closer = self.tool_call_stop
+        if not closer or not getattr(request, "tools", None):
+            return request
+        stop = getattr(request, "stop", None)
+        if stop is None:
+            request.stop = [closer]
+        elif isinstance(stop, str):
+            if stop == closer:
+                return request
+            request.stop = [stop, closer]
+        elif closer in stop:
+            return request
+        else:
+            stop.append(closer)
+        # The parser needs to *see* the closer to finish the tool call, and
+        # stop strings are stripped from the output by default.
+        if hasattr(request, "include_stop_str_in_output"):
+            request.include_stop_str_in_output = True
         return request
 
     def _preprocess_feed(
@@ -608,6 +658,12 @@ class ParserEngine(Parser):
 
     # ── Reasoning state queries ───────────────────────────────────────
 
+    @property
+    def emits_reasoning_span(self) -> bool:
+        # initial_state is derived per request from chat_template_kwargs, so
+        # this tracks the thinking/no-thinking distinction of *this* request.
+        return self.parser_engine_config.initial_state == ParserState.REASONING
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_id = self._reasoning_end_token_id
         start_id = self._reasoning_start_token_id
@@ -627,6 +683,32 @@ class ParserEngine(Parser):
                     )
             return False
         return self._reasoning_ended
+
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        # O(len(delta)). The inherited default ignores the delta and rescans
+        # the whole sequence, and the structured-output manager calls this
+        # once per request per engine step -- and once per speculative
+        # position -- while a thinking span is open. With reasoning spans of
+        # tens of thousands of tokens that rescan serializes hundreds of
+        # milliseconds of Python into every forward pass.
+        end_id = self._reasoning_end_token_id
+        if end_id is None:
+            return self.is_reasoning_end(input_ids)
+        start_id = self._reasoning_start_token_id
+        boundary_ids = self._turn_boundary_token_ids
+        ended = None
+        for token_id in delta_ids:
+            if token_id == end_id:
+                ended = True
+            elif start_id is not None and token_id == start_id:
+                ended = False
+            elif token_id in boundary_ids:
+                ended = (
+                    self.parser_engine_config.initial_state != ParserState.REASONING
+                )
+        return bool(ended)
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         end_id = self._reasoning_end_token_id

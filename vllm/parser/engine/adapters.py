@@ -62,8 +62,21 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         finally:
             self._parser_engine.skip_tool_parsing = saved
 
+    # Consulted by the structured-output manager: with this set it passes
+    # token references instead of building full-sequence copies per step.
+    reasoning_end_delta_only = True
+
+    @property
+    def emits_reasoning_span(self) -> bool:
+        return self._parser_engine.emits_reasoning_span
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        return self._parser_engine.is_reasoning_end_streaming(input_ids, delta_ids)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
