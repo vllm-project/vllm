@@ -1850,6 +1850,28 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
+    def mrope_num_dims(self) -> int:
+        thinker_config = getattr(self.hf_config, "thinker_config", None)
+        thinker_text_config = getattr(thinker_config, "text_config", None)
+
+        for hf_config in (
+            self.hf_text_config,
+            thinker_text_config,
+            self.hf_config,
+        ):
+            rope_parameters = getattr(hf_config, "rope_parameters", None)
+            if not isinstance(rope_parameters, dict):
+                continue
+
+            mrope_section = rope_parameters.get("mrope_section")
+            if isinstance(mrope_section, (list, tuple)):
+                return len(mrope_section)
+
+        # Preserve the historical three-dimensional allocation for custom
+        # configs that identify themselves as M-RoPE without exposing sections.
+        return 3 if self.uses_mrope else 0
+
+    @property
     def uses_xdrope_dim(self) -> int:
         return uses_xdrope_dim(self.hf_config)
 
