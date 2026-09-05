@@ -7,7 +7,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import Float32, Int32, Uint32, Uint64
+from cutlass import Float32, Int32, Uint32
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
@@ -164,7 +164,7 @@ class StableTopKFromGatheredCandidatesKernel:
     hist_bins = 2048
     radix_bits = (hist_bins - 1).bit_length()
     assert hist_bins == 1 << radix_bits
-    key_bits = Uint64.width
+    key_bits = Uint32.width
     radix_passes = (key_bits + radix_bits - 1) // radix_bits
     final_radix_bits = key_bits - radix_bits * (radix_passes - 1)
     hist_chunks = (hist_bins + tb_size - 1) // tb_size
@@ -186,7 +186,8 @@ class StableTopKFromGatheredCandidatesKernel:
             threshold_bin: cute.struct.MemRange[Int32, 1]
             threshold_found: cute.struct.MemRange[Int32, 1]
             include_threshold_bin: cute.struct.MemRange[Int32, 1]
-            prefix_s: cute.struct.Align[cute.struct.MemRange[Uint64, 1], 8]
+            needs_tie_break: cute.struct.MemRange[Int32, 1]
+            prefix_s: cute.struct.MemRange[Uint32, 1]
             warp_totals: cute.struct.MemRange[Int32, self.warps_per_block]
 
         self.shared_storage = SharedStorage
@@ -206,41 +207,42 @@ class StableTopKFromGatheredCandidatesKernel:
         )
 
     @cute.jit
-    def _stable_key(self, score: Float32, token_id: Int32) -> Uint64:
+    def _score_key(self, score: Float32, token_id: Int32) -> Uint32:
         bits = recast_val(score, Uint32)
         mask = Uint32(0x80000000)
         if (bits & Uint32(0x80000000)) != Uint32(0):
             mask = Uint32(0xFFFFFFFF)
-        score_key = Uint64(bits ^ mask) << Uint64(32)
-        id_key = Uint64(~Uint32(token_id))
-        key = score_key | id_key
+        key = bits ^ mask
         if token_id < Int32(0):
-            key = Uint64(0)
+            key = Uint32(0)
         return key
 
     @cute.jit
     def _prefix_matches(
         self,
-        key: Uint64,
-        prefix: Uint64,
+        key: Uint32,
+        prefix: Uint32,
         prefix_bits: Int32,
     ):
         matches = prefix_bits == Int32(0)
         if prefix_bits != Int32(0):
             shift = Int32(self.key_bits) - prefix_bits
-            matches = (key >> Uint64(shift)) == (prefix >> Uint64(shift))
+            matches = (key >> Uint32(shift)) == (prefix >> Uint32(shift))
         return matches
 
     @cute.jit
     def _radix_pass(
         self,
-        keys: cute.Tensor,
+        score_keys: cute.Tensor,
+        token_ids: cute.Tensor,
         output: cute.Tensor,
         storage,
         tid: Int32,
         step: Int32,
         bits: int,
         is_final_pass: bool,
+        use_token_id_key: bool,
+        score_threshold: Uint32,
     ):
         hist_smem = storage.hist.get_tensor(cute.make_layout((self.hist_bins,)))
         committed_count_smem = storage.committed_count.data_ptr()
@@ -248,6 +250,7 @@ class StableTopKFromGatheredCandidatesKernel:
         threshold_bin_smem = storage.threshold_bin.data_ptr()
         threshold_found_smem = storage.threshold_found.data_ptr()
         include_threshold_bin_smem = storage.include_threshold_bin.data_ptr()
+        needs_tie_break_smem = storage.needs_tie_break.data_ptr()
         prefix_smem = storage.prefix_s.data_ptr()
         warp_totals_smem = storage.warp_totals.get_tensor(
             cute.make_layout((1, self.warps_per_block))
@@ -257,7 +260,7 @@ class StableTopKFromGatheredCandidatesKernel:
         num_bins = 1 << bits
         block_scan_iterations = (num_bins + self.tb_size - 1) // self.tb_size
         shift = Int32(self.key_bits) - prefix_bits - Int32(bits)
-        bin_mask = Uint64(num_bins - 1)
+        bin_mask = Uint32(num_bins - 1)
         prefix = prefix_smem.load()
 
         for chunk in cutlass.range_constexpr(self.hist_chunks):
@@ -265,13 +268,20 @@ class StableTopKFromGatheredCandidatesKernel:
         if tid == Int32(0):
             running_count_smem.store(committed_count_smem.load())
             include_threshold_bin_smem.store(Int32(0))
+            if cutlass.const_expr(not use_token_id_key):
+                needs_tie_break_smem.store(Int32(0))
             threshold_found_smem.store(Int32(0))
         cute.arch.sync_threads()
 
         for key_idx in cutlass.range_constexpr(self.keys_per_thread):
-            key = keys[key_idx]
-            if self._prefix_matches(key, prefix, prefix_bits):
-                bin_idx = Int32((key >> Uint64(shift)) & bin_mask)
+            token_id = token_ids[key_idx]
+            key = score_keys[key_idx]
+            valid = key != Uint32(0)
+            if cutlass.const_expr(use_token_id_key):
+                valid = key == score_threshold and token_id >= Int32(0)
+                key = ~Uint32(token_id)
+            if valid and self._prefix_matches(key, prefix, prefix_bits):
+                bin_idx = Int32((key >> Uint32(shift)) & bin_mask)
                 cute.arch.atomic_add(
                     hist_smem.iterator + bin_idx,
                     Int32(1),
@@ -300,8 +310,12 @@ class StableTopKFromGatheredCandidatesKernel:
             remaining = Int32(self.topk) - running_count - prior_in_scan_slice
             if count > Int32(0) and remaining > Int32(0) and remaining <= count:
                 threshold_bin_smem.store(bin_idx)
-                if count <= remaining or cutlass.const_expr(is_final_pass):
+                if count <= remaining or cutlass.const_expr(
+                    is_final_pass and use_token_id_key
+                ):
                     include_threshold_bin_smem.store(Int32(1))
+                elif cutlass.const_expr(is_final_pass and not use_token_id_key):
+                    needs_tie_break_smem.store(Int32(1))
                 threshold_found_smem.store(Int32(1))
             # Barrier: every thread must finish reading running_count for this
             # slice before tb_size-1 advances it, else a warp racing ahead to
@@ -318,9 +332,14 @@ class StableTopKFromGatheredCandidatesKernel:
         threshold = threshold_bin_smem.load()
         should_include_threshold = include_threshold_bin_smem.load() != Int32(0)
         for key_idx in cutlass.range_constexpr(self.keys_per_thread):
-            key = keys[key_idx]
-            if self._prefix_matches(key, prefix, prefix_bits):
-                bin_idx = Int32((key >> Uint64(shift)) & bin_mask)
+            token_id = token_ids[key_idx]
+            key = score_keys[key_idx]
+            valid = key != Uint32(0)
+            if cutlass.const_expr(use_token_id_key):
+                valid = key == score_threshold and token_id >= Int32(0)
+                key = ~Uint32(token_id)
+            if valid and self._prefix_matches(key, prefix, prefix_bits):
+                bin_idx = Int32((key >> Uint32(shift)) & bin_mask)
                 selected = bin_idx > threshold
                 if should_include_threshold:
                     selected = selected or bin_idx == threshold
@@ -332,14 +351,63 @@ class StableTopKFromGatheredCandidatesKernel:
                         scope="cta",
                     )
                     if dst < Int32(self.topk):
-                        output[dst] = recast_val(~Uint32(key), Int32)
+                        output[dst] = token_id
         cute.arch.sync_threads()
 
         pass_finished = include_threshold_bin_smem.load()
-        if tid == Int32(0) and pass_finished == Int32(0):
-            prefix_smem.store(prefix | (Uint64(threshold) << Uint64(shift)))
+        needs_tie_break = Int32(0)
+        if cutlass.const_expr(not use_token_id_key):
+            needs_tie_break = needs_tie_break_smem.load()
+            if needs_tie_break != Int32(0):
+                pass_finished = Int32(1)
+        if tid == Int32(0) and (
+            pass_finished == Int32(0) or needs_tie_break != Int32(0)
+        ):
+            prefix_smem.store(prefix | (Uint32(threshold) << Uint32(shift)))
         cute.arch.sync_threads()
         return pass_finished
+
+    @cute.jit
+    def _run_radix_passes(
+        self,
+        score_keys: cute.Tensor,
+        token_ids: cute.Tensor,
+        output: cute.Tensor,
+        storage,
+        tid: Int32,
+        use_token_id_key: bool,
+        score_threshold: Uint32,
+    ):
+        step = Int32(0)
+        finished = Int32(0)
+        while finished == Int32(0) and step < Int32(self.radix_passes - 1):
+            finished = self._radix_pass(
+                score_keys,
+                token_ids,
+                output,
+                storage,
+                tid,
+                step,
+                self.radix_bits,
+                False,
+                use_token_id_key,
+                score_threshold,
+            )
+            step += Int32(1)
+
+        if finished == Int32(0):
+            self._radix_pass(
+                score_keys,
+                token_ids,
+                output,
+                storage,
+                tid,
+                Int32(self.radix_passes - 1),
+                self.final_radix_bits,
+                True,
+                use_token_id_key,
+                score_threshold,
+            )
 
     @cute.kernel
     def kernel(
@@ -351,50 +419,90 @@ class StableTopKFromGatheredCandidatesKernel:
         tid, _, _ = cute.arch.thread_idx()
         input_row = input[row, None, None]
         output_row = out[row, None]
-        keys = cute.make_rmem_tensor((self.keys_per_thread,), Uint64)
+        score_keys = cute.make_rmem_tensor((self.keys_per_thread,), Uint32)
+        token_ids = cute.make_rmem_tensor((self.keys_per_thread,), Int32)
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage, 8)
         committed_count_smem = storage.committed_count.data_ptr()
+        running_count_smem = storage.running_count.data_ptr()
         prefix_smem = storage.prefix_s.data_ptr()
-        for i in range(tid, self.topk, self.tb_size):
-            output_row[i] = Int32(-1)
-
+        needs_tie_break_smem = storage.needs_tie_break.data_ptr()
+        warp_totals_smem = storage.warp_totals.get_tensor(
+            cute.make_layout((1, self.warps_per_block))
+        )
+        valid_count = Int32(0)
         for key_idx in cutlass.range_constexpr(self.keys_per_thread):
             col = tid + Int32(key_idx * self.tb_size)
-            score = Float32(input_row[col, 0])
             token_id = Int32(input_row[col, 1])
-            keys[key_idx] = self._stable_key(score, token_id)
+            token_ids[key_idx] = token_id
+            if token_id >= Int32(0):
+                valid_count += Int32(1)
 
         if tid == Int32(0):
             committed_count_smem.store(Int32(0))
-            prefix_smem.store(Uint64(0))
+            prefix_smem.store(Uint32(0))
+            needs_tie_break_smem.store(Int32(0))
         cute.arch.sync_threads()
 
-        step = Int32(0)
-        finished = Int32(0)
-        while finished == Int32(0) and step < Int32(self.radix_passes - 1):
-            finished = self._radix_pass(
-                keys,
-                output_row,
-                storage,
-                tid,
-                step,
-                self.radix_bits,
-                False,
-            )
-            step += Int32(1)
+        lane = cute.arch.lane_idx()
+        warp_id = cute.arch.warp_idx()
+        valid_prefix = _block_scan_inclusive_i32(
+            valid_count,
+            lane,
+            warp_id,
+            warp_totals_smem,
+            self.warps_per_block,
+        )
+        if tid == Int32(self.tb_size - 1):
+            running_count_smem.store(valid_prefix)
+        cute.arch.sync_threads()
 
-        if finished == Int32(0):
-            self._radix_pass(
-                keys,
+        total_valid = running_count_smem.load()
+        if total_valid <= Int32(self.topk):
+            if total_valid < Int32(self.topk):
+                for i in range(tid, self.topk, self.tb_size):
+                    if i >= total_valid:
+                        output_row[i] = Int32(-1)
+            dst = valid_prefix - valid_count
+            for key_idx in cutlass.range_constexpr(self.keys_per_thread):
+                token_id = token_ids[key_idx]
+                if token_id >= Int32(0):
+                    output_row[dst] = token_id
+                    dst += Int32(1)
+        else:
+            for key_idx in cutlass.range_constexpr(self.keys_per_thread):
+                col = tid + Int32(key_idx * self.tb_size)
+                score = Float32(input_row[col, 0])
+                score_keys[key_idx] = self._score_key(score, token_ids[key_idx])
+
+            self._run_radix_passes(
+                score_keys,
+                token_ids,
                 output_row,
                 storage,
                 tid,
-                Int32(self.radix_passes - 1),
-                self.final_radix_bits,
-                True,
+                False,
+                Uint32(0),
             )
+            cute.arch.sync_threads()
+
+            # Only exact score ties at the top-k boundary need token-id radix.
+            if needs_tie_break_smem.load() != Int32(0):
+                score_threshold = prefix_smem.load()
+                if tid == Int32(0):
+                    prefix_smem.store(Uint32(0))
+                cute.arch.sync_threads()
+
+                self._run_radix_passes(
+                    score_keys,
+                    token_ids,
+                    output_row,
+                    storage,
+                    tid,
+                    True,
+                    score_threshold,
+                )
 
     @cache
     @staticmethod
