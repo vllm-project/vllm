@@ -3,8 +3,10 @@
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
     LMCacheKVEvents,
@@ -52,8 +54,19 @@ def mock_connector():
     connector = MagicMock(spec=LMCacheConnectorV1)
     connector._kv_cache_events = None
     connector._lmcache_engine = MagicMock()
+    connector._logged_lmcache_degraded = False
 
     # Make the methods use the real implementation
+    connector._lmcache_engine_unavailable = (
+        LMCacheConnectorV1._lmcache_engine_unavailable.__get__(
+            connector, LMCacheConnectorV1
+        )
+    )
+    connector._skip_when_lmcache_degraded = (
+        LMCacheConnectorV1._skip_when_lmcache_degraded.__get__(
+            connector, LMCacheConnectorV1
+        )
+    )
     connector.get_kv_connector_kv_cache_events = (
         LMCacheConnectorV1.get_kv_connector_kv_cache_events.__get__(
             connector, LMCacheConnectorV1
@@ -69,6 +82,214 @@ def mock_connector():
     )
 
     return connector
+
+
+def make_connector_with_adapter(adapter: MagicMock) -> LMCacheConnectorV1:
+    connector = object.__new__(LMCacheConnectorV1)
+    connector._lmcache_engine = adapter
+    connector._kv_cache_events = None
+    connector._logged_lmcache_degraded = False
+    return connector
+
+
+def bind_lmcache_metadata(connector: LMCacheConnectorV1) -> None:
+    metadata = MagicMock()
+    metadata.requests = []
+    connector.bind_connector_metadata(metadata)
+
+
+class TestDegradedLMCacheFallback:
+    """Worker-side hooks should no-op when LMCache is in degraded mode."""
+
+    @pytest.fixture()
+    def degraded_connector(self):
+        adapter = MagicMock()
+        adapter.lmcache_engine = None
+        return make_connector_with_adapter(adapter), adapter
+
+    def test_start_load_kv_noops_when_lmcache_engine_is_none(self, degraded_connector):
+        connector, adapter = degraded_connector
+        forward_context = MagicMock()
+
+        connector.start_load_kv(forward_context, extra_arg="x")
+
+        adapter.start_load_kv.assert_not_called()
+
+    def test_register_kv_caches_noops_when_lmcache_engine_is_none(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+        kv_caches = {"layer.0": torch.zeros(1)}
+
+        connector.register_kv_caches(kv_caches)
+
+        adapter.register_kv_caches.assert_not_called()
+
+    def test_wait_for_layer_load_noops_when_lmcache_engine_is_none(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+
+        connector.wait_for_layer_load("layer.0")
+
+        adapter.wait_for_layer_load.assert_not_called()
+
+    def test_save_kv_layer_noops_when_lmcache_engine_is_none(self, degraded_connector):
+        connector, adapter = degraded_connector
+        kv_layer = torch.zeros(1)
+        attn_metadata = MagicMock()
+
+        connector.save_kv_layer("layer.0", kv_layer, attn_metadata, extra_arg="x")
+
+        adapter.save_kv_layer.assert_not_called()
+
+    def test_wait_for_save_noops_when_lmcache_engine_is_none(self, degraded_connector):
+        connector, adapter = degraded_connector
+
+        connector.wait_for_save()
+
+        adapter.wait_for_save.assert_not_called()
+
+    def test_get_finished_noops_when_lmcache_engine_is_none(self, degraded_connector):
+        connector, adapter = degraded_connector
+
+        assert connector.get_finished({"req-1"}) == (None, None)
+        adapter.get_finished.assert_not_called()
+
+    def test_get_block_ids_with_load_errors_is_empty_in_degraded_mode(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+
+        assert connector.get_block_ids_with_load_errors() == set()
+        adapter.get_block_ids_with_load_errors.assert_not_called()
+
+    def test_get_kv_cache_events_is_none_in_degraded_mode(self, degraded_connector):
+        connector, adapter = degraded_connector
+
+        assert connector.get_kv_connector_kv_cache_events() is None
+        adapter.get_kv_events.assert_not_called()
+
+    def test_start_load_kv_delegates_when_lmcache_engine_exists(self):
+        adapter = MagicMock()
+        adapter.lmcache_engine = object()
+        connector = make_connector_with_adapter(adapter)
+        bind_lmcache_metadata(connector)
+        forward_context = MagicMock()
+
+        connector.start_load_kv(forward_context, extra_arg="x")
+
+        adapter.start_load_kv.assert_called_once_with(forward_context, extra_arg="x")
+
+
+class TestDegradedSchedulerSide:
+    """Scheduler-side hooks must no-op when the LMCache lookup client is
+    unavailable (degraded init), instead of asserting and killing EngineCore."""
+
+    @pytest.fixture()
+    def degraded_connector(self):
+        adapter = MagicMock()
+        adapter.lookup_client = None
+        return make_connector_with_adapter(adapter), adapter
+
+    def test_get_num_new_matched_tokens_noops_when_lookup_unavailable(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+
+        assert connector.get_num_new_matched_tokens(MagicMock(), 0) == (0, False)
+        adapter.get_num_new_matched_tokens.assert_not_called()
+
+    def test_update_state_after_alloc_noops_when_lookup_unavailable(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+
+        connector.update_state_after_alloc(MagicMock(), MagicMock(), 0)
+        adapter.update_state_after_alloc.assert_not_called()
+
+    def test_build_connector_meta_returns_empty_when_lookup_unavailable(
+        self, degraded_connector
+    ):
+        connector, adapter = degraded_connector
+
+        meta = connector.build_connector_meta(MagicMock())
+        assert isinstance(meta, KVConnectorMetadata)
+        adapter.build_connector_meta.assert_not_called()
+
+    def test_request_finished_noops_when_lookup_unavailable(self, degraded_connector):
+        connector, adapter = degraded_connector
+
+        assert connector.request_finished(MagicMock(), [1, 2]) == (False, None)
+        adapter.request_finished.assert_not_called()
+
+    def test_scheduler_methods_delegate_when_lookup_available(self):
+        adapter = MagicMock()
+        adapter.lookup_client = object()
+        adapter.get_num_new_matched_tokens.return_value = 7
+        connector = make_connector_with_adapter(adapter)
+        request = MagicMock()
+
+        assert connector.get_num_new_matched_tokens(request, 3) == (7, False)
+        adapter.get_num_new_matched_tokens.assert_called_once_with(request, 3)
+
+        connector.update_state_after_alloc(request, MagicMock(), 7)
+        adapter.update_state_after_alloc.assert_called_once_with(request, 7)
+
+        connector.build_connector_meta(MagicMock())
+        adapter.build_connector_meta.assert_called_once()
+
+        connector.request_finished(request, [1, 2])
+        adapter.request_finished.assert_called_once_with(request, [1, 2])
+
+
+class TestDegradedSchedulerMetadataFallback:
+    """Worker-side hooks must no-op if the scheduler fell back to generic
+    metadata instead of LMCache metadata."""
+
+    @pytest.fixture()
+    def connector_with_generic_metadata(self):
+        adapter = MagicMock()
+        adapter.lmcache_engine = object()
+        connector = make_connector_with_adapter(adapter)
+        connector.bind_connector_metadata(KVConnectorMetadata())
+        return connector, adapter
+
+    def test_start_load_kv_noops_without_lmcache_metadata(
+        self, connector_with_generic_metadata
+    ):
+        connector, adapter = connector_with_generic_metadata
+
+        connector.start_load_kv(MagicMock(), extra_arg="x")
+
+        adapter.start_load_kv.assert_not_called()
+
+    def test_wait_for_layer_load_noops_without_lmcache_metadata(
+        self, connector_with_generic_metadata
+    ):
+        connector, adapter = connector_with_generic_metadata
+
+        connector.wait_for_layer_load("layer.0")
+
+        adapter.wait_for_layer_load.assert_not_called()
+
+    def test_save_kv_layer_noops_without_lmcache_metadata(
+        self, connector_with_generic_metadata
+    ):
+        connector, adapter = connector_with_generic_metadata
+
+        connector.save_kv_layer("layer.0", torch.zeros(1), MagicMock())
+
+        adapter.save_kv_layer.assert_not_called()
+
+    def test_wait_for_save_noops_without_lmcache_metadata(
+        self, connector_with_generic_metadata
+    ):
+        connector, adapter = connector_with_generic_metadata
+
+        connector.wait_for_save()
+
+        adapter.wait_for_save.assert_not_called()
 
 
 class TestGetKVConnectorKVCacheEvents:
