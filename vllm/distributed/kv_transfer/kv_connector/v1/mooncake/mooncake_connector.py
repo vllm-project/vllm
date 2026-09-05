@@ -182,12 +182,30 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
+    total_num_kv_heads: int | None = None,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
         return True, 0, 0, local_kv_block_len
+
+    if total_num_kv_heads is not None:
+        consumer_cache_replicated = remote_tp_size > total_num_kv_heads
+        if producer_cache_replicated != consumer_cache_replicated:
+            local_head_count = max(total_num_kv_heads // local_tp_size, 1)
+            local_replica_count = max(local_tp_size // total_num_kv_heads, 1)
+
+            local_head = local_tp_rank * total_num_kv_heads // local_tp_size
+            remote_head = remote_tp_rank * total_num_kv_heads // remote_tp_size
+            head_size = local_kv_block_len // local_head_count
+
+            return (
+                local_tp_rank % local_replica_count == 0,
+                max(remote_head - local_head, 0) * head_size,
+                max(local_head - remote_head, 0) * head_size,
+                head_size,
+            )
 
     if tp_ratio > 0:
         if producer_cache_replicated:
@@ -233,6 +251,7 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
+    consumer_cache_replicated: bool,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -246,7 +265,7 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if producer_cache_replicated:
+    if producer_cache_replicated or consumer_cache_replicated:
         return None
 
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
@@ -1224,6 +1243,10 @@ class MooncakeConnectorWorker:
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            consumer_cache_replicated=(
+                self.use_mla
+                or meta.remote_tp_size > self.transfer_topo.total_num_kv_heads
+            ),
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
@@ -1531,6 +1554,10 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    is_mamba_group=isinstance(
+                        group_specs[group_index].kv_cache_spec,
+                        MambaSpec,
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2064,6 +2091,7 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        is_mamba_group: bool = False,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2073,6 +2101,11 @@ class MooncakeConnectorWorker:
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            total_num_kv_heads=(
+                None
+                if self.use_mla or is_mamba_group
+                else self.transfer_topo.total_num_kv_heads
+            ),
         )
 
     def _log_debug_cache_registration(
