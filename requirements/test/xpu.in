@@ -29,6 +29,8 @@ soundfile
 # --- Tool Parsing & Evaluation ---
 blobfile
 rapidfuzz
+# gpt-oss depends on openai-harmony; exclude it in favor of oss-harmony:
+#   --excludes requirements/harmony-excludes.txt
 gpt-oss
 schemathesis
 jiwer

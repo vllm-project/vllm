@@ -48,7 +48,7 @@ pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
 ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
-openai-harmony >= 0.0.3  # Required for gpt-oss
+oss-harmony >= 0.0.11  # Required for gpt-oss (openai_harmony drop-in; see harmony-excludes.txt)
 anthropic >= 0.71.0
 model-hosting-container-standards >= 0.1.14, < 1.0.0
 mcp >= 2.0.0, < 3.0.0

@@ -47,19 +47,21 @@ repos:
       args: [
         requirements/test/cuda.in,
         -c, requirements/cuda.txt,
+        --excludes, requirements/harmony-excludes.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
         --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
+      files: ^requirements/(common|cuda|harmony-excludes|test/cuda)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
         requirements/test/rocm.in,
         -c, requirements/rocm.txt,
+        --excludes, requirements/harmony-excludes.txt,
         -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_28,
@@ -122,31 +124,33 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
+      files: ^requirements/(common|rocm|harmony-excludes|test/rocm)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
       args: [
         requirements/test/xpu.in,
         -c, requirements/xpu.txt,
+        --excludes, requirements/harmony-excludes.txt,
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+      files: ^requirements/(common|xpu|harmony-excludes|test/xpu)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-cpu
       name: pip-compile-cpu
       args: [
         requirements/test/cuda.in,
+        --excludes, requirements/harmony-excludes.txt,
         -o, requirements/test/cpu.txt,
         --index-strategy, unsafe-best-match,
         --torch-backend, cpu,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      files: ^requirements/(common|cpu|harmony-excludes|test/(cuda|cpu))\.(in|txt)$
       exclude: ^requirements/test/cuda\.txt$
     - id: pip-compile
       alias: pip-compile-docs

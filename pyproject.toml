@@ -193,3 +193,5 @@ CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# gpt-oss depends on openai-harmony; vLLM ships oss-harmony (same module).
+exclude-dependencies = ["openai-harmony"]
