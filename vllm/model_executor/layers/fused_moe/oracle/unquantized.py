@@ -72,11 +72,16 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
 
-        # On Hopper (SM90), the FlashInfer unquantized MoE kernels are slower
-        # than Triton, so prefer Triton by default.
+        # On Hopper (SM90) the two FlashInfer backends behave differently and
+        # are no longer demoted together. TRTLLM stays behind Triton: its
+        # unquantized path rejects the device outright ("kernel does not
+        # support current device"), so promoting it only costs a failed
+        # probe. CUTLASS is a separate, warp-specialized kernel and measured
+        # FASTER than Triton on H100 NVL with Qwen3-30B-A3B bf16 -- 1.031x
+        # end-to-end (15.61 vs 15.13 req/s, order-balanced, non-overlapping),
+        # so it keeps its priority ahead of Triton.
         if current_platform.is_device_capability_family(90):
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
-            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
         # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
         # Updating the oracle querying logic is out of the scope of this
