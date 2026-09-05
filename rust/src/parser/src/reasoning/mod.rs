@@ -28,7 +28,7 @@ mod seed_oss;
 mod step3p5;
 
 use thiserror::Error;
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
@@ -61,10 +61,14 @@ pub type Step3ReasoningParser = Qwen3ReasoningParser;
 pub type Result<T> = std::result::Result<T, ReasoningError>;
 
 /// One parsed streaming delta split into reasoning and visible content.
+///
+/// Each portion carries the attributions of the generated tokens that produced
+/// it, so downstream consumers can count reasoning tokens exactly. Marker
+/// spans are dropped by the parsers, keeping marker tokens out of any count.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReasoningDelta {
-    pub reasoning: Option<String>,
-    pub content: Option<String>,
+    pub reasoning: Option<DecodedText>,
+    pub content: Option<DecodedText>,
 }
 
 impl ReasoningDelta {
@@ -74,24 +78,30 @@ impl ReasoningDelta {
     }
 
     /// Append text to the reasoning portion, creating it on first use.
-    pub(crate) fn push_reasoning(&mut self, text: &str) {
-        if text.is_empty() {
+    ///
+    /// A piece with empty text but non-empty attributions (zero-width tokens
+    /// only) is still kept: the tokens are attributed to the current state.
+    pub(crate) fn push_reasoning(&mut self, piece: DecodedText) {
+        if piece.is_empty() {
             return;
         }
         match &mut self.reasoning {
-            Some(existing) => existing.push_str(text),
-            None => self.reasoning = Some(text.to_string()),
+            Some(existing) => existing.append(piece),
+            None => self.reasoning = Some(piece),
         }
     }
 
     /// Append text to the visible content portion, creating it on first use.
-    pub(crate) fn push_content(&mut self, text: &str) {
-        if text.is_empty() {
+    ///
+    /// A piece with empty text but non-empty attributions (zero-width tokens
+    /// only) is still kept: the tokens are attributed to the current state.
+    pub(crate) fn push_content(&mut self, piece: DecodedText) {
+        if piece.is_empty() {
             return;
         }
         match &mut self.content {
-            Some(existing) => existing.push_str(text),
-            None => self.content = Some(text.to_string()),
+            Some(existing) => existing.append(piece),
+            None => self.content = Some(piece),
         }
     }
 }
@@ -119,7 +129,7 @@ pub trait ReasoningParser: Send {
     }
 
     /// Feed one decoded text delta into the parser.
-    fn push(&mut self, delta: &str) -> Result<ReasoningDelta>;
+    fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta>;
 
     /// Flush any buffered partial delimiter state at end of stream.
     fn finish(&mut self) -> Result<ReasoningDelta> {

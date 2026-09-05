@@ -153,6 +153,10 @@ class AsyncLLM(EngineClient):
         )
 
         # EngineCore (starts the engine in background process).
+        # Hand the renderer to the client so it can start the frontend MM
+        # warmup only after engine-core fork (the why is in
+        # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
+        # by reset_mm_cache / warmup / shutdown.
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -160,6 +164,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            renderer=renderer,
         )
 
         # Loggers.
@@ -647,6 +652,17 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        Note:
+            Passing a raw prompt string directly to this method is deprecated.
+            Advanced power-users can manually bypass the raw-prompt fallback
+            path using the Engine's underlying Renderer pipeline:
+
+            >>> from vllm.inputs import parse_model_prompt
+            >>> parsed = parse_model_prompt(self.model_config, "Prompt text")
+            >>> params = self.renderer.default_cmpl_tok_params
+            >>> (engine_input,) = self.renderer.render_cmpl([parsed], params)
+            >>> gen = self.generate(engine_input, sampling_params, request_id)
         """
 
         q: RequestOutputCollector | None = None
@@ -1023,6 +1039,9 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
+        # Join the background MM warmup first: the mm_processor_cache is not
+        # safe for concurrent access with its apply/clear.
+        self.renderer._join_mm_warmup()
         await self.renderer.clear_mm_cache_async()
         await self.engine_core.reset_mm_cache_async()
 

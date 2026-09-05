@@ -17,7 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
     is_breakable_cudagraph_enabled,
 )
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -68,6 +68,19 @@ class BatchExecutionDescriptor:
     # uniform_token_count unset, so this is what keeps a prefill batch out of one.
     max_query_len: int | None = None
     num_active_loras: int = 0
+    # Number of microbatches the batch is split into (DBO). 1 means no splitting.
+    num_ubatches: int = 1
+
+
+def make_cudagraph_stats(
+    batch_desc: BatchExecutionDescriptor, num_tokens: int
+) -> CUDAGraphStat:
+    return CUDAGraphStat(
+        num_unpadded_tokens=num_tokens,
+        num_padded_tokens=batch_desc.num_tokens,
+        num_paddings=batch_desc.num_tokens - num_tokens,
+        runtime_mode=str(batch_desc.cg_mode),
+    )
 
 
 class CreateForwardFn(Protocol):
@@ -89,11 +102,13 @@ def _is_compatible(
     uniform_token_count: int | None,
     num_active_loras: int,
     max_query_len: int | None,
+    num_ubatches: int,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
     # desc.max_query_len=None means the graph does not constrain query length; a
     # caller that does not track max_query_len must not match one that does
+    # A graph captured for N microbatches can only serve a batch split N ways.
     return (
         (
             desc.uniform_token_count is None
@@ -106,6 +121,7 @@ def _is_compatible(
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
+        and desc.num_ubatches == num_ubatches
     )
 
 
@@ -423,6 +439,7 @@ class CudaGraphManager:
         uniform_token_count: int | None,
         num_active_loras: int,
         max_query_len: int | None = None,
+        num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -437,6 +454,7 @@ class CudaGraphManager:
                     uniform_token_count,
                     effective_loras,
                     max_query_len,
+                    num_ubatches,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -444,6 +462,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             num_active_loras=effective_loras,
+            num_ubatches=num_ubatches,
         )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor):
@@ -809,7 +828,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
             mem_samples: list[int] = []
             manager._capture_mem_samples = mem_samples
 
-            measured = int(runner.capture_model())
+            measured = int(runner.capture_model(profile_only=True))
 
             # The measured delta covers PIECEWISE, encoder and speculator graphs
             # plus the sampled FULL graphs; swap the sampled FULL cost for the

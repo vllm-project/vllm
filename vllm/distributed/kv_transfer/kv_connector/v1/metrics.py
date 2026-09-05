@@ -26,6 +26,10 @@ class KVConnectorStats:
 
     data: dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return the serializable connector stats payload."""
+        return self.data
+
     def reset(self):
         """Reset the stats, clear the state."""
         raise NotImplementedError

@@ -120,6 +120,7 @@ _TEXT_GENERATION_MODELS = {
     "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "Glm4MoeLiteForCausalLM": ("glm4_moe_lite", "Glm4MoeLiteForCausalLM"),
     "GlmMoeDsaForCausalLM": ("vllm.models.deepseek_v32", "GlmMoeDsaForCausalLM"),
+    "Glm5NextForCausalLM": ("vllm.models.glm5next", "Glm5NextForCausalLM"),
     "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -413,6 +414,10 @@ _MULTIMODAL_MODELS = {
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
     "Glm4vMoeForConditionalGeneration": ("glm4_1v", "Glm4vMoeForConditionalGeneration"),
     "GlmOcrForConditionalGeneration": ("glm_ocr", "GlmOcrForConditionalGeneration"),
+    "Glm5NextForConditionalGeneration": (
+        "vllm.models.glm5next",
+        "Glm5NextForConditionalGeneration",
+    ),
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
@@ -515,6 +520,9 @@ _MULTIMODAL_MODELS = {
     "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "MuseGlimmerForConditionalGeneration": ("muse_glimmer", "MuseGlimmerForCausalLM"),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
@@ -666,6 +674,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "Glm4MoeLiteMTPModel": ("glm4_moe_lite_mtp", "Glm4MoeLiteMTP"),
     "GlmOcrMTPModel": ("glm_ocr_mtp", "GlmOcrMTP"),
+    "Glm5NextMTPModel": ("vllm.models.glm5next", "Glm5NextMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
@@ -1247,7 +1256,10 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom)."
                 )
 
-        if not model_module.is_backend_compatible():
+        if not (
+            model_module.is_backend_compatible()
+            or model_module._can_set_attn_implementation()
+        ):
             if model_config.model_impl != "transformers":
                 return None
 

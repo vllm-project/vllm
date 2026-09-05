@@ -535,6 +535,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
+            get_fp8_block_weight_scale,
         )
         from vllm.model_executor.utils import replace_parameter
 
@@ -545,7 +546,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
             if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
                 return None
-            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            ws = get_fp8_block_weight_scale(linear)
             if ws is None:
                 return None
             if ws.dtype == torch.float8_e8m0fnu:

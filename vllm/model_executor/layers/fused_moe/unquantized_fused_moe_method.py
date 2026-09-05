@@ -27,7 +27,11 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -42,6 +46,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     # --8<-- [end:unquantized_fused_moe]
+
+    supports_pre_processed_weights = True
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -153,16 +159,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # optional w{13,2}_bias references and SwiGLU gate params. Since
             # weight updates mutate those bias tensors in place, the kernel
             # does not need to be re-built.
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            assert self.experts_cls is not None
-            self.moe_kernel = make_unquantized_moe_kernel(
-                quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                backend=self.unquantized_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
+            self._init_moe_kernel(layer)
 
             if self.unquantized_backend == UnquantizedMoeBackend.CPU:
                 # The CPU experts need the layer itself for the setup that
@@ -170,10 +167,29 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 # it only sees the two weight tensors: padding and prepacking
                 # into the grouped-gemm layout (bias included), and capturing
                 # the router config that monolithic apply() cannot carry.
+                assert self.moe_kernel is not None
                 self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def _init_moe_kernel(self, layer: "RoutedExperts") -> None:
+        """Build the MoE kernel from the layer's current (shuffled) weights."""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_unquantized_moe_kernel(
+            quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            backend=self.unquantized_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
+
+        if is_weights_pre_processed():
+            # Weights are already in runtime format; rebuild the kernel only.
+            self._init_moe_kernel(layer)
+            return
 
         # Padding may allocate a same-shaped strided view. Copy it back instead
         # of rebinding `.data`, since CUDA graphs capture the parameter storage

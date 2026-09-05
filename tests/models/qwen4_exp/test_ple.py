@@ -14,6 +14,9 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
+)
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
     compute_ple_shard_overlap,
@@ -286,6 +289,37 @@ def test_ple_fp8_embedding_respects_checkpoint_shard_exclusions() -> None:
 
     quant_config.ignored_layers = [f"{prefix}.shard_0"]
     assert _get_ple_embedding_quant_method(quant_config, prefix) is None
+
+
+def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    prefix: {"quant_algo": "FP8"},
+                    "model.language_model.layers.2.moe.gate_proj": {
+                        "quant_algo": "NVFP4"
+                    },
+                },
+            }
+        }
+    )
+
+    assert isinstance(
+        _get_ple_embedding_quant_method(quant_config, prefix),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+    assert (
+        _get_ple_embedding_quant_method(
+            quant_config,
+            "model.language_model.layers.2.moe.gate_proj",
+        )
+        is None
+    )
 
 
 def test_dilated_ple_spec_state_rolls_back_before_next_forward() -> None:
@@ -1043,6 +1077,8 @@ class _ConvBatchCase:
     dilation: int = 3
     spec_query_len: int = 1
     graph_padding: int = 0
+    state_index_stride: int = 1
+    include_null_state: bool = True
 
 
 def _make_conv_metadata(
@@ -1089,9 +1125,18 @@ def _make_conv_metadata(
         dtype=torch.int32,
         device=device,
     )
+    if case.state_index_stride > 1:
+        strided_indices = torch.full(
+            (non_spec_state_indices.numel(), case.state_index_stride),
+            NULL_BLOCK_ID,
+            dtype=torch.int32,
+            device=device,
+        )
+        strided_indices[:, 0] = non_spec_state_indices
+        non_spec_state_indices = strided_indices[:, 0]
     if case.num_decodes > 1:
         non_spec_state_indices[case.num_decodes - 1] = NULL_BLOCK_ID
-    if num_prefills > 1:
+    if num_prefills > 1 and case.include_null_state:
         non_spec_state_indices[case.num_decodes + 1] = NULL_BLOCK_ID
 
     spec_query_start_loc = torch.tensor(
@@ -1171,6 +1216,15 @@ def _make_conv_metadata(
         ),
         pytest.param(
             _ConvBatchCase(
+                prefill_query_lens=(16, 676),
+                channels=10240,
+                state_index_stride=4,
+                include_null_state=False,
+            ),
+            id="prefill-strided-state-indices",
+        ),
+        pytest.param(
+            _ConvBatchCase(
                 spec_query_lens=(1, 4, 4, 0),
                 num_accepted=(1, 2, 4, 1),
                 spec_query_len=4,
@@ -1209,6 +1263,8 @@ def test_fused_conv_correctness(
 ) -> None:
     device = torch.device("cuda")
     metadata, num_real_tokens = _make_conv_metadata(case, device)
+    if case.state_index_stride > 1:
+        assert metadata.state_indices_tensor.stride(0) == case.state_index_stride
     module = Qwen4ExpPLELayer.__new__(Qwen4ExpPLELayer)
     nn.Module.__init__(module)
     module.conv_state_len = (case.kernel_size - 1) * case.dilation

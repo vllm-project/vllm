@@ -142,7 +142,7 @@ def can_initialize(
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
     ):
-        if requires_spawn_multiprocessing():
+        if requires_spawn_multiprocessing() or model_arch == "Glm5NextForCausalLM":
             # The EngineCore subprocess re-imports the class and does not
             # inherit the KV-cache patch above, so it OOMs. Run in-process
             # so the patch applies.

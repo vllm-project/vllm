@@ -158,4 +158,4 @@ class GLU(nn.Module):
 
 def test_non_mla_is_not_matched():
     with torch.device("meta"):
-        assert not isinstance(get_fuser(GLU()), MLAFuser)
+        assert get_fuser(GLU(), MLAFuser) is None

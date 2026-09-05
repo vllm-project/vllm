@@ -317,6 +317,7 @@ class LagunaAttention(nn.Module):
         # config.gating may be:
         #   - True / "per-element": one gate per (head, head_dim) channel
         #   - "per-head":           one gate per head, broadcast across head_dim
+        self.g_proj: ColumnParallelLinear | None
         if self.gating:
             # v5 LagunaConfig uses ``gating=True`` for per-head; older configs
             # used ``"per-head"``. Accept both. ``"per-element"`` (or legacy

@@ -1160,6 +1160,7 @@ class GPUModelRunner(
             kernel_block_sizes=self._kernel_block_sizes,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -2257,8 +2258,10 @@ class GPUModelRunner(
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
-            ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
-                device=self.device, dtype=torch.int64, non_blocking=True
+            ) - async_tensor_h2d(
+                self.input_batch.num_computed_tokens_cpu_tensor[req_indices],
+                device=self.device,
+                dtype=torch.int64,
             )
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
             target.gpu[:, :total_num_scheduled_tokens] += drift
@@ -6323,9 +6326,7 @@ class GPUModelRunner(
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        logit_indices_device = torch.from_numpy(logit_indices).to(
-            self.device, non_blocking=True
-        )
+        logit_indices_device = async_tensor_h2d(logit_indices, device=self.device)
         return hidden_states, hidden_states[logit_indices_device]
 
     @torch.inference_mode()

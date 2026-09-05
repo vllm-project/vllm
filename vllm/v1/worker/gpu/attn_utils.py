@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.ubatch_utils import get_num_ubatches
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
@@ -140,14 +141,19 @@ def init_attn_backend(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
-                num_metadata_builders=1,
+                # Microbatches build attention metadata concurrently, and some
+                # builders keep the prepared metadata on themselves (MLA stores
+                # it on the prefill backend), so each ubatch needs its own.
+                num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
-            builder = group.get_metadata_builder(0)
-            if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
-                    attn_backend_workspace = builder._get_workspace_buffer()
-            else:
-                if hasattr(builder, "set_workspace_buffer"):
+            # The microbatches' builders share the workspace: they all issue
+            # attention on the one compute stream the threads hand off, so the
+            # buffer is written serially, as it already is across steps.
+            for builder in group.metadata_builders:
+                if attn_backend_workspace is None:
+                    if hasattr(builder, "_get_workspace_buffer"):
+                        attn_backend_workspace = builder._get_workspace_buffer()
+                elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
     attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
     return attn_groups, attn_cg_support_info, kernel_block_sizes
@@ -271,6 +277,7 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
+    ubatch_idx: int = 0,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -319,7 +326,7 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(0)
+            attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata

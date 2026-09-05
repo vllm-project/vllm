@@ -591,6 +591,7 @@ class QSAForwardMetadata(AttentionMetadata):
     num_prefill_tokens: int
     max_query_len: int
     decode_query_len: int
+    max_seq_len: int
     storage_block_size: int
     compress_ratio: int
 
@@ -717,6 +718,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             num_prefill_tokens=num_prefill_tokens,
             max_query_len=common_attn_metadata.max_query_len,
             decode_query_len=decode_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
         )

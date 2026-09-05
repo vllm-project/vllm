@@ -57,7 +57,8 @@ use super::{
     build_router_with_scale_out_endpoints, parse_scale_out_endpoints_flag,
     render::build_router as build_render_router,
 };
-use crate::config::{ApiServerOptions, CorsConfig};
+use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::lora::LoadLoraError;
 use crate::render::RenderState;
 use crate::state::AppState;
 
@@ -944,6 +945,20 @@ async fn test_admin_app_with_ready_and_engine_script<F>(
 where
     F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
 {
+    let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
+    (
+        build_router_with_dev_mode_and_lora(state, true, true),
+        engine_task,
+    )
+}
+
+async fn test_admin_state_with_ready_and_engine_script<F>(
+    ready: EngineCoreReadyResponse,
+    script: F,
+) -> (Arc<AppState>, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-admin".to_vec();
@@ -968,16 +983,146 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_dev_mode_and_lora(
-            Arc::new(AppState::new(
-                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-                chat,
-            )),
-            true,
-            true,
-        ),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         engine_task,
     )
+}
+
+/// Engine script that answers one `add_lora` utility call with `loaded` and
+/// hands the decoded LoRA request tuple to `check`.
+fn add_lora_script(
+    loaded: bool,
+    check: impl FnOnce(&[Value]) + Send + 'static,
+) -> impl for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static
+{
+    move |dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+            let args = array[3].as_array().expect("utility args");
+            check(args[0].as_array().expect("lora request tuple"));
+            send_outputs(push, utility_outputs(call_id, utility_result_value(loaded))).await;
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_loads_and_lists_with_parent() {
+    // An absolute local path: the runtime endpoint would reject it without
+    // VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES, static config trusts it.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        ready,
+        add_lora_script(true, |lora| {
+            assert_eq!(lora[0], Value::from("alice"));
+            assert_eq!(lora[1], Value::from(1));
+            assert_eq!(lora[2], Value::from("/adapters/alice"));
+            assert_eq!(lora[3], Value::from("base-model"));
+        }),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "/adapters/alice".to_string(),
+        base_model_name: Some("base-model".to_string()),
+        is_3d_lora_weight: false,
+    };
+    let request = state.load_static_lora(&module).await.expect("load static lora");
+    assert_eq!(request.lora_name, "alice");
+    assert_eq!(request.lora_int_id, 1);
+
+    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "alice");
+    assert_eq!(json["data"][1]["root"], "/adapters/alice");
+    assert_eq!(json["data"][1]["parent"], "base-model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_requires_lora_enabled_engine() {
+    let (state, _engine_task) = test_admin_state_with_ready_and_engine_script(
+        default_ready_response(),
+        |_dealer, _push| boxed_test_future(async {}),
+    )
+    .await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine has no lora");
+    assert!(matches!(error, LoadLoraError::Disabled(_)), "{error:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_fails_when_engine_rejects_it() {
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, add_lora_script(false, |_| {})).await;
+
+    let module = LoraModulePath {
+        name: "alice".to_string(),
+        path: "org/alice".to_string(),
+        base_model_name: None,
+        is_3d_lora_weight: false,
+    };
+    let error = state.load_static_lora(&module).await.expect_err("engine rejected");
+    assert!(
+        matches!(error, LoadLoraError::NotLoaded { .. }),
+        "{error:?}"
+    );
+    assert!(state.served_lora_requests().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn static_lora_module_rejects_empty_name_or_path() {
+    // The JSON form of `--lora-modules` is not validated at parse time; the
+    // manager rejects empty fields before any engine RPC.
+    let mut ready = default_ready_response();
+    ready.supports_lora = true;
+    ready.max_loras = 4;
+    let (state, _engine_task) =
+        test_admin_state_with_ready_and_engine_script(ready, |_dealer, _push| {
+            boxed_test_future(async {})
+        })
+        .await;
+
+    for (name, path) in [("", "org/alice"), ("alice", "")] {
+        let module = LoraModulePath {
+            name: name.to_string(),
+            path: path.to_string(),
+            base_model_name: None,
+            is_3d_lora_weight: false,
+        };
+        let error = state.load_static_lora(&module).await.expect_err("empty field");
+        assert!(
+            matches!(error, LoadLoraError::InvalidAdapter { .. }),
+            "{error:?}"
+        );
+    }
 }
 
 async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {

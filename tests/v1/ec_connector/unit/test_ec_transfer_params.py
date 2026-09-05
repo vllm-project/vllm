@@ -7,13 +7,24 @@ No running engine required.
 
 from unittest.mock import MagicMock
 
-from tests.v1.core.utils import create_scheduler
+import pytest
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.request import Request, RequestStatus
+
+# tests.v1.core.utils transitively imports the example KV connector, which
+# requires the compiled CUDA flash-attention extensions; skip cleanly rather
+# than erroring at collection when those extensions aren't built.
+_core_utils = pytest.importorskip(
+    "tests.v1.core.utils",
+    reason="requires compiled CUDA flash-attention extensions",
+    exc_type=ImportError,
+)
+create_scheduler = _core_utils.create_scheduler
 
 EC_PARAMS: dict = {"mm_hash_abc": {"peer_host": "10.0.0.1", "peer_port": 5501}}
 

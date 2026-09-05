@@ -234,7 +234,7 @@ def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_dtype: str
     assert (topk == -1).all(), "topk buffer not cleared on indexer layer"
 
 
-def test_fused_norm_rope_normalizes_query_without_local_cache_slots():
+def test_fused_norm_rope_materializes_qk_without_local_cache_slots():
     """DCP non-owner ranks still need valid query shards for query AllGather."""
     torch.manual_seed(7)
     dev = "cuda"
@@ -259,6 +259,8 @@ def test_fused_norm_rope_normalizes_query_without_local_cache_slots():
     idx_cache = torch.zeros(1, max_pos, idx_row, device=dev, dtype=torch.uint8)
     no_local_slots = torch.full((num_tokens,), -1, device=dev, dtype=torch.int64)
     topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+    kv_out = torch.empty_like(kv_c)
+    kpe_out = torch.empty_like(k_pe)
 
     q_out = K.fused_norm_rope(
         pos,
@@ -283,9 +285,17 @@ def test_fused_norm_rope_normalizes_query_without_local_cache_slots():
         mla_k_scale=None,
         has_indexer=True,
         index_rope_interleave=True,
+        kv_c_out=kv_out,
+        k_pe_out=kpe_out,
     )
 
     assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm without local cache slots")
+    assert_bf16(kv_out, rms_norm(kv_c, kvw), "kv_c rmsnorm without local slots")
+    assert_bf16(
+        kpe_out,
+        rope(k_pe.float(), pos, cos_sin, interleave=True),
+        "k_pe RoPE without local slots",
+    )
     assert not mla_cache.any(), "non-owner rank wrote the MLA KV cache"
     assert not idx_cache.any(), "non-owner rank wrote the indexer KV cache"
     assert (topk == -1).all(), "topk buffer not cleared on non-owner rank"

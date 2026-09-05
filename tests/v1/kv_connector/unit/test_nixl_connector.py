@@ -1709,8 +1709,9 @@ def test_scheduler_kv_connector_stats_aggregation():
     final_stats = next(
         iter(engine_core_outputs.values())
     ).scheduler_stats.kv_connector_stats
+    # The scheduler stats payload carries serialized per-connector dicts.
     nixl_stats = final_stats["NixlConnector"]
-    assert nixl_stats.num_successful_transfers == 2
+    assert len(nixl_stats["transfer_duration"]) == 2
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
@@ -2871,6 +2872,87 @@ def test_failed_request_skips_kv_postprocessing(
     # Blocks should have been marked as invalid.
     invalid_blocks = connector.get_block_ids_with_load_errors()
     assert invalid_blocks == {1, 2, 3}
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FailingNixlWrapper,
+)
+def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
+    default_vllm_config, dist_init
+):
+    """A request whose handles fail in different polls must not crash the engine.
+
+    One transfer handle is created per remote rank, and when a peer goes away
+    they do not all fail in the same poll: one errors while another is still
+    PROC. The first failure reports the request via _failed_recv_reqs and
+    get_finished() pops its metadata; when the remaining handles fail in a
+    later poll, the request must be cleaned up without being reported again.
+
+    Reporting twice kills the EngineCore: the scheduler's assert in
+    _update_from_kv_xfer_finished only expects a finished recv for a request
+    still waiting for KVs, having moved this one out of
+    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
+    """
+    vllm_config = create_vllm_config()
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+
+    request_id = "test_two_handles_failing_in_separate_polls"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=([1, 2, 3],),
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+    dummy_ctx = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    connector.start_load_kv(dummy_ctx)
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+
+    # Give the request a second handle, as a second remote rank would.
+    handles = worker._recving_transfers[request_id]
+    assert len(handles) == 1
+    first, second = handles[0], object()
+    worker._recving_transfers[request_id] = [first, second]
+
+    # Poll 1: the first handle has failed, the second is still running.
+    def first_failed(handle):
+        return "ERR" if handle is first else "PROC"
+
+    with patch.object(
+        worker.nixl_wrapper, "check_xfer_state", side_effect=first_failed
+    ):
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+
+    assert request_id in done_recving
+    assert request_id not in worker._recving_metadata
+    assert worker._recving_transfers[request_id] == [second]
+
+    # Poll 2: the second handle fails too. The request was already reported,
+    # so it must not be reported a second time: the scheduler has since moved
+    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
+    # finished recv for a request in that state. Its remaining handles are
+    # still released and the transfer entry removed.
+    with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+
+    assert request_id not in done_recving
+    assert request_id not in worker._recving_transfers
 
 
 def _set_test_speculative_config(

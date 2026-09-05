@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::detect_hy_token_suffix;
 use crate::reasoning::HyReasoningParser;
@@ -54,7 +54,7 @@ impl UnifiedParser for HyV3UnifiedParser {
         self.inner.tool_call_id(tool_index)
     }
 
-    fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()> {
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()> {
         self.inner.parse_into(delta, output)
     }
 
@@ -72,7 +72,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use vllm_tokenizer::{Tokenizer, test_utils::TestTokenizer};
+    use vllm_tokenizer::{DecodedText, Tokenizer, test_utils::TestTokenizer};
     use xgrammar_structural_tag::builders::StructuralTagOptions;
     use xgrammar_structural_tag::{
         FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
@@ -131,14 +131,14 @@ mod tests {
         ];
         let mut output = UnifiedParserOutput::default();
         for chunk in chunks {
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(chunk), &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
 
         assert_eq!(
             output.events,
             vec![
-                UnifiedParserEvent::Reasoning("reasoning".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("reasoning")),
                 UnifiedParserEvent::Text("answer".to_string()),
                 UnifiedParserEvent::ToolCall(crate::tool::ToolCallDelta {
                     tool_index: 0,
