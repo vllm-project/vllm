@@ -427,9 +427,12 @@ def _rocm_aiter_biased_grouped_topk_impl(
     need_renorm: bool,
     routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-    from aiter import biased_grouped_topk
+    import aiter
 
-    biased_grouped_topk(
+    topk_op = aiter.biased_grouped_topk
+    if gating_output.dtype != correction_bias.dtype:
+        topk_op = aiter.biased_grouped_topk_mixed_dtype
+    topk_op(
         gating_output,
         correction_bias,
         topk_weights,
@@ -1937,6 +1940,13 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def mixed_dtype_biased_topk_available(cls) -> bool:
+        import aiter
+
+        return callable(getattr(aiter, "biased_grouped_topk_mixed_dtype", None))
+
+    @classmethod
+    @if_aiter_supported
     def fuse_sigmoid_in_kernel(cls, aiter_topK_meta_data: object) -> bool:
         """Whether fused shared-expert sigmoid in the topk kernel is usable.
 
@@ -2667,7 +2677,12 @@ class rocm_aiter_ops:
         need_renorm: bool,
         routed_scaling_factor: float = 1.0,
     ) -> None:
-        if correction_bias.dtype != gating_output.dtype:
+        supports_mixed_dtype = (
+            gating_output.dtype == torch.bfloat16
+            and correction_bias.dtype == torch.float32
+            and rocm_aiter_ops.mixed_dtype_biased_topk_available()
+        )
+        if correction_bias.dtype != gating_output.dtype and not supports_mixed_dtype:
             correction_bias = correction_bias.to(gating_output.dtype)
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
