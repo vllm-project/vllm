@@ -51,6 +51,7 @@ from vllm.config import (
     LoRAConfig,
     MambaConfig,
     ModelConfig,
+    MooncakeProcessorCacheConfig,
     MultiModalConfig,
     ObservabilityConfig,
     OffloadConfig,
@@ -584,6 +585,9 @@ class EngineArgs:
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
+    )
+    mm_mooncake_cache_config: MooncakeProcessorCacheConfig | None = (
+        MultiModalConfig.mm_mooncake_cache_config
     )
     mm_hasher_algorithm: MMHasherAlgorithm = get_field(
         MultiModalConfig, "mm_hasher_algorithm"
@@ -1349,6 +1353,10 @@ class EngineArgs:
             "--mm-processor-cache-type", **multimodal_kwargs["mm_processor_cache_type"]
         )
         multimodal_group.add_argument(
+            "--mm-mooncake-cache-config",
+            **multimodal_kwargs["mm_mooncake_cache_config"],
+        )
+        multimodal_group.add_argument(
             "--mm-hasher-algorithm", **multimodal_kwargs["mm_hasher_algorithm"]
         )
         multimodal_group.add_argument(
@@ -1814,6 +1822,7 @@ class EngineArgs:
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
+            mm_mooncake_cache_config=self.mm_mooncake_cache_config,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
             mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
