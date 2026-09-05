@@ -40,7 +40,7 @@ def sync_openai(
 
     The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
     vocabulary hint). It is wired through model-by-model: Whisper uses it
-    as a ``<|prev|>`` continuation hint, Qwen3-ASR maps it into the
+    as a ``<|startofprev|>`` continuation hint, Qwen3-ASR maps it into the
     chat-template ``system`` turn. Models that do not consume it accept
     it without effect.
     """
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Optional `prompt` (OpenAI transcription API: style/vocabulary "
-            "hint). Wired model-by-model: Whisper uses it as a `<|prev|>` "
+            "hint). Wired model-by-model: Whisper uses it as a `<|startofprev|>` "
             "continuation hint, Qwen3-ASR maps it into the chat-template "
             "system turn."
         ),
