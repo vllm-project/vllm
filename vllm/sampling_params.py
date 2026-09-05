@@ -31,11 +31,6 @@ MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
-MAX_PROMPT_LOGPROB_TOKEN_IDS = 16384
-"""Upper bound on `SamplingParams.prompt_logprob_token_ids` list length.
-Prompt scoring gathers one row per prompt position, so the requested union can
-be much larger than the decode-only `MAX_LOGPROB_TOKEN_IDS` limit."""
-
 
 def _verify_num_sequences(value: int, parameter_name: str) -> None:
     if not isinstance(value, int):
@@ -814,7 +809,6 @@ class SamplingParams(
         tokenizer: TokenizerLike | None,
     ) -> None:
         self._validate_logprobs(model_config)
-        self._validate_prompt_logprob_token_ids(model_config)
         self._validate_logit_bias(model_config)
         self._validate_trace_replay(model_config, speculative_config)
         self._validate_stop_token_ids(model_config)
@@ -888,38 +882,22 @@ class SamplingParams(
                     value=num_prompt_logprobs,
                 )
 
-    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
-        """Validate stop_token_ids are within vocabulary range."""
-        if not self.stop_token_ids:
-            return
-
-        # stop_token_ids are used as column indices into the logits tensor,
-        # whose width is the model's vocab size (LogitsProcessor is built from
-        # config.vocab_size, InputBatch.vocab_size comes from
-        # model_config.get_vocab_size()), so use the same bound here — like
-        # _validate_logit_bias, which indexes the same tensor.
-        vocab_size = model_config.get_vocab_size()
-        invalid_token_ids = [
-            token_id
-            for token_id in self.stop_token_ids
-            if token_id < 0 or token_id >= vocab_size
-        ]
-
-        if invalid_token_ids:
-            raise VLLMValidationError(
-                f"token_id(s) {invalid_token_ids} in stop_token_ids contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
-                parameter="stop_token_ids",
-                value=invalid_token_ids,
-            )
-
-    def _validate_prompt_logprob_token_ids(self, model_config: ModelConfig) -> None:
+        # Validate prompt_logprob_token_ids. One logprob per requested ID is
+        # returned per scored row, so `max_logprobs` bounds it as it does the
+        # counts above.
         if self.prompt_logprob_token_ids is not None:
             n = len(self.prompt_logprob_token_ids)
-            if n == 0 or n > MAX_PROMPT_LOGPROB_TOKEN_IDS:
+            if n == 0:
                 raise VLLMValidationError(
-                    f"Requested prompt_logprob_token_ids length must be in "
-                    f"[1, {MAX_PROMPT_LOGPROB_TOKEN_IDS}], got {n}",
+                    "prompt_logprob_token_ids must not be empty.",
+                    parameter="prompt_logprob_token_ids",
+                    value=n,
+                )
+            if n > max_logprobs:
+                raise VLLMValidationError(
+                    f"Requested prompt_logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {max_logprobs}. "
+                    f"Raise --max-logprobs to score more candidates.",
                     parameter="prompt_logprob_token_ids",
                     value=n,
                 )
@@ -949,6 +927,31 @@ class SamplingParams(
                     parameter="prompt_logprob_start",
                     value=self.prompt_logprob_start,
                 )
+
+    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate stop_token_ids are within vocabulary range."""
+        if not self.stop_token_ids:
+            return
+
+        # stop_token_ids are used as column indices into the logits tensor,
+        # whose width is the model's vocab size (LogitsProcessor is built from
+        # config.vocab_size, InputBatch.vocab_size comes from
+        # model_config.get_vocab_size()), so use the same bound here — like
+        # _validate_logit_bias, which indexes the same tensor.
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.stop_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in stop_token_ids contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="stop_token_ids",
+                value=invalid_token_ids,
+            )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
         """Validate logit_bias token IDs are within vocabulary range."""

@@ -81,9 +81,9 @@ def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
         yield hf_model
 
 
-def _model_config(vocab_size: int = 10):
+def _model_config(vocab_size: int = 10, max_logprobs: int = 20):
     return SimpleNamespace(
-        max_logprobs=20,
+        max_logprobs=max_logprobs,
         logits_processors=None,
         is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
@@ -428,6 +428,29 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
             structured_outputs_config=None,
             tokenizer=None,
         )
+
+
+def test_prompt_logprob_token_ids_bounded_by_max_logprobs():
+    """Candidate count rides the same ceiling as the logprobs counts.
+
+    One logprob per requested ID is returned per scored row, so raising
+    `max_logprobs` is what admits a wider candidate set; this parameter has no
+    limit of its own.
+    """
+    model_config = _model_config(vocab_size=100, max_logprobs=4)
+
+    def verify(**kwargs):
+        SamplingParams(**kwargs).verify(
+            model_config,
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
+
+    verify(prompt_logprob_token_ids=[1, 2, 3, 4])
+
+    with pytest.raises(VLLMValidationError, match="prompt_logprob_token_ids"):
+        verify(prompt_logprob_token_ids=[1, 2, 3, 4, 5])
 
 
 def test_none_logprobs(vllm_model, example_prompts):
