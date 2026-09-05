@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -170,7 +171,43 @@ class AdaptiveVerificationManager:
         self._pending_resets.append(req_idx)
         self._confidence_probs[req_idx].fill_(1.0)
 
-    def batches_to_profile(self, capture_sizes: list[int]) -> Iterator[dict[str, int]]:
+    def profile_batch_split(self, num_tokens: int) -> list[int] | None:
+        """Per-request query lengths for a profiled step of *num_tokens*.
+
+        A decode request contributes ``1 + num_speculative_steps`` queries, so a
+        fully occupied decode step is ``max_num_reqs * decode_query_len`` tokens
+        and nothing above that can be decode. Splitting such a step evenly over
+        ``max_num_reqs`` requests would time a batch the scheduler cannot
+        produce, so the surplus is shaped as the prefill it has to be.
+
+        Returns ``None`` when the step still fits in decode, leaving the caller's
+        even split (which already gives every request at most
+        ``decode_query_len`` queries) alone.
+        """
+        max_num_reqs = self.req_states.max_num_reqs
+        decode_query_len = self.num_speculative_steps + self.num_bonus_tokens
+        max_decode_tokens = max_num_reqs * decode_query_len
+        if num_tokens <= max_decode_tokens:
+            return None
+
+        # ``context_len`` is the profiler's stand-in for a sequence length, so it
+        # also sizes the prefill chunks the surplus is cut into.
+        chunk_len = max(envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN, 1)
+        surplus = num_tokens - max_decode_tokens
+        num_prefill_reqs = min(max(cdiv(surplus, chunk_len), 1), max_num_reqs)
+        # Prefill slots come out of the request budget, freeing their decode
+        # tokens back to the chunks.
+        num_decode_reqs = max_num_reqs - num_prefill_reqs
+        prefill_tokens = num_tokens - num_decode_reqs * decode_query_len
+
+        split = [decode_query_len] * num_decode_reqs
+        base, extra = divmod(prefill_tokens, num_prefill_reqs)
+        split += [base + (i < extra) for i in range(num_prefill_reqs)]
+        return split
+
+    def batches_to_profile(
+        self, capture_sizes: list[int]
+    ) -> Iterator[dict[str, int | list[int]]]:
         """Dummy-run kwargs whose step timings seed the cost tables.
 
         Run these inside StepTimingCollector.collect(), then hand the block's
@@ -188,11 +225,19 @@ class AdaptiveVerificationManager:
                 tail_sizes.add(size)
             tail_sizes -= set(capture_sizes)
         for num_tokens in capture_sizes + sorted(tail_sizes):
+            batch: dict[str, int | list[int]] = {
+                "num_tokens": num_tokens,
+                "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
+            }
+            # Only the tail is reshaped: captured sizes have to keep the even
+            # split so the run matches the descriptor the graph was captured
+            # with.
+            if num_tokens in tail_sizes:
+                split = self.profile_batch_split(num_tokens)
+                if split is not None:
+                    batch["num_scheduled_tokens_per_req"] = split
             for _ in range(_PROFILE_REPLAYS):
-                yield {
-                    "num_tokens": num_tokens,
-                    "context_len": envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN,
-                }
+                yield dict(batch)
 
     def set_initial_cost_curves(self, samples: list[StepTimingSample]) -> None:
         def median_curve(
