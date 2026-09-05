@@ -31,6 +31,19 @@ logger = init_logger(__name__)
 
 
 class xLAMToolParser(ToolParser):
+    # Streaming markers that can wrap the tool-call JSON array.
+    _FENCE = "```"
+    _FENCE_LANG = "json"
+    _TOOL_CALLS_TAG = "[TOOL_CALLS]"
+    _TOOL_CALL_XML = "<tool_call>"
+    _TOOL_CALL_XML_END = "</tool_call>"
+
+    _TOOL_NAME_RE = re.compile(r'"name"\s*:\s*"([^"]+)"')
+    _TOOL_ARGS_RE = re.compile(
+        r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*'
+        r"(\{(?:[^{}]|(?:\{[^{}]*\}))*\})"
+    )
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -38,7 +51,6 @@ class xLAMToolParser(ToolParser):
         self.prev_tool_calls: list[dict] = []
         self.current_tool_id = -1
         self.current_tool_name_sent = False
-        self.streamed_args: list[str] = []  # Track arguments sent for each tool
 
         # For backward compatibility with tests
         self.current_tools_sent: list[bool] = []
@@ -54,7 +66,15 @@ class xLAMToolParser(ToolParser):
         ]
         self.thinking_tag_pattern = r"</think>([\s\S]*)"
 
-        # Define streaming state type to be initialized later
+        # Streaming content scanner state: everything before _consumed has
+        # been classified as content, whitespace, or tool block.
+        self._consumed = 0
+        self._pending_ws = ""
+        self._content_emitted = False
+        # Active tool block: {"json_start", "json_end", "close", "end"}.
+        # "end" is the index just past the closing marker once seen.
+        self._block: Optional[dict[str, Any]] = None
+
         self.streaming_state: dict[str, Any] = {
             "current_tool_index": -1,
             "tool_ids": [],
@@ -197,365 +217,373 @@ class xLAMToolParser(ToolParser):
     ) -> Union[DeltaMessage, None]:
         """
         Extract tool calls for streaming mode.
+
+        A single forward scan over ``current_text`` classifies each span as
+        chat content, tool-block markup, or tool-call JSON. Content that
+        could still turn out to be a wrapper marker is withheld until
+        disambiguated, so markers and tool JSON never leak into
+        ``delta.content``. Argument deltas are mirrored into
+        ``self.streamed_args_for_tool`` so the serving layer's end-of-stream
+        flush (``get_remaining_unstreamed_args``) sees what was actually
+        sent and does not re-append the full argument string.
         """
-        # First, check for a definitive start of a tool call block.
-        # This prevents premature parsing of incomplete output.
-        stripped_text = current_text.strip()
-        preprocessed_content, preprocessed_tool_calls = self.preprocess_model_output(
-            current_text
-        )
-
-        # For JSON code blocks, we need to detect them earlier, even if incomplete
-        has_potential_json_block = (
-            "```json" in current_text
-            or "```\n[" in current_text
-            or "[TOOL_CALLS]" in current_text
-            or "<tool_call>" in current_text
-        )
-
-        is_tool_call_block = (
-            stripped_text.startswith("[")
-            or stripped_text.startswith("<tool_call>")
-            or stripped_text.startswith("[TOOL_CALLS]")
-            or
-            # Check if we have thinking tags with JSON-like content following
-            ("</think>[" in current_text)
-            or
-            # Check if the text contains a JSON array after preprocessing
-            preprocessed_tool_calls is not None
-            or
-            # For JSON code blocks, detect early if we see enough structure
-            (
-                has_potential_json_block
-                and '"name"' in current_text
-                and '"arguments"' in current_text
-            )
-        )
-
-        if not is_tool_call_block:
-            return DeltaMessage(content=delta_text)
-
         try:
-            # Initialize streaming state if not exists
-            if not hasattr(self, "streaming_state"):
-                self.streaming_state = {
-                    "current_tool_index": -1,
-                    "tool_ids": [],
-                    "sent_tools": [],  # Track complete state of each tool
-                }
+            content = self._scan_content(current_text)
 
-            # Try parsing as JSON to check for complete tool calls
-            try:
-                # Use preprocessed tool calls if available
-                tool_calls_text = (
-                    preprocessed_tool_calls if preprocessed_tool_calls else current_text
-                )
-                parsed_tools = json.loads(tool_calls_text)
-                if isinstance(parsed_tools, list):
-                    # Update our tool array for next time
-                    self.prev_tool_call_arr = parsed_tools
-            except json.JSONDecodeError:
-                # Not complete JSON yet, use regex for partial parsing
-                pass
+            tool_deltas: list[DeltaToolCall] = []
+            if self._block is not None:
+                region = self._block_region(current_text)
+                self._try_parse_tools(region)
 
-            # Check for test-specific state setup (current_tools_sent)
-            # This handles the case where tests manually set current_tools_sent
-            if (
-                hasattr(self, "current_tools_sent")  # type: ignore
-                and len(self.current_tools_sent) > 0
-            ):
-                # If current_tools_sent is set to [False], it means the test wants us to send the name
-                if (
-                    len(self.current_tools_sent) == 1
-                    and self.current_tools_sent[0] is False
-                ):
-                    # Extract the function name using regex
-                    name_pattern = r'"name"\s*:\s*"([^"]+)"'
-                    name_match = re.search(name_pattern, current_text)
-                    if name_match:
-                        function_name = name_match.group(1)
+                legacy = self._handle_test_compatibility(current_text)
+                if legacy is not None:
+                    return legacy
 
-                        # The test expects us to send just the name first
-                        tool_id = make_tool_call_id()
-                        delta = DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=0,
-                                    type="function",
-                                    id=tool_id,
-                                    function=DeltaFunctionCall(
-                                        name=function_name
-                                    ).model_dump(exclude_none=True),  # type: ignore
-                                )
-                            ]
-                        )
-                        # Update state to reflect that we've sent the name
-                        self.current_tools_sent = [True]
-                        self.current_tool_id = 0
-                        self.streaming_state["current_tool_index"] = 0
-                        if len(self.streaming_state["sent_tools"]) == 0:
-                            self.streaming_state["sent_tools"].append(
-                                {
-                                    "sent_name": True,
-                                    "sent_arguments_prefix": False,
-                                    "sent_arguments": "",
-                                }
-                            )
-                        else:
-                            self.streaming_state["sent_tools"][0]["sent_name"] = True
-                        self.current_tool_name_sent = True
-                        return delta
+                # Catch up on every state transition already visible in the
+                # region, but emit at most one arguments delta per tool per
+                # call so argument streaming stays incremental.
+                emitted_args: set[int] = set()
+                while True:
+                    delta = self._step_tool_streaming(region, emitted_args)
+                    if delta is None:
+                        break
+                    tool_deltas.append(delta)
 
-            # Use regex to identify tool calls in the output
-            # Use preprocessed tool calls text for better parsing, but also try to extract from incomplete JSON blocks
-            search_text = (
-                preprocessed_tool_calls if preprocessed_tool_calls else current_text
-            )
-
-            # For JSON code blocks that aren't complete yet, try to extract the JSON content
-            if not preprocessed_tool_calls and has_potential_json_block:
-                # Try to extract the JSON array from within the code block
-                json_match = re.search(
-                    r"```(?:json)?\s*([\s\S]*?)(?:```|$)", current_text
-                )
-                if json_match:
-                    potential_json = json_match.group(1).strip()
-                    # Use this as search text even if it's incomplete
-                    if potential_json.startswith("[") and (
-                        '"name"' in potential_json and '"arguments"' in potential_json
-                    ):
-                        search_text = potential_json
-
-            # Try to find complete tool names first
-            name_pattern = r'"name"\s*:\s*"([^"]+)"'
-            name_matches = list(re.finditer(name_pattern, search_text))
-            tool_count = len(name_matches)
-
-            # If no complete tool names found, check for partial tool names
-            if tool_count == 0:
-                # Check if we're in the middle of parsing a tool name
-                partial_name_pattern = r'"name"\s*:\s*"([^"]*)'
-                partial_matches = list(re.finditer(partial_name_pattern, search_text))
-                if partial_matches:
-                    # We have a partial tool name - not ready to emit yet
-                    return None
-                else:
-                    # No tools found at all
-                    return None
-
-            # Ensure our state arrays are large enough
-            while len(self.streaming_state["sent_tools"]) < tool_count:
-                self.streaming_state["sent_tools"].append(
-                    {
-                        "sent_name": False,
-                        "sent_arguments_prefix": False,
-                        "sent_arguments": "",
-                    }
-                )
-
-            while len(self.streaming_state["tool_ids"]) < tool_count:
-                self.streaming_state["tool_ids"].append(None)
-
-            # Determine if we need to move to a new tool
-            current_idx = self.streaming_state["current_tool_index"]
-
-            # If we haven't processed any tool yet or current tool is complete, move to next
-            if current_idx == -1 or current_idx < tool_count - 1:
-                next_idx = current_idx + 1
-
-                # If tool at next_idx has not been sent yet
-                if (
-                    next_idx < tool_count
-                    and not self.streaming_state["sent_tools"][next_idx]["sent_name"]
-                ):
-                    # Update indexes
-                    self.streaming_state["current_tool_index"] = next_idx
-                    self.current_tool_id = next_idx  # For backward compatibility
-                    current_idx = next_idx
-
-                    # Extract the tool name
-                    tool_name = name_matches[current_idx].group(1)
-
-                    # Generate ID and send tool name
-                    tool_id = f"call_{current_idx}_{random_uuid()}"
-                    self.streaming_state["tool_ids"][current_idx] = tool_id
-
-                    delta = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=current_idx,
-                                type="function",
-                                id=tool_id,
-                                function=DeltaFunctionCall(name=tool_name).model_dump(
-                                    exclude_none=True
-                                ),  # type: ignore
-                            )
-                        ]
-                    )
-                    self.streaming_state["sent_tools"][current_idx]["sent_name"] = True
-                    self.current_tool_name_sent = True  # For backward compatibility
-
-                    # Keep track of streamed args for backward compatibility
-                    while len(self.streamed_args) <= current_idx:
-                        self.streamed_args.append("")
-
-                    return delta
-
-            # Process arguments for the current tool
-            if current_idx >= 0 and current_idx < tool_count:
-                # Support both regular and empty argument objects
-                # First, check for the empty arguments case: "arguments": {}
-                empty_args_pattern = (
-                    r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}'
-                )
-                empty_args_match = re.search(empty_args_pattern, search_text)
-
-                # Check if this tool has empty arguments
-                if empty_args_match and empty_args_match.start() > 0:
-                    # Find which tool this empty arguments belongs to
-                    empty_args_tool_idx = 0
-                    for i in range(tool_count):
-                        if i == current_idx:
-                            # If this is our current tool and it has empty arguments
-                            if not self.streaming_state["sent_tools"][current_idx][
-                                "sent_arguments_prefix"
-                            ]:
-                                # Send empty object
-                                self.streaming_state["sent_tools"][current_idx][
-                                    "sent_arguments_prefix"
-                                ] = True
-                                self.streaming_state["sent_tools"][current_idx][
-                                    "sent_arguments"
-                                ] = "{}"
-
-                                # Update streamed_args for backward compatibility
-                                while len(self.streamed_args) <= current_idx:
-                                    self.streamed_args.append("")
-                                self.streamed_args[current_idx] += "{}"
-
-                                delta = DeltaMessage(
-                                    tool_calls=[
-                                        DeltaToolCall(
-                                            index=current_idx,
-                                            function=DeltaFunctionCall(
-                                                arguments="{}"
-                                            ).model_dump(exclude_none=True),  # type: ignore
-                                        )
-                                    ]
-                                )
-
-                                # Move to next tool if available
-                                if current_idx < tool_count - 1:
-                                    self.streaming_state["current_tool_index"] += 1
-                                    self.current_tool_id = self.streaming_state[
-                                        "current_tool_index"
-                                    ]
-
-                                return delta
-
-                # Extract arguments for current tool using regex for non-empty arguments
-                args_pattern = r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|(?:\{[^{}]*\}))*\})'
-                args_matches = list(re.finditer(args_pattern, search_text))
-
-                if current_idx < len(args_matches):
-                    args_text = args_matches[current_idx].group(1)
-
-                    # Handle transition between tools
-                    is_last_tool = current_idx == tool_count - 1
-
-                    # For multiple tools, extract only the arguments for the current tool
-                    if tool_count > 1:
-                        # Parse the entire JSON structure to properly extract arguments for each tool
-                        try:
-                            parsed_tools = json.loads(search_text)
-                            if isinstance(parsed_tools, list) and current_idx < len(
-                                parsed_tools
-                            ):
-                                current_tool = parsed_tools[current_idx]
-                                if isinstance(current_tool.get("arguments"), dict):
-                                    args_text = json.dumps(
-                                        current_tool["arguments"], ensure_ascii=False
-                                    )
-                                else:
-                                    args_text = str(current_tool.get("arguments", "{}"))
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            # Fallback to regex-based extraction
-                            pass
-
-                    # If arguments haven't been sent yet
-                    sent_args = self.streaming_state["sent_tools"][current_idx][
-                        "sent_arguments"
-                    ]
-
-                    # If we haven't sent the opening bracket yet
-                    if not self.streaming_state["sent_tools"][current_idx][
-                        "sent_arguments_prefix"
-                    ] and args_text.startswith("{"):
-                        self.streaming_state["sent_tools"][current_idx][
-                            "sent_arguments_prefix"
-                        ] = True
-                        self.streaming_state["sent_tools"][current_idx][
-                            "sent_arguments"
-                        ] = "{"
-
-                        # Update streamed_args for backward compatibility
-                        while len(self.streamed_args) <= current_idx:
-                            self.streamed_args.append("")
-                        self.streamed_args[current_idx] += "{"
-
-                        delta = DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=current_idx,
-                                    function=DeltaFunctionCall(
-                                        arguments="{"
-                                    ).model_dump(exclude_none=True),  # type: ignore
-                                )
-                            ]
-                        )
-                        return delta
-
-                    # If we need to send more arguments
-                    if args_text.startswith(sent_args):
-                        # Calculate what part of arguments we need to send
-                        args_diff = args_text[len(sent_args) :]
-
-                        if args_diff:
-                            # Update our state
-                            self.streaming_state["sent_tools"][current_idx][
-                                "sent_arguments"
-                            ] = args_text
-
-                            # Update streamed_args for backward compatibility
-                            while len(self.streamed_args) <= current_idx:
-                                self.streamed_args.append("")
-                            self.streamed_args[current_idx] += args_diff
-
-                            delta = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=current_idx,
-                                        function=DeltaFunctionCall(
-                                            arguments=args_diff
-                                        ).model_dump(exclude_none=True),  # type: ignore
-                                    )
-                                ]
-                            )
-                            return delta
-
-                    # If the tool's arguments are complete, check if we need to move to the next tool
-                    if args_text.endswith("}") and args_text == sent_args:
-                        # This tool is complete, move to the next one in the next iteration
-                        if current_idx < tool_count - 1:
-                            self.streaming_state["current_tool_index"] += 1
-                            self.current_tool_id = self.streaming_state[
-                                "current_tool_index"
-                            ]  # For compatibility
-
-            # If we got here, we couldn't determine what to stream next
+            if content and tool_deltas:
+                return DeltaMessage(content=content, tool_calls=tool_deltas)
+            if tool_deltas:
+                return DeltaMessage(tool_calls=tool_deltas)
+            if content:
+                return DeltaMessage(content=content)
+            return None
+        except Exception:
+            logger.exception("Error in streaming tool call extraction")
             return None
 
-        except Exception as e:
-            logger.exception(f"Error in streaming tool calls: {e}")
-            # If we encounter an error, just return the delta text as regular content
-            return DeltaMessage(content=delta_text)
+    # ------------------------------------------------------------------
+    # Content scanner
+    # ------------------------------------------------------------------
+
+    def _scan_content(self, current_text: str) -> str:
+        """Advance over unclassified text, returning content safe to emit.
+
+        Whitespace is withheld until more content follows, which mirrors the
+        ``.strip()`` non-streaming extraction applies around the tool block.
+        """
+        out: list[str] = []
+
+        def emit(text: str) -> None:
+            if not text:
+                return
+            if self._content_emitted:
+                out.append(self._pending_ws)
+            self._pending_ws = ""
+            out.append(text)
+            self._content_emitted = True
+
+        while self._consumed < len(current_text):
+            if self._block is not None and self._block["end"] is None:
+                self._locate_block_end(current_text)
+                if self._block["end"] is None:
+                    break
+                self._consumed = self._block["end"]
+                continue
+
+            seg = current_text[self._consumed :]
+            ch = seg[0]
+            if ch.isspace():
+                ws_len = len(seg) - len(seg.lstrip())
+                self._pending_ws += seg[:ws_len]
+                self._consumed += ws_len
+                continue
+            if ch in "`[<":
+                verdict, advance = self._match_block_start(current_text)
+                if verdict == "wait":
+                    break
+                if verdict == "open":
+                    self._consumed += advance
+                    continue
+                emit(ch)
+                self._consumed += 1
+                continue
+            safe = len(seg)
+            for i, c in enumerate(seg):
+                if c in "`[<" or c.isspace():
+                    safe = i
+                    break
+            emit(seg[:safe])
+            self._consumed += safe
+
+        return "".join(out)
+
+    def _match_block_start(self, current_text: str) -> tuple[str, int]:
+        """Decide whether a tool block opens at ``self._consumed``.
+
+        Returns ``("open", advance)`` once a block is confirmed,
+        ``("wait", 0)`` while the tail could still become one, and
+        ``("no", 0)`` when it is plain content.
+        """
+        if self._block is not None:
+            # Only the first block is treated as tool calls, matching the
+            # non-streaming path which parses the first valid JSON payload.
+            return ("no", 0)
+
+        pos = self._consumed
+        seg = current_text[pos:]
+        ch = seg[0]
+
+        if ch == "`":
+            if len(seg) < len(self._FENCE):
+                return ("wait", 0) if self._FENCE.startswith(seg) else ("no", 0)
+            if not seg.startswith(self._FENCE):
+                return ("no", 0)
+            body = seg[len(self._FENCE) :]
+            if len(body) < len(self._FENCE_LANG) and self._FENCE_LANG.startswith(body):
+                return ("wait", 0)
+            if body.startswith(self._FENCE_LANG):
+                body = body[len(self._FENCE_LANG) :]
+            after_ws = body.lstrip()
+            if not after_ws:
+                return ("wait", 0)
+            if after_ws[0] == "[":
+                json_start = pos + len(seg) - len(after_ws)
+                self._open_block(json_start, close=self._FENCE)
+                return ("open", json_start - pos)
+            return ("no", 0)
+
+        if ch == "[":
+            tag = self._TOOL_CALLS_TAG
+            if seg.startswith(tag):
+                after = seg[len(tag) :]
+                if not after:
+                    return ("wait", 0)
+                if after[0] == "[":
+                    self._open_block(pos + len(tag), close="\n")
+                    return ("open", len(tag))
+                return ("no", 0)
+            if len(seg) < len(tag) and tag.startswith(seg):
+                return ("wait", 0)
+            # A bare JSON array counts only at the start of the output or
+            # right after a </think> block (as in preprocess_model_output).
+            before = current_text[:pos]
+            if not self._content_emitted or before.rstrip().endswith("</think>"):
+                self._open_block(pos, close=None)
+                return ("open", 0)
+            return ("no", 0)
+
+        if ch == "<":
+            tag = self._TOOL_CALL_XML
+            if seg.startswith(tag):
+                after_ws = seg[len(tag) :].lstrip()
+                if not after_ws:
+                    return ("wait", 0)
+                if after_ws[0] == "[":
+                    json_start = pos + len(seg) - len(after_ws)
+                    self._open_block(json_start, close=self._TOOL_CALL_XML_END)
+                    return ("open", json_start - pos)
+                return ("no", 0)
+            if len(seg) < len(tag) and tag.startswith(seg):
+                return ("wait", 0)
+            return ("no", 0)
+
+        return ("no", 0)
+
+    def _open_block(self, json_start: int, close: Optional[str]) -> None:
+        self._block = {
+            "json_start": json_start,
+            "json_end": None,
+            "close": close,
+            "end": None,
+        }
+
+    def _locate_block_end(self, current_text: str) -> None:
+        close = self._block["close"]
+        if close is None:
+            return
+        idx = current_text.find(close, self._block["json_start"])
+        if idx == -1:
+            return
+        self._block["json_end"] = idx
+        # A newline closes a [TOOL_CALLS] block but stays part of content.
+        self._block["end"] = idx if close == "\n" else idx + len(close)
+
+    def _block_region(self, current_text: str) -> str:
+        end = self._block["json_end"]
+        if end is None:
+            end = len(current_text)
+        return current_text[self._block["json_start"] : end]
+
+    # ------------------------------------------------------------------
+    # Tool-call streaming
+    # ------------------------------------------------------------------
+
+    def _try_parse_tools(self, region: str) -> None:
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(region.strip())
+        except (json.JSONDecodeError, ValueError):
+            return
+        if isinstance(parsed, list):
+            self.prev_tool_call_arr = parsed
+
+    def _handle_test_compatibility(self, current_text: str) -> Optional[DeltaMessage]:
+        # Handles the case where tests manually set current_tools_sent.
+        if not (
+            len(self.current_tools_sent) == 1 and self.current_tools_sent[0] is False
+        ):
+            return None
+        name_match = self._TOOL_NAME_RE.search(current_text)
+        if not name_match:
+            return None
+        function_name = name_match.group(1)
+
+        tool_id = make_tool_call_id()
+        delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    type="function",
+                    id=tool_id,
+                    function=DeltaFunctionCall(name=function_name).model_dump(
+                        exclude_none=True
+                    ),  # type: ignore
+                )
+            ]
+        )
+        self.current_tools_sent = [True]
+        self.current_tool_id = 0
+        self.streaming_state["current_tool_index"] = 0
+        if len(self.streaming_state["sent_tools"]) == 0:
+            self.streaming_state["sent_tools"].append(
+                {
+                    "sent_name": True,
+                    "sent_arguments_prefix": False,
+                    "sent_arguments": "",
+                }
+            )
+        else:
+            self.streaming_state["sent_tools"][0]["sent_name"] = True
+        self.current_tool_name_sent = True
+        return delta
+
+    def _step_tool_streaming(
+        self, region: str, emitted_args: set[int]
+    ) -> Optional[DeltaToolCall]:
+        name_matches = list(self._TOOL_NAME_RE.finditer(region))
+        tool_count = len(name_matches)
+        if tool_count == 0:
+            return None
+
+        state = self.streaming_state
+        while len(state["sent_tools"]) < tool_count:
+            state["sent_tools"].append(
+                {
+                    "sent_name": False,
+                    "sent_arguments_prefix": False,
+                    "sent_arguments": "",
+                }
+            )
+        while len(state["tool_ids"]) < tool_count:
+            state["tool_ids"].append(None)
+        while len(self.streamed_args_for_tool) < tool_count:
+            self.streamed_args_for_tool.append("")
+
+        idx = state["current_tool_index"]
+
+        # Finish streaming the current tool's arguments before advancing.
+        if 0 <= idx < tool_count:
+            delta = self._stream_args_delta(region, idx, tool_count, emitted_args)
+            if delta is not None:
+                return delta
+
+        if idx == -1 or (
+            idx < tool_count - 1 and self._args_complete(region, idx, tool_count)
+        ):
+            next_idx = idx + 1
+            if next_idx < tool_count and not state["sent_tools"][next_idx]["sent_name"]:
+                state["current_tool_index"] = next_idx
+                self.current_tool_id = next_idx
+                tool_name = name_matches[next_idx].group(1)
+                tool_id = f"call_{next_idx}_{random_uuid()}"
+                state["tool_ids"][next_idx] = tool_id
+                state["sent_tools"][next_idx]["sent_name"] = True
+                self.current_tool_name_sent = True
+                return DeltaToolCall(
+                    index=next_idx,
+                    type="function",
+                    id=tool_id,
+                    function=DeltaFunctionCall(name=tool_name).model_dump(
+                        exclude_none=True
+                    ),  # type: ignore
+                )
+
+        return None
+
+    def _resolve_args_text(
+        self, region: str, idx: int, tool_count: int
+    ) -> Optional[str]:
+        args_matches = list(self._TOOL_ARGS_RE.finditer(region))
+        if idx >= len(args_matches):
+            return None
+        args_text = args_matches[idx].group(1)
+
+        # For multiple tools, re-serialize from the parsed JSON so each
+        # tool's arguments are extracted precisely.
+        if tool_count > 1:
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(region.strip())
+                if isinstance(parsed, list) and idx < len(parsed):
+                    args = parsed[idx].get("arguments")
+                    if isinstance(args, dict):
+                        args_text = json.dumps(args, ensure_ascii=False)
+                    elif args is not None:
+                        args_text = str(args)
+            except (json.JSONDecodeError, ValueError, KeyError):
+                pass
+
+        return args_text
+
+    def _stream_args_delta(
+        self, region: str, idx: int, tool_count: int, emitted_args: set[int]
+    ) -> Optional[DeltaToolCall]:
+        args_text = self._resolve_args_text(region, idx, tool_count)
+        if args_text is None:
+            return None
+        tool_state = self.streaming_state["sent_tools"][idx]
+
+        if not tool_state["sent_arguments_prefix"] and args_text.startswith("{"):
+            if idx in emitted_args:
+                return None
+            emitted_args.add(idx)
+            tool_state["sent_arguments_prefix"] = True
+            tool_state["sent_arguments"] = "{"
+            self.streamed_args_for_tool[idx] += "{"
+            return DeltaToolCall(
+                index=idx,
+                function=DeltaFunctionCall(arguments="{").model_dump(exclude_none=True),  # type: ignore
+            )
+
+        sent = tool_state["sent_arguments"]
+        if args_text.startswith(sent):
+            args_diff = args_text[len(sent) :]
+            if args_diff:
+                if idx in emitted_args:
+                    return None
+                emitted_args.add(idx)
+                tool_state["sent_arguments"] = args_text
+                self.streamed_args_for_tool[idx] += args_diff
+                return DeltaToolCall(
+                    index=idx,
+                    function=DeltaFunctionCall(arguments=args_diff).model_dump(
+                        exclude_none=True
+                    ),  # type: ignore
+                )
+
+        return None
+
+    def _args_complete(self, region: str, idx: int, tool_count: int) -> bool:
+        args_text = self._resolve_args_text(region, idx, tool_count)
+        return (
+            args_text is not None
+            and args_text.endswith("}")
+            and self.streaming_state["sent_tools"][idx]["sent_arguments"] == args_text
+        )
