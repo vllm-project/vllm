@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
@@ -109,6 +111,39 @@ def _get_trtllm_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_workspace_buffer
+
+
+_xqa_isolated_stream: torch.cuda.Stream | None = None
+
+
+def _get_xqa_isolated_stream() -> torch.cuda.Stream:
+    """Return the process-stable stream used for NVFP4 XQA decode."""
+    global _xqa_isolated_stream
+    if _xqa_isolated_stream is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM requires an eager "
+                "XQA warmup before CUDA graph capture."
+            )
+        _xqa_isolated_stream = torch.cuda.Stream()
+    return _xqa_isolated_stream
+
+
+@contextmanager
+def _xqa_isolated_stream_scope(enabled: bool) -> Iterator[None]:
+    """Run a kernel on the isolated XQA stream with capture-safe ordering."""
+    if not (envs.VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM and enabled):
+        yield
+        return
+
+    stream = _get_xqa_isolated_stream()
+    current = torch.cuda.current_stream()
+    stream.wait_stream(current)
+    try:
+        with torch.cuda.stream(stream):
+            yield
+    finally:
+        current.wait_stream(stream)
 
 
 def _pack_draft_block_bool_mask(
@@ -947,7 +982,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
 
-        # XQA decode requires BF16/FP16-Q even with FP8 KV cache.
+        # XQA decode requires BF16/FP16-Q with FP8 or NVFP4 KV cache.
         if (
             (
                 current_platform.is_device_capability(90)
@@ -955,7 +990,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             and not is_prefill
             and force_use_trtllm_attention() is not False
-            and cache_dtype.startswith("fp8")
+            and (
+                cache_dtype.startswith("fp8")
+                or (
+                    current_platform.is_device_capability_family(120)
+                    and cache_dtype.startswith("nvfp4")
+                )
+            )
         ):
             return self.model_config.dtype
 
@@ -2114,7 +2155,6 @@ class FlashInferImpl(AttentionImpl):
         )
         if decode_with_dedicated_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2447,23 +2487,33 @@ class FlashInferImpl(AttentionImpl):
                     )
                     q_len_per_req: int | None = attn_metadata.decode.q_len_per_req
 
-                    flashinfer_xqa_batch_decode_with_kv_cache(
-                        query=decode_query,
-                        kv_cache=kv_cache_tuple,
-                        workspace_buffer=workspace_buffer,
-                        block_tables=block_tables_decode,
-                        seq_lens=seq_lens_decode,
-                        max_seq_len=attn_metadata.decode.max_seq_len,
-                        bmm1_scale=bmm1_scale,
-                        bmm2_scale=self.bmm2_scale,
-                        window_left=self.window_left,
-                        out=output[:num_decode_tokens],
-                        sinks=self.sinks,
-                        kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
-                        q_len_per_req=q_len_per_req,
-                        mask=attn_metadata.decode.mask,
-                        q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
-                    )
+                    with _xqa_isolated_stream_scope(self.is_kvcache_nvfp4):
+                        flashinfer_xqa_batch_decode_with_kv_cache(
+                            query=decode_query,
+                            kv_cache=(
+                                nvfp4_kv_data
+                                if self.is_kvcache_nvfp4
+                                else kv_cache_tuple
+                            ),
+                            workspace_buffer=workspace_buffer,
+                            block_tables=block_tables_decode,
+                            seq_lens=seq_lens_decode,
+                            max_seq_len=attn_metadata.decode.max_seq_len,
+                            bmm1_scale=bmm1_scale,
+                            bmm2_scale=self.bmm2_scale,
+                            window_left=self.window_left,
+                            out=output[:num_decode_tokens],
+                            sinks=self.sinks,
+                            kv_layout=get_flashinfer_layout_string(
+                                self.kv_cache_layout
+                            ),
+                            q_len_per_req=q_len_per_req,
+                            mask=attn_metadata.decode.mask,
+                            kv_cache_sf=(
+                                nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                            ),
+                            q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
+                        )
                     return output_padded
 
                 if output.dtype == FP4_DTYPE:

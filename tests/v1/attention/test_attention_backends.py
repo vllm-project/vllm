@@ -933,6 +933,126 @@ def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_sm120_nvfp4_xqa_uses_model_dtype_for_decode(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.cache_dtype = "nvfp4"
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(disable_flashinfer_q_quantization=False)
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda capability: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
+
+    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
+    assert builder.get_q_data_type(is_prefill=True) == flashinfer_backend.FP8_DTYPE
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_isolated_stream_fork_and_join(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    events: list[tuple[str, ...]] = []
+
+    class FakeStream:
+        def __init__(self, name):
+            self.name = name
+
+        def wait_stream(self, stream):
+            events.append((self.name, "wait", stream.name))
+
+    class FakeStreamContext:
+        def __enter__(self):
+            events.append(("side", "enter"))
+
+        def __exit__(self, *_):
+            events.append(("side", "exit"))
+
+    current = FakeStream("current")
+    side = FakeStream("side")
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM",
+        True,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.torch.cuda, "current_stream", lambda: current
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.torch.cuda, "stream", lambda stream: FakeStreamContext()
+    )
+    monkeypatch.setattr(flashinfer_backend, "_get_xqa_isolated_stream", lambda: side)
+
+    with flashinfer_backend._xqa_isolated_stream_scope(enabled=True):
+        events.append(("body",))
+
+    assert events == [
+        ("side", "wait", "current"),
+        ("side", "enter"),
+        ("body",),
+        ("side", "exit"),
+        ("current", "wait", "side"),
+    ]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(("configured", "enabled"), [(False, True), (True, False)])
+def test_flashinfer_xqa_isolated_stream_disabled_is_noop(
+    monkeypatch, configured, enabled
+):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_XQA_USE_ISOLATED_STREAM",
+        configured,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "_get_xqa_isolated_stream",
+        lambda: pytest.fail("isolated stream must not be created"),
+    )
+
+    with flashinfer_backend._xqa_isolated_stream_scope(enabled):
+        pass
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_isolated_stream_requires_eager_warmup(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(flashinfer_backend, "_xqa_isolated_stream", None)
+    monkeypatch.setattr(
+        flashinfer_backend.torch.cuda, "is_current_stream_capturing", lambda: True
+    )
+
+    with pytest.raises(RuntimeError, match="eager XQA warmup"):
+        flashinfer_backend._get_xqa_isolated_stream()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
