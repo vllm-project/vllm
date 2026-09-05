@@ -63,7 +63,7 @@ def test_sleep_mode():
         )
         assert response.status_code == 200
 
-        # is sleeping should be false after waking up any part of the engine
+        # Partial wake keeps the engine sleeping.
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
         assert response.json().get("is_sleeping") is True

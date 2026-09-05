@@ -185,6 +185,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def release_kv_cache_memory(self) -> None:
+        """Discard KV cache physical GPU memory. Requires a completed pause."""
+        ...
+
+    @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the engine"""
         ...
