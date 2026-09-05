@@ -19,7 +19,11 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
-from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternReplacement,
+)
 from .matcher_utils import MatcherQuantFP8
 from .rms_quant_fusion import QUANT_OPS
 
@@ -401,3 +405,8 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
                         break
 
         self.dump_patterns(config, self.pm_pass)
+
+    def uuid(self) -> str:
+        # MatcherQuantFP8 builds the patterns' quant subgraph; include it so
+        # changes to pattern construction invalidate the compilation cache.
+        return VllmInductorPass.hash_source(super().uuid(), MatcherQuantFP8)
