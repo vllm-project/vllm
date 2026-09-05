@@ -14,10 +14,12 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
@@ -38,6 +40,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
 
@@ -65,6 +72,382 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
             )
         ],
     )
+
+
+def _set_transfer_group_selector(
+    scheduler: MooncakeConnectorScheduler, *group_ids: int
+) -> None:
+    scheduler.kv_cache_config = MagicMock()
+    scheduler.kv_cache_config.select_transfer_block_ids.side_effect = (
+        lambda block_ids: tuple(block_ids[i] for i in group_ids)
+    )
+
+
+def test_piecewise_load_uses_only_suffix_destination_blocks():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16,)
+    scheduler._is_hma_required = False
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    params = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "prefill",
+        "remote_bootstrap_addr": "127.0.0.1:1234",
+        "transfer_id": "transfer",
+    }
+    request = SimpleNamespace(request_id="req", kv_transfer_params=params)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [[10, 11, 12, 13, 14, 15]]
+
+    scheduler.update_state_after_alloc_for_range(request, blocks, KVLoadRange(64, 96))
+
+    assert scheduler._reqs_need_recv["req"] == (request, [[14, 15]])
+    assert params["do_remote_prefill"] is False
+
+
+def test_piecewise_load_rejects_non_terminal_range():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.supports_load_range = True
+
+    with pytest.raises(ValueError, match="only supports a terminal"):
+        scheduler.update_state_after_alloc_for_range(
+            MagicMock(), MagicMock(), KVLoadRange(0, 16, is_terminal=False)
+        )
+
+
+def test_piecewise_load_rejects_incomplete_transfer_params():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16,)
+    scheduler._is_hma_required = False
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    request = SimpleNamespace(
+        request_id="req",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_engine_id": "prefill",
+            "remote_bootstrap_addr": "127.0.0.1:1234",
+        },
+    )
+
+    with pytest.raises(ValueError, match="transfer_id"):
+        scheduler.update_state_after_alloc_for_range(
+            request, MagicMock(), KVLoadRange(64, 96)
+        )
+
+    assert scheduler._reqs_need_recv == {}
+
+
+def test_remote_prefill_lookup_ignores_incomplete_transfer_params():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.is_kv_producer = False
+    scheduler._has_mamba = False
+    request = SimpleNamespace(
+        request_id="req",
+        prompt_token_ids=list(range(96)),
+        kv_transfer_params={"do_remote_prefill": True},
+    )
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+
+
+def test_piecewise_load_maps_hybrid_attention_groups_and_partial_tail():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0, 1)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16, 8)
+    scheduler._is_hma_required = True
+    scheduler.blocks_per_sw = [0, 3]
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    params = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "prefill",
+        "remote_bootstrap_addr": "127.0.0.1:1234",
+        "transfer_id": "transfer",
+    }
+    request = SimpleNamespace(request_id="req", kv_transfer_params=params)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [
+        [10, 11, 12, 13],
+        [20, 21, 22, 23, 24, 25, 26, 27],
+    ]
+
+    scheduler.update_state_after_alloc_for_range(request, blocks, KVLoadRange(32, 60))
+
+    assert scheduler._reqs_need_recv["req"] == (
+        request,
+        [[12, 13], [25, 26, 27]],
+    )
+
+
+def test_piecewise_load_accepts_window_only_swa_blocks():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0, 1)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16, 8)
+    scheduler._is_hma_required = True
+    scheduler.blocks_per_sw = [0, 3]
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    params = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "prefill",
+        "remote_bootstrap_addr": "127.0.0.1:1234",
+        "transfer_id": "transfer",
+    }
+    request = SimpleNamespace(request_id="req", kv_transfer_params=params)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [
+        [10, 11, 12, 13],
+        [25, 26, 27],
+    ]
+
+    scheduler.update_state_after_alloc_for_range(request, blocks, KVLoadRange(32, 60))
+
+    assert scheduler._reqs_need_recv["req"] == (
+        request,
+        [[12, 13], [25, 26, 27]],
+    )
+
+
+def test_piecewise_load_accepts_omitted_swa_padding_blocks():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0, 1, 2, 3, 4)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 256
+    scheduler._piecewise_group_block_sizes = (256, 128, 128, 128, 16)
+    scheduler._is_hma_required = True
+    scheduler.blocks_per_sw = [0, 3, 3, 3, 17]
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    params = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "prefill",
+        "remote_bootstrap_addr": "127.0.0.1:1234",
+        "transfer_id": "transfer",
+    }
+    request = SimpleNamespace(request_id="req", kv_transfer_params=params)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [
+        [10, 11, 12, 13, 14],
+        [20, 21, 22],
+        [30, 31, 32],
+        [40, 41],
+        list(range(50, 66)),
+    ]
+
+    scheduler.update_state_after_alloc_for_range(
+        request, blocks, KVLoadRange(768, 1056)
+    )
+
+    assert scheduler._reqs_need_recv["req"] == (
+        request,
+        [
+            [13, 14],
+            [20, 21, 22],
+            [30, 31, 32],
+            [40, 41],
+            list(range(50, 66)),
+        ],
+    )
+
+
+def test_piecewise_load_rejects_unaligned_hybrid_boundary():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 256
+
+    with pytest.raises(ValueError, match="scheduler block size 256"):
+        scheduler.update_state_after_alloc_for_range(
+            MagicMock(), MagicMock(), KVLoadRange(16, 48)
+        )
+
+
+def test_piecewise_load_rejects_insufficient_suffix_blocks():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 0, 1)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16, 8)
+    scheduler._is_hma_required = False
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    request = SimpleNamespace(
+        request_id="req",
+        kv_transfer_params={
+            "do_remote_prefill": True,
+            "remote_engine_id": "prefill",
+            "remote_bootstrap_addr": "127.0.0.1:1234",
+            "transfer_id": "transfer",
+        },
+    )
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [[10, 11], [20, 21]]
+
+    with pytest.raises(ValueError, match="more unhashed blocks"):
+        scheduler.update_state_after_alloc_for_range(
+            request, blocks, KVLoadRange(16, 48)
+        )
+
+    assert scheduler._reqs_need_recv == {}
+
+
+def test_piecewise_load_excludes_non_transfer_groups():
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    _set_transfer_group_selector(scheduler, 1, 2)
+    scheduler.supports_load_range = True
+    scheduler._scheduler_block_size = 16
+    scheduler._piecewise_group_block_sizes = (16, 16)
+    scheduler._is_hma_required = False
+    scheduler.is_kv_producer = False
+    scheduler._reqs_need_recv = {}
+    params = {
+        "do_remote_prefill": True,
+        "remote_engine_id": "prefill",
+        "remote_bootstrap_addr": "127.0.0.1:1234",
+        "transfer_id": "transfer",
+    }
+    request = SimpleNamespace(request_id="req", kv_transfer_params=params)
+    blocks = MagicMock()
+    blocks.get_unhashed_block_ids_all_groups.return_value = [
+        [10, 11, 12, 13],
+        [20, 21, 22, 23],
+        [30, 31, 32, 33],
+    ]
+
+    scheduler.update_state_after_alloc_for_range(request, blocks, KVLoadRange(32, 64))
+
+    assert scheduler._reqs_need_recv["req"] == (
+        request,
+        [[22, 23], [32, 33]],
+    )
+
+
+def test_piecewise_capability_accepts_hybrid_attention_but_not_mamba():
+    vllm_config = MagicMock()
+    vllm_config.cache_config.block_size = 16
+    vllm_config.cache_config.prefix_match_unit = None
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    full = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    swa = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=32,
+    )
+    attention_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["swa"], swa),
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(vllm_config, "engine", attention_config)
+
+    assert scheduler.supports_load_range
+    assert scheduler._scheduler_block_size == 16
+    assert scheduler._piecewise_group_block_sizes == (16, 8)
+
+    packed_mla = UniformTypeKVCacheSpecs(
+        block_size=256,
+        kv_cache_specs={
+            "c4": MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.uint8,
+                tokens_per_state=4,
+            ),
+            "c128": MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.uint8,
+                tokens_per_state=128,
+            ),
+        },
+    )
+    packed_swa = UniformTypeKVCacheSpecs(
+        block_size=4,
+        kv_cache_specs={
+            "swa": SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.float32,
+                sliding_window=8,
+            )
+        },
+    )
+    packed_attention_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["c4", "c128"], packed_mla),
+            KVCacheGroupSpec(["swa"], packed_swa),
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config, "engine", packed_attention_config
+    )
+
+    assert scheduler.supports_load_range
+    assert scheduler._scheduler_block_size == 256
+    assert scheduler._piecewise_group_block_sizes == (256, 4)
+    assert scheduler.blocks_per_sw == [0, 3]
+
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((4, 8),),
+        dtypes=(torch.float16,),
+    )
+    recurrent_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(vllm_config, "engine", recurrent_config)
+
+    assert not scheduler.supports_load_range
+
+
+def test_piecewise_block_sizes_include_dcp_sharding():
+    vllm_config = MagicMock()
+    vllm_config.cache_config.block_size = 16
+    vllm_config.cache_config.prefix_match_unit = None
+    vllm_config.parallel_config.decode_context_parallel_size = 2
+    vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    cache_config = _make_test_kv_cache_config()
+
+    scheduler = MooncakeConnectorScheduler(vllm_config, "engine", cache_config)
+
+    assert scheduler._scheduler_block_size == 32
+    assert scheduler._piecewise_group_block_sizes == (32,)
 
 
 class FakeMooncakeWrapper:
@@ -686,6 +1069,20 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.torch.accelerator.current_device_index",
+            return_value=0,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.current_platform.set_device"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_current_attn_backends",
+            return_value=[],
+        ),
         patch("httpx.AsyncClient") as mock_async_client,
     ):
         # Mock PP group
@@ -1185,6 +1582,68 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
                 assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
                 assert worker.registered_layer_names == list(kv_caches)
                 assert worker.registered_layer_indices == [0, 1]
+
+
+def test_register_kv_caches_excludes_non_transfer_groups():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn"],
+            spec,
+            enable_kv_transfer=i > 0,
+        )
+        for i in range(3)
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+        kv_caches = {
+            group.layer_names[0]: torch.zeros(
+                (2, spec.page_size_bytes), dtype=torch.uint8
+            )
+            for group in groups
+        }
+
+        with patch.object(worker.engine, "batch_register_memory", return_value=0):
+            connector.register_kv_caches(kv_caches)
+
+        assert worker.registered_layer_names == [
+            "model.layers.1.self_attn",
+            "model.layers.2.self_attn",
+        ]
+        assert worker.registered_layer_indices == [1, 2]
+        assert worker.registered_group_indices == [0, 1]
+        assert len(worker.kv_caches_base_addr) == 2
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():

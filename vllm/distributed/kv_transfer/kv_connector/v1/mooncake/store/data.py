@@ -693,6 +693,7 @@ class LoadSpec:
     can_load: bool
     token_len: int = 0
     tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
+    load_group_ids: tuple[int, ...] | None = None
 
 
 @dataclass
