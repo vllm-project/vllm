@@ -21,6 +21,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
     import llguidance
@@ -196,6 +197,10 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if len(tokens) == 0:
             return []
         if self.ll_matcher.is_stopped():
+            return []
+
+        tokens = strip_speculative_padding(tokens)
+        if len(tokens) == 0:
             return []
 
         num_tokens = self.ll_matcher.validate_tokens(tokens)
