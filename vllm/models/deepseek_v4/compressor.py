@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -34,6 +35,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+logger = init_logger(__name__)
 
 
 def _prefer_two_stage_compressor() -> bool:
@@ -148,7 +151,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        assert self.dtype == torch.float32
+        assert self.dtype in (torch.float32, torch.bfloat16)
         assert compress_ratio in [4, 128]
         coff = 1 + (compress_ratio == 4)
         self.sliding_window = coff * compress_ratio
@@ -231,13 +234,31 @@ class DeepseekCompressor(nn.Module):
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
+        self.use_hip_compressor = False
+        if current_platform.is_rocm():
+            from .amd.ops.hip_compress_dispatch import hip_compressor_enabled
+
+            self.use_hip_compressor = hip_compressor_enabled(
+                head_dim,
+                self.rope_head_dim,
+                compress_ratio,
+                vllm_config.cache_config.cache_dtype,
+            )
+            if self.use_hip_compressor:
+                logger.info_once(
+                    "Using gfx942 HIP DeepSeek-V4 compressor for head_dim=%d.",
+                    head_dim,
+                )
 
         # The head=512 cr>=128 no-overlap deep gather uses the two-stage
         # compressor, which needs an fp32 scratch [max_batched, 512] for
         # the intermediate compressed_kv.
         # Currently only tested on ROCm
         self._use_two_stage_fused_compressor = (
-            _prefer_two_stage_compressor() and head_dim == 512 and not self.overlap
+            not self.use_hip_compressor
+            and _prefer_two_stage_compressor()
+            and head_dim == 512
+            and not self.overlap
         )
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -251,15 +272,29 @@ class DeepseekCompressor(nn.Module):
                 device=self.device,
             )
 
-        state_dtype = torch.float32
+        state_dtype = torch.bfloat16 if self.use_hip_compressor else torch.float32
         self.ape = nn.Parameter(
             torch.empty(
                 (compress_ratio, self.coff * self.head_dim),
-                dtype=state_dtype,
+                dtype=torch.float32,
                 device=self.device,
             ),
             requires_grad=False,
         )
+        if self.use_hip_compressor and compress_ratio == 128:
+            plan_capacity = (
+                self.max_num_batched_tokens // compress_ratio + self.max_num_reqs + 2
+            )
+            self.register_buffer(
+                "_hca_plan_scratch",
+                torch.empty(plan_capacity, dtype=torch.int32, device=self.device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_hca_counter_scratch",
+                torch.empty(1, dtype=torch.int32, device=self.device),
+                persistent=False,
+            )
 
         self.fused_wkv_wgate = MergedColumnParallelLinear(
             self.hidden_size,
@@ -345,7 +380,7 @@ class DeepseekCompressor(nn.Module):
             else {"launch_pdl": False}
         )
 
-        # Store the KV and score (with fused APE addition) in the state.
+        # The HIP path adds APE during compression.
         # NOTE: PDL is disabled — both this kernel and the compress kernels
         # below depend on preceding kernel outputs (kv/score from the cublas
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
@@ -354,7 +389,7 @@ class DeepseekCompressor(nn.Module):
         save_partial_states(
             kv=kv,
             score=score,
-            ape=self.ape,
+            ape=None if self.use_hip_compressor else self.ape,
             positions=positions,
             state_cache=state_cache,
             slot_mapping=slot_mapping,
@@ -413,6 +448,31 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
+        elif current_platform.is_rocm() and self.use_hip_compressor:
+            from .amd.ops.hip_compress_dispatch import (
+                compress_norm_rope_store_hip,
+                hip_compressor_supported,
+            )
+
+            if not hip_compressor_supported(
+                self.head_dim,
+                self.compress_ratio,
+                kv_cache,
+            ):
+                raise RuntimeError(
+                    "The gfx942 DSV4 HIP compressor was selected but its "
+                    "_rocm_C op or paged uint8 cache layout is unavailable."
+                )
+            compress_norm_rope_store_fn = compress_norm_rope_store_hip
+            extra_kwargs = {
+                "ape": self.ape,
+                "use_bf16_state_cache": True,
+            }
+            if self.compress_ratio == 128:
+                extra_kwargs.update(
+                    hca_plan_scratch=self._hca_plan_scratch,
+                    hca_counter_scratch=self._hca_counter_scratch,
+                )
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.
