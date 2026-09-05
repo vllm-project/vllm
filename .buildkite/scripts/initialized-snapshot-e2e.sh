@@ -44,19 +44,23 @@ gpu_pids() {
         --format=csv,noheader,nounits | sed '/^[[:space:]]*$/d'
 }
 
-port_open() {
-    [[ -n "$(ss -H -ltn "sport = :$1")" ]]
+port_listeners() {
+    ss -H -ltn "sport = :$1"
 }
 
 state_clean() {
-    local pid port
+    local pid port output
     for pid in "${SNAPSHOT_PIDS[@]}"; do
         [[ ! -e "/proc/$pid" ]] || return 1
     done
-    [[ -z "$(gpu_pids)" ]] || return 1
-    [[ "$(link_remaps)" == "$LINK_REMAP_BASELINE" ]] || return 1
+    output="$(gpu_pids)" || return 1
+    [[ -z "$output" ]] || return 1
+    output="$(link_remaps)" || return 1
+    [[ "$output" == "$LINK_REMAP_BASELINE" ]] || return 1
     for port in "$PORT_ONE" "$PORT_TWO"; do
-        [[ -z "$port" ]] || ! port_open "$port" || return 1
+        [[ -n "$port" ]] || continue
+        output="$(port_listeners "$port")" || return 1
+        [[ -z "$output" ]] || return 1
     done
 }
 
@@ -183,7 +187,8 @@ done
 [[ "$GPU_NAME" == *H200* && "$GPU_UUID" == GPU-* && "$MIG_MODE" == Disabled ]] \
     || die "selected device is not a full non-MIG H200: $GPU_ROW"
 (( GPU_MEMORY_MIB >= 130000 )) || die "selected H200 does not expose full memory"
-[[ -z "$(gpu_pids)" ]] || die "selected H200 is not idle"
+GPU_PIDS="$(gpu_pids)" || die "failed to inspect the selected GPU"
+[[ -z "$GPU_PIDS" ]] || die "selected H200 is not idle"
 
 RUN_ID="snapshot-e2e-$(date +%s)-$$-$RANDOM"
 CONTAINER_NAME="vllm-$RUN_ID"
@@ -237,8 +242,10 @@ echo "$INSPECT_RECEIPT"
 
 run "restore compact snapshot 1" 900 "${OFFLINE_EXEC[@]}" \
     vllm snapshot restore /e2e/artifact --host 127.0.0.1 --port "$PORT_ONE"
-port_open "$PORT_ONE" || die "restore 1 did not bind its port"
-[[ -n "$(gpu_pids)" ]] || die "restore 1 did not engage the selected GPU"
+PORT_LISTENERS="$(port_listeners "$PORT_ONE")" || die "failed to inspect restore 1 port"
+[[ -n "$PORT_LISTENERS" ]] || die "restore 1 did not bind its port"
+GPU_PIDS="$(gpu_pids)" || die "failed to inspect the selected GPU"
+[[ -n "$GPU_PIDS" ]] || die "restore 1 did not engage the selected GPU"
 assert_oracle "$PORT_ONE" 1
 run "stop container after restore 1" 60 docker stop --time 20 "$CONTAINER_NAME" >/dev/null
 [[ "$(docker container inspect --format '{{.Id}}' "$CONTAINER_NAME")" == "$CONTAINER_ID" ]] \
@@ -250,8 +257,10 @@ run "start the same container" 60 docker start "$CONTAINER_NAME" >/dev/null
     || die "docker start replaced the container"
 run "restore compact snapshot 2" 900 "${OFFLINE_EXEC[@]}" \
     vllm snapshot restore /e2e/artifact --host 127.0.0.1 --port "$PORT_TWO"
-port_open "$PORT_TWO" || die "restore 2 did not bind its port"
-[[ -n "$(gpu_pids)" ]] || die "restore 2 did not engage the selected GPU"
+PORT_LISTENERS="$(port_listeners "$PORT_TWO")" || die "failed to inspect restore 2 port"
+[[ -n "$PORT_LISTENERS" ]] || die "restore 2 did not bind its port"
+GPU_PIDS="$(gpu_pids)" || die "failed to inspect the selected GPU"
+[[ -n "$GPU_PIDS" ]] || die "restore 2 did not engage the selected GPU"
 assert_oracle "$PORT_TWO" 2
 run "stop container after restore 2" 60 docker stop --time 20 "$CONTAINER_NAME" >/dev/null
 wait_clean || die "restore 2 teardown left residue"

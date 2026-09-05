@@ -28,6 +28,7 @@ from vllm.snapshot.controller import (
     LocalSnapshotTools,
     SnapshotCreateError,
     SnapshotRestoreError,
+    _child_engine_argv,
     create_snapshot,
     restore_snapshot,
 )
@@ -243,17 +244,22 @@ def test_snapshot_environment_contract(
         (("--hf_token=SECRET",), ("--hf_token=***",)),
         (("--api_key", "SECRET"), ("--api_key", "***")),
         (("--api_key=SECRET",), ("--api_key=***",)),
-        (("--hf-overrides", "value"), ("--hf-overrides", "value")),
+        (("--hf-tok", "SECRET"), ("--hf-tok", "***")),
+        (("--hf-tok=SECRET",), ("--hf-tok=***",)),
+        (("--hf_tok", "SECRET"), ("--hf_tok", "***")),
+        (("--api-k", "SECRET", "SECOND"), ("--api-k", "***", "***")),
+        (("--api-k=SECRET",), ("--api-k=***",)),
+        (("--hf-overrides", "{}"), ("--hf-overrides", "{}")),
     ],
 )
-def test_snapshot_manifest_redacts_underscore_options(case):
+def test_snapshot_manifest_redacts_accepted_secret_options(case):
     engine_argv, expected = case
     tools = create_autospec(LocalSnapshotTools, instance=True)
     tools.current_identity.return_value = _runtime_identity()
     tools._artifact_bytes.return_value = 0
     manifest = LocalSnapshotTools.make_manifest(
         tools,
-        argparse.Namespace(model="model", model_tag=None),
+        snapshot_server.parse_vllm_args(["model", *engine_argv]),
         engine_argv,
         ProcessInventory(100, (100, 101), (101,), "GPU-abc"),
         _oracle(),
@@ -273,6 +279,94 @@ def parse_snapshot(*argv: str):
         create_requested=argv[:1] == ("create",)
     ).subparser_init(subparsers)
     return parser.parse_args(["snapshot", *argv])
+
+
+@pytest.mark.parametrize("option", ["--snapshot-dir", "--snapshot_dir", "--snapshot-d"])
+@pytest.mark.parametrize("joined", [False, True])
+def test_snapshot_create_forwards_only_engine_options(option, joined, monkeypatch):
+    directory = [f"{option}=/tmp/snapshot"] if joined else [option, "/tmp/snapshot"]
+    argv = ["create", "Qwen/Qwen3-0.6B", "--revision", _MODEL_REVISION, *directory]
+    args = parse_snapshot(*argv)
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", *argv])
+
+    child = snapshot_server.parse_vllm_args(list(_child_engine_argv(args, None)))
+
+    assert child.model == "Qwen/Qwen3-0.6B"
+    assert child.revision == _MODEL_REVISION
+    assert child.enable_sleep_mode
+
+
+@pytest.mark.parametrize("model_in_cli", [False, True])
+def test_snapshot_create_config_preserves_cli_precedence(
+    tmp_path, monkeypatch, model_in_cli
+):
+    config = tmp_path / "engine.yaml"
+    config.write_text("model: config-model\nmax-model-len: 512\ndtype: float16\n")
+    model = ["Qwen/Qwen3-0.6B"] if model_in_cli else []
+    argv = [
+        "create",
+        *model,
+        "--snapshot-dir",
+        str(tmp_path / "snapshot"),
+        "--config",
+        str(config),
+        "--revision",
+        _MODEL_REVISION,
+        "--max-model-len",
+        "1024",
+    ]
+    args = parse_snapshot(*argv)
+    monkeypatch.setattr(sys, "argv", ["vllm", "snapshot", *argv])
+    child = snapshot_server.parse_vllm_args(list(_child_engine_argv(args, None)))
+
+    assert (
+        (args.model_tag or args.model)
+        == child.model
+        == ("Qwen/Qwen3-0.6B" if model_in_cli else "config-model")
+    )
+    assert args.max_model_len == child.max_model_len == 1024
+    assert args.dtype == child.dtype == "float16"
+
+
+@pytest.mark.parametrize(
+    ("probe", "status", "output"),
+    [
+        (None, 0, ""),
+        ("nvidia-smi", 1, ""),
+        ("find", 1, ""),
+        ("ss", 1, ""),
+        ("nvidia-smi", 0, "12345"),
+        ("find", 0, "link_remap.fixture"),
+        ("ss", 0, "LISTEN"),
+    ],
+)
+def test_snapshot_e2e_cleanup_requires_successful_empty_probes(probe, status, output):
+    script = (
+        Path(__file__).resolve().parents[3]
+        / ".buildkite/scripts/initialized-snapshot-e2e.sh"
+    )
+    if not script.exists():
+        pytest.skip("snapshot E2E script is not packaged in this test image")
+    source = script.read_text()
+    # Exercise the real probes without entering Docker/CRIU setup.
+    functions = source[source.index("link_remaps() {") : source.index("wait_clean() {")]
+    shell = (
+        """set -Eeuo pipefail
+GPU_UUID=fixture PORT_ONE=18001 PORT_TWO=18002 LINK_REMAP_BASELINE=''
+SNAPSHOT_PIDS=(999999999)
+nvidia-smi() { :; }
+find() { :; }
+ss() { :; }
+"""
+        + functions
+    )
+    if probe:
+        shell += f'\n{probe}() {{ printf %s "{output}"; return {status}; }}\n'
+    shell += "\nif state_clean; then exit 0; else exit 1; fi\n"
+
+    result = subprocess.run(["bash", "-c", shell], capture_output=True, timeout=10)
+
+    assert result.returncode == (0 if probe is None else 1), result.stderr
 
 
 def test_snapshot_create_cli_accepts_only_pinned_compact_mode(

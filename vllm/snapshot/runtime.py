@@ -769,19 +769,20 @@ class LocalSnapshotTools:
         redacted_argv = list(engine_argv)
         redact_api_keys = False
         for index, argument in enumerate(redacted_argv):
-            option, separator, value = argument.partition("=")
-            normalized_argument = option.replace("_", "-") + separator + value
-            if normalized_argument == "--api-key":
-                redact_api_keys = True
-            elif normalized_argument.startswith("--api-key="):
-                redacted_argv[index] = f"{option}=***"
-                redact_api_keys = False
-            elif normalized_argument == "--hf-token":
-                if index + 1 < len(redacted_argv):
+            option, separator, _ = argument.partition("=")
+            normalized_option = option.replace("_", "-")
+            # Parsed argv can contain unambiguous long-option abbreviations.
+            if len(normalized_option) > 2 and "--api-key".startswith(normalized_option):
+                redact_api_keys = not separator
+                if separator:
+                    redacted_argv[index] = f"{option}=***"
+            elif len(normalized_option) > 2 and "--hf-token".startswith(
+                normalized_option
+            ):
+                if separator:
+                    redacted_argv[index] = f"{option}=***"
+                elif index + 1 < len(redacted_argv):
                     redacted_argv[index + 1] = "***"
-                redact_api_keys = False
-            elif normalized_argument.startswith("--hf-token="):
-                redacted_argv[index] = f"{option}=***"
                 redact_api_keys = False
             elif argument.startswith("-"):
                 redact_api_keys = False

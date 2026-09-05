@@ -43,9 +43,12 @@ def _child_engine_argv(
     child_argv: list[str] = []
     iterator = iter(engine_argv)
     for item in iterator:
-        if item == "--snapshot-dir":
-            next(iterator, None)
-        elif not item.startswith("--snapshot-dir="):
+        option, separator, _ = item.partition("=")
+        option = option.replace("_", "-")
+        if len(option) > 2 and "--snapshot-dir".startswith(option):
+            if not separator:
+                next(iterator, None)
+        else:
             child_argv.append(item)
     if "--enable-sleep-mode" not in child_argv:
         child_argv.append("--enable-sleep-mode")
