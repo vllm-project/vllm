@@ -84,8 +84,10 @@ class ColoredFormatter(NewLineFormatter):
     """
 
     # ANSI color codes
+    # DEBUG intentionally left uncolored so it uses the terminal's default
+    # foreground -- a hardcoded white (\033[37m) is unreadable on light
+    # backgrounds.
     COLORS = {
-        "DEBUG": "\033[37m",  # White
         "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
         "ERROR": "\033[31m",  # Red
