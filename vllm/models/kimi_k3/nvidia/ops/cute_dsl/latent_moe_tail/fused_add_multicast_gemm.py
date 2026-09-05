@@ -135,6 +135,7 @@ def _epilogue_tma_store_add_shared(
     )
     tTR_rC = cute.make_rmem_tensor(tTR_rAcc.shape, gemm_kernel.c_dtype)
     tTR_rShared = cute.make_rmem_tensor(tTR_rAcc.shape, gemm_kernel.c_dtype)
+    tTR_rSharedAcc = cute.make_rmem_tensor(tTR_rAcc.shape, cutlass.Float32)
     tiled_copy_r2s, tRS_rC, tRS_sC = sm100.epilogue_smem_copy_and_partition(
         gemm_kernel, tiled_copy_t2r, tTR_rC, epi_tidx, sC
     )
@@ -159,9 +160,6 @@ def _epilogue_tma_store_add_shared(
         cute.flat_divide(tCgShared, epi_tile)
     )
     tTR_cC_partitioned = thr_copy_t2r.partition_D(cute.flat_divide(tCcC, epi_tile))
-    tTR_gShared = tTR_gShared_partitioned[
-        (None, None, None, None, None, *mma_tile_coord_mnl)
-    ]
     tTR_cC = tTR_cC_partitioned[(None, None, None, None, None, *mma_tile_coord_mnl)]
 
     exemplar = tTR_gShared_partitioned[(None, None, None, 0, 0, 0, 0, 0)]
@@ -179,7 +177,6 @@ def _epilogue_tma_store_add_shared(
     )
 
     tTR_tAcc = cute.group_modes(tTR_tAcc, 3, cute.rank(tTR_tAcc))
-    tTR_gShared = cute.group_modes(tTR_gShared, 3, cute.rank(tTR_gShared))
     tTR_cC = cute.group_modes(tTR_cC, 3, cute.rank(tTR_cC))
     bSG_gC = cute.group_modes(bSG_gC, 1, cute.rank(bSG_gC))
 
@@ -187,7 +184,6 @@ def _epilogue_tma_store_add_shared(
     previous_subtile_count = num_tiles_executed * subtile_cnt
     cute.arch.griddepcontrol_wait()
     for subtile_idx in range(subtile_cnt):
-        tTR_gShared_subtile = tTR_gShared[(None, None, None, subtile_idx)]
         tTR_cC_subtile = tTR_cC[(None, None, None, subtile_idx)]
         pred_shape = (1, *tTR_cC_subtile.shape[1:])
         pred = cute.make_rmem_tensor(pred_shape, cutlass.Boolean)
@@ -196,13 +192,44 @@ def _epilogue_tma_store_add_shared(
                 pred[(0, m_idx, n_idx)] = cute.elem_less(
                     tTR_cC_subtile[(0, m_idx, n_idx)], mC_mnl.shape
                 )
-        tTR_rShared.store(cute.zeros_like(tTR_rShared, dtype=gemm_kernel.c_dtype))
-        cute.copy(
-            shared_g2r_atom,
-            tTR_gShared_subtile,
-            tTR_rShared,
-            pred=pred,
+        tTR_rSharedAcc.store(cute.zeros_like(tTR_rSharedAcc, dtype=cutlass.Float32))
+        shared_sources: cutlass.Constexpr = (
+            gemm_kernel.tp_size if gemm_kernel.published_shared else 1
         )
+        for source_rank in cutlass.range_constexpr(shared_sources):
+            source_offset: cutlass.Constexpr = (
+                source_rank * gemm_kernel.shard_dim
+                if gemm_kernel.published_shared
+                else 0
+            )
+            tCgShared_source = cute.make_tensor(
+                tCgShared.iterator + source_offset,
+                tCgShared.layout,
+            )
+            tTR_gShared_source_partitioned = thr_copy_t2r.partition_D(
+                cute.flat_divide(tCgShared_source, epi_tile)
+            )
+            tTR_gShared_source = tTR_gShared_source_partitioned[
+                (None, None, None, None, None, *mma_tile_coord_mnl)
+            ]
+            tTR_gShared_source = cute.group_modes(
+                tTR_gShared_source,
+                3,
+                cute.rank(tTR_gShared_source),
+            )
+            tTR_gShared_source_subtile = tTR_gShared_source[
+                (None, None, None, subtile_idx)
+            ]
+            tTR_rShared.store(cute.zeros_like(tTR_rShared, dtype=gemm_kernel.c_dtype))
+            cute.copy(
+                shared_g2r_atom,
+                tTR_gShared_source_subtile,
+                tTR_rShared,
+                pred=pred,
+            )
+            tTR_rSharedAcc.store(
+                tTR_rSharedAcc.load() + tTR_rShared.load().to(cutlass.Float32)
+            )
 
         # Load the shared addend before waiting for the accumulator.
         if subtile_idx == 0:
@@ -211,10 +238,8 @@ def _epilogue_tma_store_add_shared(
         cute.copy(tiled_copy_t2r, tTR_tAcc_mn, tTR_rAcc)
 
         gemm_vec = tiled_copy_r2s.retile(tTR_rAcc).load().to(gemm_kernel.c_dtype)
-        shared_vec = tiled_copy_r2s.retile(tTR_rShared).load()
-        fused_vec = (gemm_vec.to(cutlass.Float32) + shared_vec.to(cutlass.Float32)).to(
-            gemm_kernel.c_dtype
-        )
+        shared_vec = tiled_copy_r2s.retile(tTR_rSharedAcc).load()
+        fused_vec = (gemm_vec.to(cutlass.Float32) + shared_vec).to(gemm_kernel.c_dtype)
         # The symmetric output is an in-band Lamport mailbox whose empty
         # marker contains BF16 -0. Normalize either signed zero to +0 so a
         # legitimate result can never be mistaken for an unwritten fragment.
@@ -294,10 +319,18 @@ class FusedAddMulticastGemm:
         self,
         mma_tiler_mn: tuple[int, int],
         cluster_shape_mn: tuple[int, int],
+        tp_size: int,
+        shard_dim: int,
+        max_m: int,
+        published_shared: bool,
         b_prime_stages: int = 2,
     ):
         self.acc_dtype = cutlass.Float32
         self.cluster_shape_mn = cluster_shape_mn
+        self.tp_size = tp_size
+        self.shard_dim = shard_dim
+        self.max_m = max_m
+        self.published_shared = published_shared
         self.mma_tiler = (*mma_tiler_mn, 1)
         # B primes the combined A+B pipeline before the PDL wait.
         self.b_prime_stages = b_prime_stages
@@ -389,7 +422,8 @@ class FusedAddMulticastGemm:
         a: cute.Tensor,
         b: cute.Tensor,
         c: cute.Tensor,
-        shared_shard: cute.Tensor,
+        shared_source: cute.Tensor,
+        shared_flags: cute.Tensor,
         c_multicast_i64: cutlass.Int64,
         max_active_clusters: cutlass.Constexpr,
         stream: cuda.CUstream,
@@ -486,7 +520,8 @@ class FusedAddMulticastGemm:
             self.c_smem_layout_staged,
             self.epi_tile,
             tile_sched_params,
-            shared_shard,
+            shared_source,
+            shared_flags,
         ).launch(
             grid=grid,
             block=[self.threads_per_cta, 1, 1],
@@ -512,7 +547,8 @@ class FusedAddMulticastGemm:
         c_smem_layout_staged: cute.Layout | cute.ComposedLayout,
         epi_tile: cute.Tile,
         tile_sched_params: utils.PersistentTileSchedulerParams,
-        shared_shard: cute.Tensor,
+        shared_source: cute.Tensor,
+        shared_flags: cute.Tensor,
     ):
         self._gemm_device(
             tiled_mma,
@@ -528,7 +564,8 @@ class FusedAddMulticastGemm:
             c_smem_layout_staged,
             epi_tile,
             tile_sched_params,
-            shared_shard,
+            shared_source,
+            shared_flags,
         )
 
     @cute.jit
@@ -547,7 +584,8 @@ class FusedAddMulticastGemm:
         c_smem_layout_staged: cute.Layout | cute.ComposedLayout,
         epi_tile: cute.Tile,
         tile_sched_params: utils.PersistentTileSchedulerParams,
-        shared_shard: cute.Tensor,
+        shared_source: cute.Tensor,
+        shared_flags: cute.Tensor,
     ):
         warp_idx = cute.arch.warp_idx()
         warp_idx = cute.arch.make_warp_uniform(warp_idx)
@@ -656,11 +694,37 @@ class FusedAddMulticastGemm:
         gC_mnl = cute.local_tile(
             mC_mnl, cute.slice_(self.mma_tiler, (None, None, 0)), (None, None, None)
         )
-        # Shared shard is physically [M, shard_dim]. Give it the same logical MNL
-        # view as C so its epilogue partition is coordinate-identical.
+        if cutlass.const_expr(self.published_shared):
+            current_index = cute.arch.load(
+                (shared_flags.iterator + 0).llvm_ptr,
+                cutlass.Uint32,
+            )
+            bytes_per_buffer = cute.arch.load(
+                (shared_flags.iterator + 2).llvm_ptr,
+                cutlass.Uint32,
+            )
+            current_elements = cutlass.Int64(current_index) * (
+                cutlass.Int64(bytes_per_buffer) // cutlass.Int64(2)
+            )
+            shared_iterator = cute.make_ptr(
+                self.c_dtype,
+                (shared_source.iterator + current_elements).llvm_ptr,
+                cute.AddressSpace.gmem,
+                assumed_align=16,
+            )
+            shared_layout = cute.make_layout(
+                (mC_mnl.shape[0], self.shard_dim),
+                stride=(self.tp_size * self.shard_dim, 1),
+            )
+        else:
+            shared_iterator = shared_source.iterator
+            shared_layout = shared_source.layout
+
+        # Give source rank zero the same logical MNL view as C. The epilogue
+        # shifts this pointer by one shard for every additional source rank.
         mShared_mnl = cute.make_tensor(
-            shared_shard.iterator,
-            cute.append(shared_shard.layout, cute.make_layout((1,), stride=(0,))),
+            shared_iterator,
+            cute.append(shared_layout, cute.make_layout((1,), stride=(0,))),
         )
         gShared_mnl = cute.local_tile(
             mShared_mnl,
@@ -977,7 +1041,8 @@ def launch_kernel(
     a: cute.Tensor,  # (l, m, k)
     b: cute.Tensor,  # (l, n, k)
     c: cute.Tensor,  # (l, m, n)
-    shared_shard: cute.Tensor,  # (m, shard_dim), private TP shard
+    shared_source: cute.Tensor,
+    shared_flags: cute.Tensor,
     rows: cutlass.Int64,
     c_multicast_i64: cutlass.Int64,
     full_hidden_dim: cutlass.Constexpr,
@@ -1009,7 +1074,8 @@ def launch_kernel(
         a,
         b,
         c,
-        shared_shard,
+        shared_source,
+        shared_flags,
         c_multicast_i64,
         max_active_clusters,
         stream,
@@ -1024,9 +1090,11 @@ def compile_kernel(
     a: cute.Tensor,
     b: cute.Tensor,
     c: cute.Tensor,
-    shared_shard: cute.Tensor,
+    shared_source: cute.Tensor,
     full_hidden_dim: int,
     shard_dim: int,
+    tp_size: int,
+    published_shared: bool,
     mma_tiler_mn: tuple[int, int] = (64, 32),
     cluster_shape_mn: tuple[int, int] = (1, 8),
     max_active_clusters: cutlass.Constexpr = None,
@@ -1037,6 +1105,8 @@ def compile_kernel(
         mnkl,
         full_hidden_dim,
         shard_dim,
+        tp_size,
+        published_shared,
         mma_tiler_mn,
         cluster_shape_mn,
         max_active_clusters,
@@ -1050,6 +1120,10 @@ def compile_kernel(
     gemm = FusedAddMulticastGemm(
         mma_tiler_mn,
         cluster_shape_mn,
+        tp_size,
+        shard_dim,
+        mnkl[0],
+        published_shared,
         b_prime_stages,
     )
     validate_configuration(
@@ -1065,10 +1139,29 @@ def compile_kernel(
     # The producer writes [M, full_hidden_dim]. GEMM receives a rank-local
     # [M, shard_dim] view: contiguous within a row, with full_hidden_dim as
     # its leading dimension.
-    shared_shard_compile = make_fake_tensor(
-        shared_shard.element_type,
-        (mnkl[0], shard_dim),
-        stride=(full_hidden_dim, 1),
+    if published_shared:
+        shared_compile = make_fake_tensor(
+            shared_source.element_type,
+            (3, mnkl[0], tp_size, shard_dim),
+            stride=(
+                mnkl[0] * tp_size * shard_dim,
+                tp_size * shard_dim,
+                shard_dim,
+                1,
+            ),
+            assumed_align=16,
+        )
+    else:
+        shared_compile = make_fake_tensor(
+            shared_source.element_type,
+            (mnkl[0], shard_dim),
+            stride=(full_hidden_dim, 1),
+            assumed_align=16,
+        )
+    shared_flags = make_fake_tensor(
+        cutlass.Int32,
+        (12,),
+        stride=(1,),
         assumed_align=16,
     )
     stream = make_fake_stream()
@@ -1078,7 +1171,8 @@ def compile_kernel(
         a,
         b,
         c,
-        shared_shard_compile,
+        shared_compile,
+        shared_flags,
         cutlass.Int64(mnkl[0]),
         cutlass.Int64(0),
         full_hidden_dim,
@@ -1123,8 +1217,10 @@ class AdaptiveUpProjectionKernel:
         self.b_prime_stages = b_prime_stages
         device = torch.device("cuda", torch.accelerator.current_device_index())
         self._device = device
-        self._dynamic: Any | None = None
-        self._skinny_by_m: dict[int, FusedAddMulticastSkinnyGemmKernel] = {}
+        self._dynamic_by_mode: dict[bool, Any] = {}
+        self._skinny_by_m: dict[
+            tuple[int, bool], FusedAddMulticastSkinnyGemmKernel
+        ] = {}
         validate_configuration(
             latent_dim=latent_dim,
             shard_dim=self.shard_dim,
@@ -1154,9 +1250,14 @@ class AdaptiveUpProjectionKernel:
             cluster_size
         )
         self._mailbox_c = _as_cute(self._mailbox)
+        self._dummy_shared_flags = torch.zeros(
+            12,
+            dtype=torch.int32,
+            device=device,
+        )
 
-    def compile_dynamic(self) -> None:
-        if self._dynamic is not None:
+    def compile_dynamic(self, published_shared: bool = False) -> None:
+        if published_shared in self._dynamic_by_mode:
             return
         device = self._device
         with torch.accelerator.device_index(device.index):
@@ -1170,19 +1271,26 @@ class AdaptiveUpProjectionKernel:
                 dtype=torch.bfloat16,
                 device=device,
             )
-            compile_shared = torch.empty(
-                (self.max_m, self.hidden_dim),
-                dtype=torch.bfloat16,
-                device=device,
-            )[
-                :,
-                self.rank * self.shard_dim : (self.rank + 1) * self.shard_dim,
-            ]
+            if published_shared:
+                compile_shared = torch.empty(
+                    (3, self.max_m, self.tp_size, self.shard_dim),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            else:
+                compile_shared = torch.empty(
+                    (self.max_m, self.hidden_dim),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )[
+                    :,
+                    self.rank * self.shard_dim : (self.rank + 1) * self.shard_dim,
+                ]
             compile_latent_c = _as_cute(compile_latent, dynamic_m=True)
             compile_weight_c = _as_cute(compile_weight.unsqueeze(0))
             compile_shared_c = _as_cute(compile_shared)
 
-            self._dynamic = compile_kernel(
+            self._dynamic_by_mode[published_shared] = compile_kernel(
                 (self.max_m, self.shard_dim, self.latent_dim, 1),
                 compile_latent_c,
                 compile_weight_c,
@@ -1190,41 +1298,78 @@ class AdaptiveUpProjectionKernel:
                 compile_shared_c,
                 self.hidden_dim,
                 self.shard_dim,
+                self.tp_size,
+                published_shared,
                 self.mma_tiler_mn,
                 self.cluster_shape_mn,
                 self._max_active_clusters,
                 self.b_prime_stages,
             )
 
-    def compile_skinny(self, m: int) -> None:
+    def compile_skinny(self, m: int, published_shared: bool = False) -> None:
         if not 1 <= m <= self.skinny_max_m:
             raise ValueError(
                 f"Skinny up-projection requires M in [1, {self.skinny_max_m}]."
             )
-        if m in self._skinny_by_m:
+        key = (m, published_shared)
+        if key in self._skinny_by_m:
             return
         with torch.accelerator.device_index(self._device.index):
-            self._skinny_by_m[m] = FusedAddMulticastSkinnyGemmKernel(
+            self._skinny_by_m[key] = FusedAddMulticastSkinnyGemmKernel(
                 rank=self.rank,
                 tp_size=self.tp_size,
                 latent_dim=self.latent_dim,
                 hidden_dim=self.hidden_dim,
                 num_rows=m,
+                max_m=self.max_m,
+                published_shared=published_shared,
             )
 
-    def ensure_compiled(self, m: int) -> None:
+    def ensure_compiled(self, m: int, published_shared: bool = False) -> None:
         if not 1 <= m <= self.max_m:
             raise ValueError(f"runtime M={m} must be in [1, {self.max_m}]")
         if m <= self.skinny_max_m:
-            self.compile_skinny(m)
+            self.compile_skinny(m, published_shared)
         else:
-            self.compile_dynamic()
+            self.compile_dynamic(published_shared)
 
     def __call__(
         self,
         latent: torch.Tensor,
         weight: torch.Tensor,
         shared_shard: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._run(
+            latent,
+            weight,
+            shared_shard,
+            self._dummy_shared_flags,
+            published_shared=False,
+        )
+
+    def from_published(
+        self,
+        latent: torch.Tensor,
+        weight: torch.Tensor,
+        shared_workspace: torch.Tensor,
+        shared_flags: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._run(
+            latent,
+            weight,
+            shared_workspace,
+            shared_flags,
+            published_shared=True,
+        )
+
+    def _run(
+        self,
+        latent: torch.Tensor,
+        weight: torch.Tensor,
+        shared_source: torch.Tensor,
+        shared_flags: torch.Tensor,
+        *,
+        published_shared: bool,
     ) -> torch.Tensor:
         if latent.ndim != 2:
             raise ValueError("latent must be rank-2")
@@ -1237,11 +1382,6 @@ class AdaptiveUpProjectionKernel:
                 (self.shard_dim, self.latent_dim),
                 "weight",
             ),
-            (
-                shared_shard,
-                (self.max_m, self.shard_dim),
-                "shared_shard",
-            ),
         )
         for tensor, shape, name in expected:
             if (
@@ -1250,17 +1390,33 @@ class AdaptiveUpProjectionKernel:
                 or tensor.device != device
             ):
                 raise ValueError(f"{name} must be CUDA torch.bfloat16 {list(shape)}")
+        expected_shared_shape = (
+            (3, self.max_m, self.tp_size, self.shard_dim)
+            if published_shared
+            else (self.max_m, self.shard_dim)
+        )
+        if (
+            shared_source.shape != expected_shared_shape
+            or shared_source.dtype != torch.bfloat16
+            or shared_source.device != device
+            or shared_flags.shape != (12,)
+            or shared_flags.dtype != torch.int32
+            or shared_flags.device != device
+            or not shared_flags.is_contiguous()
+        ):
+            raise ValueError("up-projection shared inputs have unsupported metadata")
         if (
             not latent.is_contiguous()
             or not weight.is_contiguous()
-            or shared_shard.stride() != (self.hidden_dim, 1)
+            or (not published_shared and shared_source.stride() != (self.hidden_dim, 1))
+            or (published_shared and not shared_source.is_contiguous())
         ):
             raise ValueError("up-projection inputs have unsupported strides")
         if not 1 <= m <= self.max_m:
             raise ValueError(f"runtime M={m} must be in [1, {self.max_m}]")
 
         if m <= self.skinny_max_m:
-            skinny = self._skinny_by_m.get(m)
+            skinny = self._skinny_by_m.get((m, published_shared))
             if skinny is None:
                 raise RuntimeError(
                     f"Skinny up-projection M={m} was not compiled before launch."
@@ -1268,20 +1424,23 @@ class AdaptiveUpProjectionKernel:
             return skinny(
                 latent,
                 weight,
-                shared_shard,
+                shared_source,
+                shared_flags,
                 self._mailbox,
                 self._mailbox_multicast_ptr,
             )
 
-        if self._dynamic is None:
+        dynamic = self._dynamic_by_mode.get(published_shared)
+        if dynamic is None:
             raise RuntimeError("Dynamic up-projection was not compiled before launch.")
         with torch.accelerator.device_index(device.index):
             stream = cuda.CUstream(torch.cuda.current_stream(device).cuda_stream)
-            self._dynamic(
+            dynamic(
                 _as_cute(latent.unsqueeze(0), dynamic_m=True),
                 _as_cute(weight.unsqueeze(0)),
                 self._mailbox_c,
-                _as_cute(shared_shard),
+                _as_cute(shared_source),
+                _as_cute(shared_flags),
                 cutlass.Int64(m),
                 cutlass.Int64(
                     self._mailbox_multicast_ptr + self.rank * self.shard_dim * 2

@@ -505,6 +505,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         shape: tuple[int, ...],
         dtype: torch.dtype,
         device: torch.device,
+        *,
+        force: bool = False,
     ) -> torch.Tensor:
         """Persistent, pre-registered NCCL symmetric-memory scratch buffer.
 
@@ -529,7 +531,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         key = (role, tuple(shape), dtype)
         buf = cache.get(key)
         if buf is None:
-            with nccl_symm_mem_context(pynccl_comm):
+            with nccl_symm_mem_context(pynccl_comm, force=force):
                 buf = torch.empty(shape, dtype=dtype, device=device)
             cache[key] = buf
         return buf
@@ -711,7 +713,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         return output_list
 
-    def _all_gather_symm_mem(self, input_: torch.Tensor) -> torch.Tensor:
+    def _all_gather_symm_mem(
+        self,
+        input_: torch.Tensor,
+        *,
+        force: bool = False,
+        max_input_size_0: int | None = None,
+    ) -> torch.Tensor:
         """AllGather a single tensor using NCCL symmetric memory (NVLS).
 
         Only the output needs to be in symmetric memory; NCCL does not
@@ -720,14 +728,55 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
 
-        out_size = (input_.size(0) * self.world_size,) + tuple(input_.size()[1:])
+        input_size_0 = input_.size(0)
+        scratch_input_size_0 = (
+            input_size_0 if max_input_size_0 is None else max_input_size_0
+        )
+        if scratch_input_size_0 < input_size_0:
+            raise ValueError(
+                f"max_input_size_0 ({scratch_input_size_0}) must be at least "
+                f"input_.size(0) ({input_size_0})"
+            )
+        out_size = (scratch_input_size_0 * self.world_size,) + tuple(input_.size()[1:])
         # Persistent pre-registered scratch avoids the per-call symm-mem context
         # snapshot/registration overhead (see _get_symm_scratch).
         symm_output = self._get_symm_scratch(
-            "ag_out", out_size, input_.dtype, input_.device
+            "ag_out_forced" if force else "ag_out",
+            out_size,
+            input_.dtype,
+            input_.device,
+            force=force,
         )
         pynccl_comm.all_gather(symm_output, input_)
-        return symm_output
+        return symm_output[: input_size_0 * self.world_size]
+
+    def all_gather_symm_mem(
+        self,
+        input_: torch.Tensor,
+        *,
+        max_input_size_0: int | None = None,
+    ) -> torch.Tensor:
+        """Run a targeted NVLS all-gather without changing global collectives.
+
+        ``max_input_size_0`` reserves one persistent output large enough for
+        all dynamic token counts up to the supplied limit. This avoids a new
+        symmetric allocation and collective window registration for every
+        prefill shape.
+        """
+        if self.world_size == 1:
+            return input_
+        pynccl_comm = self.pynccl_comm
+        if (
+            pynccl_comm is None
+            or pynccl_comm.disabled
+            or pynccl_comm.nccl_version < 22703
+        ):
+            return super().all_gather(input_, 0)
+        return self._all_gather_symm_mem(
+            input_.contiguous(),
+            force=True,
+            max_input_size_0=max_input_size_0,
+        )
 
     def _all_gather_batched_symm_mem(
         self, inputs: list[torch.Tensor]

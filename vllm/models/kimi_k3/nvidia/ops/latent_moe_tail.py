@@ -172,29 +172,49 @@ class KimiK3LatentMoETailOp:
         contract = self.contract
         skinny_units = tuple(
             CuTeDSLCompileUnit(
-                name="K3 latent MoE tail Skinny up-projection",
+                name=(
+                    "K3 latent MoE tail published Skinny up-projection"
+                    if published_shared
+                    else "K3 latent MoE tail Skinny up-projection"
+                ),
                 key=(
                     "k3-latent-moe-tail-skinny-up-projection",
                     contract,
                     m,
+                    published_shared,
                 ),
-                compile=partial(self._up_projection.compile_skinny, m),
+                compile=partial(
+                    self._up_projection.compile_skinny,
+                    m,
+                    published_shared,
+                ),
             )
+            for published_shared in (False, True)
             for m in range(1, self._up_projection.skinny_max_m + 1)
         )
-        return skinny_units + (
+        dynamic_units = tuple(
             CuTeDSLCompileUnit(
-                name="K3 latent MoE tail dynamic up-projection",
+                name=(
+                    "K3 latent MoE tail published dynamic up-projection"
+                    if published_shared
+                    else "K3 latent MoE tail dynamic up-projection"
+                ),
                 key=(
                     "k3-latent-moe-tail-dynamic-up-projection",
                     contract,
                     _MMA_TILER_MN,
                     _GEMM_CLUSTER_MN,
                     _B_PRIME_STAGES,
+                    published_shared,
                 ),
-                compile=self._up_projection.compile_dynamic,
-            ),
+                compile=partial(
+                    self._up_projection.compile_dynamic,
+                    published_shared,
+                ),
+            )
+            for published_shared in (False, True)
         )
+        return skinny_units + dynamic_units
 
     def __call__(
         self,
@@ -234,6 +254,135 @@ class KimiK3LatentMoETailOp:
         return self._lamport_copy(
             mailbox,
             m=num_tokens,
+        ).squeeze(0)
+
+    def from_normalized_replicated_routed(
+        self,
+        routed_output: torch.Tensor,
+        shared_output: torch.Tensor,
+        up_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Finalize MegaMoE output without a standalone shared all-reduce.
+
+        DeepGEMM MegaMoE has already combined the routed experts across EP and
+        applied routed RMSNorm.  Reduce-scatter only the TP-sharded shared
+        partial, run this rank's column shard of the routed up-projection with
+        the shared add in its beta epilogue, then multicast the shards.
+        """
+        contract = self.contract
+        if routed_output.ndim != 2:
+            raise ValueError("routed_output must be a 2D tensor")
+        num_tokens = routed_output.shape[0]
+        expected = (
+            (
+                routed_output,
+                (num_tokens, contract.latent_size),
+                "routed_output",
+            ),
+            (
+                shared_output,
+                (num_tokens, contract.hidden_size),
+                "shared_output",
+            ),
+            (
+                up_weight,
+                (contract.hidden_size, contract.latent_size),
+                "up_weight",
+            ),
+        )
+        for tensor, shape, name in expected:
+            if (
+                tensor.shape != shape
+                or tensor.device != contract.device
+                or tensor.dtype != contract.dtype
+                or not tensor.is_contiguous()
+            ):
+                raise ValueError(
+                    f"{name} must be contiguous CUDA {contract.dtype} {list(shape)}"
+                )
+        if not 1 <= num_tokens <= contract.max_num_tokens:
+            raise ValueError(
+                "K3 normalized MegaMoE tail requires between 1 and "
+                f"{contract.max_num_tokens} tokens."
+            )
+
+        self._up_projection.ensure_compiled(num_tokens)
+        shared_shard = self._collective.reduce_scatter_shared(shared_output)
+        local_hidden_size = contract.hidden_size // contract.tp_size
+        local_up_weight = up_weight.narrow(
+            0,
+            self.rank * local_hidden_size,
+            local_hidden_size,
+        )
+        mailbox = self._up_projection(
+            routed_output,
+            local_up_weight,
+            shared_shard,
+        )
+        return self._lamport_copy(mailbox, m=num_tokens).squeeze(0)
+
+    def published_shared_workspace(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the symmetric destination-scatter workspace for this op."""
+        return self._collective.published_shared_workspace()
+
+    def from_normalized_replicated_routed_published(
+        self,
+        routed_output: torch.Tensor,
+        up_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Finalize routed output after DeepGEMM scattered shared partials."""
+        contract = self.contract
+        if routed_output.ndim != 2:
+            raise ValueError("routed_output must be a 2D tensor")
+        num_tokens = routed_output.shape[0]
+        expected = (
+            (
+                routed_output,
+                (num_tokens, contract.latent_size),
+                "routed_output",
+            ),
+            (
+                up_weight,
+                (contract.hidden_size, contract.latent_size),
+                "up_weight",
+            ),
+        )
+        for tensor, shape, name in expected:
+            if (
+                tensor.shape != shape
+                or tensor.device != contract.device
+                or tensor.dtype != contract.dtype
+                or not tensor.is_contiguous()
+            ):
+                raise ValueError(
+                    f"{name} must be contiguous CUDA {contract.dtype} {list(shape)}"
+                )
+        if not 1 <= num_tokens <= contract.max_num_tokens:
+            raise ValueError(
+                "K3 published MegaMoE tail requires between 1 and "
+                f"{contract.max_num_tokens} tokens."
+            )
+
+        self._up_projection.ensure_compiled(num_tokens, published_shared=True)
+        shared_workspace, shared_flags, _ = self.published_shared_workspace()
+        local_hidden_size = contract.hidden_size // contract.tp_size
+        local_up_weight = up_weight.narrow(
+            0,
+            self.rank * local_hidden_size,
+            local_hidden_size,
+        )
+        mailbox = self._up_projection.from_published(
+            routed_output,
+            local_up_weight,
+            shared_workspace,
+            shared_flags,
+        )
+        return self._lamport_copy(
+            mailbox,
+            m=num_tokens,
+            shared_flags=shared_flags,
         ).squeeze(0)
 
     def _validate_inputs(
