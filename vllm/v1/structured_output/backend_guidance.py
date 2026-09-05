@@ -225,6 +225,236 @@ class GuidanceGrammar(StructuredOutputGrammar):
         self.ll_matcher.reset()
 
 
+def _unsupported_structural_tag(reason: str, node: Any) -> VLLMValidationError:
+    def _shape(n: Any) -> Any:
+        if isinstance(n, dict):
+            return {k: "..." if k == "json_schema" else _shape(v) for k, v in n.items()}
+        return [_shape(x) for x in n] if isinstance(n, list) else n
+
+    try:
+        desc = json.dumps(_shape(node))[:1000]
+    except (TypeError, ValueError):
+        desc = repr(node)[:1000]
+    return VLLMValidationError(
+        f"Invalid grammar specification: structural tag {reason} is not "
+        f"supported by the guidance backend (got: {desc})"
+    )
+
+
+def _tag_schema(
+    schema: Any,
+    node: Any,
+    disable_any_whitespace: bool,
+    disable_additional_properties: bool,
+) -> dict[str, Any]:
+    """Prepare a tag's JSON schema for embedding into a llguidance grammar
+    (``StructTag.grammar`` / ``%json``). These expect an actual JSON schema —
+    not the serialized ``{"grammars": [...]}`` envelope returned by
+    ``LLMatcher.grammar_from_json_schema``, which llguidance would silently
+    read as an empty schema, dropping every constraint."""
+    if schema is True:
+        schema = {}  # boolean schema "true": any JSON value
+    if not isinstance(schema, dict):
+        raise _unsupported_structural_tag("non-object json_schema content", node)
+    if disable_additional_properties:
+        schema = process_for_additional_properties(schema)
+    else:
+        schema = copy.deepcopy(schema)
+    schema.setdefault("x-guidance", {"whitespace_flexible": not disable_any_whitespace})
+    return schema
+
+
+def _tag_parts(
+    t: Any,
+    disable_any_whitespace: bool,
+    disable_additional_properties: bool,
+) -> tuple[str, str, dict[str, Any]]:
+    """Validate one new-format ``tag`` entry -> ``(begin, end, schema)``."""
+    if not isinstance(t, dict) or t.get("type", "tag") != "tag":
+        raise _unsupported_structural_tag("entry that is not a 'tag'", t)
+    begin, end, content = t.get("begin"), t.get("end"), t.get("content")
+    if isinstance(end, list) and len(end) == 1:
+        end = end[0]
+    if not (isinstance(begin, str) and begin and isinstance(end, str)):
+        raise _unsupported_structural_tag(
+            "tag with token-level or non-string begin/end", t
+        )
+    if (
+        not isinstance(content, dict)
+        or content.get("type") != "json_schema"
+        or content.get("style", "json") != "json"
+        or content.get("any_order")
+    ):
+        raise _unsupported_structural_tag(
+            "tag content that is not plain json_schema", t
+        )
+    schema = _tag_schema(
+        content.get("json_schema"),
+        content,
+        disable_any_whitespace,
+        disable_additional_properties,
+    )
+    return begin, end, schema
+
+
+def _gtext(s: str) -> str:
+    """Lark string literal (empty string -> no element), as emitted by
+    ``llguidance.StructTag.to_grammar``."""
+    return json.dumps(s) if s else ""
+
+
+def _split_leading_special_token(begin: str) -> tuple[str, str]:
+    """Split a leading ``<...>`` special-token marker off ``begin``
+    (``StructTag.to_grammar``'s ``assume_special`` heuristic)."""
+    if begin.startswith("<"):
+        gt = begin.find(">")
+        if gt > 0 and "<" not in begin[1:gt]:
+            return begin[: gt + 1], begin[gt + 1 :]
+    return "", begin
+
+
+def _split_trailing_special_token(end: str) -> tuple[str, str]:
+    """Split a trailing ``<...>`` special-token marker off ``end``, e.g.
+    ``"}\\n</tool_call>"`` -> ``("}\\n", "</tool_call>")``."""
+    if end.endswith(">"):
+        lt = end.rfind("<")
+        if lt != -1:
+            marker = end[lt:]
+            if len(marker) > 2 and ">" not in marker[:-1] and "<" not in marker[1:]:
+                return end[:lt], marker
+    return end, ""
+
+
+def _tag_suffix(rest: str, schema: dict[str, Any], end: str) -> str:
+    """Lark elements for a tag after its opener: remaining begin literal,
+    ``%json`` body, and the end. Models emit closers like ``</tool_call>``
+    either spelled in raw bytes or as the special token — a bytes-only end
+    rejects the special token at runtime (llguidance maps unknown-special
+    bytes to 0xFF), surfacing as "grammar rejected tokens" request
+    termination — so when the end carries a ``<...>`` suffix both spellings
+    are accepted, e.g. ``("}\\n</tool_call>" | "}\\n" </tool_call>)``."""
+    elems = [_gtext(rest)] if rest else []
+    elems.append("%json " + json.dumps(schema))
+    prefix, marker = _split_trailing_special_token(end)
+    if marker:
+        both = f"{_gtext(prefix)} {marker}" if prefix else marker
+        elems.append(f"({_gtext(end)} | {both})")
+    elif end:
+        elems.append(_gtext(end))
+    return " ".join(elems)
+
+
+def _triggered_tags_lark(parts: list[tuple[str, str, str, dict[str, Any]]]) -> str:
+    """Free text with trigger-dispatched tags, zero or more times — the same
+    skeleton ``llguidance.StructTag.to_grammar`` generates, except for the
+    two-spelling end handling in ``_tag_suffix``."""
+    tag_options = " | ".join(f"tag_{i}" for i in range(len(parts)))
+    lark = (
+        "%llguidance {}\n"
+        f"start: ({tag_options})* tag_end\n"
+        "tag_end: TAG_TEXT\n"
+        "TAG_TEXT: /(.|\\n)*/\n"
+    )
+    for i, (trig, begin, end, schema) in enumerate(parts):
+        body = _tag_suffix(begin[len(trig) :], schema, end)
+        lark += "\n"
+        if trig.startswith("<") and trig.endswith(">"):
+            # trigger assumed to be a special token, as in to_grammar
+            lark += f"tag_{i}: TAG_TEXT {trig} {body}\n"
+        else:
+            lark += f"tag_{i}_trig[lazy]: TAG_TEXT {_gtext(trig)}\n"
+            lark += f"tag_{i}: tag_{i}_trig {body}\n"
+    return lark
+
+
+def _tags_with_separator_lark(
+    parts: list[tuple[str, str, dict[str, Any]]],
+    separator: str,
+    stop_after_first: bool,
+) -> str:
+    """One or more tags separated by ``separator`` with NO free text
+    (``at_least_one=true``); exactly one tag with ``stop_after_first``."""
+    bodies = []
+    for begin, end, schema in parts:
+        special, rest = _split_leading_special_token(begin)
+        suffix = _tag_suffix(rest, schema, end)
+        bodies.append(f"{special} {suffix}" if special else suffix)
+    alts = " | ".join(f"tag_{i}" for i in range(len(bodies)))
+    if stop_after_first:
+        start = f"start: {alts}"
+    elif separator:
+        start = f"start: ({alts}) ({_gtext(separator)} ({alts}))*"
+    else:
+        start = f"start: ({alts})+"
+    rules = "\n".join(f"tag_{i}: {body}" for i, body in enumerate(bodies))
+    return f"%llguidance {{}}\n{start}\n{rules}\n"
+
+
+def _serialize_structural_tag_new_format(
+    s_tag: Any,
+    disable_any_whitespace: bool,
+    disable_additional_properties: bool,
+) -> str:
+    """Translate a new-format (xgrammar-style) structural tag —
+    ``{"type": "structural_tag", "format": {...}}`` — to a llguidance
+    grammar. Covers the shapes ``vllm/tool_parsers/structural_tag_registry``
+    emits for tool calling: ``triggered_tags`` (``tool_choice="auto"`` with a
+    ``strict: true`` tool), ``tags_with_separator``
+    (``"required"``/named), and ``any_text``. Anything else raises
+    ``VLLMValidationError`` so the server surfaces a 400."""
+    fmt = s_tag.get("format") if isinstance(s_tag, dict) else None
+    if not isinstance(fmt, dict):
+        raise _unsupported_structural_tag("without a 'format' object", s_tag)
+    ftype = fmt.get("type")
+
+    if ftype == "any_text":
+        if fmt.get("excludes"):
+            raise _unsupported_structural_tag("'any_text' with excludes", fmt)
+        return llguidance.grammar_from("regex", "(?s:.*)")
+
+    if ftype == "triggered_tags":
+        triggers, tags = fmt.get("triggers"), fmt.get("tags")
+        if (
+            fmt.get("at_least_one")
+            or fmt.get("stop_after_first")
+            or fmt.get("excludes")
+            or not triggers
+            or not all(isinstance(t, str) for t in triggers)
+            or not tags
+        ):
+            raise _unsupported_structural_tag(
+                "'triggered_tags' with unsupported options", fmt
+            )
+        parts = []
+        for t in tags:
+            begin, end, schema = _tag_parts(
+                t, disable_any_whitespace, disable_additional_properties
+            )
+            trig = next((tr for tr in triggers if begin.startswith(tr)), None)
+            if trig is None:
+                raise _unsupported_structural_tag(
+                    "tag whose begin matches no trigger", fmt
+                )
+            parts.append((trig, begin, end, schema))
+        return _triggered_tags_lark(parts)
+
+    if ftype == "tags_with_separator":
+        separator, tags = fmt.get("separator"), fmt.get("tags")
+        if not fmt.get("at_least_one") or not isinstance(separator, str) or not tags:
+            raise _unsupported_structural_tag(
+                "'tags_with_separator' with unsupported options", fmt
+            )
+        parts = [
+            _tag_parts(t, disable_any_whitespace, disable_additional_properties)
+            for t in tags
+        ]
+        return _tags_with_separator_lark(
+            parts, separator, bool(fmt.get("stop_after_first"))
+        )
+
+    raise _unsupported_structural_tag(f"format type {ftype!r}", fmt)
+
+
 def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
     grammar_spec: str | dict[str, Any],
@@ -264,6 +494,15 @@ def serialize_guidance_grammar(
                 s_tag = json.loads(grammar_spec)
             else:
                 s_tag = grammar_spec
+            if not (isinstance(s_tag, dict) and "structures" in s_tag):
+                # New (xgrammar-style) structural tag format, e.g. produced by
+                # vllm.tool_parsers.structural_tag_registry for hermes tool
+                # calling (strict:true + tool_choice="auto", "required", or a
+                # named tool). Same detection as backend_xgrammar: the legacy
+                # format is {"triggers": [...], "structures": [...]}.
+                return _serialize_structural_tag_new_format(
+                    s_tag, disable_any_whitespace, disable_additional_properties
+                )
             triggers: list[str] = s_tag["triggers"]
             tags: list[llguidance.StructTag] = []
             for s in s_tag["structures"]:
@@ -277,7 +516,17 @@ def serialize_guidance_grammar(
                     llguidance.StructTag(
                         trigger=trig,
                         begin=s["begin"],
-                        grammar=_process_schema(s["schema"]),
+                        # StructTag.grammar expects a JSON schema (or Lark),
+                        # not the serialized {"grammars": [...]} envelope
+                        # _process_schema returns — llguidance silently
+                        # treats that envelope as an empty schema, dropping
+                        # every constraint on the tag's content.
+                        grammar=_tag_schema(
+                            s["schema"],
+                            s,
+                            disable_any_whitespace,
+                            disable_additional_properties,
+                        ),
                         end=s["end"],
                     )
                 )
