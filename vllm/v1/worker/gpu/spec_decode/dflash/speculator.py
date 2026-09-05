@@ -15,7 +15,10 @@ from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_sliding_window,
+)
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import cp_local_slot
@@ -177,6 +180,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
+
+        # FlashAttention's AOT split schedule is wrong for a windowed drafter,
+        # and `_get_sliding_window_configs` leaves it on or off depending on
+        # whether the target also runs FlashAttention. Decide it here instead.
+        for groups in self.attn_groups:
+            for group in groups:
+                builder = group.get_metadata_builder()
+                if getattr(
+                    builder, "aot_schedule", False
+                ) and get_kv_cache_spec_sliding_window(builder.kv_cache_spec):
+                    # `aot_schedule` belongs to FlashAttention's builder, not
+                    # to the base class this loop is typed against.
+                    builder.aot_schedule = False  # type: ignore[attr-defined]
 
         self.draft_kv_cache_group_ids = [
             gid for gid, g in enumerate(self.attn_groups) if g

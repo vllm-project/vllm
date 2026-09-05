@@ -59,7 +59,7 @@ def _is_rms_norm(module: nn.Module) -> bool:
     # Go via `get_fuser` because it caches
     from vllm.model_executor.models.transformers.fuser import get_fuser
 
-    return isinstance(get_fuser(module), RMSNormFuser)
+    return get_fuser(module, RMSNormFuser) is not None
 
 
 def _top_level_index(funcdef: ast.FunctionDef, node: ast.AST) -> int:
