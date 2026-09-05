@@ -419,15 +419,25 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 
+                # Whether this call carries KV aggregation. Mixed deployment
+                # without KV transfer often has no kv_connector_output at all,
+                # in which case there is nothing to preserve and we can fail
+                # fast instead of collecting all responses.
+                has_kv = kv_output_aggregator is not None
+
                 # Only FT scenario will have FAILURE_WITH_KV_OUTPUT status
                 if status == WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT:
-                    if self.is_failed:
+                    if self.is_failed or not has_kv:
                         raise RuntimeError("Worker failed with KV connector output")
                     has_failure = True
                     assert isinstance(result, KVConnectorOutput)
                     responses.append(result)
                 elif status != WorkerProc.ResponseStatus.SUCCESS:
-                    if not self.vllm_config.parallel_config.enable_fault_tolerance or self.is_failed:
+                    if (
+                        not self.vllm_config.parallel_config.enable_fault_tolerance
+                        or self.is_failed
+                        or not has_kv
+                    ):
                         raise RuntimeError(
                             f"Worker failed with error '{result}', please check the"
                             " stack trace above for the root cause"
