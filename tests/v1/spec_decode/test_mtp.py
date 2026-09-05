@@ -42,6 +42,7 @@ def test_shared_head_can_defer_lm_head(default_vllm_config):
         regular = SharedHead(config, "mtp")
         deferred = SharedHead(config, "mtp", defer_lm_head=True)
 
+    parallel_lm_head.assert_called_once()
     assert regular.head is parallel_lm_head.return_value
     assert isinstance(deferred.head, DeferredLMHead)
     assert not tuple(deferred.head.parameters())
