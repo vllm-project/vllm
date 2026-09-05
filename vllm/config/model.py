@@ -1668,6 +1668,19 @@ class ModelConfig:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
+        # GDN / gated-delta models (e.g. Qwen3-Next) carry no mamba_chunk_size/
+        # chunk_size config field; their FLA prefill kernel tiles at
+        # FLA_CHUNK_SIZE (64). Use that instead of the Mamba1 2048 default so
+        # the all-mode mamba cache block aligns to the real kernel chunk
+        # (avoids a 3.5x-oversized block).
+        if (
+            chunk_size is None
+            and getattr(self.hf_text_config, "linear_conv_kernel_dim", None) is not None
+        ):
+            from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+            chunk_size = FLA_CHUNK_SIZE
+
         # Since Mamba1 does not have a chunk notion
         # we use a default chunk size of 2048.
         if chunk_size is None:

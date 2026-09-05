@@ -86,6 +86,41 @@ class BaseMambaAttentionMetadata:
     replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
+def compute_mamba_prefix_caching_block_indices(
+    num_computed_tokens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    mamba_block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-request block indices for "all" mode prefix caching.
+
+    Shared by the Mamba and GDN metadata builders. Returns
+    (block_idx_last_computed_token, block_idx_first_scheduled_token,
+    block_idx_last_scheduled_token).
+    """
+    # Block index of the last computed token
+    block_idx_last_computed_token = (
+        (num_computed_tokens + mamba_block_size - 1) // mamba_block_size - 1
+    )
+    # which is <= block index for the first scheduled token
+    block_idx_first_scheduled_token = (
+        (num_computed_tokens + mamba_block_size) // mamba_block_size - 1
+    )
+    # which is <= block index of the last scheduled token
+    block_idx_last_scheduled_token = (
+        (seq_lens + mamba_block_size - 1) // mamba_block_size - 1
+    )
+    # -1 in case it's non-computed and causes later issues with indexing
+    block_idx_last_computed_token = torch.clamp(block_idx_last_computed_token, min=0)
+    # -1 in the case we have a padded request (0 seq-len)
+    block_idx_last_scheduled_token = torch.clamp(block_idx_last_scheduled_token, min=0)
+
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     kv_cache_spec: MambaSpec
     metadata_cls: type[M]
@@ -416,43 +451,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common_attn_metadata: CommonAttentionMetadata,
         mamba_block_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-        # Block index of the last computed token
-        block_idx_last_computed_token = (
-            torch.div(
-                num_computed_tokens + mamba_block_size - 1,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # which is <= block index for the first scheduled token
-        block_idx_first_scheduled_token = (
-            torch.div(
-                num_computed_tokens + mamba_block_size,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # which is <= block index of the last scheduled token
-        block_idx_last_scheduled_token = (
-            torch.div(
-                common_attn_metadata.seq_lens + mamba_block_size - 1,
-                mamba_block_size,
-                rounding_mode="floor",
-            )
-            - 1
-        )
-        # -1 in case it's non-computed and causes later issues with indexing
-        block_idx_last_computed_token.clamp_(min=0)
-        # -1 in the case we have a padded request (0 seq-len)
-        block_idx_last_scheduled_token.clamp_(min=0)
-
-        return (
-            block_idx_last_computed_token,
-            block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token,
+        return compute_mamba_prefix_caching_block_indices(
+            common_attn_metadata.compute_num_computed_tokens(),
+            common_attn_metadata.seq_lens,
+            mamba_block_size,
         )
 
     def _compute_common_metadata(

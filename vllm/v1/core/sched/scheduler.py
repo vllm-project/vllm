@@ -331,8 +331,16 @@ class Scheduler(SchedulerInterface):
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
         self._skip_zero_block_ids: set[int] = set()
-        self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        self.need_mamba_block_aligned_split = self.has_mamba_layers and (
+            self.cache_config.mamba_cache_mode == "align"
+            # all-mode with a kernel that lacks short-first-chunk realignment
+            # (e.g. GDN/FLA): clip prefill chunks to kernel-chunk multiples so
+            # per-block SSM checkpoints stay exactly materializable. Set by
+            # Platform._align_hybrid_block_size.
+            or (
+                self.cache_config.mamba_cache_mode == "all"
+                and self.cache_config.mamba_all_mode_prefill_align_size is not None
+            )
         )
         self.mamba_has_prefill_checkpoint_blocks = (
             self.has_mamba_layers
@@ -349,6 +357,9 @@ class Scheduler(SchedulerInterface):
         # hash boundary, so the split adds that stop.
         self.mamba_partial_cache_hit = (
             self.need_mamba_block_aligned_split
+            # align-only: all-mode materializes states from within-chunk h
+            # exports, not at chunk ends, so partial-tail steering is moot.
+            and self.cache_config.mamba_cache_mode == "align"
             and self.hash_block_size < self.block_size
             and self.kv_cache_manager.coordinator.enable_partial_hash_hits
         )
@@ -416,6 +427,27 @@ class Scheduler(SchedulerInterface):
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
         if start >= prefill_end:
             return num_new_tokens
+
+        if self.cache_config.mamba_cache_mode == "all":
+            # All-mode (kernel without short-first-chunk realignment): block
+            # boundary states materialize from within-chunk h exports, so the
+            # only requirement is that chunk STARTS stay kernel-chunk aligned
+            # — clip chunk ends to kernel-chunk multiples (<=63 tokens/step
+            # deferred, vs align mode's <= block_size-1). The final prefill
+            # chunk may end anywhere (tail handled by kernel masking; its
+            # state lands via the final-state write, not a full-block hash).
+            align = self.cache_config.mamba_all_mode_prefill_align_size
+            assert align is not None
+            end = start + num_new_tokens
+            last_aligned = max(request.num_prompt_tokens, request.num_tokens - 1)
+            if end < last_aligned:
+                # Re-align a misaligned start (e.g. externally loaded KV)
+                # at the next boundary; otherwise clip the end down.
+                if start % align != 0:
+                    end = min(end, (start // align + 1) * align)
+                else:
+                    end = end // align * align
+            return max(end - start, 0)
 
         block_size = self.cache_config.block_size
         # The last block-aligned position whose state can be cached. With
