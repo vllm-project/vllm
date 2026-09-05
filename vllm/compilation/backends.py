@@ -1071,7 +1071,6 @@ class VllmBackend:
 
         cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
-        self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_index
         local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
