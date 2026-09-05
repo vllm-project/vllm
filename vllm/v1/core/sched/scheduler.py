@@ -427,7 +427,7 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.block_size
+        block_size = self.cache_config.block_size
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
@@ -449,7 +449,7 @@ class Scheduler(SchedulerInterface):
                 query_end=end,
                 checkpoint_position=checkpoint_position,
                 hash_block_size=self.hash_block_size,
-                mamba_block_size=self.block_size,
+                mamba_block_size=block_size,
                 checkpoint_alignment=self.mamba_prefill_checkpoint_alignment,
             )
         )

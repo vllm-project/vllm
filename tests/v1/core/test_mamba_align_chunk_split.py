@@ -138,6 +138,7 @@ def _split(
         use_eagle_block_drop = use_eagle
     stub = SimpleNamespace(
         block_size=MAMBA_BLOCK_SIZE,
+        cache_config=SimpleNamespace(block_size=MAMBA_BLOCK_SIZE),
         use_eagle_block_drop=use_eagle_block_drop,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -159,7 +160,7 @@ def _split(
         (3602, 2000, False, MAMBA_BLOCK_SIZE),
         (3602, 3602, True, 3602),
         (2002, 2002, True, 2002),
-        (3602, 512, True, 512),
+        (3602, 512, True, 0),
         (3602, 1700, True, MAMBA_BLOCK_SIZE),
     ],
 )
