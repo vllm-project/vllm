@@ -162,6 +162,7 @@ class AutoGPTQConfig(QuantizationConfig):
         self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
+        self.modules_in_checkpoint: set[str] | None = None
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = full_config.get("autoround_version", "")
 
@@ -274,6 +275,10 @@ class AutoGPTQConfig(QuantizationConfig):
             self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.modules_in_block_to_quantize
             )
+        if self.modules_in_checkpoint is not None:
+            self.modules_in_checkpoint = set(
+                hf_to_vllm_mapper.apply_list(list(self.modules_in_checkpoint))
+            )
 
     def maybe_update_config(
         self,
@@ -294,6 +299,9 @@ class AutoGPTQConfig(QuantizationConfig):
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
         metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        self.modules_in_checkpoint = {
+            param_name.rsplit(".", 1)[0] for param_name in metadata
+        }
         quant_layers: set[str] = {
             param_name.rsplit(".", 1)[0]
             for param_name, info in metadata.items()

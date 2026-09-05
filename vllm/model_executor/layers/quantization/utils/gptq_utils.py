@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from copy import deepcopy
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -87,6 +87,7 @@ def is_layer_gptq_quantized(
     prefix: str,
     quantized_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    modules_in_checkpoint: Collection[str] | None = None,
 ) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -111,6 +112,14 @@ def is_layer_gptq_quantized(
 
         is_quantized = None
         for shard_prefix in shard_prefixes:
+            if (
+                modules_in_checkpoint is not None
+                and shard_prefix not in modules_in_checkpoint
+            ):
+                # Shard does not exist in the checkpoint (e.g. Gemma 4's
+                # k_eq_v layers have no v_proj), so it cannot disagree.
+                continue
+
             is_shard_quantized = any(
                 layer in shard_prefix for layer in quantized_layers
             )
@@ -123,6 +132,10 @@ def is_layer_gptq_quantized(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
+
+        if is_quantized is None:
+            # None of the fused layer's shards exist in the checkpoint.
+            return False
     else:
         is_quantized = any(layer in prefix for layer in quantized_layers)
 
@@ -145,6 +158,7 @@ def get_linear_quant_method(
             prefix=prefix,
             quantized_layers=cloned_config.modules_in_block_to_quantize,
             fused_mapping=cloned_config.packed_modules_mapping,
+            modules_in_checkpoint=getattr(cloned_config, "modules_in_checkpoint", None),
         )
         # False = skip module, None = no override, else = Positive match
         if get_dynamic_override(  # noqa: E712
