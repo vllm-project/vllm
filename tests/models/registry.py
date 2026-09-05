@@ -876,12 +876,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
-        "allendou/Fun-ASR-Nano-2512-vllm",
+        "FunAudioLLM/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
-        max_transformers_version="5.1",
+        max_transformers_version="5.15",
         transformers_version_reason={
-            "vllm": "Incompatible with transformers v5.2+ "
-            "(dict object has no attribute '__name__').",
+            "vllm": "The official Fun-ASR-Nano vLLM package is validated "
+            "through transformers v5.15.0; newer versions require separate "
+            "validation.",
         },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
