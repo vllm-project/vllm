@@ -70,6 +70,8 @@ class CudaCheckpointer:
         # handle. We record the pid that was checkpointed and return it
         # from suspend() so callers have a stable token to pass to resume().
         self._checkpoint_pid: int | None = None
+        # Retain the restored process until unlocking succeeds.
+        self._restored_pid: int | None = None
 
     @property
     def is_suspended(self) -> bool:
@@ -113,7 +115,8 @@ class CudaCheckpointer:
         """Resume the CUDA process from a checkpoint.
 
         Restores GPU state and unlocks the process
-        (CHECKPOINTED -> LOCKED -> RUNNING).
+        (CHECKPOINTED -> LOCKED -> RUNNING). If unlocking fails, a retry
+        only unlocks the already restored process.
 
         Args:
             handle: The pid returned by suspend(). If None, uses the pid
@@ -128,15 +131,27 @@ class CudaCheckpointer:
             )
 
         if handle is None:
-            handle = self._checkpoint_pid
+            handle = (
+                self._restored_pid
+                if self._restored_pid is not None
+                else self._checkpoint_pid
+            )
 
         if handle is None:
             raise RuntimeError("No checkpoint pid available for resume.")
 
         logger.info("Resuming CUDA process (pid=%s)...", handle)
         # Inverse of suspend: restore GPU state, then unlock.
-        process_restore(handle)
+        if self._restored_pid is None:
+            process_restore(handle)
+            self._restored_pid = handle
+        elif handle != self._restored_pid:
+            raise RuntimeError(
+                f"CUDA process {self._restored_pid} is restored but still locked. "
+                "Retry resume() for that process before resuming another."
+            )
         process_unlock(handle)
+        self._restored_pid = None
         self._is_suspended = False
         logger.info("CUDA process resumed.")
 
