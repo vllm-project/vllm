@@ -160,3 +160,30 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         tokenizer=object(),
     )
     assert params.structured_outputs._backend == expected_backend
+
+
+@pytest.mark.parametrize("json_schema", [{}, "{}", " \n {} \t"])
+def test_empty_json_schema_rejected(json_schema):
+    """The universal empty schema is rejected before unconstrained decoding."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=json_schema)
+    )
+    with pytest.raises(VLLMValidationError, match="cannot be an empty JSON schema"):
+        params._validate_structured_outputs(
+            _StubModelConfig(is_diffusion=False),
+            StructuredOutputsConfig(),
+            tokenizer=object(),
+        )
+
+
+@pytest.mark.parametrize("json_schema", [JSON_SCHEMA, '{"type": "object"}'])
+def test_nonempty_json_schema_allowed(json_schema):
+    """Non-empty schemas continue to pass request validation."""
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(json=json_schema)
+    )
+    params._validate_structured_outputs(
+        _StubModelConfig(is_diffusion=False),
+        StructuredOutputsConfig(),
+        tokenizer=object(),
+    )

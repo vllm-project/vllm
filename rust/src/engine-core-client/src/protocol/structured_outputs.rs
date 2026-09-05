@@ -5,7 +5,7 @@ use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_structured_outputs_params};
 
 /// Structured-output backend selected for EngineCore grammar compilation.
 ///
@@ -75,6 +75,11 @@ impl StructuredOutputsParams {
         Self::from_constraint(StructuredOutputConstraint::Json(json))
     }
 
+    pub fn try_json(json: Value) -> Result<Self> {
+        validate_json_schema(&json)?;
+        Ok(Self::json(json))
+    }
+
     pub fn regex(regex: impl Into<String>) -> Self {
         Self::from_constraint(StructuredOutputConstraint::Regex(regex.into()))
     }
@@ -104,6 +109,23 @@ impl StructuredOutputsParams {
             backend: StructuredOutputBackend::default(),
         }
     }
+}
+
+fn validate_json_schema(json: &Value) -> Result<()> {
+    let is_empty_schema = match json {
+        Value::Object(schema) => schema.is_empty(),
+        Value::String(schema) => {
+            matches!(serde_json::from_str(schema), Ok(Value::Object(schema)) if schema.is_empty())
+        }
+        _ => false,
+    };
+    if is_empty_schema {
+        bail_invalid_structured_outputs_params!(
+            "structured_outputs.json cannot be an empty JSON schema; provide a non-empty \
+             schema, or use json_object=true when JSON object output is intended"
+        );
+    }
+    Ok(())
 }
 
 /// Wire-compatible structured-output payload used by Python engine-core.
@@ -140,6 +162,10 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
 
     fn try_from(raw: WireStructuredOutputsParams) -> Result<Self> {
         use StructuredOutputConstraint::*;
+
+        if let Some(json) = &raw.json {
+            validate_json_schema(json)?;
+        }
 
         let mut constraint = None;
 
@@ -239,6 +265,8 @@ impl<'de> Deserialize<'de> for StructuredOutputsParams {
 
 #[cfg(test)]
 mod tests {
+    use thiserror_ext::AsReport as _;
+
     use super::*;
 
     #[test]
@@ -287,6 +315,32 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("json_object must be true"));
+    }
+
+    #[test]
+    fn structured_outputs_rejects_empty_json_schema() {
+        for schema in [
+            serde_json::json!({}),
+            serde_json::json!("{}"),
+            serde_json::json!(" \n {} \t"),
+        ] {
+            let error = serde_json::from_value::<StructuredOutputsParams>(
+                serde_json::json!({"json": schema}),
+            )
+            .unwrap_err();
+
+            assert!(error.to_report_string().contains("cannot be an empty JSON schema"));
+        }
+    }
+
+    #[test]
+    fn structured_outputs_accepts_nonempty_json_schema() {
+        for schema in [
+            serde_json::json!({"type": "object"}),
+            serde_json::json!(r#"{"type":"object"}"#),
+        ] {
+            StructuredOutputsParams::try_json(schema).unwrap();
+        }
     }
 
     #[test]
