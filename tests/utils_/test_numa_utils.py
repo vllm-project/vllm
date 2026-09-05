@@ -510,3 +510,25 @@ def test_configure_subprocess_numa_fallback(monkeypatch):
     with numa_utils.configure_subprocess(node_config, local_rank=0):
         assert multiprocessing.spawn.get_executable() == before
         assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
+
+
+def test_resolve_numactl_args_warns_when_all_candidates_fail(monkeypatch):
+    """When numactl is missing (or rejects even the bare probe), every
+    candidate fails and the empty fallback must warn instead of returning
+    '' silently."""
+    warnings = []
+
+    def fake_warning(msg, *args):
+        warnings.append(msg % args)
+
+    def raise_filenotfound(*args, **kwargs):
+        raise FileNotFoundError("numactl not installed")
+
+    monkeypatch.setattr(numa_utils.logger, "warning", fake_warning)
+    monkeypatch.setattr(numa_utils.subprocess, "run", raise_filenotfound)
+
+    assert (
+        numa_utils._resolve_numactl_args("--cpunodebind=0 --membind=0") == ""
+    )
+    assert len(warnings) == 1
+    assert "numactl" in warnings[0]
