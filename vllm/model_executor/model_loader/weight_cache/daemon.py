@@ -17,8 +17,9 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor parallelism is supported; pipeline, data, and expert parallelism
-are rejected at launch.
+Tensor parallelism and expert parallelism (with DP=PP=1, so EP size equals TP
+size) are supported; pipeline parallelism, data parallelism, and EPLB are
+rejected at launch.
 """
 
 import contextlib
@@ -40,8 +41,8 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    CacheConfig,
     TensorEntry,
+    WeightCacheKey,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -131,10 +132,11 @@ class WeightCacheDaemon:
         self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
-        self.cache_config = CacheConfig.from_model_config(
+        self.cache_config = WeightCacheKey.from_model_config(
             vllm_config.model_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
             tp_rank=tp_rank,
+            enable_expert_parallel=vllm_config.parallel_config.enable_expert_parallel,
         )
 
     def load_model(self, load_gate: AbstractContextManager | None = None) -> None:
@@ -247,12 +249,12 @@ class WeightCacheDaemon:
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
         client_config = request.get("cache_config")
-        if not isinstance(client_config, CacheConfig):
+        if not isinstance(client_config, WeightCacheKey):
             send_msg(conn, {"status": "error", "message": "Missing cache_config"})
             return
         mismatched = self.cache_config.mismatched_fields(client_config)
         if mismatched:
-            logger.warning("CacheConfig mismatch on fields: %s", mismatched)
+            logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
         if not self.entries:
@@ -325,18 +327,19 @@ def main() -> None:
     parallel_config = vllm_config.parallel_config
     if parallel_config.pipeline_parallel_size > 1:
         raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
+            "The weight cache daemon only supports tensor/expert parallelism; "
             "pipeline parallelism is not supported"
         )
     if parallel_config.data_parallel_size > 1:
         raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
+            "The weight cache daemon only supports tensor/expert parallelism; "
             "data parallelism is not supported"
         )
-    if getattr(parallel_config, "enable_expert_parallel", False):
+    if parallel_config.enable_eplb:
         raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "expert parallelism is not supported"
+            "The weight cache daemon does not support EPLB: expert load "
+            "balancing rearranges experts in GPU memory at runtime, which "
+            "the static cached layout cannot represent"
         )
     tp_size = parallel_config.tensor_parallel_size
 

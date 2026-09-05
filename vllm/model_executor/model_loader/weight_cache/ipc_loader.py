@@ -103,7 +103,10 @@ class IpcModelLoader(BaseModelLoader):
         loaded through this loader).
         """
         device_index = torch.accelerator.current_device_index()
-        entries, _ = self._fetch_entries(model_config)
+        from vllm.config import get_current_vllm_config
+
+        enable_ep = get_current_vllm_config().parallel_config.enable_expert_parallel
+        entries, _ = self._fetch_entries(model_config, enable_ep)
         params = dict(model.named_parameters())
         buffers = dict(model.named_buffers())
         for name, entry in entries.items():
@@ -123,7 +126,9 @@ class IpcModelLoader(BaseModelLoader):
         self._check_supported(vllm_config, model_config)
         state_fetched = False
         try:
-            entries, aliases = self._fetch_entries(model_config)
+            entries, aliases = self._fetch_entries(
+                model_config, vllm_config.parallel_config.enable_expert_parallel
+            )
             state_fetched = True
             return self._build_model(
                 vllm_config, model_config, prefix, entries, aliases
@@ -199,6 +204,15 @@ class IpcModelLoader(BaseModelLoader):
     @staticmethod
     def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
         check_ipc_quant_support(model_config, where="engine")
+        if vllm_config.parallel_config.enable_eplb:
+            # EPLB rearranges experts in GPU memory at runtime, which would
+            # corrupt the zero-copy shared cache and diverge from the static
+            # expert layout the daemon exported.
+            raise ValueError(
+                "[weight_cache:engine] EPLB is not supported with "
+                "--load-format ipc_cache; disable EPLB or use the default "
+                "load format."
+            )
         cache_dtype = vllm_config.cache_config.cache_dtype
         if cache_dtype != "auto" and not str(cache_dtype).startswith("fp8"):
             # BaseKVCacheMethod.process_weights_after_loading turns the loaded
@@ -267,7 +281,7 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(
-        self, model_config: ModelConfig
+        self, model_config: ModelConfig, enable_expert_parallel: bool
     ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
         from vllm.distributed import (
             get_pp_group,
@@ -282,6 +296,7 @@ class IpcModelLoader(BaseModelLoader):
             tp_rank=get_tensor_model_parallel_rank(),
             pp_size=pp_group.world_size,
             pp_rank=pp_group.rank_in_group,
+            enable_expert_parallel=enable_expert_parallel,
         )
         return self._request_state(cache_config)
 
