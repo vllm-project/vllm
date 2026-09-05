@@ -290,6 +290,8 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
+    VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH: bool = False
+    VLLM_NCCL_SYMM_MEM_ALIAS_DIAGNOSTICS: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
@@ -2016,6 +2018,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))
+    ),
+    # Reuse power-of-two symmetric-memory scratch buffers instead of retaining
+    # one registered allocation for every collective shape.
+    "VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH": lambda: bool(
+        int(os.getenv("VLLM_NCCL_SYMM_MEM_BOUNDED_SCRATCH", "0"))
+    ),
+    # Warn when a bounded scratch view remains live when the slot is reused.
+    "VLLM_NCCL_SYMM_MEM_ALIAS_DIAGNOSTICS": lambda: bool(
+        int(os.getenv("VLLM_NCCL_SYMM_MEM_ALIAS_DIAGNOSTICS", "0"))
     ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
