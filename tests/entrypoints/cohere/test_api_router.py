@@ -44,7 +44,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
 from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
     vllm_error_handler,
 )
-from vllm.exceptions import VLLMError, VLLMValidationError
+from vllm.exceptions import VLLMError
 from vllm.sampling_params import SamplingParams
 
 
@@ -97,20 +97,6 @@ class _RenderChatHandler:
 
     def to_chat_completion_request(self, request):
         return CohereServingChatV2._convert_v2_to_chat_completion(request)
-
-
-def test_report_header_validation_returns_client_error():
-    handler = _Handler(VLLMValidationError("Invalid X-KV-Cache-Report-Mode"))
-    with TestClient(_build_app_with_vllm_handlers(handler)) as client:
-        response = client.post(
-            "/cohere/v2/chat",
-            json={
-                "model": "m",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-        )
-    assert response.status_code == 400
-    assert "X-KV-Cache-Report-Mode" in response.json()["message"]
 
 
 class _RenderHandler:

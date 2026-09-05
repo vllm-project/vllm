@@ -20,7 +20,6 @@ from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -38,13 +37,8 @@ def resolve_kv_cache_report_mode(
     if raw_request is None:
         return extra_args
     mode = raw_request.headers.get(KV_CACHE_REPORT_MODE_HEADER)
-    if mode is None:
-        return extra_args
     if mode not in ("incremental", "full"):
-        raise VLLMValidationError(
-            f"{KV_CACHE_REPORT_MODE_HEADER} must be 'incremental' or 'full'",
-            parameter=KV_CACHE_REPORT_MODE_HEADER,
-        )
+        return extra_args
     return {"kv_cache_report_mode": mode, **(extra_args or {})}
 
 

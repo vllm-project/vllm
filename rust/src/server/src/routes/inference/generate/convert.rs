@@ -60,7 +60,7 @@ pub(super) fn prepare_generate_request(
     sampling_params.vllm_xargs = crate::utils::merge_kv_cache_report_mode(
         sampling_params.vllm_xargs,
         ctx.kv_cache_report_mode.as_deref(),
-    )?;
+    );
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),

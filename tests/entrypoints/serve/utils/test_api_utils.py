@@ -13,7 +13,6 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
-from vllm.exceptions import VLLMValidationError
 
 
 @pytest.mark.parametrize("mode", ["full", "incremental"])
@@ -60,7 +59,10 @@ def test_kv_cache_report_without_header_preserves_body(raw_request, extra_args):
 
 
 @pytest.mark.parametrize("mode", ["", "FULL", "invalid", "full,incremental"])
-def test_kv_cache_report_rejects_invalid_header_even_with_body(mode):
+@pytest.mark.parametrize(
+    "extra_args", [None, {}, {"custom": 7}, {"kv_cache_report_mode": "incremental"}]
+)
+def test_kv_cache_report_ignores_invalid_header(mode, extra_args):
     request = Request(
         {
             "type": "http",
@@ -70,10 +72,7 @@ def test_kv_cache_report_rejects_invalid_header_even_with_body(mode):
         }
     )
 
-    with pytest.raises(VLLMValidationError, match="X-KV-Cache-Report-Mode"):
-        api_utils.resolve_kv_cache_report_mode(
-            {"kv_cache_report_mode": "incremental"}, request
-        )
+    assert api_utils.resolve_kv_cache_report_mode(extra_args, request) == extra_args
 
 
 @pytest.mark.parametrize(

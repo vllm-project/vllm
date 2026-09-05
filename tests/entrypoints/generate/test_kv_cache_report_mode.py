@@ -39,7 +39,6 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 _MESSAGES = [{"role": "user", "content": "hi"}]
@@ -194,13 +193,10 @@ async def test_kv_cache_report_header_reaches_sampling_params(api, mode):
             raw_request,
         )
 
-    if mode == "invalid":
-        with pytest.raises(VLLMValidationError):
-            await call
-    else:
-        with pytest.raises(_EngineReached) as reached:
-            await call
-        assert reached.value.params.extra_args == {"kv_cache_report_mode": mode}
+    with pytest.raises(_EngineReached) as reached:
+        await call
+    expected = {} if mode == "invalid" else {"kv_cache_report_mode": mode}
+    assert (reached.value.params.extra_args or {}) == expected
 
 
 @pytest.mark.asyncio
@@ -270,12 +266,8 @@ async def test_realtime_applies_report_header_to_each_utterance(mode, monkeypatc
     for _ in range(2):
         await connection._run_generation(AsyncMock(), asyncio.Queue())
 
-    if mode == "invalid":
-        generate.assert_not_called()
-        assert send_error.await_count == 2
-    else:
-        assert generate.call_count == 2
-        for call in generate.call_args_list:
-            assert call.kwargs["sampling_params"].extra_args == {
-                "kv_cache_report_mode": mode
-            }
+    send_error.assert_not_awaited()
+    assert generate.call_count == 2
+    expected = {} if mode == "invalid" else {"kv_cache_report_mode": mode}
+    for call in generate.call_args_list:
+        assert (call.kwargs["sampling_params"].extra_args or {}) == expected

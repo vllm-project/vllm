@@ -139,8 +139,7 @@ impl InferenceServiceImpl {
             text_request.sampling_params.vllm_xargs = merge_kv_cache_report_mode(
                 text_request.sampling_params.vllm_xargs,
                 kv_cache_report_mode.as_deref(),
-            )
-            .map_err(|error| Status::invalid_argument(error.to_error_response().error.message))?;
+            );
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 
@@ -229,7 +228,8 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let kv_cache_report_mode = request
             .metadata()
             .get(KV_CACHE_REPORT_MODE_HEADER)
-            .map(|value| value.to_str().unwrap_or_default().to_owned());
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
@@ -303,7 +303,8 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         let kv_cache_report_mode = request
             .metadata()
             .get(KV_CACHE_REPORT_MODE_HEADER)
-            .map(|value| value.to_str().unwrap_or_default().to_owned());
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {

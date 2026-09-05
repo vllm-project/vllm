@@ -26,20 +26,14 @@ pub struct ResolvedRequestContext {
 pub fn merge_kv_cache_report_mode(
     mut xargs: Option<HashMap<String, Value>>,
     header: Option<&str>,
-) -> Result<Option<HashMap<String, Value>>, ApiError> {
-    if let Some(mode) = header {
-        if !matches!(mode, "incremental" | "full") {
-            return Err(ApiError::invalid_request(
-                "X-KV-Cache-Report-Mode must be 'incremental' or 'full'",
-                Some("X-KV-Cache-Report-Mode"),
-            ));
-        }
+) -> Option<HashMap<String, Value>> {
+    if let Some(mode) = header.filter(|mode| matches!(*mode, "incremental" | "full")) {
         xargs
             .get_or_insert_with(HashMap::new)
             .entry("kv_cache_report_mode".to_string())
             .or_insert_with(|| Value::String(mode.to_string()));
     }
-    Ok(xargs)
+    xargs
 }
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
@@ -161,7 +155,8 @@ pub fn resolve_request_context(
         .map(str::to_owned);
     let kv_cache_report_mode = headers
         .get(KV_CACHE_REPORT_MODE_HEADER)
-        .map(|value| value.to_str().unwrap_or_default().to_owned());
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
     ResolvedRequestContext {
         request_id,
@@ -196,7 +191,7 @@ mod tests {
             "kv_cache_report_mode": "incremental", "custom": 7,
         }))
         .unwrap();
-        let merged = merge_kv_cache_report_mode(Some(xargs), Some("full")).unwrap();
+        let merged = merge_kv_cache_report_mode(Some(xargs), Some("full"));
         let sorted: std::collections::BTreeMap<_, _> = merged.unwrap().into_iter().collect();
         expect_test::expect![[r#"
             {
@@ -204,19 +199,16 @@ mod tests {
               "kv_cache_report_mode": "incremental"
             }"#]]
         .assert_eq(&serde_json::to_string_pretty(&sorted).unwrap());
-        assert!(merge_kv_cache_report_mode(None, None).unwrap().is_none());
+        assert!(merge_kv_cache_report_mode(None, None).is_none());
     }
 
     #[test]
-    fn kv_cache_report_rejects_invalid_headers_even_with_body() {
+    fn kv_cache_report_ignores_invalid_headers() {
         for value in ["", "FULL", "invalid", "full,incremental"] {
             let xargs = serde_json::from_value(json!({"kv_cache_report_mode": "full"})).unwrap();
-            let error = merge_kv_cache_report_mode(Some(xargs), Some(value)).unwrap_err();
-            assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
-            assert_eq!(
-                error.to_error_response().error.param,
-                Some("X-KV-Cache-Report-Mode".to_string())
-            );
+            for args in [None, Some(HashMap::new()), Some(xargs)] {
+                assert_eq!(merge_kv_cache_report_mode(args.clone(), Some(value)), args,);
+            }
         }
     }
 }

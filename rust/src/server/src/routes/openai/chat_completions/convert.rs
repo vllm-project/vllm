@@ -74,7 +74,7 @@ pub(super) fn prepare_chat_request(
     request.vllm_xargs = crate::utils::merge_kv_cache_report_mode(
         request.vllm_xargs,
         ctx.kv_cache_report_mode.as_deref(),
-    )?;
+    );
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,

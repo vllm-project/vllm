@@ -151,18 +151,17 @@ completion = client.chat.completions.create(
 An explicit `vllm_xargs.kv_cache_report_mode` in the body takes precedence over
 the header. The token-in/token-out API uses `sampling_params.extra_args` for
 this body parameter (`sampling_params.vllm_xargs` in the Rust frontend).
-Invalid header values return HTTP 400, including when the body specifies a mode.
+Invalid header values are ignored, preserving the body value or the default mode.
 
 The Python frontend supports this header on Chat Completions, Completions,
 Responses, Anthropic Messages, Cohere Chat, batched chat, render/generate,
 generative scoring, and audio transcription/translation. Beam search preserves
 the mode across its internal generation requests. Realtime audio accepts the
-header on the WebSocket handshake and applies it to each utterance; invalid
-values produce an error event when generation starts.
+header on the WebSocket handshake and applies it to each utterance.
 
 The Rust frontend supports the header on Chat Completions, Completions,
 render/generate, and as `x-kv-cache-report-mode` metadata on both gRPC generation
-methods. Invalid gRPC metadata returns `INVALID_ARGUMENT`. Offline Python uses
+methods. Invalid report-mode metadata is ignored. Offline Python uses
 `SamplingParams.extra_args`; JSONL batch requests use `vllm_xargs` in each request
 body. Neither has HTTP request headers.
 
