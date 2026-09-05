@@ -126,11 +126,6 @@ pub trait TextBackend: Send + Sync {
         usize::MAX
     }
 
-    /// Return the max model length derived from model metadata, when available.
-    fn derived_max_model_len(&self) -> Option<u32> {
-        None
-    }
-
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).
     /// Used to range-check `allowed_token_ids` and token-id prompts.
     fn tokenizer_vocab_size(&self) -> usize {

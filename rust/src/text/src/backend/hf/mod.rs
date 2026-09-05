@@ -141,10 +141,6 @@ impl TextBackend for HfTextBackend {
         self.model_vocab_size
     }
 
-    fn derived_max_model_len(&self) -> Option<u32> {
-        self.model_config.max_model_len()
-    }
-
     fn model_id(&self) -> &str {
         &self.model_id
     }
