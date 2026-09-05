@@ -67,6 +67,7 @@ from vllm.multimodal.inputs import (
     AudioItem,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -625,16 +626,19 @@ class Qwen3ASRForConditionalGeneration(
             tower_model=["audio_tower."],
         )
 
-    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
-        """Return the number of tokens processed by the audio tower encoder.
-
-        Required for LoRA support on the tower module.
-        """
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         # For Qwen3-ASR, the audio tower produces one embedding per audio
         # placeholder token inserted into the prompt (no additional
         # merge/downsample step like vision towers). Therefore, the encoder
         # token budget is identity.
-        return num_audio_tokens
+        return num_mm_embeds, None
 
     @classmethod
     def get_speech_to_text_config(

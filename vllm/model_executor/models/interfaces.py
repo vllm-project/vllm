@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
-from typing_extensions import Self, TypeIs
+from typing_extensions import Self, TypeIs, deprecated
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -419,23 +419,16 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
 
             yield
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the tower module of the multi-modal model.
-        Given the number of image tokens, output the number of
-        multi-modal encoder tokens.
-        """
-        ...
+    @deprecated(
+        "get_num_mm_encoder_tokens is deprecated; use get_mm_lora_token_counts instead."
+    )
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int: ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Implement this function to enable LoRA support
-        for the connector module of the multi-modal model.
-        Given the number of vision tokens, output the number of
-        multi-modal connector tokens.
-        """
-        ...
+    @deprecated(
+        "get_num_mm_connector_tokens is deprecated; use "
+        "get_mm_lora_token_counts instead."
+    )
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int: ...
 
     def get_mm_lora_token_counts(
         self,

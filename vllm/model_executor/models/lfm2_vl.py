@@ -35,6 +35,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -1283,12 +1284,13 @@ class Lfm2VLForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         downsample_factor = self.config.downsample_factor
-
-        return num_image_tokens * downsample_factor**2
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        downsample_factor = self.config.downsample_factor
-
-        return num_vision_tokens // downsample_factor**2
+        return num_mm_embeds * downsample_factor**2, num_mm_embeds
