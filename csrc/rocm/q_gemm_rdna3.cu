@@ -257,7 +257,12 @@ __global__ void gemm_q4_kernel_rdna3(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
     T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm,
+    // Deterministic split-K epilogue: when non-null, each split block stores
+    // its FP32 partial to partials[(z*size_m + m)*size_n + n] instead of
+    // CAS-atomically accumulating a low-precision partial into c. See the
+    // epilogue below for why the atomic path is order-dependent.
+    float* __restrict__ partials) {
   const int t = threadIdx.x;
   const int offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
   const int offset_m = blockIdx.y * M_COUNT;
@@ -599,6 +604,15 @@ __global__ void gemm_q4_kernel_rdna3(
   #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
     if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
+    if (partials != nullptr) {
+      float* p = partials +
+                 ((long)blockIdx.z * size_m + (offset_m + m)) * size_n + n;
+      p[0] = block_c[m][0];
+      p[1] = block_c[m][1];
+      p[2] = block_c[m][2];
+      p[3] = block_c[m][3];
+      continue;
+    }
     T* out = c + (offset_m + m) * size_n + n;
     if constexpr (std::is_same<T, half>::value) {
       half2 r01 = __halves2half2(__float2half_rn(block_c[m][0]),
@@ -637,7 +651,8 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
                                const uint32_t* b_qzeros, const T* b_scales,
                                const int* b_q_perm, T* c, int size_m,
                                int size_n, int size_k, int groups,
-                               int zero_offset, cudaStream_t stream) {
+                               int zero_offset, float* partials,
+                               cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid((size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
             (size_m + M_COUNT - 1) / M_COUNT,
@@ -645,7 +660,7 @@ void launch_gemm_q4_for_mcount(const T* a, const uint32_t* b_q_weight,
 
   gemm_q4_kernel_rdna3<T, M_COUNT><<<grid, block, 0, stream>>>(
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
-      zero_offset, b_q_perm);
+      zero_offset, b_q_perm, partials);
 }
 
 // Dispatch to the largest M_COUNT template that doesn't waste more than
@@ -664,28 +679,86 @@ void launch_gemm_q4(const T* a, const uint32_t* b_q_weight,
                     const uint32_t* b_qzeros, const T* b_scales,
                     const int* b_q_perm, T* c, int size_m, int size_n,
                     int size_k, int groups, bool use_v2_format,
-                    cudaStream_t stream) {
+                    float* partials, cudaStream_t stream) {
   const int zero_offset = use_v2_format ? 0 : 1;
 
   if (size_m == 1) {
     launch_gemm_q4_for_mcount<T, 1>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, partials, stream);
   } else if (size_m <= 3) {
     launch_gemm_q4_for_mcount<T, 2>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, partials, stream);
   } else if (size_m <= 7) {
     launch_gemm_q4_for_mcount<T, 4>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, partials, stream);
   } else {
     // M_COUNT=8 covers M up to 15 here; M >= 16 should ideally take the
     // WMMA path, but if it falls through we still produce correct output —
     // just leaving 3-5× of throughput on the table for prefill workloads.
     launch_gemm_q4_for_mcount<T, 8>(a, b_q_weight, b_qzeros, b_scales, b_q_perm,
                                     c, size_m, size_n, size_k, groups,
-                                    zero_offset, stream);
+                                    zero_offset, partials, stream);
+  }
+}
+
+
+// Deterministic split-K reduction: one thread per output element sums the
+// grid.z FP32 partial slices in fixed ascending-z order and rounds to the
+// output dtype exactly once. The order is a pure function of the launch
+// shape, so the result is bit-reproducible for identical inputs.
+template <typename T>
+__global__ void reduce_partials_rdna3(const float* __restrict__ partials,
+                                      T* __restrict__ c, const int z_count,
+                                      const int size_m, const int size_n) {
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= (long)size_m * size_n) return;
+  const int m = (int)(idx / size_n);
+  const int n = (int)(idx % size_n);
+  float acc = 0.0f;
+  for (int z = 0; z < z_count; ++z)
+    acc += partials[((long)z * size_m + m) * size_n + n];
+  if constexpr (std::is_same<T, half>::value) {
+    c[idx] = __float2half_rn(acc);
+  } else {
+    c[idx] = __float2bfloat16(acc);
+  }
+}
+
+// Deterministic scalar GEMM: split-K blocks write FP32 partials to scratch
+// (no atomics, no intermediate low-precision rounding), then one reduce pass
+// performs a fixed-order FP32 accumulation with a single final cast. The
+// scalar kernel writes every in-range (z, m, n) partial exactly once, so a
+// plain at::empty scratch suffices; row-tile bound:
+//   scratch_bytes = z_count * TILE_M * size_n * 4
+// is independent of the caller's M (the scalar domain is M < 64, so a single
+// tile covers it). The PyTorch caching allocator (including its CUDA-graph
+// capture pool) owns scratch reuse and lifetime.
+template <typename T>
+void launch_gemm_q4_deterministic(const T* a, const uint32_t* b_q_weight,
+                                  const uint32_t* b_qzeros, const T* b_scales,
+                                  const int* b_q_perm, T* c, int size_m,
+                                  int size_n, int size_k, int groups,
+                                  bool use_v2_format, cudaStream_t stream) {
+  constexpr int TILE_M = 64;  // single tile covers the scalar domain
+  const int z_count = (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE;
+  at::Tensor partials = at::empty(
+      {z_count, std::min(TILE_M, size_m), size_n},
+      at::TensorOptions().dtype(at::kFloat).device(
+          at::Device(at::kCUDA, c10::cuda::current_device())));
+  float* partials_ptr = partials.data_ptr<float>();
+  for (int row0 = 0; row0 < size_m; row0 += TILE_M) {
+    const int rows = std::min(TILE_M, size_m - row0);
+    launch_gemm_q4(a + (long)row0 * size_k, b_q_weight, b_qzeros, b_scales,
+                   b_q_perm, c + (long)row0 * size_n, rows, size_n, size_k,
+                   groups, use_v2_format, partials_ptr, stream);
+    const long total = (long)rows * size_n;
+    const int threads = 256;
+    const int blocks = (int)((total + threads - 1) / threads);
+    reduce_partials_rdna3<T><<<blocks, threads, 0, stream>>>(
+        partials_ptr, c + (long)row0 * size_n, z_count, rows, size_n);
   }
 }
 
@@ -751,7 +824,9 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   TORCH_CHECK(size_n % 8 == 0, "N must be a multiple of 8 (64-bit atomic CAS)");
 
   auto opts = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  at::Tensor c = torch::zeros({size_m, size_n}, opts);
+  // The deterministic epilogue writes every output element exactly once
+  // (reduce pass below), so c needs no zero-initialization.
+  at::Tensor c = torch::empty({size_m, size_n}, opts);
 
   const int* g_idx_ptr = nullptr;
   if (!b_g_idx.device().is_meta() && b_g_idx.numel() > 0) {
@@ -760,20 +835,24 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
     g_idx_ptr = (const int*)b_g_idx.data_ptr();
   }
 
+  // Deterministic split-K: FP32 partials + fixed-order reduction (see
+  // launch_gemm_q4_deterministic). The CAS-atomic low-precision epilogue
+  // this replaces was order-dependent and produced different results for
+  // identical inputs on gfx11 once more than a few split blocks contended.
   if (a.scalar_type() == torch::kHalf) {
-    vllm::gptq_rdna3::launch_gemm_q4<half>(
+    vllm::gptq_rdna3::launch_gemm_q4_deterministic<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
         g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
         use_v2_format, stream);
   } else {
-    vllm::gptq_rdna3::launch_gemm_q4<vllm::gptq_rdna3::bf16_t>(
+    vllm::gptq_rdna3::launch_gemm_q4_deterministic<vllm::gptq_rdna3::bf16_t>(
         (const vllm::gptq_rdna3::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(),
         (const vllm::gptq_rdna3::bf16_t*)b_scales.data_ptr(), g_idx_ptr,
-        (vllm::gptq_rdna3::bf16_t*)c.data_ptr(), size_m, size_n, size_k, groups,
-        use_v2_format, stream);
+        (vllm::gptq_rdna3::bf16_t*)c.data_ptr(), size_m, size_n, size_k,
+        groups, use_v2_format, stream);
   }
 
   return c;
