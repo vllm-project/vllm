@@ -878,10 +878,11 @@ class DeepseekV4MoE(nn.Module):
         self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        assert self.n_physical_experts % self.ep_size == 0, (
-            f"n_physical_experts={self.n_physical_experts} must be divisible by "
-            f"ep_size={self.ep_size}. Adjust num_redundant_experts."
-        )
+        if self.n_physical_experts % self.ep_size != 0:
+            raise ValueError(
+                f"n_physical_experts={self.n_physical_experts} must be divisible by "
+                f"ep_size={self.ep_size}. Adjust num_redundant_experts."
+            )
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
         self.physical_expert_end = (
@@ -947,10 +948,11 @@ class DeepseekV4MoE(nn.Module):
         self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        assert self.n_physical_experts % self.tp_size == 0, (
-            f"n_physical_experts={self.n_physical_experts} must be divisible by "
-            f"tp_size={self.tp_size}. Adjust num_redundant_experts."
-        )
+        if self.n_physical_experts % self.tp_size != 0:
+            raise ValueError(
+                f"n_physical_experts={self.n_physical_experts} must be divisible by "
+                f"tp_size={self.tp_size}. Adjust num_redundant_experts."
+            )
         self.n_local_physical_experts = self.n_physical_experts // self.tp_size
         self.n_local_experts = self.n_local_physical_experts
         self.experts_start_idx = self.tp_rank * self.n_local_experts
