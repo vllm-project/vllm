@@ -135,6 +135,7 @@ steps:
       - csrc/
       - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-AITER-TP4.yaml
       - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-AITER-TEP4.yaml
+      - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-FP8-TP4-ROCm.yaml
       - tests/evals/gsm8k/configs/models-spec-decode-rocm.txt
       - tests/evals/gsm8k/test_gsm8k_correctness.py
       - tests/evals/gsm8k/gsm8k_eval.py
