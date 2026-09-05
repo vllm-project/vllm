@@ -57,6 +57,10 @@ pub(super) fn prepare_generate_request(
     let include_logprobs = request.sampling_params.inner.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.inner.prompt_logprobs.is_some();
     let mut sampling_params = request.sampling_params.inner;
+    sampling_params.vllm_xargs = crate::utils::merge_kv_cache_report_mode(
+        sampling_params.vllm_xargs,
+        ctx.kv_cache_report_mode.as_deref(),
+    );
     sampling_params.vllm_xargs = merge_kv_transfer_params(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),

@@ -1207,10 +1207,13 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), backend);
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router_with_scale_out_endpoints(
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
+            true,
+        ),
         engine_task,
     )
 }
@@ -1236,6 +1239,88 @@ async fn server_load(app: &axum::Router) -> u64 {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("json body");
     value["server_load"].as_u64().expect("server_load")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_cache_report_header_reaches_engine_on_all_generation_routes() {
+    for stream in [false, true] {
+        for (route, mut body) in [
+            (
+                "/v1/chat/completions",
+                json!({"messages": [{"role": "user", "content": "hi"}]}),
+            ),
+            ("/v1/completions", json!({"prompt": "hi"})),
+            (
+                "/inference/v1/generate",
+                json!({"token_ids": [1, 2], "sampling_params": {"max_tokens": 16}}),
+            ),
+        ] {
+            let (mut app, engine_task) = test_app_with_backend_and_engine_request_check(
+                Arc::new(FakeChatBackend::new()),
+                |request| {
+                    let args = &request.sampling_params.as_ref().unwrap().extra_args;
+                    assert_eq!(
+                        serde_json::to_value(args).unwrap(),
+                        json!({"kv_cache_report_mode": "full"}),
+                    );
+                },
+            )
+            .await;
+            body["model"] = json!("Qwen/Qwen1.5-0.5B-Chat");
+            body["stream"] = json!(stream);
+            let response = app
+                .call(
+                    Request::builder()
+                        .method("POST")
+                        .uri(route)
+                        .header("content-type", "application/json")
+                        .header("X-KV-Cache-Report-Mode", "full")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{route}");
+            to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            engine_task.await.expect("mock engine task");
+        }
+    }
+}
+
+#[tokio::test]
+async fn kv_cache_report_header_survives_render() {
+    for (route, mut body) in [
+        (
+            "/v1/chat/completions/render",
+            json!({"messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        ("/v1/completions/render", json!({"prompt": "hi"})),
+    ] {
+        body["model"] = json!("render-model");
+        let response = test_render_app()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(route)
+                    .header("content-type", "application/json")
+                    .header("x-kv-cache-report-mode", "full")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut rendered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if rendered.is_array() {
+            rendered = rendered[0].take();
+        }
+        assert_eq!(
+            rendered["sampling_params"]["vllm_xargs"],
+            json!({"kv_cache_report_mode": "full"})
+        );
+    }
 }
 
 async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {

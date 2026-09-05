@@ -4,6 +4,7 @@
 from argparse import Namespace
 
 import pytest
+from starlette.requests import Request
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
@@ -12,6 +13,51 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental"])
+@pytest.mark.parametrize("body_mode", [None, "full", "incremental"])
+def test_kv_cache_report_header_fills_missing_body_mode(mode, body_mode):
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-kv-cache-report-mode", mode.encode())],
+        }
+    )
+    extra_args = {"custom": 1}
+    if body_mode is not None:
+        extra_args["kv_cache_report_mode"] = body_mode
+    original = extra_args.copy()
+
+    result = api_utils.resolve_kv_cache_report_mode(extra_args, request)
+
+    assert result == {"custom": 1, "kv_cache_report_mode": body_mode or mode}
+    assert extra_args == original
+
+
+@pytest.mark.parametrize(
+    "raw_request", [None, Request({"type": "http", "headers": []})]
+)
+@pytest.mark.parametrize("extra_args", [None, {}, {"kv_cache_report_mode": "full"}])
+def test_kv_cache_report_without_header_preserves_body(raw_request, extra_args):
+    assert api_utils.resolve_kv_cache_report_mode(extra_args, raw_request) == extra_args
+
+
+@pytest.mark.parametrize("mode", ["", "FULL", "invalid", "full,incremental"])
+@pytest.mark.parametrize(
+    "extra_args", [None, {}, {"custom": 7}, {"kv_cache_report_mode": "incremental"}]
+)
+def test_kv_cache_report_ignores_invalid_header(mode, extra_args):
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-kv-cache-report-mode", mode.encode()),
+            ],
+        }
+    )
+
+    assert api_utils.resolve_kv_cache_report_mode(extra_args, request) == extra_args
 
 
 @pytest.mark.parametrize(

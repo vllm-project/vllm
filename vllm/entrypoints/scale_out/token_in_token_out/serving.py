@@ -28,7 +28,11 @@ from vllm.entrypoints.serve.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    resolve_kv_cache_report_mode,
+    should_include_usage,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import GenerationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
@@ -126,6 +130,9 @@ class ServingTokens(GenerateBaseServing):
             raw_request.state.request_metadata = request_metadata
 
         sampling_params = request.sampling_params
+        sampling_params.extra_args = resolve_kv_cache_report_mode(
+            sampling_params.extra_args, raw_request
+        )
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
         if sampling_params.n > max_num_seqs:
             return self.create_error_response(

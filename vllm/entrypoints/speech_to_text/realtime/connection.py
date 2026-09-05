@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from vllm import envs
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
+from vllm.entrypoints.serve.utils.api_utils import resolve_kv_cache_report_mode
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
@@ -217,6 +218,7 @@ class RealtimeConnection:
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
+                extra_args=resolve_kv_cache_report_mode(None, self.websocket),
                 skip_clone=True,
             )
 
