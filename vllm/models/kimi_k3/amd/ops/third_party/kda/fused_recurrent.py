@@ -468,7 +468,9 @@ def fused_recurrent_kda_packed_decode_kernel(
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
+    pid = tl.program_id(0)
+    i_v = pid % tl.cdiv(V, BV)
+    i_nh = pid // tl.cdiv(V, BV)
     i_n, i_h = i_nh // H, i_nh % H
 
     o_k = tl.arange(0, BK)
@@ -593,7 +595,7 @@ def fused_recurrent_kda_packed_decode(
         scale = K**-0.5
 
     out = torch.empty((1, B, H, V), dtype=mixed_qkv.dtype, device=device)
-    grid = (cdiv(V, BV), B * H)
+    grid = (cdiv(V, BV) * B * H,)
     fused_recurrent_kda_packed_decode_kernel[grid](
         mixed_qkv=mixed_qkv,
         raw_g=raw_g,
