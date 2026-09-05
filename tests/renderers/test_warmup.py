@@ -45,6 +45,7 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     # MM processor with configurable limits
     mm_processor = MagicMock()
     mm_processor.info.allowed_mm_limits = mm_limits
+    mm_processor.apply.return_value = {"prompt_token_ids": [1]}
     renderer.mm_processor = mm_processor
     renderer._readonly_mm_processor = None
     renderer._warmup_mm_processor = BaseRenderer._warmup_mm_processor.__get__(
@@ -65,6 +66,8 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     renderer._mm_warmup_done = False
     renderer.clear_mm_cache = MagicMock()
     renderer.model_config.max_model_len = 128
+    renderer.config.scheduler_config.max_num_batched_tokens = 8192
+    renderer.config.scheduler_config.enable_chunked_prefill = True
     renderer.model_config.get_multimodal_config.return_value.limit_per_prompt = {}
 
     return renderer
@@ -114,6 +117,19 @@ class TestMmWarmupZeroLimitFiltering:
 class TestMmWarmupRunsNormally:
     # MM warmup must run when mm_processor is set and limits > 0; the chat
     # template warmup must run alongside it.
+
+    @pytest.mark.parametrize(
+        ("max_model_len", "expected_seq_len"), [(491520, 8192), (128, 128)]
+    )
+    def test_warmup_sequence_length_is_bounded(self, max_model_len, expected_seq_len):
+        renderer = _make_renderer_mock({"image": 1, "video": 1})
+        renderer.model_config.max_model_len = max_model_len
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            BaseRenderer.warmup(renderer, ChatParams())
+
+        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
 
     def test_processor_apply_called(self):
         renderer = _make_renderer_mock({"image": 1})
