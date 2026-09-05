@@ -153,7 +153,6 @@ class CudaGraphManager:
         self.decode_query_len = decode_query_len
         self.varlen_decode = varlen_decode
 
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
@@ -335,6 +334,23 @@ class CudaGraphManager:
                         key = (i, num_active_loras)
                         self._candidates.setdefault(key, []).extend(matching)
                     current_range_start = num_tokens + 1
+
+    @property
+    def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on scale.
+        return self.vllm_config.parallel_config.data_parallel_size
+
+    def release_graphs(self) -> None:
+        """Drop the captured graphs so a later capture() can refill them.
+
+        Elastic EP reallocates the MoE workspace when it grows, which leaves
+        every captured graph holding a stale data pointer. `_capture_descs` is
+        kept, so `needs_capture()` still reports the work to redo.
+        """
+        self.graphs.clear()
+        self._graphs_captured = False
+        if self.breakable_cg_runner is not None:
+            BreakableCUDAGraphWrapper.clear_all_graphs()
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0

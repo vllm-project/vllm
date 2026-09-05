@@ -2593,9 +2593,6 @@ class VllmConfig:
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
-        if self.parallel_config.enable_elastic_ep:
-            unsupported.append("elastic expert parallelism")
-
         has_logitsproc_plugins = False
         if model_config is not None:
             from importlib.metadata import entry_points

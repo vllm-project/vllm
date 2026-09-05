@@ -400,7 +400,13 @@ class ElasticEPScalingExecutor:
         self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
+        manager = getattr(self.worker.model_runner, "cudagraph_manager", None)
+        if manager is not None:
+            # MRV2 captures through CudaGraphManager instead of wrapping the
+            # model, so neither wrapper branch below ever fires.
+            manager.release_graphs()
+
+        elif isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
             wrapper = self.worker.model_runner.model
             wrapper.concrete_cudagraph_entries = {}
 
@@ -714,14 +720,19 @@ class ElasticEPScalingExecutor:
         # (gpu_model_runner.py:3663), which deadlocks if any rank skips it.
 
         # Save and clear block tables so the dummy MoE forward doesn't
-        # write dummy slot mappings into real KV-cache blocks.
-        multi_block_table = self.worker.model_runner.input_batch.block_table
+        # write dummy slot mappings into real KV-cache blocks. MRV2 needs no
+        # such guard: its dummy runs go through prepare_dummy_attn(), which
+        # reads BlockTables.input_block_tables (the per-step gather
+        # destination) and leaves the persistent per-request block ids alone.
+        multi_block_table = None
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for bt in multi_block_table.block_tables:
-            saved_block_tables.append(
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-            )
-        multi_block_table.clear()
+        if not self.worker.use_v2_model_runner:
+            multi_block_table = self.worker.model_runner.input_batch.block_table
+            for bt in multi_block_table.block_tables:
+                saved_block_tables.append(
+                    (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+                )
+            multi_block_table.clear()
 
         # _ensure_workspace_size allocates a fresh tensor on grow, leaving
         # any captured CUDA graph with a stale data pointer; drop graphs
@@ -740,8 +751,9 @@ class ElasticEPScalingExecutor:
 
         lock_workspace()
 
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_block_tables
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)
+        if multi_block_table is not None:
+            for bt, (saved_gpu, saved_cpu) in zip(
+                multi_block_table.block_tables, saved_block_tables
+            ):
+                bt.block_table.gpu.copy_(saved_gpu)
+                bt.block_table.cpu.copy_(saved_cpu)
