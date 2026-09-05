@@ -21,6 +21,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -181,6 +182,31 @@ def _lazy_import_wrapper(
     return wrapper
 
 
+def pin_host_range_buf(length: int) -> None:
+    """Pin flashinfer's cached host-side arange buffer covering `length`.
+
+    flashinfer's decode plan() builds its host qo_indptr from the cached
+    `_get_range_buf` entry and copies it to the GPU with non_blocking=True on
+    every call; the cache entry is unpinned, so the copy silently blocks the
+    host. Replace the entry with a pinned copy so the copies stay async.
+    """
+    if not PIN_MEMORY:
+        return
+    mod = _get_submodule("flashinfer.utils")
+    if mod is None:
+        return
+    get_range_buf = getattr(mod, "_get_range_buf", None)
+    cache_buf = getattr(mod, "_cache_buf", None)
+    ceil_pow2 = getattr(mod, "_ceil_pow2", None)
+    if get_range_buf is None or cache_buf is None or ceil_pow2 is None:
+        return
+    get_range_buf(length, "cpu")  # Ensure the cache entry exists.
+    key = (f"range_{ceil_pow2(length)}", "cpu")
+    buf = cache_buf[key]
+    if not buf.is_pinned():
+        cache_buf[key] = buf.pin_memory()
+
+
 # Create lazy wrappers for each function
 flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_bf16_moe"
@@ -289,6 +315,32 @@ def has_flashinfer_moe() -> bool:
     return (
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
+    )
+
+
+@functools.cache
+def has_flashinfer_sm90_nope_mla() -> bool:
+    """FlashInfer SM90 NoPE MLA (FP8 KV with in-kernel dequant, kpe=0).
+
+    Feature-detected via the ``ckv_scale_arr`` run() kwarg introduced with
+    the SM90 NoPE support (FlashInfer >= 0.6.18), so dev builds carry the
+    gate without a version parse.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.mla import BatchMLAPagedAttentionWrapper
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(BatchMLAPagedAttentionWrapper.run).parameters
+    except (TypeError, ValueError):
+        return False
+    return (
+        "ckv_scale_arr" in params
+        and params["ckv_scale_arr"].kind is inspect.Parameter.KEYWORD_ONLY
     )
 
 

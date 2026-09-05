@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
     method_has_implemented_embedding,
+    resolve_quant_method,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
@@ -35,6 +36,8 @@ DEFAULT_VOCAB_PADDING_SIZE = 64
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
+
+    supports_pre_processed_weights = True
 
     def create_weights(
         self,
@@ -71,7 +74,9 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+        if envs.VLLM_BATCH_INVARIANT and (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
@@ -287,7 +292,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
         if quant_method is None and quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            quant_method = resolve_quant_method(quant_config, self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 

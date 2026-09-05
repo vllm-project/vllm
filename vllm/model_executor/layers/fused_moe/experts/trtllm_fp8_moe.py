@@ -80,18 +80,26 @@ class TrtLlmFp8ExpertsBase:
         )
         if not supported:
             return supported, reason
-        # FlashInfer accepts gemm1_alpha/beta/clamp_limit only for MXFP8; the
-        # DeepSeek-FP8 block-scale kernel rejects them and the per-tensor kernel
-        # has no clamp at all, so a model-requested SwiGLU clamp cannot be
-        # honored on those paths.
         if (
             moe_config.swiglu_limit is not None
             or moe_config.swiglu_alpha is not None
             or moe_config.swiglu_beta is not None
-        ) and (weight_key, activation_key) != (kMxfp8Static, kMxfp8Dynamic):
+        ) and (
+            (weight_key, activation_key)
+            not in (
+                (kMxfp8Static, kMxfp8Dynamic),
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            )
+            or moe_config.activation
+            not in (
+                MoEActivation.SILU,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            )
+        ):
             return False, (
                 "the TRTLLM FP8 kernels apply the SwiGLU alpha/beta/clamp "
-                "parameters only for MXFP8 weights"
+                "parameters only for block-scaled weights with a SwiGLU "
+                f"activation, but got {weight_key} and {moe_config.activation}"
             )
         if moe_config.num_experts > 2048:
             return False, (
