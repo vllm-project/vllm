@@ -393,26 +393,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
                 assert num_accepted_tokens is not None
-                non_spec_num_accepted = num_accepted_tokens[non_spec_sequence_masks_cpu]
-                if (
-                    self.use_spec_decode
-                    and non_spec_num_accepted.numel() > 0
-                    and (non_spec_num_accepted > 1).any()
-                ):
-                    non_spec_block_rows = block_table_tensor[
-                        non_spec_sequence_masks_cpu
-                    ]
-                    source_columns = (non_spec_num_accepted - 1).clamp(min=0)
-                    spec_decode_src_indices = non_spec_block_rows[
-                        torch.arange(
-                            non_spec_block_rows.size(0),
-                            device=block_table_tensor.device,
-                        ),
-                        source_columns,
-                    ]
-                    non_spec_num_accepted = non_spec_num_accepted.clamp(min=1)
-                else:
-                    non_spec_num_accepted = None
+                non_spec_num_accepted = num_accepted_tokens[
+                    non_spec_sequence_masks_cpu
+                ].clamp(min=1)
+                non_spec_block_rows = block_table_tensor[non_spec_sequence_masks_cpu]
+                source_columns = non_spec_num_accepted - 1
+                spec_decode_src_indices = non_spec_block_rows[
+                    torch.arange(
+                        non_spec_block_rows.size(0),
+                        device=block_table_tensor.device,
+                    ),
+                    source_columns,
+                ]
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]

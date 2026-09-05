@@ -268,3 +268,24 @@ def test_mixed_batch_restores_non_spec_state():
     assert meta.non_spec_num_accepted.tolist() == [3]
     assert meta.num_accepted_tokens is not None
     assert meta.num_accepted_tokens.tolist() == [2]
+
+
+@pytest.mark.parametrize("accepted", [1, 2, 3])
+@pytest.mark.parametrize("spec_first", [False, True])
+def test_mixed_batch_keeps_independent_accepted_counts(accepted, spec_first):
+    builder = _create_gdn_builder(num_speculative_tokens=2)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    query_lens = [3, 1, 1] if spec_first else [1, 1, 3]
+    drafts = [2, -1, -1] if spec_first else [-1, -1, 2]
+    counts = [3, accepted, 1] if spec_first else [accepted, 1, 3]
+    batch = BatchSpec(seq_lens=[65, 65, 65], query_lens=query_lens)
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=torch.tensor(counts, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor(drafts, dtype=torch.int32),
+    )
+    assert meta.non_spec_num_accepted is not None
+    assert meta.non_spec_num_accepted.tolist() == [accepted, 1]
+    assert meta.num_accepted_tokens.tolist() == [3]
