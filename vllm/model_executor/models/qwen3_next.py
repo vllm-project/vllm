@@ -376,7 +376,7 @@ class Qwen3NextAttention(nn.Module):
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
+            and current_platform.is_cuda_alike()
             and supports_dtype
             and (text_only or supports_mrope)
         )
