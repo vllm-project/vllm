@@ -278,12 +278,8 @@ def test_modelopt_mixed_precision_dispatches_fp8_block_scales_moe():
     # Constructing the real method selects a device-specific kernel backend,
     # which is not what this test is about: assert the dispatch decision and the
     # block size handed to it.
-    with patch(
-        "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod"
-    ) as mock_moe:
-        method = config.get_quant_method(
-            layer, prefix="model.layers.0.mlp.experts"
-        )
+    with patch("vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod") as mock_moe:
+        method = config.get_quant_method(layer, prefix="model.layers.0.mlp.experts")
 
     assert method is mock_moe.return_value
     quant_config = mock_moe.call_args.args[0]
@@ -302,9 +298,7 @@ def test_modelopt_mixed_precision_fp8_block_scales_defaults_block_size():
     layer.__class__ = RoutedExperts
     layer.moe_config = MagicMock()
 
-    with patch(
-        "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod"
-    ) as mock_moe:
+    with patch("vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod") as mock_moe:
         config.get_quant_method(layer, prefix="model.layers.0.mlp.experts")
 
     assert mock_moe.call_args.args[0].weight_block_size == [128, 128]
@@ -335,9 +329,7 @@ def test_modelopt_mixed_precision_fp8_block_scales_sibling_entry_block_size():
     prefix = "model.layers.0.moe.experts"
     assert config._resolve_quant_algo(prefix) == "FP8_BLOCK_SCALES"
 
-    with patch(
-        "vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod"
-    ) as mock_moe:
+    with patch("vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod") as mock_moe:
         config.get_quant_method(layer, prefix=prefix)
 
     assert mock_moe.call_args.args[0].weight_block_size == [64, 64]
