@@ -693,12 +693,18 @@ def select_deepseek_v4_mxfp4_moe_backend(
 
     # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
     # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
+    # AITER_MXFP4_BF16 is the CK kernel and is gfx950-only, so on gfx942 it is
+    # rejected and the list would otherwise fall straight through to the generic
+    # triton_kernels path. AITER_TRITON_MXFP4_BF16 (moe_gemm_a16w4) supports
+    # gfx942 and shares the triton_kernels weight format, so it slots in between
+    # as the gfx942 winner while gfx950 keeps taking the CK kernel first.
     if (
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
     else:
