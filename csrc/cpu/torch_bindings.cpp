@@ -287,6 +287,11 @@ void mamba_chunk_scan_fwd_cpu_impl(at::Tensor& out, at::Tensor& final_states,
                                    const c10::optional<at::Tensor>& z,
                                    const at::Tensor& cu_seqlens);
 
+torch::Tensor fused_gumbel_argmax(const torch::Tensor& logits,
+                                  const torch::Tensor& seeds);
+
+torch::Tensor greedy_argmax(const torch::Tensor& logits);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -738,6 +743,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &mamba_chunk_scan_fwd_cpu_impl);
 
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  // Fused sampling kernels
+  ops.def("fused_gumbel_argmax(Tensor logits, Tensor seeds) -> Tensor");
+  ops.impl("fused_gumbel_argmax", torch::kCPU, &fused_gumbel_argmax);
+
+  ops.def("greedy_argmax(Tensor logits) -> Tensor");
+  ops.impl("greedy_argmax", torch::kCPU, &greedy_argmax);
 
   // Speculative decoding kernels
   ops.def(

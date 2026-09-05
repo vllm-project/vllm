@@ -189,9 +189,11 @@ class TopKTopPSampler(nn.Module):
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
-        PyTorch-native implementation of top-k and top-p sampling for CPU.
+        Fused Gumbel-max sampling for CPU.
 
-        The logits tensor may be updated in-place.
+        Uses a precomputed Gumbel table + single-pass argmax over logits,
+        skipping softmax and intermediate allocations entirely.
+        Falls back to the native path when fp64 Gumbel noise is requested.
         """
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
@@ -200,16 +202,25 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        if not generators and not self.use_fp64_gumbel:
-            return compiled_random_sample(logits), logits_to_return
+        if self.use_fp64_gumbel:
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            q = empty_exponential_noise_like(probs, self.use_fp64_gumbel)
+            q.exponential_()
+            for i, generator in generators.items():
+                q[i].exponential_(generator=generator)
+            return sample_with_exponential_noise(probs, q), logits_to_return
 
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        q = empty_exponential_noise_like(probs, self.use_fp64_gumbel)
-        q.exponential_()
-        for i, generator in generators.items():
-            q[i].exponential_(generator=generator)
-
-        return sample_with_exponential_noise(probs, q), logits_to_return
+        batch_size = logits.shape[0]
+        seeds = torch.randint(0, 2**31, (batch_size,), dtype=torch.long)
+        for i, gen in generators.items():
+            seeds[i] = torch.randint(
+                0, 2**31, (1,), generator=gen, dtype=torch.long
+            ).item()
+        logits_f32 = logits.to(dtype=torch.float32)
+        return (
+            torch.ops._C.fused_gumbel_argmax(logits_f32, seeds),
+            logits_to_return,
+        )
 
     def _init_aiter_ops(self) -> bool:
         if self._aiter_ops_import_failed:
