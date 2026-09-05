@@ -137,6 +137,14 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
             "ROCM_ATTN",
             AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
+        # Test Case 10: the FlyDSL dualwave env var only puts FlyDSL first
+        # in the preference order. It still has to pass validation, and this
+        # config (block_size 16) is one it declines, so selection moves on.
+        (
+            {"VLLM_ROCM_USE_FLYDSL_DUALWAVE_PREFILL_ATTN": "1"},
+            None,
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
     ],
 )
 def test_standard_attention_backend_selection(

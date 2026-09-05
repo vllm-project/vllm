@@ -479,6 +479,11 @@ def _get_backend_priorities(
             ]
 
     backends = []
+    # FlyDSL gfx950 paged attention, ahead of everything else when opted into:
+    # the flag is the request, and validate_configuration still rejects it if
+    # the kernels are missing or the shape is unsupported.
+    if envs.VLLM_ROCM_USE_FLYDSL_DUALWAVE_PREFILL_ATTN:
+        backends.append(AttentionBackendEnum.ROCM_FLYDSL_DUALWAVE_ATTN)
     # Keep ROCM_ATTN disabled for KV connectors until connector transfer
     # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
