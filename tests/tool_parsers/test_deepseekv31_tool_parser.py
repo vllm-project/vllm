@@ -59,3 +59,21 @@ def test_extract_tool_calls_with_multiple_tools(parser):
 
     # prefix is content
     assert result.content == "some prefix text"
+
+
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        # Generation was cut off part way through the block.
+        "Let me look that up.<｜tool▁calls▁begin｜>get_weather",
+        # Start token present, but the individual call markers are missing.
+        '<｜tool▁calls▁begin｜>foo<｜tool▁sep｜>{"x":1}<｜tool▁calls▁end｜>',
+    ],
+)
+def test_extract_tool_calls_unparsable_block(parser, model_output: str):
+    """A start token with no parsable call must not be reported as a tool call,
+    and must not truncate the content."""
+    result = parser.extract_tool_calls(model_output, None)
+    assert not result.tools_called
+    assert result.tool_calls == []
+    assert result.content == model_output

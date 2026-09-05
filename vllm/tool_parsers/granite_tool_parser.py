@@ -87,6 +87,13 @@ class GraniteToolParser(ToolParser):
                 for function_call in raw_function_calls
             ]
 
+            if not tool_calls:
+                # An empty array parsed cleanly, so keep the output as content
+                # instead of claiming a tool call that is not there.
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
+
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=tool_calls,
