@@ -33,7 +33,7 @@ pub struct RenderConfig {
     pub chat_template: Option<String>,
     pub default_chat_template_kwargs: HashMap<String, Value>,
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    pub max_model_len: u32,
+    pub max_model_len: Option<u32>,
     pub max_logprobs: Option<i32>,
     pub tls: Option<TlsConfig>,
 }
@@ -77,7 +77,8 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     .context("failed to load renderer/tokenizer backends")?;
     let served_model_names =
         crate::effective_served_model_names(&config.model, &config.served_model_name);
-    let text = TextRequestProcessor::new(loaded.text_backend, config.max_model_len)
+    let max_model_len = config.max_model_len.unwrap_or(u32::MAX);
+    let text = TextRequestProcessor::new(loaded.text_backend, max_model_len)
         .with_max_logprobs(config.max_logprobs);
     let chat = ChatRequestProcessor::render_only(loaded.chat_backend).with_parser_selections(
         config.tool_call_parser.clone(),
@@ -154,7 +155,7 @@ mod tests {
                 chat_template: None,
                 default_chat_template_kwargs: HashMap::new(),
                 chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-                max_model_len: 128,
+                max_model_len: Some(128),
                 max_logprobs: None,
                 tls: None,
             },
