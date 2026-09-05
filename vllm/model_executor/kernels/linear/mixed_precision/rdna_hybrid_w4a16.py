@@ -528,6 +528,9 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             )
             w_zp = zp_unpacked.to(c.act_type).contiguous()
             self._transform_param(layer, self.w_zp_name, lambda x: w_zp)
+        elif self.w_zp_name is not None:
+            # Symmetric GPTQ checkpoints may still contain redundant qzeros.
+            layer.register_parameter(self.w_zp_name, None)
 
         self._transform_param(layer, self.w_q_name, lambda x: w_q_skinny)
         self._transform_param(layer, self.w_s_name, lambda x: w_s_skinny)
