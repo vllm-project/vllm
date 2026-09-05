@@ -8,6 +8,7 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
 
@@ -43,13 +44,26 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1:
-                assert layer_impl.need_to_return_lse_for_decode, (
-                    "Decode Context Parallelism (DCP) requires attention "
-                    "implementations to return the softmax LSE during decode, "
-                    f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
-                )
+                if not layer_impl.need_to_return_lse_for_decode:
+                    platform_name = current_platform.device_name
+                    msg = (
+                        "Decode Context Parallelism (DCP) requires "
+                        "attention implementations to return the "
+                        "softmax LSE during decode, but "
+                        f"{layer_impl.__class__.__name__} does not."
+                    )
+                    if current_platform.is_rocm():
+                        msg += (
+                            " No LSE-capable attention backend is "
+                            f"currently available on {platform_name}. "
+                            "DCP cannot be used on this platform."
+                        )
+                    else:
+                        msg += (
+                            " Try a different backend by setting "
+                            "--attention-backend or disable DCP."
+                        )
+                    raise ValueError(msg)
 
 
 def get_kv_cache_shard_count() -> int:
