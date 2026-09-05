@@ -17,6 +17,8 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
+        self._commits_replayssm_trackers = True
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -47,19 +49,19 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
 
     bind_kv_cache(kv_cache, ctx, [], kv_cache_groups=kv_cache_groups)
 
-    assert (
-        mixers[0]._replayssm_ring_start.data_ptr()
-        == mixers[2]._replayssm_ring_start.data_ptr()
+    tracker_names = (
+        "_replayssm_ring_start",
+        "_replayssm_prev_num_accepted",
+        "_replayssm_prev_query_len",
     )
-    assert (
-        mixers[0]._replayssm_prev_num_accepted.data_ptr()
-        == mixers[2]._replayssm_prev_num_accepted.data_ptr()
-    )
-    assert (
-        mixers[1]._replayssm_ring_start.data_ptr()
-        != mixers[0]._replayssm_ring_start.data_ptr()
-    )
-    # Group {0, 2} shares trackers; layer 2 (not 0) updates after both run.
+    for tracker_name in tracker_names:
+        group_tracker = getattr(mixers[0], tracker_name)
+        assert group_tracker.data_ptr() == getattr(mixers[2], tracker_name).data_ptr()
+        assert group_tracker.data_ptr() != getattr(mixers[1], tracker_name).data_ptr()
+        assert group_tracker.shape == (4,)
+        assert torch.count_nonzero(group_tracker) == 0
+
+    assert [m._commits_replayssm_trackers for m in mixers] == [True, True, False]
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 
