@@ -1842,6 +1842,7 @@ class Shapes:
     output_partition_sizes: list[int]
     input_size_per_partition: int
     params_dtype: torch.dtype
+    input_size: int = 0
 
     @property
     def output_size_per_partition(self) -> int:
@@ -1900,12 +1901,15 @@ class KNvfp4Static(QuantKeyScheme):
             raise ValueError(
                 "Unsupported model when in features size is not multiple of 16"
             )
-        # Input dim is not TP-sharded for these column-parallel params, so
-        # input_size_per_partition is the full packed checkpoint dim. Some
-        # checkpoints store the NVFP4 weights/scales transposed as
+        # The input dim is not TP-sharded for column-parallel params, but IS
+        # sharded for row-parallel (input-parallel) layers. A transposed
+        # checkpoint stores the full packed input width regardless of TP
+        # sharding, so key the transpose guard off the global input size.
+        # Some checkpoints store the NVFP4 weights/scales transposed as
         # (packed_in, out); wrap the loader to transpose those back.
-        packed_input_dim = shapes.input_size_per_partition // 2
-        packed_scale_input_dim = shapes.input_size_per_partition // ctx.group_size
+        global_input_size = shapes.input_size or shapes.input_size_per_partition
+        packed_input_dim = global_input_size // 2
+        packed_scale_input_dim = global_input_size // ctx.group_size
         weight_loader = _wrap_weight_loader_for_transpose(wl, packed_input_dim)
         weight_scale_loader = _wrap_weight_loader_for_transpose(
             wl, packed_scale_input_dim
@@ -2442,7 +2446,7 @@ class ModelOptLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        del input_size, output_size
+        del output_size
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -2453,7 +2457,9 @@ class ModelOptLinearMethod(LinearMethodBase):
         layer.output_partition_sizes = output_partition_sizes
         if not hasattr(layer, "has_bias"):
             layer.has_bias = getattr(layer, "bias", None) is not None
-        shapes = Shapes(output_partition_sizes, input_size_per_partition, params_dtype)
+        shapes = Shapes(
+            output_partition_sizes, input_size_per_partition, params_dtype, input_size
+        )
 
         self.wkey.create_weights(layer, WEIGHT, self.ctx, shapes, weight_loader)
         if self.akey:

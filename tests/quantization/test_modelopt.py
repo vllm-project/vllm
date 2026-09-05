@@ -159,6 +159,44 @@ def test_modelopt_nvfp4_transpose_wrapper(
         assert loaded_weights[0] is loaded
 
 
+def test_modelopt_nvfp4_transpose_guard_uses_global_input_for_row_parallel():
+    """For a row-parallel (input-parallel) NVFP4 layer at TP>1 the input dim is
+    sharded, but a transposed checkpoint stores the full packed input width.
+    The transpose guard must key off the global input size, not the local
+    partition width, or the wrapper misses the transpose and the loader later
+    fails shape validation while sharding."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        WEIGHT,
+        CkptCtx,
+        KNvfp4Static,
+        Shapes,
+    )
+
+    scheme = KNvfp4Static()
+    # Row-parallel layer at TP=2: global input 4096, partition 2048, output 1536.
+    shapes = Shapes([1536], 2048, torch.bfloat16, input_size=4096)
+
+    loaded_weights: list[Any] = []
+    layer = torch.nn.Module()
+
+    def recording_loader(param, loaded_weight, *args, **kwargs):
+        loaded_weights.append(loaded_weight)
+
+    scheme.create_weights(
+        layer, WEIGHT, CkptCtx(group_size=16), shapes, recording_loader
+    )
+
+    # Transposed checkpoint weight: (packed_in=global//2=2048, out=1536).
+    loaded_weight = torch.empty(2048, 1536)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    assert loaded_weights[-1].shape == (1536, 2048)
+
+    # Transposed per-block scale: (packed_in//group=256, out=1536).
+    loaded_scale = torch.empty(256, 1536)
+    layer.weight_scale.weight_loader(layer.weight_scale, loaded_scale)
+    assert loaded_weights[-1].shape == (1536, 256)
+
+
 def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     config = ModelOptNvFp4Config(
         is_checkpoint_nvfp4_serialized=True,
