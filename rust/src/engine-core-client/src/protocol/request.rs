@@ -127,6 +127,9 @@ pub struct EngineCoreRequest {
     /// Stable session identity shared by related requests.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// OTel GenAI operation name for Prometheus latency histogram labels.
+    #[serde(default)]
+    pub operation_name: Option<String>,
 }
 
 impl EngineCoreRequest {
@@ -189,13 +192,14 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 21);
+        assert_eq!(array.len(), 22);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
         assert_eq!(array[10], Value::Nil);
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
+        assert_eq!(array[21], Value::Nil);
     }
 
     #[test]

@@ -351,6 +351,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    operation_name="chat",
                 )
             else:
                 if not request.include_reasoning:
@@ -382,6 +383,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
+                    operation_name="chat",
                 )
 
             generators.append(generator)

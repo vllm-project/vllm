@@ -690,6 +690,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=priority,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                operation_name="chat",
             )
 
             async for res in generator:
