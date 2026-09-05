@@ -82,12 +82,14 @@ steps:
     - tests/basic_correctness/test_basic_correctness.py
     - tests/v1/distributed/test_async_llm_dp.py
     - tests/v1/distributed/test_eagle_dp.py
+    - tests/v1/distributed/test_external_lb_dp.py
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_USE_V2_MODEL_RUNNER=1 &&
       cd tests &&
-      TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed\(num_gpus=2\)" -k "not ray and not True"'
+      TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed\(num_gpus=2\)" -k "not ray and not True" &&
+      SKIP_DEVICE_MASK_IN_EP=true pytest -v -s v1/distributed/test_external_lb_dp.py -k "not completion_streaming and not api-4-standard"'
 
 - label: Model Runner V2 Spec Decode
   timeout_in_minutes: 50
