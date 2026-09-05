@@ -74,7 +74,7 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.10 to 3.14. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 

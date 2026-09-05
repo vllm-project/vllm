@@ -30,7 +30,7 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 
 ## Requirements
 
-- Python: 3.10 -- 3.13
+- Python: 3.10 -- 3.14
 
 === "Intel/AMD x86"
 

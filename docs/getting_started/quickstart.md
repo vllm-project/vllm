@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.10 -- 3.13
+- Python: 3.10 -- 3.14
 
 !!! note
     vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
