@@ -811,6 +811,7 @@ The Rust implementation matches Python `vllm bench serve` in:
 | `OPENAI_API_KEY` | API key for authenticated endpoints (cached, not read per-request) |
 | `HF_TOKEN` | HuggingFace token for gated/private tokenizers and datasets (falls back to the `hf auth login` token file) |
 | `HF_HOME` | Overrides the HuggingFace cache location (default `~/.cache/huggingface`) used for tokenizers and dataset parquet shards |
+| `HF_DATASETS_SERVER_ENDPOINT` | Dataset Viewer API base URL for `--dataset-name hf` (default: `https://datasets-server.huggingface.co`) |
 | `TOKIO_WORKER_THREADS` | Override tokio worker thread count (default: physical cores) |
 
 ## License

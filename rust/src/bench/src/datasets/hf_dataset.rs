@@ -13,6 +13,27 @@ use super::SampleRequest;
 use crate::error::{BenchError, Result};
 use crate::tokenizer::TokenizerKind;
 
+const DEFAULT_DATASETS_SERVER_ENDPOINT: &str = "https://datasets-server.huggingface.co";
+const DATASETS_SERVER_ENDPOINT_ENV: &str = "HF_DATASETS_SERVER_ENDPOINT";
+const DATASETS_SERVER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn dataset_server_url(endpoint: &str, route: &str) -> Result<url::Url> {
+    let mut url = url::Url::parse(endpoint).map_err(|e| {
+        BenchError::Config(format!(
+            "Invalid HF datasets server endpoint '{endpoint}': {e}"
+        ))
+    })?;
+    let path = format!(
+        "{}/{}",
+        url.path().trim_end_matches('/'),
+        route.trim_start_matches('/')
+    );
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
 /// Detected column format for extracting prompts from HF dataset rows.
 enum ColumnFormat {
     /// Column contains chat messages (array of {role, content} or {from, value}).
@@ -101,11 +122,12 @@ pub async fn download_hf_dataset(
     seed: u64,
     disable_shuffle: bool,
 ) -> Result<(Vec<serde_json::Value>, String, String)> {
-    let encoded_dataset: String =
-        url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
+    let datasets_server_endpoint = std::env::var(DATASETS_SERVER_ENDPOINT_ENV)
+        .unwrap_or_else(|_| DEFAULT_DATASETS_SERVER_ENDPOINT.to_string());
 
-    let mut client_builder =
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(120));
+    let mut client_builder = reqwest::Client::builder()
+        .connect_timeout(DATASETS_SERVER_CONNECT_TIMEOUT)
+        .timeout(std::time::Duration::from_secs(120));
 
     // Match hf-hub's auth for shard downloads: HF_TOKEN env var, then the hub token file
     let token = std::env::var("HF_TOKEN")
@@ -131,9 +153,9 @@ pub async fn download_hf_dataset(
     } else if let Some(info) = {
         // Call /info to discover available configs and splits. Private datasets are not
         // processed by the dataset viewer; fall back to datasets-library defaults.
-        let info_url =
-            format!("https://datasets-server.huggingface.co/info?dataset={encoded_dataset}");
-        match get_with_retry(&client, &info_url, "HF dataset /info").await {
+        let mut info_url = dataset_server_url(&datasets_server_endpoint, "info")?;
+        info_url.query_pairs_mut().append_pair("dataset", dataset);
+        match get_with_retry(&client, info_url.as_str(), "HF dataset /info").await {
             Ok(info) => Some(info),
             Err(e) => {
                 tracing::warn!(
@@ -219,21 +241,28 @@ pub async fn download_hf_dataset(
         "resolved Hugging Face dataset"
     );
 
-    let (revision, mut shard_paths) =
-        match convert_parquet_shards(&client, dataset, &resolved_config, &resolved_split).await {
-            Ok(paths) => (PARQUET_REVISION, paths),
-            Err(e) => {
-                tracing::info!(
-                    dataset,
-                    error = %e,
-                    "no dataset-viewer parquet export; trying native parquet files on main"
-                );
-                (
-                    "main",
-                    native_data_files(dataset, &resolved_config, &resolved_split).await?,
-                )
-            }
-        };
+    let (revision, mut shard_paths) = match convert_parquet_shards(
+        &client,
+        &datasets_server_endpoint,
+        dataset,
+        &resolved_config,
+        &resolved_split,
+    )
+    .await
+    {
+        Ok(paths) => (PARQUET_REVISION, paths),
+        Err(e) => {
+            tracing::info!(
+                dataset,
+                error = %e,
+                "no dataset-viewer parquet export; trying native parquet files on main"
+            );
+            (
+                "main",
+                native_data_files(dataset, &resolved_config, &resolved_split).await?,
+            )
+        }
+    };
 
     // Sort for determinism, then shuffle shard order so samples are not always drawn
     // from the start of the split (mirrors the datasets library's streaming shuffle).
@@ -266,14 +295,14 @@ fn shard_repo_path(url: &str) -> Option<String> {
 /// List the dataset-viewer's auto-converted parquet shards for a config/split.
 async fn convert_parquet_shards(
     client: &reqwest::Client,
+    datasets_server_endpoint: &str,
     dataset: &str,
     config: &str,
     split: &str,
 ) -> Result<Vec<String>> {
-    let encoded_dataset: String =
-        url::form_urlencoded::byte_serialize(dataset.as_bytes()).collect();
-    let url = format!("https://datasets-server.huggingface.co/parquet?dataset={encoded_dataset}");
-    let listing = get_with_retry(client, &url, "HF dataset /parquet").await?;
+    let mut url = dataset_server_url(datasets_server_endpoint, "parquet")?;
+    url.query_pairs_mut().append_pair("dataset", dataset);
+    let listing = get_with_retry(client, url.as_str(), "HF dataset /parquet").await?;
 
     // Partially converted datasets (>5GB) export under a "partial-" split prefix.
     let partial_split = format!("partial-{split}");
@@ -906,6 +935,20 @@ pub fn load_hf_dataset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dataset_server_url_uses_configured_endpoint() {
+        let url = dataset_server_url("https://datasets.example/api/", "parquet").unwrap();
+
+        assert_eq!(url.as_str(), "https://datasets.example/api/parquet");
+    }
+
+    #[test]
+    fn test_dataset_server_url_rejects_invalid_endpoint() {
+        let err = dataset_server_url("not a URL", "info").unwrap_err();
+
+        assert!(err.to_string().contains("Invalid HF datasets server endpoint"));
+    }
 
     #[test]
     fn test_detect_chat_conversation() {
