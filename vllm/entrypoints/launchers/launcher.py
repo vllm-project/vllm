@@ -102,7 +102,12 @@ async def serve_http(
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    engine_client = app.state.engine_client
+    watchdog_task = (
+        loop.create_task(watchdog_loop(server, engine_client))
+        if engine_client is not None
+        else None
+    )
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
 
     ssl_cert_refresher = (
@@ -133,25 +138,26 @@ async def serve_http(
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
-        engine_client = app.state.engine_client
-        timeout = engine_client.vllm_config.shutdown_timeout
-        mode = "abort" if timeout == 0 else "drain"
+        if engine_client is not None:
+            timeout = engine_client.vllm_config.shutdown_timeout
+            mode = "abort" if timeout == 0 else "drain"
 
-        logger.info(
-            "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
-            mode,
-            timeout,
-        )
+            logger.info(
+                "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
+                mode,
+                timeout,
+            )
 
-        await loop.run_in_executor(
-            None, partial(engine_client.shutdown, timeout=timeout)
-        )
-        logger.info_once("[shutdown] API server: engine client stopped")
+            await loop.run_in_executor(
+                None, partial(engine_client.shutdown, timeout=timeout)
+            )
+            logger.info_once("[shutdown] API server: engine client stopped")
 
         server.should_exit = True
         logger.info_once("[shutdown] API server: signalling HTTP server shutdown")
         server_task.cancel()
-        watchdog_task.cancel()
+        if watchdog_task is not None:
+            watchdog_task.cancel()
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
 
@@ -174,7 +180,8 @@ async def serve_http(
         return server.shutdown()
     finally:
         shutdown_task.cancel()
-        watchdog_task.cancel()
+        if watchdog_task is not None:
+            watchdog_task.cancel()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):

@@ -52,7 +52,7 @@ class DeepStreamVideoBackendMixin:
     local file path is required — HTTP and base64 sources decode identically
     to local files.
 
-    Like the OpenCV/PyAV mixins, this provides only the codec layer.
+    Like the OpenCV mixin, this provides only the codec layer.
     Frame *selection* lives in the loader's
     ``compute_frames_index_to_sample`` and arrives here as an explicit
     list of frame indices.
@@ -132,7 +132,7 @@ class DeepStreamVideoBackendMixin:
 
         valid = frame_indices[: result.n_kept]
         # GPU -> CPU NHWC uint8 at the codec boundary (one PCIe copy); keeps
-        # the array shape identical to the OpenCV/PyAV backends. Copy into
+        # the array shape identical to the OpenCV backend. Copy into
         # PINNED host memory (reused across calls by PyTorch's pinned caching
         # allocator) so the D2H runs at full PCIe bandwidth (~13 GB/s) rather
         # than the ~1 GB/s pageable path that plain ``.cpu()`` takes — ~12x

@@ -343,8 +343,12 @@ class Ernie4_5_VisionPatchEmbed(nn.Module):
 class Ernie4_5_VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        self.inv_freq = 1.0 / theta ** (
-            torch.arange(start=0, end=dim, step=2, dtype=torch.float32) / dim
+        self.register_buffer(
+            "inv_freq",
+            1.0
+            / theta
+            ** (torch.arange(start=0, end=dim, step=2, dtype=torch.float32) / dim),
+            persistent=False,
         )
 
     def forward(self, seqlen: int) -> torch.Tensor:
@@ -421,10 +425,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        device = self.device
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            hpos_ids = torch.arange(h, device=device).unsqueeze(1).expand(-1, w)
+            wpos_ids = torch.arange(w, device=device).unsqueeze(0).expand(h, -1)
             hpos_ids = (
                 hpos_ids.reshape(
                     h // self.spatial_merge_size,
@@ -449,9 +454,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        # `pos_ids` is built on the host; stage it over non-blocking so the
-        # gather below doesn't index a device tensor with a CPU one.
-        pos_ids = pos_ids.to(rotary_pos_emb_full.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -536,7 +538,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
@@ -1452,11 +1454,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 ]
                 if token_id is not None
             ]
-            self._visual_token_ids_tensor_cache = torch.tensor(
+            visual_token_ids_tensor_cache = torch.tensor(
                 visual_token_ids, dtype=torch.long
             )
         else:
-            self._visual_token_ids_tensor_cache = None
+            visual_token_ids_tensor_cache = None
+        self.register_buffer(
+            "_visual_token_ids_tensor_cache",
+            visual_token_ids_tensor_cache,
+            persistent=False,
+        )
 
     def compute_logits(
         self,
@@ -1739,8 +1746,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
-        grid_thw = mm_kwargs["image_grid_thw"].to(
-            self.vision_model.device, non_blocking=True
+        grid_thw = async_tensor_h2d(
+            mm_kwargs["image_grid_thw"], self.vision_model.device
         )
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
@@ -1761,7 +1768,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         output = outputs["default"]
         assert batch_mm_kwargs is not None
         grid_thw_cpu = batch_mm_kwargs["image_grid_thw"]
-        grid_thw = grid_thw_cpu.to(output.device, non_blocking=True)
+        grid_thw = async_tensor_h2d(grid_thw_cpu, output.device)
         # The valid token count slices the graph output for the eager
         # resampler call, so it has to come back to the host.
         num_valid = int(
