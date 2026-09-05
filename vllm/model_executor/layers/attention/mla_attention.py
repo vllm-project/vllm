@@ -1136,6 +1136,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        """Pack and cache the MLA projection weights after load.
+
+        Delegates to the backend impl's own packing, then dequantizes and
+        splits ``kv_b_proj`` into the ``W_UK``/``W_UV`` matrices used by the
+        BMM decode/prefill paths.
+
+        Args:
+            act_dtype: Activation dtype the 16-bit BMM weights are stored in.
+        """
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
@@ -1245,6 +1254,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
+
+                # Drain the HSA queue periodically. These rapid-fire tiny BMM
+                # launches can race the rocprofiler InterceptQueue (pulled into
+                # torch by Kineto) and have segfaulted during concurrent engine
+                # init on ROCm; bounding the in-flight depth shrinks that window.
+                if m % 16 == 0:
+                    torch.cuda.synchronize(self.W_K.device)
+            torch.cuda.synchronize(self.W_K.device)
         else:
             # Convert from (L, N, V) to (N, L, V)
             replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
