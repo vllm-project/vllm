@@ -3654,6 +3654,141 @@ def test_unify_kv_cache_spec_page_size_mamba():
     assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
 
 
+def test_unify_kv_cache_page_size_scales_block_before_padding():
+    """A padded attention layer grows its block size by the whole ratio first.
+
+    Padding alone leaves the layer paying a full max-size page for a block
+    that still holds its original token count, so one request reserves far
+    more blocks than the page it claims can justify. Scaling first keeps the
+    block count proportional and pads only the remainder.
+    """
+    # 1024 bytes per token per layer, so the pages are 16 KiB and 40 KiB.
+    # 40 KiB is not a multiple of 16 KiB, which is what forces the pad branch.
+    small = new_kv_cache_spec(block_size=16)
+    large = new_kv_cache_spec(block_size=40)
+    assert small.page_size_bytes == 16384
+    assert large.page_size_bytes == 40960
+    assert large.page_size_bytes % small.page_size_bytes != 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"small_attn_layer": small, "large_attn_layer": large}
+    )
+
+    # The whole part of 40960 // 16384 is 2, so the block doubles and the page
+    # the layer actually fills grows to 32 KiB before the pad up to 40 KiB.
+    assert unified["small_attn_layer"].block_size == 32
+    assert unified["small_attn_layer"].page_size_padded == 40960
+    assert unified["small_attn_layer"].page_size_bytes == 40960
+    # The layer that already sets the maximum is untouched.
+    assert unified["large_attn_layer"] == large
+
+    # A ratio below 2 has no whole part to scale by, so the block size stays
+    # put and the page is padded exactly as before.
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "small_attn_layer": new_kv_cache_spec(block_size=24),
+            "large_attn_layer": new_kv_cache_spec(block_size=32),
+        }
+    )
+    assert unified["small_attn_layer"].block_size == 24
+    assert unified["small_attn_layer"].page_size_bytes == 32768
+
+
+def test_unify_kv_cache_page_size_scales_pre_padded_spec_from_natural_page():
+    """A pre-padded spec scales from its natural page, not the padded one.
+
+    Producers can hand this function attention specs that already carry
+    ``page_size_padded``. The scale ratio must come from the natural page and
+    the scaled candidate must drop the stale padding: keeping it would
+    under-scale the block size and, once the grown natural page outruns the
+    old padding, trip the ``page_size_padded >= unpadded`` assertion.
+    """
+    from dataclasses import replace
+
+    # Natural 16 KiB page pre-padded to 24 KiB, next to a 40 KiB layer.
+    # 40960 % 24576 != 0 forces the pad branch; the ratio must be
+    # 40960 // 16384 == 2, not 40960 // 24576 == 1.
+    pre_padded = replace(new_kv_cache_spec(block_size=16), page_size_padded=24576)
+    large = new_kv_cache_spec(block_size=40)
+    assert pre_padded.page_size_bytes == 24576
+    assert large.page_size_bytes % pre_padded.page_size_bytes != 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 32
+    assert unified["pre_padded_layer"].unpadded_page_size_bytes == 32768
+    assert unified["pre_padded_layer"].page_size_padded == 40960
+    assert unified["pre_padded_layer"].page_size_bytes == 40960
+    assert unified["large_attn_layer"] == large
+
+    # Divisible path: the natural 16 KiB page divides the 48 KiB maximum, and
+    # so does the stale 24 KiB padding -- which is exactly the trap: a ratio
+    # taken from the padded size (48 // 24 == 2) under-scales and then trips
+    # the padding assertion once the natural page grows past 24 KiB. The
+    # ratio must be 48 // 16 == 3, and dropping the padding lands exactly on
+    # the maximum with no pad at all.
+    pre_padded = replace(new_kv_cache_spec(block_size=16), page_size_padded=24576)
+    large = new_kv_cache_spec(block_size=48)
+    assert large.page_size_bytes == 49152
+    assert large.page_size_bytes % pre_padded.page_size_bytes == 0
+    assert large.page_size_bytes % pre_padded.unpadded_page_size_bytes == 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 48
+    assert unified["pre_padded_layer"].page_size_padded is None
+    assert unified["pre_padded_layer"].page_size_bytes == 49152
+    assert unified["large_attn_layer"] == large
+
+
+def test_unify_kv_cache_page_size_mla_alignment_padding_is_the_scaling_base():
+    """MLA scales from its aligned (padded) page, unlike plain attention.
+
+    MLA padding is the product of the spec's own ``alignment``, reapplied by
+    ``__post_init__`` on every ``replace``, so it is never stale: the aligned
+    page is the correct divisibility and ratio base, and clearing it would
+    simply be undone.
+    """
+    mla = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=96,
+        dtype=torch.float32,
+        alignment=512,
+    )
+    assert mla.unpadded_page_size_bytes == 384
+    assert mla.page_size_bytes == 512
+
+    # The aligned 512 B page divides the 1024 B maximum: ratio 1024 // 512
+    # doubles the block, and re-alignment lands exactly on the maximum
+    # (real 768 B rounds up to 1024 B). A natural-page ratio would reject
+    # this long-supported configuration outright.
+    large = new_kv_cache_spec(block_size=1)
+    assert large.page_size_bytes == 1024
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"mla_layer": mla, "large_attn_layer": large}
+    )
+    assert unified["mla_layer"].block_size == 2
+    assert unified["mla_layer"].page_size_bytes == 1024
+    assert unified["large_attn_layer"] == large
+
+    # When the aligned page does not divide the maximum, MLA must keep its
+    # NotImplementedError contract (callers fall back to full allocation);
+    # asserting mid-unify would break that.
+    odd = FullAttentionSpec(
+        block_size=3, num_kv_heads=1, head_size=32, dtype=torch.float32
+    )
+    assert odd.page_size_bytes == 768
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {"mla_layer": mla, "odd_attn_layer": odd}
+        )
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
