@@ -7,6 +7,8 @@ import copy
 import json
 from typing import Any
 
+from vllm.tokenizers.deepseek_encoding_utils import load_tool_call_arguments
+
 # flake8: noqa: E501
 TOOLS_SYSTEM_TEMPLATE = """## Tools
 You have access to a set of tools you can use to answer the user's question.
@@ -80,10 +82,7 @@ def tool_calls_from_openai_format(tool_calls):
 def encode_arguments_to_dsml(tool_call: dict[str, str]) -> str:
     p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""
     P_dsml_strs = []
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
-    else:
-        arguments = tool_call["arguments"]
+    arguments = load_tool_call_arguments(tool_call)
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
