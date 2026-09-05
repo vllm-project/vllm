@@ -21,7 +21,13 @@ pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for Gumbel sampler tests", allow_module_level=True)
 
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.gumbel import (
+    _sm_count,
+    _temperature_softmax_combine_kernel,
+    apply_temperature,
+    gumbel_sample,
+    temperature_softmax,
+)
 
 DEVICE = "cuda"
 VOCAB_SIZE = 200_000
@@ -424,3 +430,112 @@ def test_logits_cache_narrower_than_logits_is_rejected():
             logits_cache=cache,
             logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
         )
+
+
+def _reference_probs(
+    logits: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    """What `temperature_softmax` replaces: scale in place, then softmax."""
+    scaled = logits.to(torch.float32)
+    apply_temperature(scaled, idx_mapping, temperature)
+    return scaled.softmax(dim=-1, dtype=torch.float32)
+
+
+# `temperature_softmax` splits each row across programs when the batch alone
+# cannot occupy every SM, so the batch sizes below must straddle the SM count to
+# cover both the split and the single-program path.
+@pytest.mark.parametrize("num_tokens", [1, 8, 64, 130, 512])
+@pytest.mark.parametrize("vocab_size", [1024, 4097, 151_936])
+def test_temperature_softmax_matches_reference(num_tokens: int, vocab_size: int):
+    gen = torch.Generator(device=DEVICE).manual_seed(4321)
+    logits = torch.randn(
+        num_tokens, vocab_size, generator=gen, device=DEVICE, dtype=torch.bfloat16
+    )
+    idx_mapping = torch.arange(num_tokens, device=DEVICE, dtype=torch.int32)
+    # Cover the temperature==0 and ==1 shortcuts alongside ordinary values.
+    temperature = torch.tensor(
+        [(0.0, 1.0, 0.5, 2.0)[i % 4] for i in range(num_tokens)],
+        device=DEVICE,
+        dtype=torch.float32,
+    )
+    probs = temperature_softmax(logits, idx_mapping, temperature)
+    expected = _reference_probs(logits, idx_mapping, temperature)
+    torch.testing.assert_close(probs, expected, rtol=0, atol=1e-6)
+    assert torch.isfinite(probs).all()
+
+
+def test_temperature_softmax_split_and_single_paths_agree():
+    """The split path must reproduce the single-program path exactly.
+
+    Both paths run over identical data; only the launch geometry differs, so a
+    disagreement means the cross-program max/sum combine is wrong.
+    """
+    num_sms = _sm_count(torch.accelerator.current_device_index())
+    vocab_size = 151_936
+    gen = torch.Generator(device=DEVICE).manual_seed(99)
+    row = torch.randn(1, vocab_size, generator=gen, device=DEVICE, dtype=torch.bfloat16)
+    temperature = torch.full((1,), 0.7, device=DEVICE, dtype=torch.float32)
+    idx = torch.zeros(1, device=DEVICE, dtype=torch.int32)
+
+    split = temperature_softmax(row, idx, temperature)
+
+    # Repeat the same row past the SM count so the single-program path is taken,
+    # then compare any one of its rows against the split result.
+    wide = row.expand(num_sms + 1, vocab_size).contiguous()
+    single = temperature_softmax(
+        wide,
+        torch.zeros(num_sms + 1, device=DEVICE, dtype=torch.int32),
+        temperature,
+    )
+    torch.testing.assert_close(split[0], single[0], rtol=0, atol=1e-7)
+
+
+def test_temperature_softmax_combine_compiles_once_across_batch_sizes():
+    """The combine kernel must not recompile as the running batch size changes.
+
+    `NUM_SPLITS_POW2` is a `tl.constexpr`, so tying it to the actual split count
+    gives it a new value at several batch sizes. Warmup only covers one, leaving
+    the rest to compile mid-inference -- a latency spike vLLM's jit_monitor
+    flags. Batch sizes below straddle every split count the heuristic can pick.
+    """
+    device = torch.accelerator.current_device_index()
+    num_sms = _sm_count(device)
+    batch_sizes = [1, 2, 4, 8, 16, 32, num_sms]
+    vocab_size = 151_936
+    temperature = torch.full((1,), 0.8, device=DEVICE, dtype=torch.float32)
+
+    _temperature_softmax_combine_kernel.device_caches.pop(device, None)
+    for num_tokens in batch_sizes:
+        gen = torch.Generator(device=DEVICE).manual_seed(num_tokens)
+        logits = torch.randn(
+            num_tokens, vocab_size, generator=gen, device=DEVICE, dtype=torch.bfloat16
+        )
+        idx = torch.zeros(num_tokens, device=DEVICE, dtype=torch.int32)
+        temperature_softmax(logits, idx, temperature)
+
+    variants = len(_temperature_softmax_combine_kernel.device_caches[device][0])
+    assert variants == 1, (
+        f"combine kernel compiled {variants} variants across batch sizes "
+        f"{batch_sizes}; each extra variant is a JIT compile during inference"
+    )
+
+
+def test_temperature_softmax_rows_are_distributions():
+    gen = torch.Generator(device=DEVICE).manual_seed(7)
+    # Wide dynamic range stresses the max subtraction that keeps exp() finite.
+    logits = (
+        torch.randn(4, 151_936, generator=gen, device=DEVICE, dtype=torch.bfloat16) * 40
+    )
+    idx = torch.arange(4, device=DEVICE, dtype=torch.int32)
+    temperature = torch.full((4,), 0.25, device=DEVICE, dtype=torch.float32)
+    probs = temperature_softmax(logits, idx, temperature)
+    assert torch.isfinite(probs).all()
+    assert (probs >= 0).all()
+    torch.testing.assert_close(
+        probs.double().sum(dim=-1),
+        torch.ones(4, device=DEVICE, dtype=torch.float64),
+        rtol=0,
+        atol=1e-4,
+    )

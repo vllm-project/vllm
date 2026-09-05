@@ -91,6 +91,9 @@ class SamplingStates:
             return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
+    def no_min_p(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.all(self.min_p.np[idx_mapping_np] == 0.0))
+
     def get_top_k_top_p(
         self, expanded_idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
