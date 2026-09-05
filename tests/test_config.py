@@ -2621,3 +2621,28 @@ def test_revision_resolved_when_weights_match_model(mock_resolve):
     assert isinstance(config.revision, ResolvedRevision)
     assert config.revision.resolved == REVISION
     mock_resolve.assert_any_call(model, None, config.hf_token)
+
+
+@pytest.mark.skip_global_cleanup
+@patch("vllm.config.model.get_config")
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_microbatching_all2all_backend_validation(mock_resolve, mock_get_config):
+    from transformers import PretrainedConfig
+    hf_config = PretrainedConfig(
+        model_type="qwen3",
+        num_hidden_layers=1,
+        architectures=["Qwen3ForCausalLM"],
+    )
+    mock_get_config.return_value = hf_config
+
+    # Microbatching requires specific all2all backends.
+    # By default, use_ubatching is True when enable_dbo is True,
+    # but all2all_backend defaults to allgather_reducescatter.
+    # This must raise a ValueError.
+    from vllm.config import DeviceConfig
+    with pytest.raises(ValueError, match="Microbatching currently only supports"):
+        VllmConfig(
+            model_config=ModelConfig("Qwen/Qwen3-0.6B"),
+            parallel_config=ParallelConfig(enable_dbo=True),
+            device_config=DeviceConfig(device="cpu"),
+        )
