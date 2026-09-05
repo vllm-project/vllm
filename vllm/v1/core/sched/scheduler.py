@@ -1808,6 +1808,31 @@ class Scheduler(SchedulerInterface):
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
 
+    @staticmethod
+    def _get_routed_experts_prompt_start(request: Request) -> int | None:
+        sampling_params = request.sampling_params
+        prompt_start = (
+            0
+            if sampling_params is None
+            or sampling_params.routed_experts_prompt_start is None
+            else sampling_params.routed_experts_prompt_start
+        )
+        if (
+            not isinstance(prompt_start, int)
+            or not 0 <= prompt_start <= request.num_prompt_tokens
+        ):
+            logger.error(
+                "Invalid routed_experts_prompt_start %r for request %s with "
+                "%d prompt tokens. Terminating request.",
+                prompt_start,
+                request.request_id,
+                request.num_prompt_tokens,
+            )
+            request.status = RequestStatus.FINISHED_ERROR
+            request.resumable = False
+            return None
+        return prompt_start
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -2023,22 +2048,15 @@ class Scheduler(SchedulerInterface):
                     # Prefill completed: read full prompt routing from
                     # slot buffer using the block-ID snapshot taken at
                     # schedule time (immune to async preemption).
-                    if (
-                        request.sampling_params is not None
-                        and request.sampling_params.routed_experts_prompt_start
-                        is not None
-                    ):
-                        prompt_start = (
-                            request.sampling_params.routed_experts_prompt_start
-                        )
-                        assert prompt_start < request.num_prompt_tokens
+                    prompt_start = self._get_routed_experts_prompt_start(request)
+                    if prompt_start is None:
+                        stopped = True
                     else:
-                        prompt_start = 0
-                    routed_experts = self.routed_experts_mgr.get(
-                        block_ids,
-                        request.num_prompt_tokens,
-                        token_start=prompt_start,
-                    )
+                        routed_experts = self.routed_experts_mgr.get(
+                            block_ids,
+                            request.num_prompt_tokens,
+                            token_start=prompt_start,
+                        )
                 else:
                     if scheduled_spec_token_ids:
                         # Spec decode: accepted tokens at the START of

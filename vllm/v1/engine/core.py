@@ -79,6 +79,7 @@ from vllm.v1.engine.utils import (
     SignalCallback,
     get_physical_gpu_ids_for_local_dp_rank,
 )
+from vllm.v1.engine.xdrope import validate_xdrope_input
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.engine_core_sentinel import (
     FT_UTILITY_METHOD,
@@ -1009,6 +1010,13 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
+
+        validate_xdrope_input(
+            self.vllm_config.model_config,
+            request.prompt_token_ids,
+            request.mm_features or [],
+            request.prompt_is_token_ids,
+        )
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:

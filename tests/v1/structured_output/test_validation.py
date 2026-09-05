@@ -25,6 +25,9 @@ class _StubModelConfig:
     def __init__(self, is_diffusion: bool):
         self.is_diffusion = is_diffusion
 
+    def get_vocab_size(self) -> int:
+        return 32000
+
 
 def test_structured_outputs_rejected_for_diffusion_models():
     """Diffusion LLMs denoise the canvas in parallel, which is incompatible
@@ -101,7 +104,7 @@ def test_regex_with_nul_byte_rejected(regex):
     # the pattern reaches the native from_regex call.
     from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
 
-    with pytest.raises(ValueError, match="NUL"):
+    with pytest.raises(VLLMValidationError, match="NUL"):
         validate_xgrammar_grammar(params)
 
 

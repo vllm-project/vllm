@@ -1689,7 +1689,7 @@ class GPUModelRunner(
             # needs the sequence length when mm_features is empty (which is
             # the case here since prompt_embeds are filtered out above).
             seq_len = req_state.prompt_embeds.shape[0]
-            input_tokens = list(range(seq_len))
+            input_tokens = [-1] * seq_len
         else:
             raise ValueError(
                 "M-RoPE requires either prompt_token_ids or prompt_embeds."
@@ -1705,14 +1705,30 @@ class GPUModelRunner(
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
         xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
         assert supports_xdrope(model), "XD-RoPE support is not implemented."
 
+        # `prompt_embeds` is a passthrough modality (no image_grid_thw), so
+        # filter it out before model-specific XD-RoPE position generation.
+        xdrope_features = [
+            f for f in req_state.mm_features if f.modality != "prompt_embeds"
+        ]
+
+        if req_state.prompt_token_ids is not None:
+            input_tokens = req_state.prompt_token_ids
+        elif req_state.prompt_embeds is not None:
+            # Embeddings-only requests have no token IDs to inspect. After
+            # filtering prompt_embeds above, the model only needs sequence
+            # length to emit text positions.
+            seq_len = req_state.prompt_embeds.shape[0]
+            input_tokens = [-1] * seq_len
+        else:
+            raise ValueError(
+                "XD-RoPE requires either prompt_token_ids or prompt_embeds."
+            )
+
         req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
-            req_state.mm_features,
+            input_tokens,
+            xdrope_features,
         )
 
     def _extract_mm_kwargs(

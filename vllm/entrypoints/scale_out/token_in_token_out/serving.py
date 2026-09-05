@@ -30,7 +30,7 @@ from vllm.entrypoints.serve.engine.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.exceptions import GenerationError
+from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -204,6 +204,13 @@ class ServingTokens(GenerateBaseServing):
                 skip_mm_cache=True,
             )
 
+        input_length = self._extract_prompt_len(engine_input)
+        if self.model_config.enable_return_routed_experts:
+            try:
+                sampling_params.validate_routed_experts_prompt_start(input_length)
+            except VLLMValidationError as exc:
+                return self.create_error_response(str(exc))
+
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
@@ -225,7 +232,7 @@ class ServingTokens(GenerateBaseServing):
             sampling_params.max_tokens = get_max_tokens(
                 max_model_len=self.model_config.max_model_len,
                 max_tokens=None,
-                input_length=self._extract_prompt_len(engine_input),
+                input_length=input_length,
                 default_sampling_params=self.default_sampling_params,
                 override_max_tokens=self.override_max_tokens,
             )
