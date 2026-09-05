@@ -7,8 +7,10 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
@@ -31,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.v1.attention.backends.registry import (
+    MambaAttentionBackendEnum,
+)
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -69,6 +74,54 @@ from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputM
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+def _has_mamba2_layers(kv_cache_config: KVCacheConfig) -> bool:
+    return any(
+        isinstance(group.kv_cache_spec, MambaSpec)
+        and group.kv_cache_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+        for group in kv_cache_config.kv_cache_groups
+    )
+
+
+def _validate_mamba2_batch_invariant_config(vllm_config: VllmConfig) -> None:
+    """Reject Mamba2 sub-configurations not covered by this implementation."""
+    mamba_config = vllm_config.mamba_config
+    if mamba_config.backend != MambaBackendEnum.TRITON:
+        raise ValueError(
+            "Mamba2 batch invariance currently supports only the Triton "
+            f"SSU backend, but {mamba_config.backend.value!r} was selected."
+        )
+    if mamba_config.enable_stochastic_rounding:
+        raise ValueError(
+            "Mamba2 batch invariance is incompatible with stochastic "
+            "rounding of the SSM state cache."
+        )
+    if vllm_config.cache_config.use_replayssm:
+        raise ValueError(
+            "Mamba2 batch invariance has not been validated with ReplaySSM; "
+            "disable --use-replayssm."
+        )
+    if vllm_config.cache_config.enable_prefix_caching:
+        raise ValueError(
+            "Mamba2 batch invariance does not yet support prefix caching; "
+            "disable --enable-prefix-caching."
+        )
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and kv_transfer_config.kv_connector is not None:
+        raise ValueError(
+            "Mamba2 batch invariance has not been validated with KV connectors."
+        )
+
+    if vllm_config.speculative_config is not None:
+        raise ValueError(
+            "Mamba2 batch invariance does not yet support speculative "
+            "decoding; disable speculative decoding."
+        )
+    if vllm_config.model_config.is_multimodal_model:
+        raise ValueError(
+            "Mamba2 batch invariance has not been validated for multimodal models."
+        )
 
 
 class Scheduler(SchedulerInterface):
@@ -334,6 +387,36 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        self.has_mamba2_layers = _has_mamba2_layers(kv_cache_config)
+        self.need_mamba_chunk_invariant_split = (
+            self.has_mamba2_layers and envs.VLLM_BATCH_INVARIANT
+        )
+        self.mamba_chunk_size = (
+            vllm_config.model_config.get_mamba_chunk_size()
+            if self.need_mamba_chunk_invariant_split
+            else None
+        )
+        self._mamba_chunk_reservation_pending = False
+        if self.need_mamba_chunk_invariant_split:
+            _validate_mamba2_batch_invariant_config(vllm_config)
+            assert self.mamba_chunk_size is not None
+            effective_budget = min(
+                self.max_num_scheduled_tokens,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            if effective_budget < self.mamba_chunk_size:
+                raise ValueError(
+                    "Mamba2 batch invariance requires a scheduler token budget "
+                    f"of at least one scan chunk ({self.mamba_chunk_size}), but "
+                    f"the effective budget is {effective_budget}."
+                )
+            threshold = self.scheduler_config.long_prefill_token_threshold
+            if 0 < threshold < self.mamba_chunk_size:
+                raise ValueError(
+                    "Mamba2 batch invariance requires "
+                    "long_prefill_token_threshold to be zero or at least one "
+                    f"scan chunk ({self.mamba_chunk_size}), but it is {threshold}."
+                )
         self.mamba_has_prefill_checkpoint_blocks = (
             self.has_mamba_layers
             # TODO: support spec decoding
@@ -390,6 +473,65 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _mamba_chunk_invariant_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_computed_tokens: int,
+    ) -> int:
+        """Schedule at most one complete Mamba2 scan chunk per prefill."""
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if num_computed_tokens >= prefill_end:
+            return num_new_tokens
+
+        chunk_size = self.mamba_chunk_size
+        assert chunk_size is not None
+        if num_computed_tokens % chunk_size != 0:
+            raise RuntimeError(
+                "Mamba2 batch-invariant prefill cannot resume inside a scan "
+                f"chunk: computed={num_computed_tokens}, chunk_size={chunk_size}."
+            )
+
+        remaining_prefill = prefill_end - num_computed_tokens
+        next_chunk = min(remaining_prefill, chunk_size)
+        if num_new_tokens < next_chunk:
+            self._mamba_chunk_reservation_pending = True
+            return 0
+
+        # Keeping the physical factorization fixed is stricter than merely
+        # ending on a chunk boundary: 512 must remain 256 + 256, not one step.
+        return next_chunk
+
+    def _is_mamba_chunk_invariant_prefill(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> bool:
+        if not self.need_mamba_chunk_invariant_split:
+            return False
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        return num_computed_tokens < prefill_end
+
+    def _mamba_chunk_invariant_budget(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        available_budget: int,
+        reserved_tokens: int,
+    ) -> tuple[int, bool]:
+        """Keep complete chunks available after an alignment stall.
+
+        The next schedule call packs eligible Mamba prefills ahead of decodes.
+        The reservation is intentionally local to one call so an aborted or
+        otherwise ineligible prefill cannot suppress decode forever.
+        """
+        is_prefill = self._is_mamba_chunk_invariant_prefill(
+            request, num_computed_tokens
+        )
+        if not is_prefill:
+            available_budget = max(available_budget - reserved_tokens, 0)
+        return available_budget, is_prefill
 
     def _mamba_block_aligned_split(
         self,
@@ -530,6 +672,15 @@ class Scheduler(SchedulerInterface):
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
         input_budget = self.scheduler_config.max_num_batched_tokens
+        reserved_mamba_tokens = 0
+        if self._mamba_chunk_reservation_pending:
+            chunk_size = self.mamba_chunk_size
+            assert chunk_size is not None
+            reservation_budget = min(token_budget, input_budget - draft_slots)
+            reserved_mamba_tokens = reservation_budget // chunk_size * chunk_size
+        # A reservation lasts for one scheduling attempt. A fresh alignment
+        # stall below will arm the following attempt again.
+        self._mamba_chunk_reservation_pending = False
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
@@ -590,6 +741,19 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            request_token_budget = min(token_budget, input_budget - draft_slots)
+            is_mamba_prefill = False
+            if reserved_mamba_tokens:
+                (
+                    request_token_budget,
+                    is_mamba_prefill,
+                ) = self._mamba_chunk_invariant_budget(
+                    request,
+                    request.num_computed_tokens,
+                    request_token_budget,
+                    reserved_mamba_tokens,
+                )
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -597,9 +761,7 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
-            )
+            num_new_tokens = min(num_new_tokens, request_token_budget)
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -609,6 +771,13 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
                 - self.num_sampled_tokens_per_step,
             )
+
+            if self.need_mamba_chunk_invariant_split:
+                num_new_tokens = self._mamba_chunk_invariant_split(
+                    request,
+                    num_new_tokens,
+                    request.num_computed_tokens,
+                )
 
             # Apply Mamba alignment before encoder caps.
             if self.need_mamba_block_aligned_split:
@@ -734,6 +903,8 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
+            if reserved_mamba_tokens and is_mamba_prefill:
+                reserved_mamba_tokens = max(reserved_mamba_tokens - num_new_tokens, 0)
             req_index += 1
 
             # Speculative decode related.
@@ -917,6 +1088,7 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
+                    is_mamba_prefill = False
 
                     # Skip request with pending mm encoding prefetches
                     if (
@@ -960,6 +1132,16 @@ class Scheduler(SchedulerInterface):
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
+                    if reserved_mamba_tokens:
+                        (
+                            request_token_budget,
+                            is_mamba_prefill,
+                        ) = self._mamba_chunk_invariant_budget(
+                            request,
+                            num_computed_tokens,
+                            request_token_budget,
+                            reserved_mamba_tokens,
+                        )
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -1005,7 +1187,18 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, request_token_budget)
+                    if num_new_tokens == 0:
+                        break
                     assert num_new_tokens > 0
+
+                    if self.need_mamba_chunk_invariant_split:
+                        num_new_tokens = self._mamba_chunk_invariant_split(
+                            request,
+                            num_new_tokens,
+                            num_computed_tokens,
+                        )
+                        if num_new_tokens == 0:
+                            break
 
                     # Apply Mamba alignment before encoder caps.
                     if self.need_mamba_block_aligned_split:
@@ -1188,6 +1381,10 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
+                if reserved_mamba_tokens and is_mamba_prefill and num_new_tokens > 0:
+                    reserved_mamba_tokens = max(
+                        reserved_mamba_tokens - num_new_tokens, 0
+                    )
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
