@@ -1651,6 +1651,7 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/gdn
   - vllm/model_executor/layers/mamba/ops
   - vllm/platforms/rocm.py
   commands:
