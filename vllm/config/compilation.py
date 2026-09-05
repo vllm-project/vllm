@@ -130,6 +130,9 @@ class PassConfig:
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
+    enable_sp_moe: bool = None  # type: ignore[assignment]
+    """Enable sequence parallelism for MoE collectives in TP cases.
+    This replaces AllReduce -> RMSNorm -> Chunk with ReduceScatter -> RMSNorm."""
     fuse_gemm_comms: bool = None  # type: ignore[assignment]
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
