@@ -38,6 +38,7 @@ class NvFp4LinearKernel(ABC):
     def input_quant_key(self) -> QuantKey | None:
         """Return the input quantization key supported by this kernel. If the kernel
         does not support input quantization outside of the kernel, return None.
+        Kernels that return a key must also implement input_quant_scales.
         """
         return None
 

@@ -19,7 +19,10 @@ from collections.abc import Callable
 import torch
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_scales,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -40,9 +43,8 @@ def _silu_and_mul_fp8_static(
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
     result = torch.empty(out_shape, dtype=FP8_DTYPE, device=x.device)
-    # TODO(mgoin): read the consumer scale via the contract instead of reaching
-    # into the kernel-specific input_scale attribute.
-    scale = linear.input_scale
+    scale = get_input_quant_scales(linear).static_scale
+    assert scale is not None, "Static FP8 quantization requires an input scale"
     torch.ops._C.silu_and_mul_quant(result, x, scale)
     return QuantizedActivation(
         data=result,
@@ -112,12 +114,12 @@ def _silu_and_mul_nvfp4_dynamic(
         (num_tokens, num_k_tiles * 4), dtype=FP8_DTYPE, device=x.device
     )
 
-    input_global_scale = getattr(linear, "input_global_scale", None)
-    assert input_global_scale is not None, (
-        "input_global_scale is required for NVFP4 quantization"
+    global_scale_inv = get_input_quant_scales(linear).global_scale_inv
+    assert global_scale_inv is not None, (
+        "NVFP4 quantization requires an inverse global scale"
     )
 
-    torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, input_global_scale)
+    torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, global_scale_inv)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
