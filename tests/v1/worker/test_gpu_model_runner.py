@@ -194,6 +194,60 @@ def model_runner():
 model_runner_2 = model_runner
 
 
+@pytest.mark.parametrize(
+    ("num_prompt_logprobs", "scheduled_tokens", "draft_before_bookkeeping"),
+    [
+        ({}, {"req": 4}, True),
+        ({"other": 0}, {"req": 4}, True),
+        ({"req": 0}, {"req": 4}, False),
+    ],
+)
+def test_bookkeeping_hidden_states_reuses_target_output_without_conflict(
+    num_prompt_logprobs: dict[str, int],
+    scheduled_tokens: dict[str, int],
+    draft_before_bookkeeping: bool,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.num_prompt_logprobs = num_prompt_logprobs
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens=scheduled_tokens,
+        total_num_scheduled_tokens=4,
+    )
+    hidden_states = torch.arange(30).reshape(6, 5)
+
+    bookkeeping_hidden_states = runner._get_bookkeeping_hidden_states(
+        hidden_states,
+        scheduler_output,
+        draft_before_bookkeeping,
+    )
+
+    assert bookkeeping_hidden_states is hidden_states
+
+
+def test_bookkeeping_hidden_states_are_protected_from_drafter_reuse():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.num_prompt_logprobs = {"req": 0}
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={"req": 4},
+        total_num_scheduled_tokens=4,
+    )
+    hidden_states = torch.arange(30).reshape(6, 5)
+    expected = hidden_states[:4].clone()
+
+    bookkeeping_hidden_states = runner._get_bookkeeping_hidden_states(
+        hidden_states,
+        scheduler_output,
+        draft_before_bookkeeping=True,
+    )
+    hidden_states.add_(100)
+
+    assert bookkeeping_hidden_states.shape == (4, 5)
+    assert bookkeeping_hidden_states.untyped_storage().data_ptr() != (
+        hidden_states.untyped_storage().data_ptr()
+    )
+    assert torch.equal(bookkeeping_hidden_states, expected)
+
+
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
     new_reqs = []
     num_scheduled_tokens = {}
