@@ -496,6 +496,7 @@ class AsyncLLM(EngineClient):
         parent_req: ParentRequest | None,
         index: int,
         queue: RequestOutputCollector,
+        streaming_prompt: bool = False,
     ):
         if parent_req is None and not self.output_processor.has_request(
             request.request_id
@@ -506,10 +507,51 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        if streaming_prompt:
+            await self.engine_core.add_streaming_prompt_request_async(request)
+        else:
+            await self.engine_core.add_request_async(request)
 
         if self.log_requests:
-            logger.info("Added request %s.", request.request_id)
+            request_kind = "streaming prompt request" if streaming_prompt else "request"
+            logger.info("Added %s %s.", request_kind, request.request_id)
+
+    async def add_streaming_prompt_request(
+        self, request: EngineCoreRequest, prompt_text: str | None = None
+    ) -> RequestOutputCollector:
+        """Add a request whose prompt can be appended before decode starts."""
+        if self.errored:
+            raise EngineDeadError()
+        self._validate_streaming_input_sampling_params(request.params)
+
+        self.input_processor.assign_request_id(request)
+        self._run_output_handler()
+
+        queue = RequestOutputCollector(request.params.output_kind, request.request_id)
+        await self._add_request(
+            request, prompt_text, None, 0, queue, streaming_prompt=True
+        )
+        return queue
+
+    async def append_streaming_prompt_tokens(
+        self, request_id: str, token_ids: list[int]
+    ) -> dict[str, int | bool | str]:
+        """Append prompt tokens to a streaming-prompt request."""
+        return await self.engine_core.append_streaming_prompt_tokens_async(
+            request_id, token_ids
+        )
+
+    async def finalize_streaming_prompt(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        """Finalize prompt growth and allow normal decode to start."""
+        return await self.engine_core.finalize_streaming_prompt_async(request_id)
+
+    async def get_streaming_prompt_metrics(
+        self, request_id: str
+    ) -> dict[str, int | bool | str]:
+        """Return scheduler-side streaming-prompt metrics."""
+        return await self.engine_core.get_streaming_prompt_metrics_async(request_id)
 
     async def _add_streaming_input_request(
         self,

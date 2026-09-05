@@ -295,6 +295,7 @@ class TestAnnotateProfile:
             req_ids=["gen1"],
             resumed_req_ids=set(),
             new_token_ids=[],
+            new_prompt_token_ids=[[]],
             all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[10],

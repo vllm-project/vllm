@@ -240,6 +240,7 @@ def _schedule_cached_requests(
             req_ids=req_ids,
             resumed_req_ids=set(),
             new_token_ids=new_token_ids,
+            new_prompt_token_ids=[[] for _ in req_ids],
             all_token_ids={},
             new_block_ids=[None] * len(req_ids),
             num_computed_tokens=num_computed_tokens,
@@ -562,6 +563,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         req_ids=[req_id],
         resumed_req_ids=set(),
         new_token_ids=[[]],
+        new_prompt_token_ids=[[]],
         all_token_ids={},
         new_block_ids=[([0],)],
         num_computed_tokens=[0],
@@ -586,6 +588,51 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
+
+
+def test_update_states_streaming_prompt_append_updates_token_buffers(
+    model_runner, dist_init
+):
+    req_id = "req_0"
+    model_runner._update_states(_schedule_new_request(req_id))
+
+    cached_req_data = CachedRequestData(
+        req_ids=[req_id],
+        resumed_req_ids=set(),
+        new_token_ids=[[]],
+        new_prompt_token_ids=[[4, 5]],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[3],
+        num_output_tokens=[0],
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=cached_req_data,
+        num_scheduled_tokens={req_id: 2},
+        total_num_scheduled_tokens=2,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_runner._update_states(scheduler_output)
+
+    req_state = model_runner.requests[req_id]
+    req_index = model_runner.input_batch.req_id_to_index[req_id]
+    assert req_state.prompt_token_ids == [1, 2, 3, 4, 5]
+    assert req_state.num_prompt_tokens == 5
+    assert model_runner.input_batch.num_prompt_tokens[req_index] == 5
+    assert model_runner.input_batch.token_ids_cpu[req_index, :5].tolist() == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert model_runner.input_batch.is_token_ids[req_index, :5].all()
 
 
 def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):

@@ -1371,6 +1371,26 @@ class GPUModelRunner(
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            new_prompt_token_ids = req_data.new_prompt_token_ids[i]
+            if new_prompt_token_ids:
+                if req_state.prompt_token_ids is None:
+                    raise ValueError(
+                        "Streaming prompt append requires prompt token IDs "
+                        f"for request {req_id}"
+                    )
+                start_idx = req_state.num_prompt_tokens
+                end_idx = start_idx + len(new_prompt_token_ids)
+                req_state.prompt_token_ids.extend(new_prompt_token_ids)
+                req_state.num_prompt_tokens = end_idx
+                if req_index is not None:
+                    self.input_batch.token_ids_cpu[req_index, start_idx:end_idx] = (
+                        new_prompt_token_ids
+                    )
+                    self.input_batch.is_token_ids[req_index, start_idx:end_idx] = True
+                    self.input_batch.num_prompt_tokens[req_index] = end_idx
+                    self.input_batch.num_tokens_no_spec[req_index] = (
+                        req_state.num_tokens
+                    )
 
             if req_state.prev_num_draft_len and self.use_async_scheduling:
                 # prev_num_draft_len is used in async scheduling mode with
@@ -1793,6 +1813,27 @@ class GPUModelRunner(
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             prev_positions[i] = prev_req_id_to_index.get(req_id, -1)
 
+    @staticmethod
+    def _compute_discard_request_mask(
+        req_ids: list[str],
+        num_tokens: list[int],
+        optimistic_seq_lens_cpu: torch.Tensor,
+        prefill_only_req_ids: set[str],
+    ) -> np.ndarray:
+        """Return requests whose sampled tokens must be discarded.
+
+        A request is discarded when the current step did not reach the end of
+        its known tokens, or when the scheduler explicitly marks it as
+        prefill-only. Streaming-prompt requests use the latter path to compute
+        KV cache while preventing decode before finalize.
+        """
+        num_tokens_np = np.array(num_tokens, dtype=np.int32)
+        prefill_only_mask = np.array(
+            [req_id in prefill_only_req_ids for req_id in req_ids],
+            dtype=bool,
+        )
+        return (optimistic_seq_lens_cpu.numpy() < num_tokens_np) | prefill_only_mask
+
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2112,13 +2153,15 @@ class GPUModelRunner(
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
 
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-
-        # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning
-        self.discard_request_mask.np[:num_reqs] = (
-            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+        # Record which requests should not be sampled, so that we can clear the
+        # sampled tokens before returning. The scheduler can explicitly mark
+        # streaming-prompt requests as prefill-only before finalize.
+        req_ids = self.input_batch.req_ids[:num_reqs]
+        self.discard_request_mask.np[:num_reqs] = self._compute_discard_request_mask(
+            req_ids,
+            [self.requests[r].num_tokens for r in req_ids],
+            self.optimistic_seq_lens_cpu[:num_reqs],
+            scheduler_output.prefill_only_req_ids,
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 

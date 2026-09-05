@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from vllm.exceptions import VLLMValidationError
 from vllm.engine.protocol import StreamingInput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
@@ -170,3 +172,48 @@ async def test_generate_with_async_generator():
     assert outputs[2].finished is True
     # Both inputs were processed
     assert inputs_received == ["Hello", " world"]
+
+
+@pytest.mark.asyncio
+async def test_add_streaming_prompt_request_rejects_multiple_outputs():
+    llm = MagicMock(spec=AsyncLLM)
+    llm.errored = False
+    llm.add_streaming_prompt_request = AsyncLLM.add_streaming_prompt_request.__get__(
+        llm, AsyncLLM
+    )
+    llm._validate_streaming_input_sampling_params = (
+        AsyncLLM._validate_streaming_input_sampling_params
+    )
+
+    request = MagicMock()
+    request.params = SamplingParams(n=2)
+
+    with pytest.raises(VLLMValidationError, match="n > 1"):
+        await llm.add_streaming_prompt_request(request)
+
+
+@pytest.mark.asyncio
+async def test_dplb_streaming_prompt_utilities_route_to_owning_engine():
+    client = object.__new__(DPLBAsyncMPClient)
+    request_id = "streaming-prompt"
+    engine = b"\x01\x00"
+    client.reqs_in_flight = {request_id: engine}
+    client._call_utility_async = AsyncMock(return_value={"ok": True})
+
+    append_result = await client.append_streaming_prompt_tokens_async(request_id, [4, 5])
+    finalize_result = await client.finalize_streaming_prompt_async(request_id)
+    metrics_result = await client.get_streaming_prompt_metrics_async(request_id)
+
+    assert append_result == {"ok": True}
+    assert finalize_result == {"ok": True}
+    assert metrics_result == {"ok": True}
+    client._call_utility_async.assert_any_await(
+        "append_streaming_prompt_tokens", request_id, [4, 5], engine=engine
+    )
+    client._call_utility_async.assert_any_await(
+        "finalize_streaming_prompt", request_id, engine=engine
+    )
+    client._call_utility_async.assert_any_await(
+        "get_streaming_prompt_metrics", request_id, engine=engine
+    )
+    assert client._call_utility_async.await_count == 3
