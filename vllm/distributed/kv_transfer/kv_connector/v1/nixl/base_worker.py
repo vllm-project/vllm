@@ -712,10 +712,36 @@ class NixlBaseConnectorWorker:
             )
 
     def _sync_block_size_with_kernel(self) -> None:
+        self._logical_num_blocks = self.num_blocks
+        tensors = self.kv_cache_config.kv_cache_tensors
+        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        # A packed MLA allocation transfers whole scheduler-owned storage rows.
+        # Its groups may count different units (e.g. compressed KV and compressor
+        # state), so their minimum block size is not a common kernel block size.
+        self._transfer_packed_mla_blocks = bool(
+            self.use_mla
+            and not self.use_host_buffer
+            and self.pp_size == self.pcp_size == self.dcp_size == 1
+            and layout.is_block_outermost
+            and self._layer_specs
+            and all(
+                isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                for spec in self._layer_specs.values()
+            )
+            and len({spec.block_size for spec in self._layer_specs.values()}) > 1
+            and tensors
+            and len({tensor.block_stride for tensor in tensors}) == 1
+            and all(
+                tensor.block_stride > 0
+                and tensor.size == self.num_blocks * tensor.block_stride
+                for tensor in tensors
+            )
+        )
+        if self._transfer_packed_mla_blocks:
+            return
+
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
-        # Number of blocks not accounting for kernel block mismatches
-        self._logical_num_blocks = self.num_blocks
         if self.block_size != kernel_block_size:
             logger.info_once(
                 "User-specified logical block size (%s) does not match"
@@ -1190,6 +1216,18 @@ class NixlBaseConnectorWorker:
         # CSA-linear needs separate logical regions for attention and state
         # aliases even though every view shares one block-major allocation.
         packed_storage = packed_storage and not self._is_csa_linear
+        if self._transfer_packed_mla_blocks and not (
+            packed_storage
+            and all(
+                cache.shape[0] == self.num_blocks
+                and cache.stride(0) * cache.element_size() * self.num_blocks
+                == cache.untyped_storage().nbytes()
+                for cache in xfer_buffers.values()
+            )
+        ):
+            raise ValueError(
+                "Packed MLA transfer requires shared whole-block cache views."
+            )
 
         layer_specs: dict[str, KVCacheSpec] = {}
         compressed_region_owners: dict[int, torch.Tensor] = {}
@@ -1790,6 +1828,16 @@ class NixlBaseConnectorWorker:
         tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
+        if self._transfer_packed_mla_blocks and (
+            nixl_agent_meta.block_size != self.block_size
+            or nixl_agent_meta.physical_blocks_per_logical_kv_block != 1
+            or nixl_agent_meta.kv_cache_layout != self.kv_cache_layout
+            or nixl_agent_meta.block_lens != self.block_len_per_layer
+            or nixl_agent_meta.block_strides != self.block_stride_per_layer
+        ):
+            raise ValueError(
+                "Packed MLA transfer requires identical P/D block geometry."
+            )
         # TODO re-evaluate refreshing for scaling/recovery
         if (0, remote_tp_rank) in self._remote_agents.get(engine_id, {}):
             logger.debug(
