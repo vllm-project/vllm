@@ -276,6 +276,11 @@ class ModelConfig:
     predetermined token sequence while still computing real logprobs. Reserved
     for debugging and RL workflows: enabling it reserves a per-request trace
     buffer, so it is off by default."""
+    enable_reduced_sampling: bool = False
+    """Whether to reduce tensor-parallel sampling communication by avoiding a
+    full-vocabulary all-gather. Greedy batches reduce local argmax pairs; random
+    batches reduce local top-k candidates. Unsupported sampling features fall
+    back to full-vocabulary logits."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -443,6 +448,7 @@ class ModelConfig:
             "logprobs_mode",
             "use_fp64_gumbel",
             "enable_trace_replay",
+            "enable_reduced_sampling",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",

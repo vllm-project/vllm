@@ -238,6 +238,63 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+@pytest.mark.parametrize(
+    (
+        "enable_reduced_sampling",
+        "use_v2_model_runner",
+        "tensor_parallel_size",
+        "enable_batch_sharded_sampling",
+        "lora_enabled",
+        "speculative_enabled",
+        "return_sampling_mask",
+        "is_diffusion",
+        "should_raise",
+    ),
+    [
+        (True, False, 2, False, False, False, False, False, True),
+        (True, True, 1, False, False, False, False, False, True),
+        (True, True, 2, True, False, False, False, False, True),
+        (True, True, 2, False, True, False, False, False, True),
+        (True, True, 2, False, False, True, False, False, False),
+        (True, True, 2, False, False, False, True, False, True),
+        (True, True, 2, False, False, False, False, True, True),
+        (True, True, 2, False, False, False, False, False, False),
+        (False, False, 1, True, True, True, True, True, False),
+    ],
+)
+def test_reduced_sampling_validation(
+    enable_reduced_sampling,
+    use_v2_model_runner,
+    tensor_parallel_size,
+    enable_batch_sharded_sampling,
+    lora_enabled,
+    speculative_enabled,
+    return_sampling_mask,
+    is_diffusion,
+    should_raise,
+) -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            enable_reduced_sampling=enable_reduced_sampling,
+            return_sampling_mask=return_sampling_mask,
+            is_diffusion=is_diffusion,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tensor_parallel_size,
+            enable_batch_sharded_sampling=enable_batch_sharded_sampling,
+        ),
+        lora_config=object() if lora_enabled else None,
+        speculative_config=object() if speculative_enabled else None,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="Reduced sampling"):
+            VllmConfig._validate_reduced_sampling(config)
+    else:
+        VllmConfig._validate_reduced_sampling(config)
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
     MRV1 paths and off breakable cudagraphs by default."""

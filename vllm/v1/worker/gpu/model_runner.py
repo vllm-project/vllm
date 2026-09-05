@@ -33,6 +33,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -44,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.logits_processor import compute_local_logits
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -465,6 +467,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return_sampling_mask=self.model_config.return_sampling_mask,
             )
             custom = self.model_state.custom_sampler(self.sampler)
+            if custom and self.model_config.enable_reduced_sampling:
+                raise ValueError("Reduced sampling does not support custom samplers.")
 
             if custom:
                 self.sampler, self.rejection_sampler = custom
@@ -864,7 +868,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
+        # Profile the full-logits fallback, which is the peak-memory path even
+        # when reduced sampling is enabled.
         logits = self.model.compute_logits(hidden_states)
+        assert logits is not None
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
@@ -1447,8 +1454,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
+        assert self.sampler is not None
         shard_metadata = None
         global_input_batch = input_batch
+        use_reduced_sampling = False
+        local_logits_metadata = None
         if self.batch_sharder is not None:
             # Shard the inputs along the batch dimension to sample in parallel
             # across TP ranks.
@@ -1464,7 +1474,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            if self.model_config.enable_reduced_sampling:
+                logits, local_logits_metadata = compute_local_logits(
+                    self.model.compute_logits, sample_hidden_states
+                )
+                assert logits is not None
+                if local_logits_metadata is not None:
+                    use_reduced_sampling = True
+                    can_use_reduced_verification = True
+                    if (
+                        input_batch.num_draft_tokens > 0
+                        and self.rejection_sampler is not None
+                    ):
+                        can_use_reduced_verification = isinstance(
+                            self.rejection_sampler, RejectionSampler
+                        ) and self.rejection_sampler.can_use_reduced_sampling(
+                            input_batch.idx_mapping_np
+                        )
+                    needs_full_logits = (
+                        local_logits_metadata.vocab_size != self.vocab_size
+                        or grammar_output is not None
+                        or not can_use_reduced_verification
+                        or not self.sampler.can_use_reduced_sampling(
+                            input_batch.idx_mapping_np, logits
+                        )
+                    )
+                    if needs_full_logits:
+                        logits = tensor_model_parallel_all_gather(logits, dim=-1)
+                        logits = logits[..., : self.vocab_size].contiguous()
+                        use_reduced_sampling = False
+                else:
+                    logger.warning_once(
+                        "Reduced sampling is unavailable for %s; using full logits.",
+                        type(self.model).__name__,
+                    )
+            else:
+                logits = self.model.compute_logits(sample_hidden_states)
+            assert logits is not None
 
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -1482,23 +1528,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # all-padding block to the gather below.
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
-            assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            if use_reduced_sampling:
+                assert local_logits_metadata is not None
+                sampler_output = self.sampler(
+                    logits,
+                    input_batch,
+                    use_reduced_sampling=True,
+                    vocab_start_index=local_logits_metadata.vocab_start_index,
+                )
+            else:
+                sampler_output = self.sampler(logits, input_batch)
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
-                input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
-            )
+            # Draft logits are needed for probabilistic rejection sampling.
+            draft_logits = self.speculator.draft_logits
+            if use_reduced_sampling:
+                assert local_logits_metadata is not None
+                assert isinstance(self.rejection_sampler, RejectionSampler)
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    draft_logits,
+                    use_reduced_sampling=True,
+                    vocab_start_index=local_logits_metadata.vocab_start_index,
+                )
+            else:
+                sampler_output = self.rejection_sampler(
+                    logits, input_batch, draft_logits
+                )
 
         if shard_metadata is not None:
             # Gather the sharded sampler outputs from the TP ranks into a single
             # sampler output.
-            assert self.sampler is not None
             sampler_output = gather_sampler_output(
                 sampler_output,
                 shard_metadata,

@@ -1657,6 +1657,7 @@ class VllmConfig:
         self._resolve_allow_missing_mm_embeddings()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
+        self._validate_reduced_sampling()
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
@@ -2837,6 +2838,31 @@ class VllmConfig:
                 dcp_size,
                 interleave,
                 local_block_size,
+            )
+
+    def _validate_reduced_sampling(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.enable_reduced_sampling:
+            return
+
+        blockers: list[str] = []
+        if not self.use_v2_model_runner:
+            blockers.append("it is only implemented by Model Runner V2")
+        if self.parallel_config.tensor_parallel_size <= 1:
+            blockers.append("tensor_parallel_size is 1")
+        if self.parallel_config.enable_batch_sharded_sampling:
+            blockers.append("batch-sharded sampling is also enabled")
+        if self.lora_config is not None:
+            blockers.append("LoRA is enabled")
+        if model_config.return_sampling_mask:
+            blockers.append("sampling distribution replay is enabled")
+        if model_config.is_diffusion:
+            blockers.append("diffusion models use a custom sampling path")
+        if blockers:
+            raise ValueError(
+                "Reduced sampling was explicitly enabled via "
+                "--enable-reduced-sampling, but is not supported in "
+                f"this configuration because {'; '.join(blockers)}."
             )
 
     def validate_block_size(self) -> None:

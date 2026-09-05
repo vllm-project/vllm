@@ -3,6 +3,8 @@
 """A layer that compute logits from hidden_stats."""
 
 from collections.abc import Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import cache
 
 import torch
@@ -24,6 +26,75 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class LocalLogitsMetadata:
+    """Vocabulary layout for logits produced without a TP gather."""
+
+    vocab_size: int
+    vocab_start_index: int
+    local_vocab_size: int
+
+
+_local_logits_context: ContextVar[
+    list[tuple[torch.Tensor, LocalLogitsMetadata]] | None
+] = ContextVar("local_logits_context", default=None)
+
+
+def compute_local_logits(
+    compute_logits: Callable[[torch.Tensor], torch.Tensor | None],
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor | None, LocalLogitsMetadata | None]:
+    """Compute local logits when supported, otherwise return full logits."""
+    captures: list[tuple[torch.Tensor, LocalLogitsMetadata]] = []
+    token = _local_logits_context.set(captures)
+    try:
+        logits = compute_logits(hidden_states)
+    finally:
+        _local_logits_context.reset(token)
+
+    if len(captures) == 1 and isinstance(logits, torch.Tensor):
+        captured_logits, metadata = captures[0]
+        if logits is captured_logits and logits.shape[-1] == metadata.local_vocab_size:
+            return logits, metadata
+
+    if captures:
+        logits = compute_logits(hidden_states)
+    return logits, None
+
+
+def _get_local_logits_metadata(
+    logits_processor: "LogitsProcessor", lm_head: VocabParallelEmbedding
+) -> LocalLogitsMetadata | None:
+    """Return shard metadata when the active context can skip the TP gather."""
+    context = _local_logits_context.get()
+    if (
+        context is None
+        or hasattr(logits_processor, "base_layer")
+        or getattr(lm_head, "tp_size", 1) <= 1
+    ):
+        return None
+
+    shard_indices = getattr(lm_head, "shard_indices", None)
+    required_indices = (
+        "org_vocab_start_index",
+        "num_elements_padded",
+        "num_org_vocab_padding",
+        "num_added_elements_padded",
+    )
+    if shard_indices is None or any(
+        not hasattr(shard_indices, name) for name in required_indices
+    ):
+        return None
+    if shard_indices.num_added_elements_padded > 0:
+        return None
+
+    return LocalLogitsMetadata(
+        vocab_size=logits_processor.org_vocab_size,
+        vocab_start_index=shard_indices.org_vocab_start_index,
+        local_vocab_size=shard_indices.num_elements_padded,
+    )
 
 
 @cache
@@ -102,9 +173,13 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None = None,
         skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        local_metadata = None
         if self.logits_as_input:
             logits = hidden_states
         else:
+            if not skip_gather:
+                local_metadata = _get_local_logits_metadata(self, lm_head)
+                skip_gather = local_metadata is not None
             # Get the logits for the next tokens.
             logits = self._get_logits(
                 hidden_states, lm_head, embedding_bias, skip_gather
@@ -117,6 +192,14 @@ class LogitsProcessor(PluggableLayer):
 
             if self.scale != 1.0:
                 logits *= self.scale
+
+            if local_metadata is not None:
+                num_vocab_padding = lm_head.shard_indices.num_org_vocab_padding
+                if num_vocab_padding > 0:
+                    logits[..., -num_vocab_padding:] = -float("inf")
+                context = _local_logits_context.get()
+                assert context is not None
+                context.append((logits, local_metadata))
         return logits
 
     def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
