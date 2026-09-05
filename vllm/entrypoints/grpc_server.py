@@ -43,6 +43,7 @@ import uvloop
 
 from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.grpc_options import grpc_server_options
 from vllm.entrypoints.serve.utils.api_utils import log_version_and_model
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -85,17 +86,7 @@ async def serve_grpc(args: argparse.Namespace):
     servicer = VllmEngineServicer(async_llm, start_time)
 
     # Create gRPC server
-    server = grpc.aio.server(
-        options=[
-            ("grpc.max_send_message_length", -1),
-            ("grpc.max_receive_message_length", -1),
-            # Tolerate client keepalive pings every 10s (default 300s is too
-            # strict for non-streaming requests where no DATA frames flow
-            # during generation)
-            ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
-            ("grpc.keepalive_permit_without_calls", True),
-        ],
-    )
+    server = grpc.aio.server(options=grpc_server_options())
 
     # Add servicer to server
     vllm_engine_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
