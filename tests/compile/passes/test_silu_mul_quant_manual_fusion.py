@@ -29,6 +29,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     _FUSED_ACT_QUANT,
+    _silu_and_mul_nvfp4_dynamic,
     maybe_fused_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -63,6 +64,36 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+
+
+@pytest.mark.parametrize("num_tokens", [1, 5, 32, 127, 128, 129])
+@pytest.mark.parametrize("hidden_size", [256, 11008])
+def test_nvfp4_scale_allocation_covers_swizzled_writes(
+    monkeypatch, num_tokens, hidden_size
+):
+    """Every scale written by the CUDA kernel must fit, including partial tiles."""
+
+    def check_writes(output, scales, x, global_scale):
+        # cvt_quant_to_fp4_get_sf_out_offset uses [M/128, K/64, 32, 4, 4].
+        rows = torch.arange(num_tokens, device="cpu")[:, None]
+        cols = torch.arange(hidden_size // 16, device="cpu")[None, :]
+        offsets = (
+            ((rows // 128) * (hidden_size // 64) + cols // 4) * 512
+            + (rows % 32) * 16
+            + ((rows // 32) % 4) * 4
+            + cols % 4
+        )
+        assert int(offsets.max()) < scales.numel() * scales.element_size()
+
+    monkeypatch.setattr(
+        torch.ops._C, "silu_and_mul_nvfp4_quant", check_writes, raising=False
+    )
+    x = torch.empty((num_tokens, hidden_size * 2), dtype=torch.bfloat16, device="cpu")
+    linear = MockLinearForFusion(
+        kNvfp4Dynamic, input_global_scale=torch.ones(1, device="cpu")
+    )
+    result = _silu_and_mul_nvfp4_dynamic(x, linear)
+    assert result.data.shape == (num_tokens, hidden_size // 2)
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
@@ -205,6 +236,7 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
         )
 
 
+@pytest.mark.parametrize("num_tokens", [1, 5, 32, 127, 128, 129])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
 @pytest.mark.skipif(
@@ -213,7 +245,7 @@ def test_manual_fusion_fp8_dynamic_128(dtype: torch.dtype):
 @pytest.mark.skipif(
     envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"], reason="Only test on CUDA and ROCm"
 )
-def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
+def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype, num_tokens: int):
     """Test kNvfp4Dynamic fusion path.
 
     Compares fused (silu_and_mul_nvfp4_quant) vs unfused (silu_and_mul)
@@ -228,8 +260,7 @@ def test_manual_fusion_nvfp4_dynamic(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
 
     # NVFP4 requires hidden_size divisible by 16 (block size) and by 2 (packing).
-    # M (num_tokens) must be >= 128 for the 128x4 swizzled scale layout.
-    num_tokens, hidden_size = 128, 256
+    hidden_size = 256
     x = torch.rand(num_tokens, hidden_size * 2)
     input_global_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda")
 
