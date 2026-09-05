@@ -2635,10 +2635,33 @@ class EngineArgs:
         try:
             device_memory = current_platform.get_device_total_memory()
             device_name = current_platform.get_device_name().lower()
-        except Exception:
-            # This is only used to set default_max_num_batched_tokens
+        except Exception as e:
+            # MIG/NVML may raise; try torch before using 0 memory.
+            logger.warning(
+                "Failed to query device memory/name from the current "
+                "platform (%s: %s). Scheduler batch defaults may be "
+                "conservative.",
+                type(e).__name__,
+                e,
+            )
             device_memory = 0
             device_name = ""
+            try:
+                if torch.cuda.is_available():
+                    props = torch.cuda.get_device_properties(0)
+                    device_memory = int(props.total_memory)
+                    name = getattr(props, "name", None)
+                    if name:
+                        device_name = str(name).lower()
+            except Exception as fallback_error:
+                logger.warning(
+                    "Failed to fall back to torch.cuda device memory "
+                    "(%s: %s). Using smallest-GPU scheduler defaults.",
+                    type(fallback_error).__name__,
+                    fallback_error,
+                )
+                device_memory = 0
+                device_name = ""
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
