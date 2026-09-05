@@ -120,6 +120,7 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
+        self.last_worker_error: str | None = None
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -303,20 +304,43 @@ class MultiprocExecutor(Executor):
         # logs an error, shuts down the executor and invokes the failure
         # callback to inform the engine.
         def monitor_workers():
-            sentinels = [h.proc.sentinel for h in workers]
-            died = multiprocessing.connection.wait(sentinels)
+            handles = {
+                target: h
+                for h in workers
+                for target in (h.proc.sentinel, h.error_reader)
+            }
+            ready = multiprocessing.connection.wait(handles.keys())
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
-            logger.error(
-                "Worker proc %s died unexpectedly (exit code: %s), "
-                "shutting down executor.",
-                proc.name,
-                proc.exitcode,
-            )
+            target = ready[0]
+            worker = handles[target]
+
+            if target == worker.proc.sentinel:
+                logger.error(
+                    "Worker proc %s died unexpectedly (exit code: %s), "
+                    "shutting down executor.",
+                    worker.proc.name,
+                    worker.proc.exitcode,
+                )
+            elif isinstance(target, Connection):
+                try:
+                    err_msg, tb = target.recv()
+                    logger.error(
+                        "Worker proc %s encountered exception: %s\n%s",
+                        worker.proc.name,
+                        err_msg,
+                        tb,
+                    )
+                except EOFError:
+                    logger.error(
+                        "Worker proc %s error pipe closed unexpectedly, "
+                        "shutting down executor.",
+                        worker.proc.name,
+                    )
+
             _self.shutdown()
             callback = _self.failure_callback
             if callback is not None:
@@ -516,6 +540,9 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
+                    if getattr(w, "error_reader", None) is not None:
+                        w.error_reader.close()
+                        w.error_reader = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
                 for w in workers:
@@ -567,6 +594,7 @@ class UnreadyWorkerProcHandle:
     rank: int
     ready_pipe: Connection
     death_writer: Connection | None = None
+    error_reader: Connection | None = None
 
 
 @dataclass
@@ -580,6 +608,7 @@ class WorkerProcHandle:
     # `peer_worker_response_mqs[i]`
     peer_worker_response_mqs: list[MessageQueue | None]
     death_writer: Connection | None = None
+    error_reader: Connection | None = None
 
     @classmethod
     def from_unready_handle(
@@ -594,6 +623,7 @@ class WorkerProcHandle:
             worker_response_mq=worker_response_mq,
             peer_worker_response_mqs=peer_worker_response_mqs,
             death_writer=unready_handle.death_writer,
+            error_reader=unready_handle.error_reader,
         )
 
 
@@ -603,6 +633,7 @@ class WorkerProc:
     READY_STR = "READY"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
+    error_writer: Connection | None = None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -717,9 +748,17 @@ class WorkerProc:
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
+        # Error pipe to report unhandled worker exceptions to executor monitor
+        error_reader, error_writer = context.Pipe(duplex=False)
         if inherited_fds is not None:
             inherited_fds = inherited_fds.copy()
-            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
+            inherited_fds.extend(
+                (
+                    ready_reader.fileno(),
+                    error_reader.fileno(),
+                    death_writer.fileno(),
+                )
+            )
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -728,6 +767,7 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": ready_writer,
             "death_pipe": death_reader,
+            "error_pipe": error_writer,
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
@@ -750,9 +790,12 @@ class WorkerProc:
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
+        error_writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
-        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
+        return UnreadyWorkerProcHandle(
+            proc, rank, ready_reader, death_writer, error_reader=error_reader
+        )
 
     @staticmethod
     def wait_for_response_handle_ready(
@@ -888,6 +931,7 @@ class WorkerProc:
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
+        error_pipe = kwargs.pop("error_pipe", None)
 
         # Close inherited pipes from parent (incl. other worker pipes)
         # Explicitly passing in existing pipes and closing them makes the pipe
@@ -909,6 +953,7 @@ class WorkerProc:
             )
 
             worker = WorkerProc(*args, **kwargs)
+            worker.error_writer = error_pipe
             assert worker.worker_response_mq is not None
             if kwargs["vllm_config"].parallel_config.numa_bind:
                 numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
@@ -971,6 +1016,8 @@ class WorkerProc:
                 ready_writer.close()
             if death_pipe is not None:
                 death_pipe.close()
+            if error_pipe is not None:
+                error_pipe.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()
@@ -1053,6 +1100,15 @@ class WorkerProc:
             if hasattr(e, "add_note"):
                 e.add_note(traceback.format_exc())
             logger.exception("WorkerProc hit an exception.")
+            # Report exception to executor monitor thread immediately
+            # if this rank does not report to EngineCore, so collectives don't deadlock
+            if (
+                output_rank is not None
+                and self.rank != output_rank
+                and self.error_writer is not None
+            ):
+                with suppress(Exception):
+                    self.error_writer.send((str(e), traceback.format_exc()))
             # enqueue_output converts the exception to a FAILURE response
             # containing its string representation before transport.
             if output_rank is None or self.rank == output_rank:
