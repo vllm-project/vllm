@@ -3926,6 +3926,18 @@ class GPUModelRunner(
 
     @contextmanager
     def synchronize_input_prep(self):
+        # prepare_inputs_event is recorded when input prep ends, so it says
+        # nothing about the spec-decode postprocess that runs after the model.
+        # That postprocess reads the persistent block tables and staged index
+        # buffers and writes the accepted counts, all of which _update_states
+        # mutates as soon as this context is entered. Wait for it here; the
+        # later wait in _prepare_inputs is already past those mutations.
+        # Steps overlap under async scheduling and under the pipeline-parallel
+        # batch queue alike, and only the former creates prepare_inputs_event,
+        # so this wait cannot hang off that event's existence.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+
         if self.prepare_inputs_event is None:
             yield
             return
