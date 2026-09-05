@@ -186,11 +186,14 @@ The Llama model definition uses a manual call site on supported NVIDIA
 FlashAttention decoder layers. It writes rotated Q to graph-owned storage and writes
 K/V directly to the paged cache before attention. The CUDA kernel consumes logical
 cache views and their strides, so it supports every physical KV-cache layout advertised
-by FlashAttention. Unsupported cache formats, attention variants, parallelism, and long
-token ranges retain the ordinary RoPE and cache-update path. Profiling runs without a
-layer slot mapping rotate Q only and skip the unobserved K/V work; attention is also
-skipped because those runs have no attention metadata. CUDA does not register the
-legacy graph pass for this flag.
+by FlashAttention. Unsupported cache formats, attention variants, and parallelism
+retain the ordinary RoPE and cache-update path. Eager calls also retain that path above
+the token threshold. Compiled calls keep the custom-op entry stable because vLLM drops
+dynamic-shape guards; above the threshold, the op copies Q, clones K, and invokes the
+ordinary rotary and cache writer before attention. Profiling runs without a layer slot
+mapping rotate Q only and skip the unobserved K/V work; attention is also skipped
+because those runs have no attention metadata. CUDA does not register the legacy graph
+pass for this flag.
 
 The CUDA model path requires matching, unquantized Q/K/V and cache storage and
 is not combined with `fuse_attn_quant`. Other configurations retain the

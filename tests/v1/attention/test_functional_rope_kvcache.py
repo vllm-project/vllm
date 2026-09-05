@@ -30,6 +30,7 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.fope import FourierRotaryEmbedding
 from vllm.model_executor.models.llama import LlamaAttention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -100,6 +101,22 @@ class _CompiledLlamaAttentionCallSite(torch.nn.Module):
         self._use_fused_rope_kvcache = True
 
 
+def _manual_fusion_layer() -> SimpleNamespace:
+    return SimpleNamespace(
+        _rope_kvcache_fusion_enabled=True,
+        _fuse_attn_quant=False,
+        attn_type=AttentionType.DECODER,
+        attn_backend=SimpleNamespace(forward_includes_kv_cache_update=False),
+        kv_sharing_target_layer_name=None,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.float16,
+        kv_cache_torch_dtype=torch.float16,
+        query_quant=None,
+        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: True),
+    )
+
+
 def test_manual_fusion_requires_matching_activation_and_cache_dtype(
     monkeypatch: pytest.MonkeyPatch,
     default_vllm_config: VllmConfig,
@@ -114,22 +131,38 @@ def test_manual_fusion_requires_matching_activation_and_cache_dtype(
             is_neox_style=True,
             dtype=torch.float16,
         )
-    layer = SimpleNamespace(
-        _rope_kvcache_fusion_enabled=True,
-        _fuse_attn_quant=False,
-        attn_type=AttentionType.DECODER,
-        attn_backend=SimpleNamespace(forward_includes_kv_cache_update=False),
-        kv_sharing_target_layer_name=None,
-        head_size=64,
-        head_size_v=64,
-        dtype=torch.float16,
-        kv_cache_torch_dtype=torch.float16,
-        query_quant=None,
-        impl=SimpleNamespace(fused_rope_kvcache_q_out_supported=lambda: True),
-    )
+    layer = _manual_fusion_layer()
 
     assert Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
     layer.kv_cache_torch_dtype = torch.bfloat16
+    assert not Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
+
+
+def test_manual_fusion_rejects_rotary_with_custom_native_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    vllm_config = VllmConfig(compilation_config=CompilationConfig(custom_ops=["none"]))
+    with vllm.config.set_current_vllm_config(vllm_config):
+        rotary_emb = FourierRotaryEmbedding(
+            head_size=64,
+            rotary_dim=64,
+            max_position_embeddings=128,
+            base=10000,
+            is_neox_style=True,
+            dtype=torch.float16,
+            init_cache=False,
+            num_key_value_heads=2,
+            num_inv_freq=32,
+            fope_sep_head=True,
+            fope_init_factor=1.0,
+        )
+    layer = _manual_fusion_layer()
+
+    assert type(rotary_emb).forward is RotaryEmbedding.forward
+    assert type(rotary_emb).forward_cuda is RotaryEmbedding.forward_cuda
+    assert type(rotary_emb).forward_native is not RotaryEmbedding.forward_native
+    assert rotary_emb.cos_sin_cache.dim() == 3
     assert not Attention.manual_rope_kvcache_fusion_supported(layer, rotary_emb)
 
 

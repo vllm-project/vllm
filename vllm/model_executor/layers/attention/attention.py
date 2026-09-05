@@ -612,6 +612,7 @@ class Attention(nn.Module, AttentionLayerBase):
             and not self._fuse_attn_quant
             and isinstance(rotary_emb, RotaryEmbedding)
             and type(rotary_emb).forward is RotaryEmbedding.forward
+            and type(rotary_emb).forward_native is RotaryEmbedding.forward_native
             and type(rotary_emb).forward_cuda is RotaryEmbedding.forward_cuda
             and not rotary_emb.use_flashinfer
             and rotary_emb.head_size == self.head_size
