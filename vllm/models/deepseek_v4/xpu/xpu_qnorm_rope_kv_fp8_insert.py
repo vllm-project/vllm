@@ -91,7 +91,7 @@ def _xpu_qnorm_rope_kernel(
         # Copy full KV unchanged first
         offs = tl.arange(0, HEAD_DIM)
         kv_full = tl.load(kv_base + offs)
-        tl.store(kv_out_base + offs, kv_full)
+        tl.store(kv_out_base + offs, kv_full, mask=offs < NOPE_DIM)
 
         # GPT-J interleaved RoPE on the last ROPE_DIM dimensions
         even_offs = NOPE_DIM + rope_pair_idx * 2
