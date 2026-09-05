@@ -8,7 +8,6 @@ and SOABI, so target venvs don't need torch installed.
 
 Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
 """
-
 import json
 import os
 import subprocess
@@ -69,7 +68,9 @@ cmd = [
     *(f"-I{p}" for p in includes),
     str(src / "csrc/python_api.cpp"),
     *(f"-L{p}" for p in cpp_extension.library_paths(device_type="cuda")),
-    f"-L{cuda_home}/lib64",
+    # Check both lib64/ and lib/ directories for CUDA libraries
+    # CUDA 13+ installs to lib/ while older versions use lib64/
+    *(f"-L{p}" for p in [f"{cuda_home}/lib64", f"{cuda_home}/lib"] if os.path.exists(p)),
     "-ltorch",
     "-ltorch_python",
     "-ltorch_cpu",
