@@ -322,6 +322,12 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError("PCP does not support data parallelism on CUDA yet.")
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
