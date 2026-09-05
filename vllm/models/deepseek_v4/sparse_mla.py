@@ -33,6 +33,19 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _C128A_TOPK_ALIGNMENT = 128
 
 
+def dsv4_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    """Kernel page size for DeepSeek-V4 sparse MLA.
+
+    FlashInfer SM120 DSV4 decode is compiled for 64-token pages
+    (``_DECODE_DSV4_PAGE_BLOCK_SIZE = 64``). Keep manager ``--block-size 256``
+    so C128 storage is 2. Returning ``[64]`` lets ``select_common_block_size``
+    split each manager block into four kernel pages. SM100 stays at 256.
+    """
+    if current_platform.is_device_capability_family(120):
+        return [64]
+    return [256]
+
+
 class DeepseekV4SparseMLABackend(AttentionBackend):
     """DeepSeek-V4 sparse-MLA backend base.
 
@@ -52,7 +65,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
+        return dsv4_supported_kernel_block_sizes()
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:

@@ -294,7 +294,15 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
+        # Imported lazily: vllm.models.deepseek_v4 transitively imports
+        # vllm._aiter_ops (via fused_moe), which would deadlock cold start
+        # with an import cycle when vllm._aiter_ops pulls in this module
+        # first (see vllm/v1/attention/ops/rocm_aiter_mla_sparse.py).
+        from vllm.models.deepseek_v4.sparse_mla import (
+            dsv4_supported_kernel_block_sizes,
+        )
+
+        return dsv4_supported_kernel_block_sizes()
 
 
 @dataclass
