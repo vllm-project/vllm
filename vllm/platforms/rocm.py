@@ -598,6 +598,25 @@ class RocmPlatform(Platform):
         # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+        # ROCM_ATTN is ranked ahead of TRITON_ATTN for its custom paged
+        # attention HIP kernel, but on RDNA that kernel is only instantiated at
+        # head_size 128 (see `use_rocm_custom_paged_attention`). Above that
+        # `chunked_prefill_paged_decode` takes its Triton branch, so the reason
+        # for the ranking does not apply and the two are Triton kernels either
+        # way -- and on a head_size 256 model the one that wins the ranking is
+        # the slower of the two at depth. Demote rather than exclude: the
+        # backend still works and stays available behind TRITON_ATTN.
+        if (
+            on_gfx1x()
+            and attn_selector_config.head_size != 128
+            and AttentionBackendEnum.ROCM_ATTN in backend_priorities
+            and AttentionBackendEnum.TRITON_ATTN in backend_priorities
+        ):
+            backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
+            backend_priorities.insert(
+                backend_priorities.index(AttentionBackendEnum.TRITON_ATTN) + 1,
+                AttentionBackendEnum.ROCM_ATTN,
+            )
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
