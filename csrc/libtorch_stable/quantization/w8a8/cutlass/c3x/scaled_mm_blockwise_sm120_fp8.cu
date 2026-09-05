@@ -11,24 +11,18 @@ namespace {
 // On a GB10 (24 MiB L2) the blockwise kernel loses most of its throughput once
 // the weight is re-streamed from DRAM per row of M tiles: a 16384x2560 FP8
 // weight runs at 165 TFLOPS at M=4096 but 90 at M=8192 and 52 at M>=16384;
-// 5120x5120 is already at 117 at M=4096 and 74 from M=6144. With the tile
-// scheduler's max_swizzle_size = 8 the same launches run at 150-168 TFLOPS at
-// every M, bit-identical to the default order.
-//
-// The default order stays marginally faster while the activation slab is
-// small enough for the weight tiles to survive in the L2 anyway: 16384x2560
-// at M=4096 (10 MiB of A) is 165-170 vs 149-155 swizzled, 10240x2560 at
-// M=4096 is 157 vs 152 and 16384x2560 at M=5120 (12.5 MiB) is 166 vs 153,
-// while 5120x5120 at M=4096 (20 MiB of A) is 117 vs 160 and every shape at
-// M=6144 (15 MiB) already gains. The measured crossover is the activation
-// working set, not M alone, so the gate is A's byte count (empirical
-// threshold between the 12.5 MiB loss and the 15 MiB gain: 14 MiB). Parts whose L2 holds the weight (RTX PRO 6000
-// Blackwell / GB202: 96-128 MiB) keep the default order at every M.
+// 8192x8192 is at 54 from M=6144. With the tile scheduler's max_swizzle_size = 8
+// the same launches run at 150-174 TFLOPS at every M, bit-identical to the
+// default order (ten N/K shapes, M 2048-16384, all cells identical). The one
+// place the default order is better is a narrow band around M=4096 on the
+// 2560-wide weights (167 vs 153 at 16384x2560, 160 vs 154 at 12288x2560);
+// elsewhere the swizzled order is equal or up to 3.3x faster, so it is used
+// whenever the weight exceeds the L2. Parts whose L2 holds the weight (RTX PRO
+// 6000 Blackwell / GB202: 96-128 MiB) keep the default order, which is also
+// the faster one there (2560x6144 at 15 MiB: 178 vs 163 at M=2048).
 constexpr int kBlockwiseFp8SwizzleSize = 8;
-constexpr int64_t kBlockwiseFp8SwizzleMinActivationBytes = 14ll << 20;
 
-int blockwise_fp8_swizzle_size(int64_t m, int64_t k, int64_t weight_bytes) {
-  if (m * k < kBlockwiseFp8SwizzleMinActivationBytes) return 1;  // FP8: 1 B/elem
+int blockwise_fp8_swizzle_size(int64_t weight_bytes) {
   const int64_t l2_bytes = get_device_prop()->l2CacheSize;
   return (l2_bytes > 0 && weight_bytes > l2_bytes) ? kBlockwiseFp8SwizzleSize
                                                    : 1;
@@ -41,8 +35,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_scales,
     torch::stable::Tensor const& b_scales) {
   // b is [K, N] FP8 (one byte per element).
-  const int swizzle =
-      blockwise_fp8_swizzle_size(a.size(0), a.size(1), b.size(1) * b.size(0));
+  const int swizzle = blockwise_fp8_swizzle_size(b.size(1) * b.size(0));
   if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     cutlass_gemm_blockwise_sm120_fp8_dispatch<cutlass::bfloat16_t>(
         out, a, b, a_scales, b_scales, swizzle);
