@@ -324,8 +324,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
     assert coordinator.take_block_table_updates().keys() == {request.request_id}
 
 
-def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
-    """Keep indexer-only imports host-backed in the resident block table."""
+def test_hisparse_indexer_only_import_lands_on_gpu_when_capacity_allows():
     manager = make_hisparse_kv_cache_manager(
         32,
         16,
@@ -360,10 +359,10 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     source, indexer, resident, hot = manager.get_blocks(resumed.request_id).blocks
     assert len(source) == len(indexer) == len(resident) == 4
     assert len(hot) == 2
-    # The local prefix is adopted from shadow pages (GPU-resident), while the
-    # externally imported page stays host-backed until its tail allocation.
+    # The local prefix is adopted from shadow pages and the external page lands
+    # directly in the resident cache because this pool has capacity.
     assert not any(block.is_null for block in resident[:2])
-    assert resident[2].is_null
+    assert not resident[2].is_null
     assert not resident[3].is_null
 
 
