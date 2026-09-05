@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
 )
 from vllm.model_executor.models.vision import (
+    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
 )
@@ -351,6 +352,7 @@ class Glm5NextVisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -383,6 +385,9 @@ class Glm5NextVisionTransformer(nn.Module):
             temporal_patch_size=temporal_patch_size,
             in_channels=in_channels,
             hidden_size=self.hidden_size,
+        )
+        self.input_norm = (
+            input_norm if input_norm is not None else FusedInputNorm.identity()
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -564,7 +569,7 @@ class Glm5NextVisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         if encoder_metadata is not None:
