@@ -29,6 +29,19 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("0", False), ("false", False), ("1", True), ("true", True)],
+)
+def test_rocm_streamed_pp_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("VLLM_ROCM_USE_STREAMED_PP_TRANSPORT", value)
+    assert expected is envs.VLLM_ROCM_USE_STREAMED_PP_TRANSPORT
+
+
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):
