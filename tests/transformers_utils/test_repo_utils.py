@@ -140,9 +140,15 @@ def test_get_hf_file_to_dict_honors_no_exist_marker(
             MagicMock(return_value=None),
         ) as mock_download,
     ):
-        result = get_hf_file_to_dict("processor_config.json", "some/repo")
+        result = get_hf_file_to_dict(
+            "processor_config.json", "some/repo", token="secret"
+        )
     assert result is None
     assert mock_download.call_count == int(should_download)
+    if should_download:
+        mock_download.assert_called_once_with(
+            "some/repo", "processor_config.json", "main", token="secret"
+        )
 
 
 @pytest.mark.parametrize(

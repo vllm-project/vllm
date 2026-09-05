@@ -14,12 +14,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
+    get_sentence_transformers_cross_encoder_config,
     try_get_dense_modules,
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces import supports_multimodal
-from .interfaces_base import VllmModelForPooling, is_pooling_model
+from .interfaces_base import (
+    VllmModelForPooling,
+    get_score_type,
+    is_pooling_model,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -37,12 +42,18 @@ _GENERATE_SUFFIXES = [
 ]
 
 
-def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
+def _load_st_projector(
+    model_config: "ModelConfig",
+    dense_modules: list[dict[str, Any]] | None = None,
+) -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
 
-    dense_modules = try_get_dense_modules(
-        model_config.model, revision=model_config.revision
-    )
+    if dense_modules is None:
+        dense_modules = try_get_dense_modules(
+            model_config.model,
+            revision=model_config.revision,
+            hf_token=model_config.hf_token,
+        )
 
     if dense_modules is None:
         return None
@@ -62,7 +73,10 @@ def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
             layers.append(linear)
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-        return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+        if layers:
+            return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
+
+        return None
     except Exception:
         logger.exception("ST projector loading failed")
 
@@ -80,7 +94,10 @@ def _load_dense_weights(
 
         try:
             file_bytes = get_hf_file_bytes(
-                file_path, model_config.model, model_config.revision
+                file_path,
+                model_config.model,
+                model_config.revision,
+                token=model_config.hf_token,
             )
             if not file_bytes:
                 continue
@@ -98,13 +115,20 @@ def _load_dense_weights(
 
             for weight_key in ["weight", "linear.weight", "dense.weight"]:
                 if weight_key in state_dict:
+                    bias_key = weight_key.replace("weight", "bias")
+                    has_bias = bias_key in state_dict
+                    if (linear.bias is not None) != has_bias:
+                        logger.warning(
+                            "Dense bias configuration does not match %s", file_path
+                        )
+                        return False
+
                     weight_loader = getattr(
                         linear.weight, "weight_loader", default_weight_loader
                     )
                     weight_loader(linear.weight, state_dict[weight_key])
 
-                    bias_key = weight_key.replace("weight", "bias")
-                    if linear.bias is not None and bias_key in state_dict:
+                    if linear.bias is not None:
                         bias_loader = getattr(
                             linear.bias, "weight_loader", default_weight_loader
                         )
@@ -126,7 +150,11 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
-def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
+def _create_pooling_model_cls(
+    orig_cls: type[_T],
+    *,
+    reuse_existing_pooler: bool = True,
+) -> type[_T]:
     # Lazy import
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -155,10 +183,17 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             # Used by SEQ_CLS_LOAD_METHODS
             self.vllm_config = vllm_config
 
-            # If the model already defines a pooler instance, don't overwrite it
+            # Reuse embedding poolers by default. Sequence-classification
+            # conversion deliberately replaces them with its classifier pooler.
             pooler = getattr(self, "pooler", None)
             multimodal_model: object = self
-            if not pooler and supports_multimodal(multimodal_model):
+            if not reuse_existing_pooler and pooler is not None:
+                pooler = None
+            if (
+                reuse_existing_pooler
+                and not pooler
+                and supports_multimodal(multimodal_model)
+            ):
                 # Try to get the pooler from the LM backbone
                 language_model = multimodal_model.get_language_model()
                 if hasattr(language_model, "pooler"):
@@ -317,8 +352,9 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
         stored as the attribute `score` of the top-level model;
         please implement your own model if this is not the case.
     """
-    # Avoid modifying existing classification models
-    if is_pooling_model(cls):
+    # Preserve native CrossEncoder implementations, but replace bi-encoder
+    # poolers when adapting a feature-extraction backbone for classification.
+    if is_pooling_model(cls) and get_score_type(cls) == "cross-encoder":
         return cls
 
     # Lazy import
@@ -329,7 +365,10 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
     from .utils import maybe_prefix
 
     class ModelForSequenceClassification(
-        _create_pooling_model_cls(cls),  # type: ignore[misc]
+        _create_pooling_model_cls(  # type: ignore[misc]
+            cls,
+            reuse_existing_pooler=False,
+        ),
         SupportsCrossEncoding,
     ):
         def _init_pooler(
@@ -340,7 +379,38 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             hf_config = vllm_config.model_config.hf_config
             text_config = hf_config.get_text_config()
             model_config = vllm_config.model_config
+            self._uses_sentence_transformers_score = False
 
+            sentence_transformers_config = (
+                get_sentence_transformers_cross_encoder_config(
+                    model_config.model,
+                    model_config.revision,
+                    model_config.hf_token,
+                )
+            )
+            if sentence_transformers_config is not None:
+                dense_config = sentence_transformers_config.dense_config
+                hidden_size = model_config.get_hidden_size()
+                if dense_config["in_features"] != hidden_size:
+                    raise ValueError(
+                        "The Sentence Transformers Dense module has "
+                        f"in_features={dense_config['in_features']}, but the "
+                        f"model hidden size is {hidden_size}."
+                    )
+
+                score = _load_st_projector(model_config, [dense_config])
+                if score is None:
+                    raise ValueError(
+                        "Unable to load the Dense scoring module from this "
+                        "Sentence Transformers CrossEncoder checkpoint."
+                    )
+                self.score = score
+                self._uses_sentence_transformers_score = True
+                self._sentence_transformers_config = sentence_transformers_config
+
+                pooler_config = model_config.pooler_config
+                assert pooler_config is not None
+                return DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
             # Check if score weights are derived online from LM head
             # (same condition as load_weights branch)
             tokens = getattr(
@@ -379,7 +449,8 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             return DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            hf_config = self.config
+            model_config = self.vllm_config.model_config
+            hf_config = model_config.hf_config
             text_config = hf_config.get_text_config()
             tokens = getattr(
                 hf_config,
@@ -387,6 +458,72 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
                 getattr(text_config, "classifier_from_token", None),
             )
             method = getattr(hf_config, "method", getattr(text_config, "method", None))
+
+            if self._uses_sentence_transformers_score:
+                # The checkpoint may have been updated in place, so reload its
+                # module metadata rather than reusing the construction snapshot.
+                get_sentence_transformers_cross_encoder_config.cache_clear()
+                sentence_transformers_config = (
+                    get_sentence_transformers_cross_encoder_config(
+                        model_config.model,
+                        model_config.revision,
+                        model_config.hf_token,
+                    )
+                )
+                if sentence_transformers_config is None:
+                    raise ValueError(
+                        "The reload checkpoint is not a supported Sentence "
+                        "Transformers CrossEncoder."
+                    )
+
+                original_config = self._sentence_transformers_config
+                dense_config = sentence_transformers_config.dense_config
+                dense_keys = (
+                    "in_features",
+                    "out_features",
+                    "bias",
+                    "activation_function",
+                )
+                if (
+                    sentence_transformers_config.pooler_config
+                    != original_config.pooler_config
+                    or sentence_transformers_config.uses_message_format
+                    != original_config.uses_message_format
+                    or sentence_transformers_config.model_config.get("activation_fn")
+                    != original_config.model_config.get("activation_fn")
+                    or any(
+                        dense_config.get(key) != original_config.dense_config.get(key)
+                        for key in dense_keys
+                    )
+                ):
+                    raise ValueError(
+                        "The reload checkpoint has incompatible Sentence "
+                        "Transformers CrossEncoder semantics."
+                    )
+
+                linear = next(
+                    (
+                        module
+                        for module in self.score.modules()
+                        if isinstance(module, nn.Linear)
+                    ),
+                    None,
+                )
+                if linear is None or not _load_dense_weights(
+                    linear, dense_config["folder"], model_config
+                ):
+                    raise ValueError(
+                        "Unable to reload the Dense scoring module from this "
+                        "Sentence Transformers CrossEncoder checkpoint."
+                    )
+                self._sentence_transformers_config = sentence_transformers_config
+
+                loaded_weights = super().load_weights(weights)
+                if loaded_weights is not None:
+                    loaded_weights.update(
+                        f"score.{name}" for name, _ in self.score.named_parameters()
+                    )
+                return loaded_weights
 
             def auto_set_score_bias(weights):
                 for name, weight in weights:

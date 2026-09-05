@@ -679,9 +679,14 @@ class Base(
         is_encoder = lambda module: not getattr(module, "is_causal", True)
         has_encoder = lambda model: any(is_encoder(m) for m in model.modules())
         is_multimodal = lambda config: config != config.get_text_config()
+        text_is_encoder = getattr(self.text_config, "is_causal", None) is False
         # vLLM does not support encoder-decoder models, so if any encoder layer is
-        # found in a text only model, we assume the whole model is an encoder model
-        if has_encoder(self.model) and not is_multimodal(self.config):
+        # found in a text-only model, we assume the whole model is an encoder model.
+        # For multimodal models, use the text config so the modality encoder does not
+        # make an otherwise causal language model look bidirectional.
+        if text_is_encoder or (
+            has_encoder(self.model) and not is_multimodal(self.config)
+        ):
             self.check_version("5.0.0", "encoder models support")
             return EncoderOnlyAttention
         if self.model_config.use_mla:
