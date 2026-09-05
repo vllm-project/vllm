@@ -795,7 +795,9 @@ def rocm_fp8_mqa_logits(
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+        return fp8_mqa_logits(
+            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=False
+        )
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
