@@ -337,9 +337,8 @@ async def maybe_prefill(
     if p_url:
         logger.info("[%s] Processing through prefill: %s", req_id, p_url)
 
-        prefill_response = await process_prefill_stage(req_data, p_url, req_id)
+        prefill_response_json = await process_prefill_stage(req_data, p_url, req_id)
         # for nixl connector to facilitate kv transfer...
-        prefill_response_json = await prefill_response.json()
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
@@ -375,27 +374,28 @@ async def process_prefill_stage(
 
     headers = {"x-request-id": req_id}
     try:
-        prefill_response = await prefill_session.post(
+        async with prefill_session.post(
             f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
-        )
-        prefill_response.raise_for_status()
+        ) as prefill_response:
+            if prefill_response.status != 200:
+                error_text = await prefill_response.text()
+                logger.error(
+                    "[%s] Prefill request failed with status %d: %s",
+                    req_id,
+                    prefill_response.status,
+                    error_text,
+                )
+                raise HTTPException(
+                    status_code=prefill_response.status,
+                    detail={"error": "Prefill request failed", "message": error_text},
+                )
+            prefill_response_json = await prefill_response.json()
+            logger.info("[%s] Prefill request completed successfully", req_id)
 
-        if prefill_response.status != 200:
-            error_text = await prefill_response.text()
-            logger.error(
-                "[%s] Prefill request failed with status %d: %s",
-                req_id,
-                prefill_response.status,
-                error_text,
-            )
-            raise HTTPException(
-                status_code=prefill_response.status,
-                detail={"error": "Prefill request failed", "message": error_text},
-            )
-        logger.info("[%s] Prefill request completed successfully", req_id)
+            return prefill_response_json
 
-        return prefill_response
-
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Prefill processing failed: %s", str(e))
         raise HTTPException(
@@ -504,7 +504,21 @@ async def forward_non_stream(
         async with decode_session.post(
             f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
-            resp.raise_for_status()
+            if resp.status != 200:
+                try:
+                    error_text = await resp.text()
+                except Exception:
+                    error_text = "<unable to read body>"
+                logger.error(
+                    "[%s] Decode request failed with status %d: %s",
+                    req_id,
+                    resp.status,
+                    error_text,
+                )
+                raise HTTPException(
+                    status_code=resp.status,
+                    detail={"error": "Decode request failed", "message": error_text},
+                )
             out = await resp.json()
             _t3 = time.perf_counter()
             logger.info(
@@ -526,7 +540,7 @@ async def forward_non_stream(
 
 async def forward_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
-) -> AsyncIterator[str]:
+) -> StreamingResponse:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
         _t0 = time.perf_counter()
@@ -542,33 +556,58 @@ async def forward_stream(
         logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
         headers = {"x-request-id": req_id}
 
-        # Streaming response
-        _first = None
-        async with decode_session.post(
+        # Open and validate the upstream response before returning a
+        # StreamingResponse. Otherwise FastAPI sends 200 before this generator
+        # runs, and an upstream 4xx/5xx can no longer reach the client.
+        resp = await decode_session.post(
             f"{d_url}/v1/chat/completions",
             json=req_data,
             headers=headers,
-        ) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(1024):
-                if chunk:
-                    if _first is None:
-                        _first = time.perf_counter()
-                    yield chunk.decode("utf-8", errors="ignore")
-        _t3 = time.perf_counter()
-
-        logger.info(
-            "STAGE %s encode=%.1f rewrite=%.2f decode_ttfb=%.1f decode_total=%.1f",
-            "no-rewrite" if NO_REWRITE else "rewrite",
-            (_t1 - _t0) * 1e3,
-            (_t2 - _t1) * 1e3,
-            ((_first or _t3) - _t2) * 1e3,
-            (_t3 - _t2) * 1e3,
         )
-        logger.info("[%s] Streaming completed", req_id)
+        if resp.status != 200:
+            try:
+                error_text = await resp.text()
+            finally:
+                resp.release()
+            logger.error(
+                "[%s] Decode stream request failed with status %d: %s",
+                req_id,
+                resp.status,
+                error_text,
+            )
+            raise HTTPException(
+                status_code=resp.status,
+                detail={"error": "Decode request failed", "message": error_text},
+            )
+
+        async def stream_response() -> AsyncIterator[str]:
+            _first = None
+            try:
+                async for chunk in resp.content.iter_chunked(1024):
+                    if chunk:
+                        if _first is None:
+                            _first = time.perf_counter()
+                        yield chunk.decode("utf-8", errors="ignore")
+            except Exception as e:
+                logger.exception("[%s] Error while streaming decode: %s", req_id, e)
+                raise
+            finally:
+                resp.release()
+                _t3 = time.perf_counter()
+                logger.info(
+                    "STAGE %s encode=%.1f rewrite=%.2f "
+                    "decode_ttfb=%.1f decode_total=%.1f",
+                    "no-rewrite" if NO_REWRITE else "rewrite",
+                    (_t1 - _t0) * 1e3,
+                    (_t2 - _t1) * 1e3,
+                    ((_first or _t3) - _t2) * 1e3,
+                    (_t3 - _t2) * 1e3,
+                )
+                logger.info("[%s] Streaming ended", req_id)
+
+        return StreamingResponse(stream_response(), media_type="text/event-stream")
 
     except HTTPException:
-        logger.exception("[%s] HTTPException in forward_stream", req_id)
         raise
     except Exception as e:
         logger.exception("[%s] Error in forward_stream: %s", req_id, str(e))
@@ -595,10 +634,7 @@ async def chat_completions(request: Request):
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
-            return StreamingResponse(
-                forward_stream(req_data, req_id, e_urls, p_url, d_url),
-                media_type="text/event-stream",
-            )
+            return await forward_stream(req_data, req_id, e_urls, p_url, d_url)
         result = await forward_non_stream(req_data, req_id, e_urls, p_url, d_url)
         return JSONResponse(content=result)
 
