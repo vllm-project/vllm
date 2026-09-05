@@ -87,3 +87,30 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         "Warmed up Qwen4Exp QSA sparse attention kernels: %s.",
         attention_profiles,
     )
+
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_tile_union import (
+        qsa_tile_union_config,
+        warmup_qsa_tile_union,
+    )
+
+    tile_union_config = qsa_tile_union_config()
+    if tile_union_config is not None:
+        tile_union_profile = warmup_qsa_tile_union(
+            kv_cache,
+            block_table_for(owner.layer_name),
+            num_query_heads=owner.num_heads,
+            compress_ratio=indexer.compress_ratio,
+            token_topk=indexer.token_topk,
+            config=tile_union_config,
+        )
+        if tile_union_profile is None:
+            logger.warning(
+                "QSA tile-union path enabled but this model's compress ratio / "
+                "page size are outside what its kernels handle; the split-K "
+                "kernel will run."
+            )
+        else:
+            logger.info(
+                "Warmed up Qwen4Exp QSA tile-union kernels (rows, BN, warps): %s.",
+                tile_union_profile,
+            )
