@@ -234,6 +234,17 @@ class ModelState(ABC):
         """
         return None
 
+    def compute_sample_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project the sampled hidden states to the logits fed to the sampler."""
+        return cast(Any, self.model).compute_logits(hidden_states)
+
+    def dummy_sampler_run(self, sampler: Any, hidden_states: torch.Tensor) -> bool:
+        """Run a model-specific sampler profiling pass.
+
+        Return ``True`` to skip the default dummy sampler run.
+        """
+        return False
+
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 
     (excluding accepted draft tokens, a.k.a num bonus tokens)."""

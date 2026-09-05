@@ -863,6 +863,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        assert self.sampler is not None
+        if self.model_state.dummy_sampler_run(self.sampler, hidden_states):
+            return
         num_reqs = hidden_states.shape[0]
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
@@ -872,7 +875,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        assert self.sampler is not None
         self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
@@ -1464,7 +1466,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
+            logits = self.model_state.compute_sample_logits(sample_hidden_states)
 
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
