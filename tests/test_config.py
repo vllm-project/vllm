@@ -813,6 +813,24 @@ def test_v2_model_runner_supports_custom_logits_processors():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def test_reasoning_loop_breaking_keeps_the_v2_model_runner():
+    """V2's ThinkingBudgetState detects reasoning loops on device, so enabling
+    the feature must not demote the request onto the deprecated V1 runner."""
+    from vllm.config.reasoning import ReasoningConfig
+
+    config = VllmConfig()
+    config.reasoning_config = ReasoningConfig(
+        reasoning_start_str="<think>",
+        reasoning_end_str="</think>",
+    )
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+    config.reasoning_config.loop_break_max_pattern_size = 64
+    config.reasoning_config.loop_break_min_pattern_size = 4
+    config.reasoning_config.loop_break_min_count = 3
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
 @pytest.mark.parametrize("architecture", ["DFlash2DraftModel", "LiLiCorrDraftModel"])
 def test_dflash_candidate_draft_forces_v2_model_runner(architecture):
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
