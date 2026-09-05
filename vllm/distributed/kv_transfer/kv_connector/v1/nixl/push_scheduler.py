@@ -238,6 +238,18 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # serving layer via abort_immediately. To keep P from
             # stranding the prefill blocks, we still register an empty
             # recv so the worker emits a notif that lets P free them.
+            # However, if the required remote fields are absent (e.g.
+            # the request was rejected before prefill produced any
+            # transfer metadata), there is no remote P-node to notify.
+            if not params.get("remote_engine_id"):
+                logger.debug(
+                    "Skipping recv cleanup for %s: no remote transfer "
+                    "metadata (request was likely rejected before prefill "
+                    "completed).",
+                    request.request_id,
+                )
+                params["do_remote_prefill"] = False
+                return False, None
             # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
             params["remote_block_ids"] = ()
             self._reqs_need_recv[request.request_id] = (request, [], ())
