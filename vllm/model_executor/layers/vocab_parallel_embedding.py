@@ -90,6 +90,20 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         return layer
 
 
+def is_unquantized_method(quant_method: object) -> bool:
+    """Whether an embedding/lm_head quant method is unquantized.
+
+    A layer excluded from quantization (e.g. via a ModelOpt exclude_modules
+    config) carries UnquantizedLinearMethod rather than
+    UnquantizedEmbeddingMethod; both hold plain, unpacked weights.
+    """
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    return isinstance(
+        quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+    )
+
+
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
     """Pad the vocab size to the given value."""
     return ((vocab_size + pad_to - 1) // pad_to) * pad_to
