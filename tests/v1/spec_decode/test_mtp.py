@@ -33,7 +33,7 @@ mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
 
 
-def test_shared_head_can_defer_lm_head(default_vllm_config):
+def test_shared_head_can_defer_lm_head():
     config = mock.MagicMock(hidden_size=16, rms_norm_eps=1e-5, vocab_size=32)
 
     with mock.patch(
