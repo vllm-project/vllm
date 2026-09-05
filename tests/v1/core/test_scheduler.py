@@ -543,6 +543,135 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("cap", [1, 2, 3])
+def test_max_concurrent_prefills_bounds_admissions(cap: int):
+    """`max_concurrent_prefills` admits at most `cap` prefills in a step, even
+    with budget to spare and more requests waiting. The rest stay WAITING in
+    arrival order, to be admitted as earlier prefills complete."""
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=8192, max_concurrent_prefills=cap
+    )
+    requests = create_requests(
+        num_requests=4, num_tokens=8, req_ids=[f"r{i}" for i in range(4)]
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.num_scheduled_tokens) == cap
+    for request in requests[:cap]:
+        assert request.request_id in output.num_scheduled_tokens
+    for request in requests[cap:]:
+        assert request.request_id not in output.num_scheduled_tokens
+        assert request.status == RequestStatus.WAITING
+
+
+def test_max_concurrent_prefills_counts_inflight_chunks():
+    """A prefill that spans several steps holds its blocks the whole time, so it
+    counts against the cap on later steps too: with a cap of 1, a waiting
+    request is held until the chunked prefill ahead of it finishes."""
+    scheduler = create_scheduler(
+        max_num_seqs=16,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+        max_concurrent_prefills=1,
+    )
+
+    # 80 tokens against a 50-token budget: prefilled in two chunks.
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens["chk0"] == 50
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["chk0"],
+            req_id_to_index={"chk0": 0},
+            sampled_token_ids=[[]],  # no token sampled for a partial prefill
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk
+
+    # The cap is already spent on the in-flight prefill, so this one waits even
+    # though the step has budget for it.
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    output = scheduler.schedule()
+    assert "new0" not in output.num_scheduled_tokens
+    assert new_req.status == RequestStatus.WAITING
+    # The chunked prefill itself is untouched: the cap gates admission only.
+    assert output.num_scheduled_tokens["chk0"] == 30
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["chk0"],
+            req_id_to_index={"chk0": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert not chunk_req.is_prefill_chunk
+
+    # With the prefill finished, the cap frees up and the request is admitted.
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+
+
+def test_max_concurrent_prefills_leaves_decode_scheduled():
+    """The cap bounds prefill admission, not decode: a request that has finished
+    prefilling no longer counts against it and keeps being scheduled while
+    waiting prefills are held back."""
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=8192, max_concurrent_prefills=1
+    )
+    (decode_req,) = create_requests(
+        num_requests=1, num_tokens=8, max_tokens=100, req_ids=["dec0"]
+    )
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0"],
+            req_id_to_index={"dec0": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert not decode_req.is_prefill_chunk
+
+    requests = create_requests(num_requests=2, num_tokens=8, req_ids=["new0", "new1"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert "dec0" in output.num_scheduled_tokens
+    assert "new0" in output.num_scheduled_tokens
+    assert "new1" not in output.num_scheduled_tokens
+
+
+def test_max_concurrent_prefills_defaults_to_unbounded():
+    """The default of 0 leaves admission exactly as it was."""
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+    assert scheduler.max_concurrent_prefills == 0
+
+    requests = create_requests(
+        num_requests=4, num_tokens=8, req_ids=[f"r{i}" for i in range(4)]
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert len(output.num_scheduled_tokens) == 4
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
