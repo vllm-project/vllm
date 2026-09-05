@@ -27,6 +27,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -806,10 +807,12 @@ def safe_apply_chat_template(
             **resolved_kwargs,
         )
     except Exception as e:
-        logger.exception(
-            "An error occurred in `transformers` while applying chat template"
-        )
-        raise ValueError(str(e)) from e
+        # Chat templates reject invalid user input (e.g. an unsupported
+        # `reasoning_effort` value) by raising from within the template.
+        # Surface those as a 400 Bad Request carrying the template's own
+        # message (which typically lists the supported values) instead of a 500.
+        logger.warning("Chat template rejected the request: %s", e)
+        raise VLLMValidationError(str(e)) from e
 
     if return_assistant_tokens_mask:
         assert isinstance(plain, list), f"Expected list[int], got {type(plain)}"
