@@ -14,13 +14,17 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    _USE_LAYERNAME,
+    direct_register_custom_op,
+)
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -53,6 +57,22 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     is_neox: bool,
     layer_name: str = "",
 ) -> torch.Tensor:
+    if layer_name == "from_forward_context":
+        forward_context = get_forward_context()
+        all_kv_layers = forward_context.all_kv_layers
+        assert all_kv_layers is not None, (
+            "all_kv_layers must be set in ForwardContext when using "
+            "'from_forward_context' sentinel"
+        )
+        kv_layer_index = forward_context.kv_layer_index
+        if kv_layer_index >= len(all_kv_layers):
+            raise AssertionError(
+                "We expected the number of KV layers in `all_kv_layers` "
+                "to be equal to the number of "
+                "fused_qk_norm_rope_and_unified_kv_cache_update calls."
+            )
+        layer_name = all_kv_layers[kv_layer_index]
+        forward_context.kv_layer_index += 1
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_qk_norm_rope_kvcache_update(
@@ -191,7 +211,10 @@ class QkNormRopeKvCachePattern:
         q_rope = q_rope.view(-1, self.num_heads, self.head_size)
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        _kv_layer_name = (
+            "from_forward_context" if not _USE_LAYERNAME else self.layer_name
+        )
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, _kv_layer_name)
         return dummy, q_rope, k_rope, v
 
     def replacement_non_fp8_quant_query(
@@ -269,7 +292,10 @@ class QkNormRopeKvCachePattern:
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
-        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
+        _kv_layer_name = (
+            "from_forward_context" if not _USE_LAYERNAME else self.layer_name
+        )
+        dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, _kv_layer_name)
         return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
     def replacement_fp8_quant_query(
