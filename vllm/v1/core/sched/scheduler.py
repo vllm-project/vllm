@@ -2991,8 +2991,16 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            # get_block_ids() returns a tuple of lists, one per KV cache group.
+            # For hybrid (HMA / attention + Mamba/GDN) models there are multiple
+            # groups, so a single-value unpack `(req_block_ids,) =` raises
+            # "too many values to unpack" -> EngineDeadError. Flatten all groups
+            # so the invalid-block scan covers every KV space.
+            req_block_ids = [
+                bid
+                for grp_block_ids in self.kv_cache_manager.get_block_ids(req_id)
+                for bid in grp_block_ids
+            ]
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
