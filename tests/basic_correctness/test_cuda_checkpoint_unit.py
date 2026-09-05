@@ -82,3 +82,69 @@ def test_resume_retries_failed_restore(monkeypatch):
     assert restore.call_args_list == [call(pid), call(pid)]
     unlock.assert_called_once_with(pid)
     assert not checkpointer.is_suspended
+
+
+@pytest.mark.parametrize(
+    "state, restore_count, unlock_count",
+    [
+        (cuda_checkpoint.PROCESS_STATE_RUNNING, 0, 0),
+        (cuda_checkpoint.PROCESS_STATE_LOCKED, 0, 1),
+        (cuda_checkpoint.PROCESS_STATE_CHECKPOINTED, 1, 1),
+    ],
+)
+def test_recover_partial_suspend(monkeypatch, state, restore_count, unlock_count):
+    driver = Mock()
+    driver.get_state.return_value = state
+    for name in ("get_state", "process_restore", "process_unlock"):
+        monkeypatch.setattr(cuda_checkpoint, name, getattr(driver, name))
+    checkpointer = cuda_checkpoint.CudaCheckpointer()
+
+    checkpointer.recover()
+
+    pid = cuda_checkpoint.os.getpid()
+    expected = [call.get_state(pid)]
+    expected += [call.process_restore(pid)] * restore_count
+    expected += [call.process_unlock(pid)] * unlock_count
+    assert driver.mock_calls == expected
+    assert not checkpointer.is_suspended
+
+
+def test_recover_retains_state_after_unlock_failure(monkeypatch):
+    monkeypatch.setattr(
+        cuda_checkpoint,
+        "get_state",
+        Mock(return_value=cuda_checkpoint.PROCESS_STATE_LOCKED),
+    )
+    restore = Mock()
+    unlock = Mock(side_effect=[RuntimeError("unlock failed"), None])
+    monkeypatch.setattr(cuda_checkpoint, "process_restore", restore)
+    monkeypatch.setattr(cuda_checkpoint, "process_unlock", unlock)
+    checkpointer = cuda_checkpoint.CudaCheckpointer()
+
+    with pytest.raises(RuntimeError, match="unlock failed"):
+        checkpointer.recover()
+    assert checkpointer.is_suspended
+
+    checkpointer.resume()
+    restore.assert_not_called()
+    assert unlock.call_count == 2
+    assert not checkpointer.is_suspended
+
+
+def test_recover_failed_driver_state(monkeypatch):
+    monkeypatch.setattr(
+        cuda_checkpoint,
+        "get_state",
+        Mock(return_value=cuda_checkpoint.PROCESS_STATE_FAILED),
+    )
+    restore = Mock()
+    unlock = Mock()
+    monkeypatch.setattr(cuda_checkpoint, "process_restore", restore)
+    monkeypatch.setattr(cuda_checkpoint, "process_unlock", unlock)
+    checkpointer = cuda_checkpoint.CudaCheckpointer()
+
+    with pytest.raises(RuntimeError, match="Cannot recover CUDA process"):
+        checkpointer.recover()
+    assert checkpointer.is_suspended
+    restore.assert_not_called()
+    unlock.assert_not_called()

@@ -111,6 +111,32 @@ class CudaCheckpointer:
         logger.info("CUDA process suspended (pid=%d).", pid)
         return pid
 
+    def recover(self) -> None:
+        """Return the CUDA process to RUNNING after a failed suspension.
+
+        A failed driver call can leave the process locked or checkpointed
+        before suspend() records its state. Query the driver so recovery
+        also handles these partially completed suspensions.
+        """
+        pid = os.getpid()
+        state = self.get_state(pid)
+        if state == PROCESS_STATE_RUNNING:
+            self._restored_pid = None
+            self._is_suspended = False
+            return
+
+        self._checkpoint_pid = pid
+        self._is_suspended = True
+        if state == PROCESS_STATE_LOCKED:
+            self._restored_pid = pid
+        elif state == PROCESS_STATE_CHECKPOINTED:
+            self._restored_pid = None
+        else:
+            raise RuntimeError(
+                f"Cannot recover CUDA process {pid} from driver state {state}."
+            )
+        self.resume(pid)
+
     def resume(self, handle: int | None = None) -> None:
         """Resume the CUDA process from a checkpoint.
 

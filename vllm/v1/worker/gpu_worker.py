@@ -320,7 +320,20 @@ class Worker(WorkerBase):
         # Destroy NCCL communicators before suspend
         self._destroy_nccl_communicators()
 
-        handle = checkpointer.suspend()
+        try:
+            handle = checkpointer.suspend()
+        except BaseException:
+            # Restore CUDA state before recreating communicators, and keep
+            # the original suspension error even if either cleanup fails.
+            try:
+                checkpointer.recover()
+            except BaseException:
+                logger.exception("CUDA state recovery after suspension failure failed.")
+            try:
+                self._reinit_nccl_communicators()
+            except BaseException:
+                logger.exception("NCCL recovery after suspension failure failed.")
+            raise
         return {"checkpoint_handle": handle}
 
     def resume(self, checkpoint_handle: int | None = None) -> None:
