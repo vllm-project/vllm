@@ -10,7 +10,6 @@ from typing import Any
 from uuid import uuid4
 
 from torch.fx import GraphModule
-from torch._dynamo.backends.registry import lookup_backend
 
 from vllm.logger import init_logger
 
@@ -35,15 +34,26 @@ def dump_fx_graph(gm: GraphModule, dump_dir: Path, prefix: str) -> Path:
 def wrap_backend_with_fx_dump(
     backend: str | Callable[..., Any], dump_dir: Path, prefix: str
 ) -> Callable[..., Any]:
-    """Dump each Dynamo FX graph and execute it without backend lowering."""
-    compiler_fn = lookup_backend(backend)
+    """Dump FX graphs and lower them with the direct InferRT backend.
+
+    A string backend is retained in the vLLM configuration for compatibility
+    with its backend validation, but is deliberately not resolved through
+    TorchDynamo's registry. InferRT is an external backend and is not
+    registered there under the ``inductor`` name.
+    """
+    if isinstance(backend, str):
+        from ms_inferrt.torch.fx_backend import backend as compiler_fn
+    else:
+        compiler_fn = backend
 
     @wraps(compiler_fn)
     def dumping_backend(
         gm: GraphModule, example_inputs: list[Any], **kwargs: Any
     ) -> Any:
         path = dump_fx_graph(gm, dump_dir, prefix)
-        logger.info("Enter Fake Backend; Dynamo FX graph saved to %s", path)
-        return gm.forward
+        logger.info("Enter InferRT Backend; Dynamo FX graph saved to %s", path)
+        # InferRT accepts only the graph and example inputs. Any kwargs here
+        # belong to the original compiler backend rather than InferRT.
+        return compiler_fn(gm, example_inputs)
 
     return dumping_backend
