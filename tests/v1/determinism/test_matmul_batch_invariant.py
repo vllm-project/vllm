@@ -11,14 +11,243 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-from vllm.model_executor.determinism.batch_invariant import matmul_batch_invariant
+import vllm.model_executor.determinism.batch_invariant as batch_invariant_module
+import vllm.model_executor.determinism.batch_invariant_configs as config_module
+from vllm.model_executor.determinism.batch_invariant import (
+    addmm_batch_invariant,
+    matmul_batch_invariant,
+)
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
 )
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    trace_triton_kernel_specialization_args,
+)
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _record_tuned_matmul_warmup(
+    monkeypatch,
+    table,
+    *,
+    stride_am=2048,
+    stride_bn=2048,
+):
+    calls = []
+
+    class RecordingKernel:
+        def warmup(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        batch_invariant_module,
+        "matmul_kernel_persistent_compiled",
+        RecordingKernel(),
+    )
+    monkeypatch.setattr(batch_invariant_module, "num_compute_units", lambda _: 1)
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_FOR_DEVICE", table)
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+    monkeypatch.setattr(batch_invariant_module, "_WARMED_TUNED_MATMUL_CONFIGS", set())
+
+    batch_invariant_module._warmup_tuned_matmul_configs(
+        current_platform.current_device(), stride_am, 1, 1, stride_bn, False
+    )
+    return calls
+
+
+@skip_unsupported
+@pytest.mark.parametrize("with_bias", [False, True], ids=["no_bias", "bias"])
+def test_batch_invariant_matmul_custom_op_schema(monkeypatch, with_bias):
+    monkeypatch.setattr(
+        batch_invariant_module, "_warmup_tuned_matmul_configs", lambda *args: None
+    )
+    a = torch.rand((8, 64), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    b = torch.rand((64, 32), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    bias = (
+        torch.rand((32,), dtype=torch.bfloat16, device=DEVICE_TYPE)
+        if with_bias
+        else None
+    )
+
+    torch.library.opcheck(
+        torch.ops.vllm.batch_invariant_matmul.default,
+        (a, b, bias),
+    )
+
+
+def test_compiled_addmm_selects_tuned_config_from_runtime_m(monkeypatch):
+    has_bias_values = []
+
+    class RecordingKernel:
+        def __getitem__(self, grid):
+            def launch(a, b, c, *args, **meta):
+                has_bias_values.append(meta["HAS_BIAS"])
+                c.fill_(meta["BLOCK_SIZE_M"])
+
+            return launch
+
+    monkeypatch.setattr(
+        batch_invariant_module,
+        "matmul_kernel_persistent_compiled",
+        RecordingKernel(),
+    )
+    monkeypatch.setattr(batch_invariant_module, "num_compute_units", lambda _: 1)
+    monkeypatch.setattr(
+        config_module,
+        "_TUNED_MATMUL_CONFIGS_FOR_DEVICE",
+        _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"],
+    )
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+
+    compile_count = 0
+
+    def counting_backend(graph_module, example_inputs):
+        nonlocal compile_count
+        compile_count += 1
+        return graph_module.forward
+
+    compiled_addmm = torch.compile(
+        addmm_batch_invariant,
+        backend=counting_backend,
+        dynamic=True,
+        fullgraph=True,
+    )
+    b = torch.empty((2048, 4096), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    bias = torch.empty((4096,), dtype=torch.bfloat16, device=DEVICE_TYPE)
+
+    small = compiled_addmm(
+        bias, torch.empty((8, 2048), dtype=torch.bfloat16, device=DEVICE_TYPE), b
+    )
+    large = compiled_addmm(
+        bias, torch.empty((2048, 2048), dtype=torch.bfloat16, device=DEVICE_TYPE), b
+    )
+
+    assert compile_count == 1
+    assert has_bias_values == [True, True]
+    assert torch.all(small == 16)
+    assert torch.all(large == 128)
+
+
+@pytest.mark.parametrize(
+    "dtype,b_shape,has_table",
+    [
+        pytest.param(torch.bfloat16, (64, 32), True, id="untuned-shape"),
+        pytest.param(torch.float16, (2048, 4096), True, id="untuned-dtype"),
+        pytest.param(torch.bfloat16, (2048, 4096), False, id="untuned-device"),
+    ],
+)
+def test_compiled_matmul_keeps_untuned_paths_in_graph(
+    monkeypatch, dtype, b_shape, has_table
+):
+    monkeypatch.setattr(
+        config_module,
+        "_TUNED_MATMUL_CONFIGS_FOR_DEVICE",
+        _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"] if has_table else None,
+    )
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+    graphs = []
+
+    def inspect_backend(graph_module, example_inputs):
+        graphs.append(graph_module.graph)
+        return graph_module.forward
+
+    compiled_matmul = torch.compile(
+        matmul_batch_invariant,
+        backend=inspect_backend,
+        dynamic=True,
+        fullgraph=True,
+    )
+    K, N = b_shape
+    a = torch.empty((8, K), dtype=dtype, device=DEVICE_TYPE)
+    b = torch.empty(b_shape, dtype=dtype, device=DEVICE_TYPE)
+
+    compiled_matmul(a, b)
+
+    assert len(graphs) == 1
+    assert "vllm.batch_invariant_matmul" not in str(graphs[0])
+
+
+@skip_unsupported
+def test_compiled_matmul_runtime_m_dispatch_is_correct(monkeypatch):
+    monkeypatch.setattr(
+        config_module,
+        "_TUNED_MATMUL_CONFIGS_FOR_DEVICE",
+        _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"],
+    )
+    monkeypatch.setattr(config_module, "_TUNED_MATMUL_CONFIGS_RESOLVED", True)
+    torch._dynamo.reset()
+
+    compiled_matmul = torch.compile(
+        matmul_batch_invariant,
+        dynamic=True,
+        fullgraph=True,
+    )
+    torch.manual_seed(42)
+    b = torch.rand((2048, 4096), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    shared_row = torch.rand((2048,), dtype=torch.bfloat16, device=DEVICE_TYPE)
+    first_row_outputs = []
+
+    try:
+        for m in (8, 256):
+            a = torch.rand((m, 2048), dtype=torch.bfloat16, device=DEVICE_TYPE)
+            a[0] = shared_row
+            actual = compiled_matmul(a, b)
+            expected = torch.matmul(a, b)
+            torch.testing.assert_close(actual, expected, rtol=1e-1, atol=1e-1)
+            first_row_outputs.append(actual[0])
+        assert torch.equal(*first_row_outputs)
+    finally:
+        torch._dynamo.reset()
+
+
+def test_compiled_kernel_does_not_change_eager_m_specialization():
+    eager_args = trace_triton_kernel_specialization_args(
+        batch_invariant_module.matmul_kernel_persistent
+    )
+    compiled_kernel = batch_invariant_module.matmul_kernel_persistent_compiled
+
+    assert "M" in eager_args
+    assert "M" not in trace_triton_kernel_specialization_args(compiled_kernel)
+
+
+def test_tuned_matmul_warmup_covers_all_table_configs(monkeypatch):
+    calls = _record_tuned_matmul_warmup(
+        monkeypatch,
+        _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"],
+    )
+
+    expected_configs = {
+        (
+            bucket.block_m,
+            bucket.block_n,
+            shape_config.block_k,
+            8,
+            bucket.num_warps,
+            bucket.num_stages,
+        )
+        for shape_config in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS["ada"].values()
+        for _, bucket in shape_config.m_buckets
+    }
+    warmed_configs = {
+        (
+            kwargs["BLOCK_SIZE_M"],
+            kwargs["BLOCK_SIZE_N"],
+            kwargs["BLOCK_SIZE_K"],
+            kwargs["GROUP_SIZE_M"],
+            kwargs["num_warps"],
+            kwargs["num_stages"],
+        )
+        for _, kwargs in calls
+    }
+
+    assert warmed_configs == expected_configs
+    assert {args[4] for args, _ in calls} == {2}
+    assert any(kwargs["C_LARGE"] for _, kwargs in calls if kwargs["BLOCK_SIZE_N"] == 64)
+    assert {args[9:11] for args, _ in calls} == {(1, 16)}
+    assert {kwargs["HAS_BIAS"] for _, kwargs in calls} == {False}
 
 
 @skip_unsupported

@@ -11,13 +11,15 @@ import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_descriptor_matmul_config,
     _get_matmul_config,
+    _get_tuned_matmul_configs_for_device,
+    _get_tuned_matmul_shape_config,
     resolve_tuned_matmul_configs,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
 def _matmul_launch_metadata(
@@ -277,9 +279,133 @@ def matmul_descriptor_persistent(
     return c
 
 
-def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
-):
+matmul_kernel_persistent_compiled = triton.jit(
+    matmul_kernel_persistent.fn,
+    launch_metadata=_matmul_launch_metadata,
+    do_not_specialize=["M"],
+)
+
+
+_WARMED_TUNED_MATMUL_CONFIGS: set[tuple[int, ...]] = set()
+
+
+def _warmup_tuned_matmul_configs(
+    device_index: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_bk: int,
+    stride_bn: int,
+    has_bias: bool,
+) -> None:
+    device_configs = _get_tuned_matmul_configs_for_device()
+    warmup = getattr(matmul_kernel_persistent_compiled, "warmup", None)
+    if device_configs is None or warmup is None:
+        return
+
+    from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+        TritonWarmupTensor,
+        triton_scalar_specialization_rep,
+    )
+
+    pointer = TritonWarmupTensor(torch.bfloat16)
+    num_sms = num_compute_units(device_index)
+    stride_am = triton_scalar_specialization_rep(stride_am)
+    stride_ak = triton_scalar_specialization_rep(stride_ak)
+    stride_bk = triton_scalar_specialization_rep(stride_bk)
+    stride_bn = triton_scalar_specialization_rep(stride_bn)
+    cache_key = (
+        id(device_configs),
+        id(matmul_kernel_persistent_compiled),
+        device_index,
+        num_sms,
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        has_bias,
+    )
+    if cache_key in _WARMED_TUNED_MATMUL_CONFIGS:
+        return
+
+    default: dict[str, int] = {}
+    warmed_specializations = set()
+
+    def warm_shape(m: int, N: int, K: int, config: dict[str, int]) -> None:
+        # M selects the tile in the runtime custom op, but the kernel itself
+        # must accept every M value for that tile. Keep its i32 warmup value
+        # generic so Triton does not compile M=1/divisible-by-16 variants.
+        runtime_m = 2
+        a_large = m * K > 2**31
+        b_large = K * N > 2**31
+        c_large = m * N > 2**31
+        specialization = (
+            config["BLOCK_SIZE_M"],
+            config["BLOCK_SIZE_N"],
+            config["BLOCK_SIZE_K"],
+            config["GROUP_SIZE_M"],
+            config["num_warps"],
+            config["num_stages"],
+            a_large,
+            b_large,
+            c_large,
+        )
+        if specialization in warmed_specializations:
+            return
+        warmed_specializations.add(specialization)
+        divisible = triton_scalar_specialization_rep(N)
+        warmup(
+            pointer,
+            pointer,
+            pointer,
+            pointer if has_bias else None,
+            runtime_m,
+            divisible,
+            triton_scalar_specialization_rep(K),
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            divisible,
+            1,
+            NUM_SMS=num_sms,
+            A_LARGE=a_large,
+            B_LARGE=b_large,
+            C_LARGE=c_large,
+            HAS_BIAS=has_bias,
+            **config,
+            grid=(1,),
+        )
+
+    # Warm all table entries so later compiled calls can select any tuned
+    # shape/M bucket after the JIT monitor starts. M itself is not a Triton
+    # specialization.
+    for (N, K), shape_config in device_configs.items():
+        min_m = 1
+        for max_m, _ in shape_config.m_buckets:
+            config = _get_matmul_config(max_m, N, K, torch.bfloat16, default)
+            warm_shape(min_m, N, K, config)
+            min_m = max_m + 1
+
+        # Values above the last bucket reuse its tile. Warm each large-index
+        # state reachable by the current table shapes.
+        tail_starts = {
+            min_m,
+            max(min_m, 2**31 // K + 1),
+            max(min_m, 2**31 // N + 1),
+        }
+        max_runtime_m = torch.iinfo(torch.int32).max
+        for m in tail_starts:
+            if m <= max_runtime_m:
+                warm_shape(m, N, K, config)
+    _WARMED_TUNED_MATMUL_CONFIGS.add(cache_key)
+
+
+def _matmul_persistent_impl(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    kernel: Any = matmul_kernel_persistent,
+) -> torch.Tensor:
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     assert a.dtype == b.dtype, "Incompatible dtypes"
@@ -329,7 +455,7 @@ def matmul_persistent(
             "num_warps": 8,
         },
     }
-    matmul_kernel_persistent[grid](
+    kernel[grid](
         a,
         b,
         c,  #
@@ -351,6 +477,48 @@ def matmul_persistent(
         **_get_matmul_config(M, N, K, dtype, configs[dtype]),
     )
     return c
+
+
+def _matmul_persistent_compiled(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    _warmup_tuned_matmul_configs(
+        a.device.index,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        bias is not None,
+    )
+    return _matmul_persistent_impl(a, b, bias, kernel=matmul_kernel_persistent_compiled)
+
+
+def _matmul_persistent_fake(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty((a.shape[0], b.shape[1]), device=a.device, dtype=a.dtype)
+
+
+direct_register_custom_op(
+    "batch_invariant_matmul",
+    _matmul_persistent_compiled,
+    fake_impl=_matmul_persistent_fake,
+)
+
+
+def matmul_persistent(
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    if (
+        torch.compiler.is_compiling()
+        and _get_tuned_matmul_shape_config(b.shape[1], a.shape[1], a.dtype) is not None
+    ):
+        return torch.ops.vllm.batch_invariant_matmul(a, b, bias)
+    return _matmul_persistent_impl(a, b, bias)
 
 
 @triton.jit
