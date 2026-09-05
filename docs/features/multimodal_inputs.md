@@ -571,6 +571,15 @@ You can pass pre-computed audio embeddings similar to image embeddings:
 
 ### Cached Inputs
 
+!!! warning "Security & Multi-Tenancy Note"
+    The `uuid` parameter is used verbatim as the key in `EncoderCacheManager`'s global, unscoped cache dictionary without content verification or media hashing.
+
+    If your deployment serves multiple untrusted callers or tenants behind a shared vLLM instance:
+    - **Do not accept raw caller-supplied UUIDs** directly from untrusted client inputs without enforcing per-tenant namespacing at the gateway layer.
+    - **Do not use predictable or guessable identifiers** (such as public image URLs or sequential IDs) as the UUID.
+
+    Because vLLM allows retrieving cached embeddings using the `uuid` alone (even when no media payload is provided), a colliding or guessed UUID can allow one tenant to inadvertently or maliciously retrieve another tenant's previously-computed embedding.
+
 When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
 
 ??? code
@@ -594,7 +603,7 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         #  - Include every modality present in multi_modal_data.
         #  - For lists, provide the same number of entries.
         #  - Use None to fall back to content hashing for that item.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+        "multi_modal_uuids": {"image": ["b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f", None]},
     })
 
     for o in outputs:
@@ -620,7 +629,7 @@ Using UUIDs, you can also skip sending media data entirely if you expect cache h
         "multi_modal_data": {"image": [None, img_b]},
         # Since img_a is expected to be cached, we can skip sending the actual
         # image entirely.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+        "multi_modal_uuids": {"image": ["b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f", None]},
     })
 
     for o in outputs:
@@ -693,7 +702,7 @@ Then, you can use the OpenAI client as follows:
                     {
                         "type": "image_url",
                         "image_url": {"url": image_url},
-                        "uuid": image_url,  # Optional
+                        "uuid": "b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f",  # Optional
                     },
                 ],
             }
@@ -747,12 +756,12 @@ Then, you can use the OpenAI client as follows:
                     {
                         "type": "image_url",
                         "image_url": {"url": image_url_duck},
-                        "uuid": image_url_duck,  # Optional
+                        "uuid": "c7f3e8a1-2b4d-4e9f-8a6c-5d1e3f7a9b0c",  # Optional
                     },
                     {
                         "type": "image_url",
                         "image_url": {"url": image_url_lion},
-                        "uuid": image_url_lion,  # Optional
+                        "uuid": "e8a1f2b3-4c5d-6e7f-8a9b-0c1d2e3f4a5b",  # Optional
                     },
                 ],
             }
@@ -819,7 +828,7 @@ Then, you can use the OpenAI client as follows:
                     {
                         "type": "video_url",
                         "video_url": {"url": video_url},
-                        "uuid": video_url,  # Optional
+                        "uuid": "f1a2b3c4-d5e6-7f8a-9b0c-1d2e3f4a5b6c",  # Optional
                     },
                 ],
             }
@@ -1151,7 +1160,7 @@ Then, you can use the OpenAI client as follows:
                             "data": audio_base64,
                             "format": "wav",
                         },
-                        "uuid": audio_url,  # Optional
+                        "uuid": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",  # Optional
                     },
                 ],
             },
@@ -1181,7 +1190,7 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
                     {
                         "type": "audio_url",
                         "audio_url": {"url": audio_url},
-                        "uuid": audio_url,  # Optional
+                        "uuid": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d",  # Optional
                     },
                 ],
             }
@@ -1272,7 +1281,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     embeds = {
         "type": "image_embeds",
         "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
-        "uuid": image_url,  # Optional
+        "uuid": "b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f",  # Optional
     }
 
 
@@ -1284,7 +1293,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
             "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
             "image_grid_thw": tensor2base64(torch.load(...)),  # Shape: (3,)
         },
-        "uuid": image_url,  # Optional
+        "uuid": "b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f",  # Optional
     }
 
     model = "openbmb/MiniCPM-V-2_6"
@@ -1294,7 +1303,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
             "image_embeds": tensor2base64(torch.load(...)),  # Shape: (num_slices, hidden_size)
             "image_sizes": tensor2base64(torch.load(...)),  # Shape: (2,)
         },
-        "uuid": image_url,  # Optional
+        "uuid": "b6a8f1e2-9d3c-4a1b-8f5e-7a2c4b1d6e3f",  # Optional
     }
 
     # Single image input
@@ -1364,6 +1373,15 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ```
 
 ### Cached Inputs
+
+!!! warning "Security & Multi-Tenancy Note"
+    The `uuid` parameter is used verbatim as the key in `EncoderCacheManager`'s global, unscoped cache dictionary without content verification or media hashing.
+
+    If your deployment serves multiple untrusted callers or tenants behind a shared vLLM instance:
+    - **Do not accept raw caller-supplied UUIDs** directly from untrusted client inputs without enforcing per-tenant namespacing at the gateway layer.
+    - **Do not use predictable or guessable identifiers** (such as public image URLs or sequential IDs) as the UUID.
+
+    Because vLLM allows retrieving cached embeddings using the `uuid` alone (even when no media payload is provided), a colliding or guessed UUID can allow one tenant to inadvertently or maliciously retrieve another tenant's previously-computed embedding.
 
 Just like with offline inference, you can skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
 
