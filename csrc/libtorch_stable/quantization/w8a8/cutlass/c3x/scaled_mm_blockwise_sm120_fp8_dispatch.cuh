@@ -176,7 +176,8 @@ template <typename Gemm>
 void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Tensor const& a,
                                    torch::stable::Tensor const& b,
                                    torch::stable::Tensor const& a_scales,
-                                   torch::stable::Tensor const& b_scales) {
+                                   torch::stable::Tensor const& b_scales,
+                                   int max_swizzle_size) {
   static constexpr bool swap_ab = Gemm::swap_ab;
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = typename Gemm::GemmKernel::StrideA;
@@ -238,8 +239,14 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
+  // CTA rasterization: max_swizzle_size > 1 groups nearby M/N tiles in the
+  // persistent scheduler's raster, improving the temporal locality of the
+  // shared weight (B) tiles in the L2. Bit-identical to the default order
+  // (each output tile's K-reduction is unchanged).
+  typename GemmKernel::TileSchedulerArguments scheduler{};
+  scheduler.max_swizzle_size = max_swizzle_size;
   c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
-                                       epilogue_args);
+                                       epilogue_args, scheduler);
 }
 
 template <typename OutType>
@@ -247,7 +254,8 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
                                                torch::stable::Tensor const& a,
                                                torch::stable::Tensor const& b,
                                                torch::stable::Tensor const& a_scales,
-                                               torch::stable::Tensor const& b_scales) {
+                                               torch::stable::Tensor const& b_scales,
+                                               int max_swizzle_size) {
   int M = a.size(0);
   // more heuristic tuning can be done here by checking N/K dimensions as well
   bool swap_ab = (M <= 64);
@@ -256,18 +264,18 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
     if (M <= 256) {
       using Gemm = typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm;
       return cutlass_gemm_caller_blockwise<Gemm>(
-          out, a, b, a_scales, b_scales);
+          out, a, b, a_scales, b_scales, max_swizzle_size);
     }
     // M > 256: use default 128x128x128 config with Cooperative (Auto) schedule
     using Gemm = typename sm120_blockwise_fp8_config_default<OutType>::Gemm;
     return cutlass_gemm_caller_blockwise<Gemm>(
-        out, a, b, a_scales, b_scales);
+        out, a, b, a_scales, b_scales, max_swizzle_size);
   } else {
     // Swap A/B for small M to improve performance
     // Use TILE_N=32 as the minimum compatible tile size.
     using Gemm = typename sm120_blockwise_fp8_config_swapab<OutType>::Gemm;
     return cutlass_gemm_caller_blockwise<Gemm>(
-        out, a, b, a_scales, b_scales);
+        out, a, b, a_scales, b_scales, max_swizzle_size);
   }
 }
 
