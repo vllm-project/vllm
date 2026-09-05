@@ -27,7 +27,7 @@ def _get_cos_sin(
 
 
 @triton.jit
-def _fp32x2_to_fp4x2(x_lo, x_hi):
+def _fp32x2_to_fp4x2_ptx(x_lo, x_hi):
     # NOTE: $1 is high nibble, $2 is low nibble
     return tl.inline_asm_elementwise(
         """
@@ -43,6 +43,49 @@ def _fp32x2_to_fp4x2(x_lo, x_hi):
         is_pure=True,
         pack=1,
     ).to(tl.uint8)
+
+
+@triton.jit
+def _encode_fp4_abs(a):
+    """Encode |x| (fp32) into the 3-bit E2M1 magnitude code [0..7].
+
+    E2M1 positive representable values: 0, .5, 1, 1.5, 2, 3, 4, 6. The mixed
+    >/>= thresholds implement round-to-nearest-even at each midpoint, matching
+    ``cvt.rn.e2m1x2.f32`` bit-for-bit without inline asm.
+    """
+    return (
+        (a > 0.25).to(tl.uint8)
+        + (a >= 0.75).to(tl.uint8)
+        + (a > 1.25).to(tl.uint8)
+        + (a >= 1.75).to(tl.uint8)
+        + (a > 2.5).to(tl.uint8)
+        + (a >= 3.5).to(tl.uint8)
+        + (a > 5.0).to(tl.uint8)
+    )
+
+
+@triton.jit
+def _fp32x2_to_fp4x2_triton(x_lo, x_hi):
+    """Pure-Triton equivalent of :func:`_fp32x2_to_fp4x2_ptx`.
+
+    Packs two fp32 values into one uint8: low nibble = E2M1(x_lo), high nibble
+    = E2M1(x_hi). Reproduces ``satfinite`` via clamp to [-6, 6] and ``rn`` via
+    ties-to-even thresholds, so it compiles on backends without the PTX op.
+    """
+    xlo = tl.clamp(x_lo, -6.0, 6.0)
+    xhi = tl.clamp(x_hi, -6.0, 6.0)
+    sign_lo = tl.where(xlo < 0.0, 0x8, 0x0).to(tl.uint8)
+    sign_hi = tl.where(xhi < 0.0, 0x8, 0x0).to(tl.uint8)
+    code_lo = (_encode_fp4_abs(tl.abs(xlo)) | sign_lo) & 0xF
+    code_hi = (_encode_fp4_abs(tl.abs(xhi)) | sign_hi) & 0xF
+    return (code_hi << 4) | code_lo
+
+
+# NVIDIA has a hardware fp32→e2m1 pack (PTX); other backends need the
+# pure-Triton fallback, which has no inline asm and compiles everywhere.
+_fp32x2_to_fp4x2 = (
+    _fp32x2_to_fp4x2_ptx if current_platform.is_cuda() else _fp32x2_to_fp4x2_triton
+)
 
 
 @triton.jit
