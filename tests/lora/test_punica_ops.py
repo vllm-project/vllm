@@ -646,3 +646,69 @@ def test_add_lora_fused_moe_early_exit(device):
     assert torch.equal(y, y_snapshot), (
         "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
     )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lora_expand_per_request_scale(device):
+    """
+    Requests sharing a single adapter may each apply their own strength.
+
+    The batch below puts three requests on the same lora id, so the only
+    thing distinguishing them is `request_scales`; each token's output must
+    be the unscaled output times its own request's scale.
+    """
+    torch.set_default_device(device)
+    set_random_seed(0)
+
+    rank, hidden_size = 16, 256
+    req_lens = [5, 3, 4]
+    scales = [0.25, 1.0, 2.0]
+    num_tokens = sum(req_lens)
+
+    token_lora_mapping = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    token_to_req = torch.repeat_interleave(
+        torch.arange(len(req_lens), dtype=torch.int32),
+        torch.tensor(req_lens, dtype=torch.int32),
+    )
+
+    inputs = torch.rand(1, num_tokens, rank, dtype=torch.float32, device=device)
+    lora_weights = [
+        torch.rand(1, hidden_size, rank, dtype=torch.bfloat16, device=device)
+    ]
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=1,
+        max_num_tokens=num_tokens,
+        device=DEVICE_TYPE,
+        max_num_reqs=len(req_lens),
+    )
+    lora_meta.prepare_tensors(token_lora_mapping)
+    meta_args = lora_meta.meta_args(token_nums=num_tokens, specialize_active_lora=False)
+
+    def expand(request_scales: torch.Tensor | None) -> torch.Tensor:
+        out = torch.zeros(num_tokens, hidden_size, dtype=torch.bfloat16, device=device)
+        kwargs = {}
+        if request_scales is not None:
+            lora_meta.prepare_request_scales(request_scales, token_to_req)
+            kwargs = {
+                "request_scales": lora_meta.request_scales,
+                "token_to_req": lora_meta.token_to_req,
+            }
+        with _dict_lock:
+            _LORA_B_PTR_DICT.clear()
+            triton_ops.lora_expand(
+                inputs, lora_weights, out, *meta_args, add_inputs=False, **kwargs
+            )
+        return out
+
+    unscaled = expand(None)
+    scaled = expand(torch.tensor(scales, dtype=torch.float32))
+
+    per_token = torch.repeat_interleave(
+        torch.tensor(scales, dtype=torch.float32, device=device),
+        torch.tensor(req_lens, device=device),
+    )
+    assert_close(scaled, (unscaled.float() * per_token[:, None]).to(scaled.dtype))
+
+    # An all-ones scale must be indistinguishable from not passing scales.
+    assert torch.equal(expand(torch.ones(len(req_lens))), unscaled)
