@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from unittest.mock import Mock
 
 import pytest
 
@@ -9,8 +10,10 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.entrypoints.serve import create_error_response
+from vllm.multimodal.media import MediaConnector
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.params import ChatParams
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -62,6 +65,47 @@ def test_text_only_model_mm_data_maps_to_bad_request():
 
     error_response = create_error_response(exc_info.value)
     assert error_response.error.code == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.parametrize(
+    ("modality", "media"),
+    [
+        pytest.param("image", cherry_pil_image, id="image"),
+        pytest.param("video", baby_reading_np_ndarrays, id="video"),
+    ],
+)
+def test_cached_uuid_skips_url_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    modality: str,
+    media: object,
+):
+    renderer = _build_renderer()
+    media_url = f"https://example.com/test.{modality}"
+    media_uuid = f"test-{modality}-uuid"
+    fetch_media = Mock(return_value=media)
+    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Describe this {modality}."},
+                {
+                    "type": f"{modality}_url",
+                    f"{modality}_url": {"url": media_url},
+                    "uuid": media_uuid,
+                },
+            ],
+        }
+    ]
+
+    _, first_prompts = renderer.render_chat([messages], ChatParams())
+    _, second_prompts = renderer.render_chat([messages], ChatParams())
+
+    first_input = first_prompts[0]
+    second_input = second_prompts[0]
+    assert first_input["mm_hashes"] == second_input["mm_hashes"]
+    assert fetch_media.call_count == 1
 
 
 def test_multi_modal_uuids_length_mismatch_raises():
