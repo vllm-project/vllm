@@ -3,13 +3,15 @@
 """PP support for diffusion models: the need-sampled mask must be rank-agnostic
 when forced, and canvas init must be deterministic so all PP ranks agree."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.pp_utils import compute_need_sampled_mask
+from vllm.v1.worker.gpu.pp_utils import PPHandler, compute_need_sampled_mask
 
 
 def test_need_sampled_mask_always():
@@ -18,6 +20,44 @@ def test_need_sampled_mask_always():
     batch = SimpleNamespace(num_reqs=3)
     mask = compute_need_sampled_mask(batch, always=True)
     assert mask is not None and mask.all() and len(mask) == 3
+
+
+@pytest.mark.parametrize("always", [False, True])
+def test_broadcast_drafts_nonfinal_prefill(monkeypatch, always):
+    handler = object.__new__(PPHandler)
+    handler.is_last_rank = True
+    handler.always_need_sampled = always
+    handler.last_rank = 1
+    handler.broadcast_group = Mock()
+    handler.broadcast_stream = Mock()
+    handler.main_stream = Mock()
+    handler.max_sample_len = 3
+    batch = SimpleNamespace(
+        num_reqs=1,
+        num_computed_tokens_np=np.array([0]),
+        num_scheduled_tokens=np.array([2]),
+        prefill_len_np=np.array([8]),
+        max_seq_len_np=None,
+        num_draft_tokens=0,
+    )
+    broadcast = Mock()
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda *args: None)
+    drafts = torch.tensor([[21, 22]])
+
+    handler.broadcast(
+        torch.zeros(1, 1, dtype=torch.int64),
+        torch.ones(1, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        batch,
+    )
+    broadcast.reset_mock()
+    handler.broadcast_drafts(drafts)
+
+    assert broadcast.call_count == int(always)
+    if always:
+        torch.testing.assert_close(broadcast.call_args.args[0], drafts)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
