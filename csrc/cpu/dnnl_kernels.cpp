@@ -513,6 +513,18 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  args.ab_type = get_dnnl_type<scalar_t>();
                                });
 
+#ifdef VLLM_USE_ACL
+  // TODO(fadara01): this is a hot-fix, remove once problem is addressed in the
+  // AArch64 stack. hybrid kernels in ACL which are the fastest for LM head
+  // layers are only enabled for BF16 x BF16 -> FP32 problem desc as they can't
+  // convert FP32->BF16 internally. In this case do: oneDNN matmul with
+  // bf16:bf16:fp32 then cast output down to bf16.
+  if (b.scalar_type() == at::kBFloat16 && b.size(1) >= 64000) {
+    args.c_type = dnnl::memory::data_type::f32;
+    args.bf16_in_fp32_out = true;
+  }
+#endif
+
   return reinterpret_cast<int64_t>(new MatMulPrimitiveHandler(args));
 }
 
@@ -526,6 +538,11 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
   TORCH_CHECK(c.stride(-1) == 1);
   MatMulPrimitiveHandler* ptr =
       reinterpret_cast<MatMulPrimitiveHandler*>(handler_tensor.item<int64_t>());
+
+  torch::Tensor dnnl_output = c;
+  if (ptr->bf16_in_fp32_out) {
+    dnnl_output = torch::empty(c.sizes(), c.options().dtype(at::kFloat));
+  }
 
 // ACL matmuls expect contiguous source tensors
 #ifdef VLLM_USE_ACL
@@ -542,13 +559,17 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
   exec_args.a_m_stride = a.stride(0);
 #endif
   VLLM_DISPATCH_FLOATING_TYPES(a.scalar_type(), "onednn_mm", [&] {
+    exec_args.c_ptr = c.data_ptr<scalar_t>();
+    if (ptr->bf16_in_fp32_out) {
+      exec_args.c_ptr = dnnl_output.data_ptr<float>();
+    }
     if (bias.has_value()) {
       exec_args.use_bias = true;
       exec_args.bias_type = get_dnnl_type<scalar_t>();
 #ifdef VLLM_USE_ACL
       // ACL matmuls in oneDNN do not support a bias.
       // We handle a matmul with bias by doing: c = bias; c += matmul(a, b)
-      c.copy_(bias.value());
+      dnnl_output.copy_(bias.value());
 #else
       exec_args.bias_ptr = bias->data_ptr<scalar_t>();
 #endif
@@ -563,8 +584,11 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
     exec_args.a_ptr = a.data_ptr<scalar_t>();
 
 #endif
-    exec_args.c_ptr = c.data_ptr<scalar_t>();
 
     ptr->execute(exec_args);
   });
+
+  if (ptr->bf16_in_fp32_out) {
+    c.copy_(dnnl_output);
+  }
 }

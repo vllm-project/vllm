@@ -170,6 +170,9 @@ class MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
  public:
   struct Args : public DNNLMatMulPrimitiveHandler::Args {
     dnnl::memory::data_type ab_type;
+    // on AArch64, ACL's fastest kernel for LM head layers only supports BF16 x
+    // BF16 -> FP32.
+    bool bf16_in_fp32_out = false;
   };
 
   struct ClassMatmulCacheKey {
@@ -202,6 +205,8 @@ class MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
 
  public:
   MatMulPrimitiveHandler(const Args& args);
+
+  const bool bf16_in_fp32_out;
 
   void execute(ExecArgs& args);
 
