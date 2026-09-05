@@ -1430,6 +1430,24 @@ def test_is_encoder_decoder(model_id, is_encoder_decoder):
     assert config.is_encoder_decoder == is_encoder_decoder
 
 
+def test_enable_prompt_embeds_rejects_encoder_only():
+    """Encoder-only models carry `token_type_ids` inside `input_ids`, so prompt
+    embeds cannot express them; reject at config time instead of failing in the
+    model's embedding layer."""
+    with pytest.raises(ValueError, match="encoder-only"):
+        ModelConfig("BAAI/bge-base-en", runner="pooling", enable_prompt_embeds=True)
+
+
+def test_enable_prompt_embeds_allows_decoder_pooling():
+    """The encoder-only guard must not reject pooling models that embed
+    `input_ids` normally."""
+    config = ModelConfig(
+        "Qwen/Qwen3-Embedding-0.6B", runner="pooling", enable_prompt_embeds=True
+    )
+
+    assert config.attn_type == "decoder"
+
+
 @pytest.mark.parametrize(
     ("model_id", "uses_mrope"),
     [

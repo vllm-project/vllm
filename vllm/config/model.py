@@ -954,6 +954,12 @@ class ModelConfig:
             raise ValueError(
                 "--enable-prompt-embeds is not supported with encoder-decoder models."
             )
+        if self.enable_prompt_embeds and self.attn_type == "encoder_only":
+            # Encoder-only models encode `token_type_ids` into the high bits of
+            # `input_ids`, which prompt embeds cannot carry.
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-only models."
+            )
         return self
 
     def _resolve_mm_device_do_normalize(
