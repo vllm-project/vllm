@@ -21,6 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -80,10 +81,7 @@ class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
             dim=0,
         )
         lengths_cpu = spatial_shapes.prod(dim=-1).to(torch.int32)
-        lengths = lengths_cpu.to(
-            device=pixel_values.device,
-            non_blocking=True,
-        )
+        lengths = async_tensor_h2d(lengths_cpu, pixel_values.device)
 
         cu_seqlens = torch.zeros(
             lengths.numel() + 1,

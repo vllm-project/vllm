@@ -21,7 +21,11 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    get_dtype_size,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -593,6 +597,7 @@ class AiterFlashAttentionMetadataBuilder(
                     num_extends + 1,
                     dtype=torch.int32,
                     device=seq_lens_for_extend.device,
+                    pin_memory=True,
                 )
                 torch.cumsum(
                     swa_seqlen_for_extend,
@@ -623,8 +628,8 @@ class AiterFlashAttentionMetadataBuilder(
 
                 swa_metadata = AiterChunkSlidingWindowMetadata(
                     swa_cu_seqlens=cu_seq_lens.to(self.device, non_blocking=True),
-                    swa_seq_starts=seq_starts.to(self.device, non_blocking=True),
-                    swa_token_to_batch=token_to_seq.to(self.device, non_blocking=True),
+                    swa_seq_starts=async_tensor_h2d(seq_starts, self.device),
+                    swa_token_to_batch=async_tensor_h2d(token_to_seq, self.device),
                     swa_max_seqlens=max_seqlen_k,
                     swa_total_tokens=total_tokens,
                     swa_workspace=swa_workspace,
@@ -668,8 +673,8 @@ class AiterFlashAttentionMetadataBuilder(
             chunk_context_metadata = AiterChunkContextMetadata(
                 workspace=self.extend_workspace,
                 cu_seq_lens_chunk=cu_seq_lens_cpu.to(self.device, non_blocking=True),
-                chunk_starts=chunk_starts.to(self.device, non_blocking=True),
-                token_to_batch=token_to_batch_tensor.to(self.device, non_blocking=True),
+                chunk_starts=async_tensor_h2d(chunk_starts, self.device),
+                token_to_batch=async_tensor_h2d(token_to_batch_tensor, self.device),
                 max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                 num_chunks=num_chunks,
                 total_token_per_batch=cu_seq_lens_cpu[:, -1].tolist(),
