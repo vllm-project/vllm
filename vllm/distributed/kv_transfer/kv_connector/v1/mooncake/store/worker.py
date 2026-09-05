@@ -75,6 +75,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -1543,6 +1544,10 @@ class MooncakeStoreWorker:
             extra_config.get("save_decode_cache", False)
         )
         self.load_async = extra_config.get("load_async", True)
+        # An async load may fill only part of its last logical block; the kernel
+        # pages it never writes are zeroed once it lands (_zero_unloaded_tails).
+        self._pending_load_tails: dict[str, tuple[tuple[list[int], ...], int]] = {}
+        self._load_tail_caches: dict[int, tuple[int, list[torch.Tensor]]] = {}
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
             self.kv_role == "kv_consumer"
@@ -1914,8 +1919,16 @@ class MooncakeStoreWorker:
 
         seen_storage_ptrs: set[int] = set()
         cache_tensors: list[torch.Tensor] = []
+        attention_group_of_layer = {
+            layer_name: g_idx
+            for g_idx, group in enumerate(self._kv_cache_groups)
+            if isinstance(group.kv_cache_spec, AttentionSpec)
+            for layer_name in group.layer_names
+        }
+        self._load_tail_caches = {}
 
-        for cache in kv_caches.values():
+        for layer_name, cache in kv_caches.items():
+            self._track_load_tail_cache(layer_name, cache, attention_group_of_layer)
             cache = group_kernel_blocks(cache, self.num_blocks)
             cache_tensors.append(cache)
             cache_storage = cache.untyped_storage()
@@ -2012,6 +2025,10 @@ class MooncakeStoreWorker:
                 continue
 
             load_spec.token_len = load_spec.kvpool_cached_tokens
+            self._pending_load_tails[request.req_id] = (
+                request.block_ids,
+                load_spec.token_len,
+            )
             self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
@@ -2059,6 +2076,7 @@ class MooncakeStoreWorker:
         if self.load_async:
             for recv_thread in self.kv_recv_threads:
                 done_recving |= recv_thread.get_and_clear_finished_requests()
+        self._zero_unloaded_tails(done_recving, finished_req_ids)
 
         logger.debug(
             "Completed send: %d, recv: %d, tp_rank: %d",
@@ -2067,6 +2085,79 @@ class MooncakeStoreWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
+
+    def _track_load_tail_cache(
+        self,
+        layer_name: str,
+        cache: torch.Tensor,
+        attention_group_of_layer: dict[str, int],
+    ) -> None:
+        """Keep a ``[num_blocks, pages_per_block, ...]`` view of an attention
+        layer cache whose logical block spans several kernel pages."""
+        g_idx = attention_group_of_layer.get(layer_name)
+        if g_idx is None or cache.shape[0] % self.num_blocks != 0:
+            return
+        pages_per_block = cache.shape[0] // self.num_blocks
+        if pages_per_block <= 1:
+            # Block == kernel page: loads are block granular, nothing to zero.
+            return
+        block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+        # Runner views are standardized [B, H, N, C] (or [B, N, C] for a raw
+        # MLA latent cache): the token axis is second to last either way.
+        assert cache.ndim >= 3 and cache.shape[-2] == block_size // pages_per_block, (
+            f"{layer_name}: cache shape {tuple(cache.shape)} does not expose "
+            f"{block_size // pages_per_block} tokens per kernel page"
+        )
+        ratio, caches = self._load_tail_caches.setdefault(g_idx, (pages_per_block, []))
+        assert ratio == pages_per_block, (
+            f"group {g_idx}: inconsistent kernel pages per block "
+            f"({ratio} vs {pages_per_block} for {layer_name})"
+        )
+        caches.append(cache.unflatten(0, (self.num_blocks, pages_per_block)))
+
+    def _zero_unloaded_tails(
+        self, done_recving: set[str], finished_req_ids: set[str]
+    ) -> None:
+        """Zero the kernel pages an async load left unwritten.
+
+        The scheduler skips its zeroing of every block an async load will
+        write (the zeroing could race the transfer), but a Store hit only
+        fills ``token_len`` tokens of its last logical block. The remaining
+        kernel pages keep their previous owner's bytes; with overlaid hybrid
+        cache groups those can be another group's state (e.g. fp32 Mamba
+        state read back as bf16 latents -> NaN/Inf), and attention decode
+        kernels read the whole page holding the current position. Runs on
+        the caller's stream after the load completed, so it races neither
+        the transfer nor the next forward. Within the page holding the last
+        loaded token, only the slots after it are zeroed, along the token axis
+        of the standardized ``[B, H, N, C]`` view (layout agnostic).
+        """
+        for req_id in finished_req_ids:
+            self._pending_load_tails.pop(req_id, None)
+        for req_id in done_recving:
+            entry = self._pending_load_tails.pop(req_id, None)
+            if entry is None or not self._load_tail_caches:
+                continue
+            block_ids, token_len = entry
+            if token_len <= 0:
+                continue
+            for g_idx, (pages_per_block, caches) in self._load_tail_caches.items():
+                block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+                last_block = (token_len - 1) // block_size
+                if g_idx >= len(block_ids) or last_block >= len(block_ids[g_idx]):
+                    continue
+                tokens_in_last = token_len - last_block * block_size
+                page_tokens = block_size // pages_per_block
+                last_page, valid_in_page = divmod(tokens_in_last - 1, page_tokens)
+                valid_in_page += 1
+                block_id = block_ids[g_idx][last_block]
+                for cache in caches:
+                    if last_page + 1 < pages_per_block:
+                        cache[block_id, last_page + 1 :].zero_()
+                    if valid_in_page < page_tokens:
+                        cache[block_id, last_page].narrow(
+                            -2, valid_in_page, page_tokens - valid_in_page
+                        ).zero_()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         block_ids: set[int] = set()
