@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for Helion utility functions."""
 
+from unittest.mock import patch
+
 import pytest
 
-from vllm.kernels.helion.utils import canonicalize_gpu_name
+from vllm.kernels.helion.utils import (
+    canonicalize_gpu_name,
+    get_config_gpu_name,
+)
 
 
 @pytest.mark.parametrize(
@@ -31,3 +36,12 @@ def test_canonicalize_gpu_name_rejects_empty(invalid_name):
     """Test that empty or whitespace-only names are rejected."""
     with pytest.raises(ValueError, match="cannot be empty"):
         canonicalize_gpu_name(invalid_name)
+
+
+def test_get_config_gpu_name():
+    with patch(
+        "vllm.kernels.helion.utils.get_gpu_name",
+        return_value="NVIDIA H100 PCIe",
+    ):
+        assert get_config_gpu_name(True) == "nvidia_h100_pcie"
+        assert get_config_gpu_name(False) == "nvidia_h100"

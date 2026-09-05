@@ -56,7 +56,7 @@ def _helion_mock_context():
             return_value=mock_config_manager,
         ),
         patch(
-            "vllm.kernels.helion.utils.get_canonical_gpu_name",
+            "vllm.kernels.helion.utils.get_config_gpu_name",
             return_value="nvidia_h200",
         ),
     ):

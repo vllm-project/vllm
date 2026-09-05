@@ -6,16 +6,18 @@ import pytest
 import torch
 
 from vllm.kernels.helion.config_manager import ConfigManager
+from vllm.kernels.helion.register import get_kernel_by_name
 
 
 def skip_if_platform_unsupported(op_name: str):
     try:
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
+        from vllm.kernels.helion.utils import get_config_gpu_name
 
         if not torch.cuda.is_available():
             pytest.skip("CUDA not available")
 
-        platform = get_canonical_gpu_name()
+        kernel = get_kernel_by_name(op_name)
+        platform = get_config_gpu_name(kernel.use_variant_config)
 
         try:
             config_manager = ConfigManager.get_instance()
