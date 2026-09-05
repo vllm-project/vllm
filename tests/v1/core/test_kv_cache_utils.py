@@ -3565,6 +3565,47 @@ def test_unify_hybrid_kv_cache_specs():
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
+def test_needs_kv_cache_zeroing():
+    # Regression test for #39146: FullAttention models must zero recycled
+    # blocks to avoid stale K/V leaking through partial-block tail slots.
+    full_attention = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_0"], new_kv_cache_spec())],
+    )
+    assert full_attention.needs_kv_cache_zeroing
+
+    sliding_only = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_0"], new_sliding_window_spec(sliding_window=64))
+        ],
+    )
+    assert not sliding_only.needs_kv_cache_zeroing
+
+    # FullAttention inside a uniform-type group (hybrid manager) must also
+    # trigger zeroing.
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_0": new_kv_cache_spec(),
+            "layer_1": new_sliding_window_spec(sliding_window=64),
+        },
+    )
+    uniform_group = KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_0", "layer_1"], uniform_spec)],
+    )
+    assert uniform_group.needs_kv_cache_zeroing
+
+    # MLAAttentionSpec and SinkFullAttentionSpec subclass FullAttentionSpec,
+    # so MLA and sink-attention models are covered by the isinstance check.
+    assert issubclass(MLAAttentionSpec, FullAttentionSpec)
+    assert issubclass(SinkFullAttentionSpec, FullAttentionSpec)
+
+
 def test_unify_kv_cache_spec_page_size_mamba():
     """Regression test for https://github.com/vllm-project/vllm/issues/43626.
 
