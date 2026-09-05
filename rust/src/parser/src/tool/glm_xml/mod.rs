@@ -14,9 +14,11 @@ use crate::tool::Tool;
 
 mod glm45_moe;
 mod glm47_moe;
+mod ling3;
 
 pub use glm45_moe::Glm45MoeToolParser;
 pub use glm47_moe::Glm47MoeToolParser;
+pub use ling3::Ling3ToolParser;
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";

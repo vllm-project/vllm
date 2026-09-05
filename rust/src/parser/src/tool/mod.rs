@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, btree_map};
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
-pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
+pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser, Ling3ToolParser};
 pub(crate) use hy::{HyDialect, HyToolMarkers, HyToolParser};
 pub use json::{
     Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
