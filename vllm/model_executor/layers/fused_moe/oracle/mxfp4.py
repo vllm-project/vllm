@@ -112,6 +112,8 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer CUTLASS backends
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
+    # FlashInfer CuteDSL backends
+    FLASHINFER_CUTEDSL_MXFP4_MXFP8 = "FLASHINFER_CUTEDSL_MXFP4_MXFP8"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
@@ -192,6 +194,15 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferExperts]
+
+    elif backend == Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe import (  # noqa: E501
+            FlashInferCuteDSLExperts,
+            FlashInferCuteDSLExpertsMonolithic,
+        )
+
+        # NOTE: prefer Monolithic > Modular, so return Monolithic first.
+        return [FlashInferCuteDSLExpertsMonolithic, FlashInferCuteDSLExperts]
 
     elif backend == Mxfp4MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
@@ -304,6 +315,10 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         ],
         "flashinfer_cutlass_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8],
+        "flashinfer_cutedsl": [
+            Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8,
+        ],
+        "flashinfer_cutedsl_afp8": [Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8],
         "triton": [Mxfp4MoeBackend.TRITON],
         "triton_unfused": [Mxfp4MoeBackend.TRITON_UNFUSED],
         "humming": [Mxfp4MoeBackend.HUMMING],
@@ -342,6 +357,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8,
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
@@ -387,6 +403,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     if backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8,
     ):
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
@@ -1076,6 +1093,100 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 w13_bias_swapped,
                 w2_bias,
             )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8:
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+            flashinfer_cutedsl_weight_interleave,
+            interleave_linear_and_gate,
+            reorder_w13_to_w31_for_flashinfer_cutedsl,
+        )
+        from vllm.utils.flashinfer import flashinfer_convert_sf_to_mma_layout
+
+        w13_weight = w13_weight.data
+        w2_weight = w2_weight.data
+        w13_weight_scale = w13_weight_scale.data
+        w2_weight_scale = w2_weight_scale.data
+
+        sf_vec_size = 32
+        # Normalize w13 rows to the [up | gate] halves CuteDSL expects.
+        half = w13_weight.shape[1] // 2
+        w13_weight, w13_weight_scale = reorder_w13_to_w31_for_flashinfer_cutedsl(
+            layer.activation, w13_weight, w13_weight_scale
+        )
+        if w13_bias is not None:
+            b = w13_bias.data.to(torch.float32)
+            w13_bias = reorder_w13_to_w31_for_flashinfer_cutedsl(
+                layer.activation, b, b
+            )[0]
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32).contiguous()
+
+        # dims need to be 128 aligned for kernel and SF swizzle. gate/up halves
+        # are padded separately so the padding lands in the last interleave group.
+        def _pad128(x: int) -> int:
+            return -(-x // 128) * 128
+
+        num_experts = w13_weight.shape[0]
+        i_pad = _pad128(half) - half
+        kb = w13_weight.shape[2]  # fp4-packed: bytes = elems/2
+        kb_pad = _pad128(kb * 2) // 2 - kb
+        if i_pad or kb_pad:
+            w13_weight = torch.nn.functional.pad(
+                w13_weight.view(num_experts, 2, half, kb), (0, kb_pad, 0, i_pad)
+            ).reshape(num_experts, 2 * (half + i_pad), kb + kb_pad)
+            w13_weight_scale = torch.nn.functional.pad(
+                w13_weight_scale.view(num_experts, 2, half, -1), (0, 0, 0, i_pad)
+            ).reshape(num_experts, 2 * (half + i_pad), -1)
+            h_pad = _pad128(w2_weight.shape[1]) - w2_weight.shape[1]
+            kb2 = w2_weight.shape[2]
+            kb2_pad = _pad128(kb2 * 2) // 2 - kb2
+            w2_weight = torch.nn.functional.pad(w2_weight, (0, kb2_pad, 0, h_pad))
+
+            if w13_bias is not None:
+                up_b = torch.nn.functional.pad(w13_bias[:, :half], (0, i_pad))
+                gate_b = torch.nn.functional.pad(w13_bias[:, half:], (0, i_pad))
+                w13_bias = torch.cat([up_b, gate_b], dim=1).contiguous()
+            if w2_bias is not None:
+                w2_bias = torch.nn.functional.pad(w2_bias, (0, h_pad))
+
+        interleave = flashinfer_cutedsl_weight_interleave()
+        w13_weight = interleave_linear_and_gate(
+            w13_weight, group_size=interleave, dim=1
+        )
+        w13_weight_scale = interleave_linear_and_gate(
+            w13_weight_scale, group_size=interleave, dim=1
+        )
+
+        # Swizzle scales for CuteDSL kernel (swizzle_blockscale asserts e4m3, hence the
+        # dtype views)
+        from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+            swizzle_blockscale,
+        )
+
+        def _to_mma_layout(scale: torch.Tensor) -> torch.Tensor:
+            scale = swizzle_blockscale(scale.view(torch.float8_e4m3fn)).view(
+                scale.dtype
+            )
+            num_experts, m_padded, k_sf_padded = scale.shape
+            return flashinfer_convert_sf_to_mma_layout(
+                scale.reshape(num_experts * m_padded, k_sf_padded),
+                m=m_padded,
+                k=k_sf_padded * sf_vec_size,
+                num_groups=num_experts,
+                sf_vec_size=sf_vec_size,
+            )
+
+        w13_weight_scale = _to_mma_layout(w13_weight_scale)
+        w2_weight_scale = _to_mma_layout(w2_weight_scale)
+
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1881,6 +1992,18 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
             is_scale_swizzled=True,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTEDSL_MXFP4_MXFP8:
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+            mx_alignment=128,
+            is_scale_swizzled=False,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations

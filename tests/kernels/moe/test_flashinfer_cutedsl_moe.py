@@ -38,11 +38,11 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutedsl_moe_nvfp4
+from vllm.utils.flashinfer import has_flashinfer_cutedsl_moe
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
-if not has_flashinfer_cutedsl_moe_nvfp4() or not (
+if not has_flashinfer_cutedsl_moe() or not (
     current_platform.is_device_capability_family(100)
 ):
     pytest.skip(
@@ -193,7 +193,6 @@ def test_flashinfer_cutedsl_fp4_moe(
             hidden_states, score, topk, renormalize=False
         )
 
-        activation = MoEActivation.RELU2_NO_MUL
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
