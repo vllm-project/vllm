@@ -240,16 +240,19 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
-        # When the template requires system-first ordering, extract inline
-        # system messages from the messages array and merge them into the
-        # top-level block so the template doesn't reject them.
+        # Fold some in-array system turns into the leading system block:
+        # - all of them when the template requires system-first ordering
+        # - only a trailing suffix otherwise, so Claude Code's
+        #   [user, system] shape cannot leave generation ending on system
+        #   while mid-conversation system turns stay put for prefix cache
         if merge_inline_system:
-            for msg in anthropic_request.messages:
-                if msg.role != "system":
-                    continue
-                text = cls._extract_system_text(msg)
-                if text:
-                    system_parts.append(text)
+            inline = [m for m in anthropic_request.messages if m.role == "system"]
+        else:
+            inline = cls._trailing_system_messages(anthropic_request.messages)
+        for msg in inline:
+            text = cls._extract_system_text(msg)
+            if text and text not in system_parts:
+                system_parts.append(text)
 
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
@@ -270,6 +273,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                 parts.append(block.text)
         return "".join(parts) if parts else None
 
+    @staticmethod
+    def _trailing_system_messages(messages: list) -> list:
+        """Return the suffix of ``messages`` that is all system turns."""
+        start = len(messages)
+        while start > 0 and messages[start - 1].role == "system":
+            start -= 1
+        return messages[start:]
+
     @classmethod
     def _convert_messages(
         cls,
@@ -279,6 +290,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
+        if merge_inline_system:
+            skip_ids = {id(m) for m in messages if m.role == "system"}
+        else:
+            skip_ids = {id(m) for m in cls._trailing_system_messages(messages)}
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -286,8 +301,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             # doesn't strip billing headers and may produce messages with
             # no "content" key.
             if msg.role == "system":
-                if merge_inline_system:
-                    continue  # already merged into top-level by _convert_system_message
+                if id(msg) in skip_ids:
+                    continue  # already folded into the leading system block
                 text = cls._extract_system_text(msg)
                 if text:
                     openai_messages.append({"role": "system", "content": text})
