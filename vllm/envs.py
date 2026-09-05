@@ -316,6 +316,13 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
+    VLLM_ENABLE_MOE_ACTIVE_PROFILER: bool = True
+    """Whether to enable active-parameter-aware MoE memory profiling during
+    initialization. When enabled, peak activation headroom is scaled by the
+    model's active parameter ratio."""
+    VLLM_MOE_ACTIVATION_SAFETY_FACTOR: float = 0.05
+    """Safety factor buffer applied to active-parameter-aware MoE activation
+    headroom during memory profiling (default: 0.05 / 5% buffer)."""
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
@@ -2138,6 +2145,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # memory allocation. Enabled by default as of v0.21.0
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "1"))
+    ),
+    # Whether to enable active-parameter-aware MoE memory profiling.
+    "VLLM_ENABLE_MOE_ACTIVE_PROFILER": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MOE_ACTIVE_PROFILER", "1"))
+    ),
+    # Safety factor buffer applied to active-parameter-aware MoE activation
+    # headroom during memory profiling (default: 0.05 / 5% buffer).
+    "VLLM_MOE_ACTIVATION_SAFETY_FACTOR": lambda: float(
+        os.getenv("VLLM_MOE_ACTIVATION_SAFETY_FACTOR", "0.05")
     ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(

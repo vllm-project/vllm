@@ -1566,6 +1566,110 @@ class ModelConfig:
     def get_num_experts_per_tok(self) -> int:
         return self.model_arch_config.num_experts_per_token
 
+    def get_num_active_experts(self) -> int:
+        """Returns the number of active experts routed per token.
+        Returns 0 for non-MoE models."""
+        if not self.is_moe:
+            return 0
+        try:
+            num_per_tok = self.get_num_experts_per_tok()
+            if isinstance(num_per_tok, int) and num_per_tok > 0:
+                return num_per_tok
+        except (AttributeError, TypeError, ValueError):
+            pass
+        names = (
+            "top_k_experts",
+            "num_experts_per_tok",
+            "n_routed_experts_per_tok",
+            "moe_top_k",
+            "experts_per_token",
+            "moe_experts_per_token",
+        )
+        return getattr_iter(self.hf_text_config, names, default=1)
+
+    def get_expert_intermediate_size(self) -> int:
+        """Returns the intermediate size of an individual routed MoE expert."""
+        if not self.is_moe:
+            return 0
+        names = (
+            "moe_intermediate_size",
+            "intermediate_size",
+        )
+        return getattr_iter(self.hf_text_config, names, default=0)
+
+    def get_shared_intermediate_size(self) -> int:
+        """Returns the intermediate size of shared FFN experts, if any."""
+        if not self.is_moe:
+            return 0
+        shared_names = (
+            "shared_expert_intermediate_size",
+            "moe_shared_expert_intermediate_size",
+        )
+        shared_size = getattr_iter(self.hf_text_config, shared_names, default=None)
+        if shared_size is not None:
+            return shared_size
+
+        moe_inter = getattr(self.hf_text_config, "moe_intermediate_size", None)
+        dense_inter = getattr(self.hf_text_config, "intermediate_size", None)
+        if (
+            moe_inter is not None
+            and dense_inter is not None
+            and moe_inter != dense_inter
+        ):
+            return dense_inter
+
+        return 0
+
+    @property
+    def active_parameter_ratio(self) -> float:
+        """Computes the ratio of active parameters to total parameters (alpha).
+        Returns 1.0 for dense models. For MoE models, computes:
+        alpha = (active_params) / (total_params)
+        """
+        if not self.is_moe:
+            return 1.0
+
+        hidden_size = self.get_hidden_size()
+        num_layers = self.get_total_num_hidden_layers()
+        num_heads = self.model_arch_config.total_num_attention_heads
+        head_size = self.get_head_size()
+        kv_heads = self.get_total_num_kv_heads()
+        vocab_size = self.get_vocab_size()
+
+        num_experts = self.get_num_experts()
+        num_active = self.get_num_active_experts()
+        expert_intermediate = self.get_expert_intermediate_size()
+        shared_intermediate = self.get_shared_intermediate_size()
+
+        attn_per_layer = 2 * hidden_size * (num_heads * head_size) + 2 * hidden_size * (
+            kv_heads * head_size
+        )
+
+        # Modern MoE architectures use SwiGLU / GLU FFNs with 3 projection
+        # matrices per expert: gate_proj, up_proj, and down_proj.
+        moe_total_per_layer = num_experts * 3 * hidden_size * expert_intermediate
+        moe_active_per_layer = num_active * 3 * hidden_size * expert_intermediate
+        shared_ffn_per_layer = 3 * hidden_size * shared_intermediate
+
+        tie_word_embeddings = getattr(self.hf_text_config, "tie_word_embeddings", True)
+        embed_mult = 1 if tie_word_embeddings else 2
+        embed_params = embed_mult * vocab_size * hidden_size
+
+        total_params = (
+            num_layers * (attn_per_layer + moe_total_per_layer + shared_ffn_per_layer)
+            + embed_params
+        )
+        active_params = (
+            num_layers * (attn_per_layer + moe_active_per_layer + shared_ffn_per_layer)
+            + embed_params
+        )
+
+        if total_params <= 0:
+            return 1.0
+
+        alpha = active_params / total_params
+        return min(1.0, max(0.0, alpha))
+
     def get_total_num_hidden_layers(self) -> int:
         return self.model_arch_config.total_num_hidden_layers
 

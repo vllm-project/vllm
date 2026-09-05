@@ -71,6 +71,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemoryProfilingResult,
     MemorySnapshot,
+    calculate_moe_active_headroom,
     format_gib,
     memory_profiling,
 )
@@ -604,10 +605,33 @@ class Worker(WorkerBase):
                 profile_result.total_consumed + profile_result.transient_peak_headroom
             )
 
+        headroom = profile_result.transient_peak_headroom
+        if self.model_config.is_moe and envs.VLLM_ENABLE_MOE_ACTIVE_PROFILER:
+            alpha = self.model_config.active_parameter_ratio
+            safety_factor = self.cache_config.moe_activation_safety_factor
+            active_headroom = calculate_moe_active_headroom(
+                headroom,
+                alpha,
+                safety_factor,
+            )
+            reclaimed = headroom - active_headroom
+            logger.info(
+                "Active-parameter-aware MoE memory profiler applied: "
+                "alpha=%.4f, safety_factor=%.2f, raw_headroom=%s GiB, "
+                "active_headroom=%s GiB, reclaimed=%s GiB",
+                alpha,
+                safety_factor,
+                format_gib(headroom),
+                format_gib(active_headroom),
+                format_gib(reclaimed),
+            )
+            headroom = active_headroom
+            profile_result.non_kv_cache_memory = (
+                profile_result.total_consumed + headroom
+            )
+
         self.total_consumed = profile_result.total_consumed
-        self.peak_activation_memory = (
-            profile_result.transient_peak_headroom + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = headroom + cudagraph_memory_estimate_applied
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         self.available_kv_cache_memory_bytes = (
