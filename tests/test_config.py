@@ -330,6 +330,43 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
 
 @pytest.mark.parametrize(
+    ("index_topk", "should_raise"),
+    [(0, False), (2048, True)],
+    ids=["dense-opt-out", "sparse-default"],
+)
+@pytest.mark.skip_global_cleanup
+def test_glm_moe_dsa_cpu_sparse_attention_config(monkeypatch, index_topk, should_raise):
+    from transformers import GlmMoeDsaConfig
+
+    from vllm.model_executor.models.config import (
+        GlmMoeDsaForCausalLM,
+        _is_sparse_mla_enabled,
+    )
+    from vllm.platforms import current_platform
+
+    hf_config = GlmMoeDsaConfig(index_topk=index_topk)
+    model_config = SimpleNamespace(hf_config=hf_config)
+    assert _is_sparse_mla_enabled(hf_config) is should_raise
+
+    dcp_defaults = []
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=SimpleNamespace(
+            set_dcp_defaults=lambda **kwargs: dcp_defaults.append(kwargs)
+        ),
+    )
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+
+    if should_raise:
+        with pytest.raises(ValueError, match=r"--hf-overrides.*index_topk"):
+            GlmMoeDsaForCausalLM.verify_and_update_config(vllm_config)
+        assert not dcp_defaults
+    else:
+        GlmMoeDsaForCausalLM.verify_and_update_config(vllm_config)
+        assert dcp_defaults == [{"comm_backend": "a2a", "q_replicate": True}]
+
+
+@pytest.mark.parametrize(
     ("architecture", "is_rocm", "expected"),
     [
         ("DeepseekV32ForCausalLM", False, True),

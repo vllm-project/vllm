@@ -108,6 +108,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
+from .config import _is_sparse_mla_enabled
 from .interfaces import (
     MixtureOfExperts,
     SupportsEagle,
@@ -1125,7 +1126,7 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        self.is_v32 = hasattr(config, "index_topk")
+        self.is_v32 = _is_sparse_mla_enabled(config)
 
         # IndexCache config
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
@@ -1418,7 +1419,7 @@ class DeepseekV2Model(nn.Module):
         self.device = current_platform.device_type
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
-        self.is_v32 = hasattr(config, "index_topk")
+        self.is_v32 = _is_sparse_mla_enabled(config)
         if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
