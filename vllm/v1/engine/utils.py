@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
 ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 15.0
+STARTUP_PROGRESS_LOG_PERIOD_S = 30
 
 
 def get_engine_process_shutdown_timeout(
@@ -1247,6 +1249,37 @@ def launch_core_engines(
         )
 
 
+def describe_failed_procs(
+    proc_manager: CoreEngineProcManager | None,
+    coord_process: Process | None,
+) -> str:
+    """Describe which local proc(s) exited, for engine startup failure errors.
+
+    A process's sentinel can become ready slightly before its exit code is
+    collectible, so calling ``finished_procs()`` directly at that moment can
+    race and report an empty dict, masking which process failed entirely
+    (the bare ``Failed core proc(s): {}`` in #48031 / #45626). Briefly join
+    the proc(s) whose sentinels fired so their exit codes become visible, and
+    fall back to naming them with an unknown exit code if the race persists.
+    """
+    procs: list[BaseProcess] = list(proc_manager.processes) if proc_manager else []
+    if coord_process is not None:
+        procs.append(coord_process)
+    exited = set(connection.wait([proc.sentinel for proc in procs], timeout=0))
+    finished: dict[str, int | str] = {}
+    for proc in procs:
+        if proc.exitcode is None and proc.sentinel in exited:
+            # Sentinel fired but the exit code isn't collected yet; reap it.
+            proc.join(timeout=1.0)
+        if proc.exitcode is not None:
+            finished[proc.name] = proc.exitcode
+        elif proc.sentinel in exited:
+            finished[proc.name] = "unknown"
+    if not finished:
+        return "Failed core proc(s): {}"
+    return f"Failed core proc(s): {finished}"
+
+
 def wait_for_engine_startup(
     handshake_socket: zmq.Socket,
     core_engines: list[CoreEngine],
@@ -1283,6 +1316,8 @@ def wait_for_engine_startup(
         frontend_process_by_fd[fd] = proc
         poller.register(fd, zmq.POLLIN)
 
+    wait_start = time.monotonic()
+    next_progress_log = wait_start + STARTUP_PROGRESS_LOG_PERIOD_S
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
@@ -1296,36 +1331,54 @@ def wait_for_engine_startup(
                     "Waiting for %d local, %d remote core engine proc(s) to start.",
                     *start_pending,
                 )
+            # Periodically surface progress at INFO level so a long startup is
+            # attributable (slow weight loading, cold JIT kernel compilation on
+            # first load, ...) rather than looking like a silent hang.
+            now = time.monotonic()
+            if now >= next_progress_log:
+                next_progress_log = now + STARTUP_PROGRESS_LOG_PERIOD_S
+                logger.info(
+                    "Still waiting for engine core proc(s) to start after %.0fs "
+                    "(%d local, %d remote pending). Large models can spend a "
+                    "long time here loading weights or JIT-compiling kernels "
+                    "on first load (e.g. cold FlashInfer cache).",
+                    now - wait_start,
+                    conn_pending[0] + start_pending[0],
+                    conn_pending[1] + start_pending[1],
+                )
             continue
         if len(events) > 1 or events[0][0] != handshake_socket:
             # One of the local core, coordinator, or watched frontend processes exited.
-            if isinstance(launch.engine_manager, CoreEngineProcManager):
-                finished = launch.engine_manager.finished_procs()
-            else:
-                finished = {}
-            if coord_process is not None and coord_process.exitcode is not None:
-                finished[coord_process.name] = coord_process.exitcode
+            proc_manager = (
+                launch.engine_manager
+                if isinstance(launch.engine_manager, CoreEngineProcManager)
+                else None
+            )
+            core_msg = describe_failed_procs(proc_manager, coord_process)
             failed_frontend_procs = {
                 proc.name: proc.exitcode
                 for fd, proc in frontend_process_by_fd.items()
                 if proc.exitcode is not None
                 or any(event_fd == fd for event_fd, _ in events)
             }
-            if failed_frontend_procs and not finished:
+            elapsed_s = time.monotonic() - wait_start
+            elapsed = f"(startup had been in progress for {elapsed_s:.0f}s)"
+            if failed_frontend_procs and core_msg.endswith("{}"):
                 raise RuntimeError(
                     "Frontend process failed during engine core initialization. "
                     "See root cause above. "
-                    f"Failed frontend proc(s): {failed_frontend_procs}"
+                    f"Failed frontend proc(s): {failed_frontend_procs} {elapsed}"
                 )
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
-                f"Failed core proc(s): {finished}"
+                f"{core_msg}"
                 + (
                     f", failed frontend proc(s): {failed_frontend_procs}"
                     if failed_frontend_procs
                     else ""
                 )
+                + f" {elapsed}"
             )
 
         # Receive HELLO and READY messages from the input socket.
