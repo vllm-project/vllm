@@ -1197,6 +1197,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       message(STATUS
         "Building fused KDA decode for HIP archs: ${FUSED_KDA_DECODE_HIP_ARCHS}")
     endif()
+
+    # The fused KDA chunk kernel is gfx950 only: it needs the K=32 bf16 MFMA and
+    # a ~133-151 KiB LDS budget that only CDNA4 provides (gfx942 caps LDS at
+    # 64 KiB). It is emitted only when gfx950 is in the arch list, but a
+    # multi-arch build then compiles this source for every arch in that list, so
+    # the kernel guards its MFMA/LDS usage behind __gfx950__ to keep the other
+    # passes compiling. 
+    set(FUSED_KDA_CHUNK_HIP_ARCHS ${VLLM_GPU_ARCHES})
+    list(FILTER FUSED_KDA_CHUNK_HIP_ARCHS INCLUDE REGEX "gfx950")
+    if(FUSED_KDA_CHUNK_HIP_ARCHS)
+      set(FUSED_KDA_CHUNK_HIP_SRC
+        "csrc/libtorch_stable/kimi_k3/fused_kda_chunk_kernel_rocm.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${FUSED_KDA_CHUNK_HIP_SRC}")
+      message(STATUS
+        "Building fused KDA chunk for HIP archs: ${FUSED_KDA_CHUNK_HIP_ARCHS}")
+    endif()
   endif()
 
   message(STATUS "Enabling C_stable extension.")
@@ -1246,6 +1262,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(FUSED_KDA_DECODE_HIP_SRC)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_FUSED_KDA_DECODE=1)
+    endif()
+    if(FUSED_KDA_CHUNK_HIP_SRC)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_FUSED_KDA_CHUNK=1)
     endif()
   endif()
 
