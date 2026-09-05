@@ -82,9 +82,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
                 torch.uint8,
             ),
         )
-        self._use_pcp = (
-            vllm_config.parallel_config.prefill_context_parallel_size > 1
-        )
 
     def prepare_metadata(
         self,
@@ -94,10 +91,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
-        self._has_active_rows = True
-        if not self._use_pcp:
-            return
-
         query_lens_cpu = prefill_metadata.query_lens_cpu
         if query_lens_cpu is None:
             raise ValueError("TRTLLM ragged prefill requires CPU query lengths")
@@ -115,7 +108,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         self._has_active_rows = min_query_len > 0
         if not self._has_active_rows:
             has_mixed_rows = bool(torch.any(query_lens_cpu > 0).item())
-            if not self._use_pcp or has_mixed_rows:
+            if has_mixed_rows:
                 raise ValueError(
                     "TRTLLM ragged prefill contains mixed active and empty query "
                     f"rows: query_lens={query_lens_cpu.tolist()}"
