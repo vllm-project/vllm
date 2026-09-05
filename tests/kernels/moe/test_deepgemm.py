@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    build_psum_group_end,
     deepgemm_moe_permute,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
@@ -54,7 +55,7 @@ def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
     )
     topk_ids = torch.tensor([[0], [1]], device="cuda", dtype=torch.int64)
 
-    _, permuted_scales, expert_ids, _, _ = deepgemm_moe_permute(
+    _, permuted_scales, expert_ids, _, _, _ = deepgemm_moe_permute(
         aq=activations,
         aq_scale=scales,
         topk_ids=topk_ids,
@@ -70,6 +71,66 @@ def test_deepgemm_moe_permute_initializes_padding_scales(workspace_init):
         torch.zeros_like(permuted_scales[padding]),
         rtol=0,
         atol=0,
+    )
+
+
+@pytest.mark.parametrize("align_m", [64, 128])
+def test_build_psum_group_end(align_m):
+    """group_end[i] must equal aligned_start[i] + count[i].
+
+    aligned_start is the exclusive prefix sum of the per-expert counts rounded
+    up to align_m — the same cumsum ep_scatter uses for expert_start_loc. This
+    is what DeepGEMM's psum scheduler reads to skip padding blocks, so a wrong
+    offset silently corrupts every downstream expert. Empty experts must
+    collapse to a zero-length group (group_end == aligned_start).
+    """
+    counts = torch.tensor([130, 0, 5, 256], dtype=torch.int64)
+
+    group_end = build_psum_group_end(counts, align_m)
+
+    aligned = ((counts.to(torch.int32) + align_m - 1) // align_m) * align_m
+    # torch.cumsum promotes int32 -> int64; build_psum_group_end casts back.
+    aligned_start = torch.cumsum(aligned, dim=0) - aligned
+    expected = (aligned_start + counts).to(torch.int32)
+
+    assert group_end.dtype == torch.int32
+    assert group_end.is_contiguous()
+    torch.testing.assert_close(group_end, expected, rtol=0, atol=0)
+    # Empty expert (index 1) contributes no blocks: its end sits at its start.
+    assert group_end[1].item() == aligned_start[1].item()
+    # Each group's real end never exceeds the next group's aligned start.
+    next_start = torch.cat([aligned_start[1:], aligned_start[-1:] + aligned[-1:]])
+    assert torch.all(group_end <= next_start)
+
+
+def test_deepgemm_fp4_use_psum_layout_gate():
+    """psum layout is selected iff DeepEP v2 supplies psum_recv_per_rank.
+
+    That field is populated only by DeepEP v2's cudagraph/decode dispatch (the
+    mode with large worst-case padding), so the gate turns psum on exactly
+    there and leaves the prefill / non-EP paths on the per-row m_indices layout.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+
+    gate = DeepGemmFP4Experts._use_psum_layout
+
+    empty_meta = mk.ExpertTokensMetadata(
+        expert_num_tokens=None, expert_num_tokens_cpu=None
+    )
+
+    assert gate(None) is False
+    assert gate(empty_meta) is False
+    assert (
+        gate(
+            mk.ExpertTokensMetadata(
+                expert_num_tokens=None,
+                expert_num_tokens_cpu=None,
+                psum_recv_per_rank=torch.tensor([4], dtype=torch.int32),
+            )
+        )
+        is True
     )
 
 

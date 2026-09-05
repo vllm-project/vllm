@@ -328,7 +328,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         a1q_perm = _resize_cache(
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
         )
-        a1q, a1q_scale, expert_ids, inv_perm, align_used = deepgemm_moe_permute(
+        a1q, a1q_scale, expert_ids, inv_perm, align_used, _ = deepgemm_moe_permute(
             aq=a1q,
             aq_scale=a1q_scale,
             topk_ids=topk_ids,
@@ -414,6 +414,23 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         assert not quant_config.per_out_ch_quant
 
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+
+    @staticmethod
+    def _use_psum_layout(expert_tokens_meta: mk.ExpertTokensMetadata | None) -> bool:
+        """Whether to drive the grouped GEMM with DeepGEMM's psum layout.
+
+        Enabled exactly when DeepEP v2 supplies ``psum_recv_per_rank`` (its
+        cudagraph/decode dispatch), i.e. the mode carrying the large worst-case
+        row padding. There the psum layout lets the SM100 scheduler skip the
+        padding blocks instead of computing over them (as the per-row
+        ``m_indices`` layout does). The prefill dispatch leaves it ``None`` —
+        its layout is near-padding-free, so the non-psum path is used. Mirrors
+        the ``psum_recv_per_rank`` gate in ``fused_humming_moe``.
+        """
+        return (
+            expert_tokens_meta is not None
+            and expert_tokens_meta.psum_recv_per_rank is not None
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -576,16 +593,35 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         a1q_perm = _resize_cache(
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, K)
         )
-        a1q, a1q_scale, expert_ids, inv_perm, align_used = deepgemm_moe_permute(
-            aq=a1q,
-            aq_scale=a1q_scale,
-            topk_ids=topk_ids,
-            local_num_experts=local_num_experts,
-            expert_map=expert_map,
-            expert_tokens_meta=expert_tokens_meta,
-            aq_out=a1q_perm,
+        use_psum_layout = self._use_psum_layout(expert_tokens_meta)
+
+        a1q, a1q_scale, expert_ids, inv_perm, align_used, group_end = (
+            deepgemm_moe_permute(
+                aq=a1q,
+                aq_scale=a1q_scale,
+                topk_ids=topk_ids,
+                local_num_experts=local_num_experts,
+                expert_map=expert_map,
+                expert_tokens_meta=expert_tokens_meta,
+                aq_out=a1q_perm,
+                build_psum_layout=use_psum_layout,
+            )
         )
         assert a1q.size(0) == M_sum
+
+        # psum: pass per-group prefix-sum end offsets and a capture-stable
+        # expected_m so the scheduler skips padding blocks; otherwise pass the
+        # per-row m_indices (expert_ids).
+        if use_psum_layout:
+            assert group_end is not None
+            grouped_layout = group_end
+            psum_kwargs = {
+                "use_psum_layout": True,
+                "expected_m_for_psum_layout": M_sum,
+            }
+        else:
+            grouped_layout = expert_ids
+            psum_kwargs = {}
 
         # Cap DG's BLOCK_M heuristic at the workspace's per-expert alignment;
         # see DeepGemmExperts.apply for rationale.
@@ -597,9 +633,10 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 (a1q, a1q_scale),
                 (w1.view(torch.int8), self.w1_scale),
                 mm1_out,
-                expert_ids,
+                grouped_layout,
                 recipe_a=(1, self._ACT_BLOCK_K),
                 recipe_b=(1, self._WEIGHT_BLOCK_K),
+                **psum_kwargs,
             )
 
             # SwiGLU activation + FP8 requant
@@ -617,9 +654,10 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 (a2q, a2q_scale),
                 (w2.view(torch.int8), self.w2_scale),
                 mm2_out,
-                expert_ids,
+                grouped_layout,
                 recipe_a=(1, self._ACT_BLOCK_K),
                 recipe_b=(1, self._WEIGHT_BLOCK_K),
+                **psum_kwargs,
             )
 
         if apply_router_weight_on_input:
