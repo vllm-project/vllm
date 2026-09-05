@@ -322,6 +322,60 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     torch.testing.assert_close(layer.W_UK_T, old_w_uk_t + 100)
 
 
+def test_mla_fp8_qrep_gathers_scalar_weight_scale(monkeypatch):
+    class FakeDCPGroup:
+        def all_gather(self, input_: torch.Tensor, dim: int = 0) -> torch.Tensor:
+            assert input_.dim() > 0
+            return torch.cat([input_, input_], dim=dim)
+
+    layer = MLAAttention.__new__(MLAAttention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_lora_rank = 2
+    layer.num_heads = 2
+    layer.qk_nope_head_dim = 3
+    layer.v_head_dim = 4
+    layer.kv_b_proj = torch.nn.Module()
+    layer.kv_b_proj.weight = torch.nn.Parameter(
+        torch.arange(28.0, dtype=torch.float16).reshape(14, 2)
+    )
+    layer.kv_b_proj.quant_method = None
+    layer.is_aiter_triton_fp4_bmm_enabled = False
+    layer.is_aiter_triton_fp8_bmm_enabled = True
+    layer.is_amx_bmm_enabled = False
+    layer.dcp_q_replicate = True
+    layer.q_pad_num_heads = None
+    layer.quant_config = None
+    layer.layer_name = "test"
+    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
+
+    monkeypatch.setattr(mla_attention_module, "get_dcp_group", FakeDCPGroup)
+    monkeypatch.setattr(mla_attention_module, "is_global_first_rank", lambda: False)
+    monkeypatch.setattr(
+        mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
+    )
+
+    fp8_bmm_calls = []
+
+    def fake_triton_fp8_bmm(x, w, w_scale, **kwargs):
+        fp8_bmm_calls.append((w.shape, w_scale.shape))
+        return x.new_empty((*x.shape[:-1], w.shape[-2]))
+
+    monkeypatch.setattr(
+        mla_attention_module.rocm_aiter_ops,
+        "triton_fp8_bmm",
+        fake_triton_fp8_bmm,
+    )
+
+    with torch.no_grad():
+        layer.process_weights_after_loading(torch.float32)
+
+    assert layer.W_K_scale.shape == (2,)
+    assert any(
+        w_shape[0] == 4 and scale_shape == (2,)
+        for w_shape, scale_shape in fp8_bmm_calls
+    )
+
+
 # Validate parameter combinations during collection, before GPU fixtures run.
 PREFILL_BACKENDS_TO_TEST: list[MLAPrefillBackendEnum] = []
 if current_platform.is_cuda():
