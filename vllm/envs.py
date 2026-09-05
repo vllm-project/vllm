@@ -304,6 +304,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
+    VLLM_KV_CONTIG_ALLOC: bool = False
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
@@ -2093,6 +2094,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS": lambda: int(
         os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS", "0")
     ),
+    # Prefer contiguous physical block-ID runs for large KV-cache allocations.
+    "VLLM_KV_CONTIG_ALLOC": lambda: bool(int(os.getenv("VLLM_KV_CONTIG_ALLOC", "0"))),
     # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
     # supported but disabled by default due to a small performance regression.
     # Set to 1 when pinned memory or UVA is required (e.g. CPU offloading
@@ -2370,6 +2373,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        # Changes block selection, not generated code.
+        "VLLM_KV_CONTIG_ALLOC",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
