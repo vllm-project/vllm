@@ -741,8 +741,14 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
-        if (is_list_of(data, PILImage.Image) and len(data) > 0) or (
-            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
+        if (
+            (is_list_of(data, PILImage.Image) and len(data) > 0)
+            or (
+                is_list_of(data, (np.ndarray, torch.Tensor), check="all")
+                and len(data) > 0
+                and all(item.ndim == 3 for item in data)
+            )
+            or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4)
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
