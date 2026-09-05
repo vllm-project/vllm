@@ -897,42 +897,17 @@ def test_qsa_block_expansion_correctness() -> None:
     assert actual[:, 11].tolist() == [6, 11]
 
 
-@requires_qsa_kernels
-@pytest.mark.parametrize(
-    (
-        "num_rows",
-        "num_query_heads",
-        "num_kv_heads",
-        "page_size",
-        "use_prefill_config",
-        "num_requests",
-    ),
-    [
-        # Production page sizes from hybrid-cache block alignment: 784/800
-        # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
-        # splits are per-rank TP1/TP2/TP4; the largest batch runs both
-        # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
-    ],
-)
-def test_qsa_sparse_paged_attention_correctness(
+def _make_sparse_attention_problem(
     num_rows: int,
     num_query_heads: int,
     num_kv_heads: int,
     page_size: int,
-    use_prefill_config: bool,
     num_requests: int,
-) -> None:
-    torch.manual_seed(2)
+) -> tuple[torch.Tensor, ...]:
+    """Build one QSA attention problem: bf16 Q and paged K/V, a packed
+    selection with the trailing count column, block table and row-to-request
+    map. Returns (q, k_cache, v_cache, logical_indices, block_table,
+    token_to_req, selection_width)."""
     head_dim = 256
     num_selected_pages = 64
     # Keep the newest page outside the synthetic top-k as causal headroom.
@@ -1013,6 +988,64 @@ def test_qsa_sparse_paged_attention_correctness(
         logical_indices,
     )
     assert logical_indices.shape == (num_rows, selection_width + 1)
+    return (
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        selection_width,
+    )
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    (
+        "num_rows",
+        "num_query_heads",
+        "num_kv_heads",
+        "page_size",
+        "use_prefill_config",
+        "num_requests",
+    ),
+    [
+        # Production page sizes from hybrid-cache block alignment: 784/800
+        # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
+        # splits are per-rank TP1/TP2/TP4; the largest batch runs both
+        # use_prefill_config variants.
+        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
+    ],
+)
+def test_qsa_sparse_paged_attention_correctness(
+    num_rows: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    page_size: int,
+    use_prefill_config: bool,
+    num_requests: int,
+) -> None:
+    torch.manual_seed(2)
+    (
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        selection_width,
+    ) = _make_sparse_attention_problem(
+        num_rows, num_query_heads, num_kv_heads, page_size, num_requests
+    )
     scale = q.shape[-1] ** -0.5
 
     actual = qsa_ops.qsa_sparse_paged_attention(
@@ -1035,6 +1068,106 @@ def test_qsa_sparse_paged_attention_correctness(
     )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize(
+    (
+        "num_rows",
+        "num_query_heads",
+        "num_kv_heads",
+        "page_size",
+        "use_prefill_config",
+        "num_requests",
+    ),
+    [
+        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
+        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
+        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
+    ],
+)
+def test_qsa_sparse_paged_attention_fp8_kv(
+    num_rows: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    page_size: int,
+    use_prefill_config: bool,
+    num_requests: int,
+) -> None:
+    """fp8_e4m3 caches: the kernel must match the reference computed on the
+    dequantized cache (the check measures the kernel, not e4m3 rounding), the
+    per-tensor K/V scales must be folded in, and the bf16 branch must be
+    unchanged when the scale arguments are present."""
+    torch.manual_seed(2)
+    (
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        selection_width,
+    ) = _make_sparse_attention_problem(
+        num_rows, num_query_heads, num_kv_heads, page_size, num_requests
+    )
+    scale = q.shape[-1] ** -0.5
+    selection = logical_indices[:, :selection_width]
+    one = torch.ones((), device="cuda", dtype=torch.float32)
+
+    bf16_plain = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=use_prefill_config,
+    )
+    bf16_scaled = qsa_ops.qsa_sparse_paged_attention(
+        q,
+        k_cache,
+        v_cache,
+        logical_indices,
+        block_table,
+        token_to_req,
+        use_prefill_config=use_prefill_config,
+        k_scale=one,
+        v_scale=one,
+    )
+    assert torch.equal(bf16_plain, bf16_scaled)
+
+    for k_scale_value, v_scale_value in ((1.0, 1.0), (0.5, 2.0)):
+        k_scale = torch.full((), k_scale_value, device="cuda", dtype=torch.float32)
+        v_scale = torch.full((), v_scale_value, device="cuda", dtype=torch.float32)
+        # vLLM allocates quantized caches as uint8; the impl reinterprets the
+        # bytes as e4m3 right before the kernel, so the test takes the same
+        # detour. Stored values are the scaled ones, as reshape_and_cache does.
+        k_fp8 = (k_cache.float() / k_scale).to(torch.float8_e4m3fn)
+        v_fp8 = (v_cache.float() / v_scale).to(torch.float8_e4m3fn)
+        k_fp8 = k_fp8.view(torch.uint8).view(torch.float8_e4m3fn)
+        v_fp8 = v_fp8.view(torch.uint8).view(torch.float8_e4m3fn)
+        actual = qsa_ops.qsa_sparse_paged_attention(
+            q,
+            k_fp8,
+            v_fp8,
+            logical_indices,
+            block_table,
+            token_to_req,
+            use_prefill_config=use_prefill_config,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+        expected = _qsa_sparse_paged_attention_reference(
+            q,
+            (k_fp8.to(torch.float32) * k_scale).to(torch.bfloat16),
+            (v_fp8.to(torch.float32) * v_scale).to(torch.bfloat16),
+            selection,
+            block_table,
+            token_to_req,
+            scale,
+        )
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
 @requires_qsa_kernels
