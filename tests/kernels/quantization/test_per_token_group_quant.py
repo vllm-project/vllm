@@ -11,25 +11,45 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "shape", [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512)]
+    "shape",
+    [
+        (31, 128),
+        (32, 128),
+        (63, 256),
+        (64, 256),
+        (16, 512),
+        # group_size=128 with 16-bit input takes a register-resident schedule
+        # of 8 lanes x 16 elements per group. Cover a single group, a token
+        # count that leaves a partial trailing block, and a serving-sized
+        # shape.
+        (1, 128),
+        (333, 128),
+        (512, 6144),
+    ],
 )
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("tma_aligned", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Only test on CUDA/ROCm/XPU.",
 )
 def test_per_token_group_quant_fp8(
-    shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
+    shape,
+    column_major: bool,
+    tma_aligned: bool,
+    scale_ue8m0: bool,
+    group_size: int,
+    dtype: torch.dtype,
 ):
     device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=dtype) * 8
 
     # native kernel path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
@@ -54,6 +74,50 @@ def test_per_token_group_quant_fp8(
 
     assert torch.allclose(out_q.float(), ref_q.float(), atol=0.15, rtol=0.15)
     assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)
+
+
+def _misaligned_clone(x: torch.Tensor) -> torch.Tensor:
+    """Contiguous copy of ``x`` whose ``data_ptr`` is not 16B aligned."""
+    numel = x.numel()
+    base = torch.empty(numel + 16 // x.element_size(), device=x.device, dtype=x.dtype)
+    view = base[1 : 1 + numel]
+    if view.data_ptr() % 16 == 0:
+        pytest.skip("allocator did not yield a misaligned offset")
+    return view.view(x.shape).copy_(x)
+
+
+@pytest.mark.parametrize("shape", [(1, 128), (333, 128), (1024, 6144)])
+@pytest.mark.parametrize("column_major", [False, True])
+@pytest.mark.parametrize("scale_ue8m0", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="register-resident schedule is CUDA/ROCm only",
+)
+def test_per_token_group_quant_fp8_register_matches_smem(
+    shape, column_major: bool, scale_ue8m0: bool, dtype: torch.dtype
+):
+    """group_size=128 with 16-bit input takes a register-resident schedule that
+    needs 16B-aligned buffers; a misaligned input falls back to the
+    shared-memory schedule. The two must agree bit-for-bit, which the
+    tolerance-based comparison against Triton above cannot establish.
+    """
+    device = current_platform.device_type
+    torch.manual_seed(42)
+    x = torch.randn(shape, device=device, dtype=dtype) * 8
+
+    reg_q, reg_s = fp8_utils.per_token_group_quant_fp8(
+        x, 128, column_major_scales=column_major, use_ue8m0=scale_ue8m0
+    )
+    smem_q, smem_s = fp8_utils.per_token_group_quant_fp8(
+        _misaligned_clone(x),
+        128,
+        column_major_scales=column_major,
+        use_ue8m0=scale_ue8m0,
+    )
+
+    assert torch.equal(reg_q.view(torch.uint8), smem_q.view(torch.uint8))
+    assert torch.equal(reg_s, smem_s)
 
 
 @pytest.mark.parametrize(
@@ -432,3 +496,24 @@ def test_per_token_group_quant_int8(shape, group_size: int):
 
     assert torch.allclose(out_q.float(), ref_q.float(), atol=0.15, rtol=0.15)
     assert torch.allclose(scale, ref_s, atol=0.01, rtol=0.01)
+
+
+@pytest.mark.parametrize("shape", [(1, 128), (333, 128), (1024, 6144)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="register-resident schedule is CUDA/ROCm only",
+)
+def test_per_token_group_quant_int8_register_matches_smem(shape, dtype: torch.dtype):
+    """int8 output shares the register-resident schedule with fp8, so it needs
+    the same bit-exactness guard against the shared-memory schedule.
+    """
+    device = current_platform.device_type
+    torch.manual_seed(42)
+    x = torch.randn(shape, device=device, dtype=dtype) * 8
+
+    reg_q, reg_s = int8_utils.per_token_group_quant_int8(x, 128)
+    smem_q, smem_s = int8_utils.per_token_group_quant_int8(_misaligned_clone(x), 128)
+
+    assert torch.equal(reg_q, smem_q)
+    assert torch.equal(reg_s, smem_s)
