@@ -1304,6 +1304,7 @@ def get_default_config(
     topk: int,
     dtype: str | None,
     block_shape: list[int] | None = None,
+    allow_cuda_wna16: bool = True,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
         return {
@@ -1356,7 +1357,9 @@ def get_default_config(
         # only set BLOCK_SIZE_M
         # BLOCK_SIZE_N and BLOCK_SIZE_K would be set later
         bit = 4 if dtype == "int4_w4a16" else 8
-        use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk, block_shape[1], E, bit)
+        use_moe_wna16_cuda = allow_cuda_wna16 and should_moe_wna16_use_cuda(
+            M * topk, block_shape[1], E, bit
+        )
         if use_moe_wna16_cuda:
             config = {
                 "BLOCK_SIZE_M": min(16, next_power_of_2(M)),
@@ -1426,6 +1429,7 @@ def try_get_optimal_moe_config(
     dtype: str | None,
     M: int,
     block_shape: list[int] | None = None,
+    allow_cuda_wna16: bool = True,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
 
@@ -1447,7 +1451,16 @@ def try_get_optimal_moe_config(
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+            config = get_default_config(
+                M,
+                E,
+                N,
+                w1_shape[2],
+                top_k,
+                dtype,
+                block_shape,
+                allow_cuda_wna16=allow_cuda_wna16,
+            )
     return config
 
 

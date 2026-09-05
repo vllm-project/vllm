@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExpertsBase,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    CudaOrTritonWNA16Experts,
     TritonWNA16Experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
@@ -276,6 +277,8 @@ def select_wna16_moe_backend(
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
 
+    from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
+
     for backend in AVAILABLE_BACKENDS:
         reason = _backend_incompatibility_reason(
             backend,
@@ -289,7 +292,12 @@ def select_wna16_moe_backend(
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
             continue
         activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
+        kernel_classes = backend_to_kernel_cls(backend)
+        if backend == WNA16MoEBackend.TRITON and isinstance(
+            quant_config, MoeWNA16Config
+        ):
+            kernel_classes = [CudaOrTritonWNA16Experts, *kernel_classes]
+        for k_cls in kernel_classes:
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
@@ -384,6 +392,7 @@ def make_wna16_moe_kernel(
     allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
+        CudaOrTritonWNA16Experts,
         TritonWNA16Experts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
