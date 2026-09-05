@@ -47,7 +47,9 @@ class UvaBuffer:
             raise RuntimeError("UVA is not available")
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
-        self.uva = get_accelerator_view_from_cpu_tensor(self.cpu)
+        self.uva = get_accelerator_view_from_cpu_tensor(
+            self.cpu, require_live_view=True
+        )
 
 
 class UvaBufferPool:
