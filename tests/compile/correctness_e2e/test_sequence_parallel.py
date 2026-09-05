@@ -29,6 +29,8 @@ logger = init_logger("test_sequence_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
 NVFP4_MODEL_INFO = _HfExamplesInfo(NVFP4_MODEL_ID)
+XPU_MXFP8_MODEL_ID = "INCModel/Qwen3-32B-MXFP8-CT-AutoRound"
+XPU_MXFP8_MODEL_INFO = _HfExamplesInfo(XPU_MXFP8_MODEL_ID)
 
 
 class ParallelSetup(NamedTuple):
@@ -405,6 +407,42 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
     )
     _compare_sp_settings(
         NVFP4_MODEL_ID,
+        [] if comparison is None else [comparison],
+        method="generate",
+    )
+
+
+@create_new_process_for_each_test()
+def test_tp_sp_xpu_mxfp8_generation(num_gpus_available: int):
+    if not current_platform.is_xpu():
+        pytest.skip("MXFP8 sequence parallelism is only supported on XPU")
+
+    comparison = _build_sp_args(
+        XPU_MXFP8_MODEL_ID,
+        ParallelSetup(
+            tp_size=2,
+            pp_size=1,
+            # MXFP8 has no fused rms_norm+quant kernel yet, so norm/act
+            # quant fusion must stay disabled.
+            fuse_norm_quant=False,
+            fuse_act_quant=False,
+            eager_mode=True,
+        ),
+        "mp",
+        "auto",
+        SPTestOptions(
+            multi_node_only=False,
+            load_format=None,
+            model_info=XPU_MXFP8_MODEL_INFO,
+        ),
+        num_gpus_available,
+        use_inductor_graph_partition=False,
+        fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
+        is_multimodal=False,
+    )
+    _compare_sp_settings(
+        XPU_MXFP8_MODEL_ID,
         [] if comparison is None else [comparison],
         method="generate",
     )
