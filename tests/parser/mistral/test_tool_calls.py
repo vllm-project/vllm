@@ -183,10 +183,11 @@ def encode_mistral_output(tokenizer: MistralTokenizer, text: str) -> list[int]:
     ids: list[int] = []
     for part in re.split(r"(\[TOOL_CALLS\]|\[ARGS\])", text):
         if part in marker_ids:
+            marker_id = marker_ids[part]
             # Fall back to text encoding here and the id-based engine path
             # silently stops being exercised while the tests still pass.
-            assert marker_ids[part] is not None, f"{part} missing from vocab"
-            ids.append(marker_ids[part])
+            assert marker_id is not None, f"{part} missing from vocab"
+            ids.append(marker_id)
         elif part:
             ids.extend(tokenizer.encode(part, add_special_tokens=False))
     return ids
@@ -249,6 +250,7 @@ def stream_delta_message_generator(
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=True,
         )
+        assert _parser_cls is not None
         _engine_parser = _parser_cls(mistral_tokenizer, None)
         if reasoning_parser is not None:
             _req_with_tools = ChatCompletionRequest(
@@ -1967,6 +1969,7 @@ def test_adjust_request_unsupported_response_format(
         ),
     )
     result = mistral_tool_parser.adjust_request(request)
+    assert isinstance(result, ChatCompletionRequest)
     assert result.structured_outputs is None
     assert result.response_format == request.response_format
 
@@ -2125,6 +2128,7 @@ def test_grammar_from_parser_set_by_adjust_request(
 ) -> None:
     request = _make_request()
     result = mistral_tool_parser.adjust_request(request)
+    assert isinstance(result, ChatCompletionRequest)
     assert result._grammar_from_parser is True
 
 
@@ -2329,6 +2333,7 @@ def test_adjust_request_pre_v11_guided_schema_injected(
     schema = result.structured_outputs.json
     if isinstance(schema, str):
         schema = json.loads(schema)
+    assert schema is not None
     assert schema["type"] == "array"
     assert schema["minItems"] == 1
     items = schema["items"]
@@ -2357,11 +2362,13 @@ def test_adjust_request_pre_v11_required_clears_response_format(
     request = _make_request(tool_choice="required", response_format=response_format)
     result = mistral_pre_v11_tool_parser.adjust_request(request)
 
+    assert isinstance(result, ChatCompletionRequest)
     assert result.response_format is None
     assert result.structured_outputs is not None
     schema = result.structured_outputs.json
     if isinstance(schema, str):
         schema = json.loads(schema)
+    assert schema is not None
     assert schema["type"] == "array"
 
 
@@ -2376,6 +2383,7 @@ def test_adjust_request_non_mistral_tokenizer_required_injects_schema(
     )
     result = non_mistral_parser.adjust_request(request)
 
+    assert isinstance(result, ChatCompletionRequest)
     assert result.response_format is None
     assert result.structured_outputs is not None
     assert result.structured_outputs.json is not None

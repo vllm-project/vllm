@@ -9,9 +9,11 @@ forwarding chain. Endpoint-level coverage lives in
 """
 
 import asyncio
+from typing import cast
 
 import pytest
 
+from vllm.inputs import TokensPrompt
 from vllm.renderers.params import TokenizeParams
 
 
@@ -35,7 +37,9 @@ def _make_base_renderer_with(tokenizer):
             from vllm.utils.async_utils import make_async
 
             self.tokenizer = tok
-            self._executor = None
+            # No thread pool: the stub skips BaseRenderer.__init__, which is
+            # what builds the real ThreadPoolExecutor.
+            self._executor = None  # type: ignore[assignment]
             # Mirror BaseRenderer.__init__: the async path offloads the sync
             # ``_tokenize_prompt`` to a thread pool.
             self._tokenize_prompt_async = make_async(self._tokenize_prompt)
@@ -97,7 +101,8 @@ class TestTokenizePromptOffsets:
         class _BareRenderer(BaseRenderer):
             def __init__(self, tok):
                 self.tokenizer = tok
-                self._executor = None
+                # See _StubRenderer: BaseRenderer.__init__ is skipped.
+                self._executor = None  # type: ignore[assignment]
                 self.mm_processor = None
 
             def get_tokenizer(self):
@@ -244,11 +249,16 @@ class TestTruncationKeepsOffsetsAligned:
             truncate_prompt_tokens=keep,
             truncation_side=side,
         )
-        result = params.apply_post_tokenization(
-            fast_tokenizer, renderer._tokenize_prompt({"prompt": text}, params)
+        # A TokensPrompt goes in, so a TokensPrompt comes back out.
+        result = cast(
+            TokensPrompt,
+            params.apply_post_tokenization(
+                fast_tokenizer, renderer._tokenize_prompt({"prompt": text}, params)
+            ),
         )
 
         offsets = result["prompt_token_offsets"]
+        assert offsets is not None
         assert len(result["prompt_token_ids"]) == keep
         assert len(offsets) == keep
 

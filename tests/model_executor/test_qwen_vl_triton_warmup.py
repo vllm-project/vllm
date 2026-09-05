@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -9,6 +10,9 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import (
     _warm_mrope,
     _warm_vision,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 def test_vision_warmup_calls_only_position_and_rotary_paths() -> None:
@@ -98,7 +102,7 @@ def test_mrope_warmup_launches_triton_shapes() -> None:
         dtype=torch.bfloat16,
         device=torch.device("cpu"),
     )
-    _warm_mrope(runner, FakeMropeModel())
+    _warm_mrope(cast("GPUModelRunner", runner), FakeMropeModel())
     assert [shape for shape, _ in launched] == [
         torch.Size((3, 1)),
         torch.Size((3, 2)),
@@ -114,4 +118,4 @@ def test_mrope_warmup_skips_models_without_supports_mrope() -> None:
         model_config=SimpleNamespace(get_num_attention_heads=fail),
         get_model=fail,
     )
-    _warm_mrope(runner, torch.nn.Module())
+    _warm_mrope(cast("GPUModelRunner", runner), torch.nn.Module())

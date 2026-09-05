@@ -13,7 +13,8 @@ is picked up with zero manual wiring.
 from __future__ import annotations
 
 import dataclasses
-from typing import NamedTuple
+from collections.abc import Callable
+from typing import NamedTuple, cast
 
 import pytest
 
@@ -22,6 +23,7 @@ from tests.parser.engine.replay_harness import (
     MockTokenizer,
     Sample,
     _test_request,
+    as_tokenizer,
     assert_no_terminal_leakage,
     assert_parse_output,
     collect_output,
@@ -55,7 +57,7 @@ def _discover_parsers() -> list[_ParserInfo]:
     Returns one ``_ParserInfo`` per parser, sorted by config name.
     Raises ``RuntimeError`` if any registered parser lacks a builder.
     """
-    bare_tok = MockTokenizer(vocab={}, tokens=[])
+    bare_tok = as_tokenizer(MockTokenizer(vocab={}, tokens=[]))
     found: list[_ParserInfo] = []
     missing_builders: list[str] = []
     for obj in vars(_adapters_mod).values():
@@ -70,7 +72,12 @@ def _discover_parsers() -> list[_ParserInfo]:
             # token, so it does not fit this TOOL_END-based replay harness.
             # It is covered by tests/parser/mistral/ instead.
             continue
-        cfg = obj(bare_tok, None).parser_engine_config
+        # Concrete engine parsers supply their own ``parser_engine_config``
+        # and so take just ``(tokenizer, tools)``; ``type[ParserEngine]``
+        # still advertises the base signature, which requires the config
+        # as a keyword argument.
+        make_parser = cast("Callable[..., ParserEngine]", obj)
+        cfg = make_parser(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue

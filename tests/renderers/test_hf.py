@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import jinja2
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import ConversationMessage, load_chat_template
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers.hf import (
@@ -256,6 +258,9 @@ def test_resolve_chat_template_kwargs(sample_json_schema, model, expected_kwargs
         tools=tools,
         model_config=model_config,
     )
+    # The rest of this test feeds the resolved template to the kwargs resolver,
+    # so a tokenizer without one would fail confusingly further down.
+    assert chat_template is not None
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
     ):
@@ -577,7 +582,10 @@ def test_resolve_content_format_examples(template_path, expected_format):
         model,
         trust_remote_code=model_config.trust_remote_code,
     )
-    dummy_tokenizer.chat_template = None
+    # `chat_template` exists on the underlying transformers tokenizer but is
+    # not part of the `TokenizerLike` protocol. Clearing it forces resolution
+    # to fall back to the template loaded below.
+    dummy_tokenizer.chat_template = None  # type: ignore[attr-defined]
 
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
     assert isinstance(chat_template, str)
@@ -643,7 +651,9 @@ def test_get_gen_prompt(
     result = safe_apply_chat_template(
         model_config,
         tokenizer,
-        mock_request.messages,
+        # The test messages are plain role/content dicts, so they are already
+        # in conversation shape and need no `parse_chat_messages` pass.
+        cast(list[ConversationMessage], mock_request.messages),
         tools=None,
         chat_template=mock_request.chat_template or template_content,
         add_generation_prompt=mock_request.add_generation_prompt,
@@ -660,7 +670,7 @@ def test_get_gen_prompt(
 
 class TestConvertDeveloperToSystem:
     def test_converts_role(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -670,7 +680,7 @@ class TestConvertDeveloperToSystem:
         assert result[1]["role"] == "user"
 
     def test_removes_tools_key(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {
                 "role": "developer",
                 "content": "Instructions",
@@ -681,7 +691,7 @@ class TestConvertDeveloperToSystem:
         assert "tools" not in result[0]
 
     def test_no_developer_messages_unchanged(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "System prompt"},
             {"role": "user", "content": "Hello"},
         ]
@@ -690,7 +700,7 @@ class TestConvertDeveloperToSystem:
         assert result[1]["role"] == "user"
 
     def test_does_not_mutate_original(self):
-        original = {
+        original: ConversationMessage = {
             "role": "developer",
             "content": "Instructions",
             "tools": [{"type": "function"}],
@@ -781,7 +791,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         return get_tokenizer("facebook/opt-125m")
 
     def test_developer_converted_to_system_for_chatml(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -800,7 +810,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_preserved_when_template_supports_it(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -816,7 +826,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_developer_does_not_crash_strict_template(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "developer", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
@@ -832,7 +842,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "You are a helpful assistant." in result
 
     def test_no_developer_messages_no_overhead(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -850,7 +860,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
     def test_developer_at_non_first_position_consolidated(
         self, model_config, tokenizer
     ):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there!"},
@@ -871,7 +881,7 @@ class TestSafeApplyChatTemplateDeveloperRole:
         assert "What is 2+2?" in result
 
     def test_developer_only_no_prior_system(self, model_config, tokenizer):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "developer", "content": "Be concise."},
             {"role": "user", "content": "What is 2+2?"},
@@ -949,7 +959,7 @@ class TestApplyChatTemplateEffortTolerant:
         return get_tokenizer("facebook/opt-125m")
 
     def test_unsupported_effort_raises_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(
             VLLMValidationError,
             match="Unexpected reasoning effort high",
@@ -970,7 +980,7 @@ class TestApplyChatTemplateEffortTolerant:
         )
 
     def test_supported_effort_accepted(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         result = safe_apply_chat_template(
             model_config,
             tokenizer,
@@ -982,7 +992,7 @@ class TestApplyChatTemplateEffortTolerant:
         assert result == "user: Hello\n"
 
     def test_non_effort_template_error_is_bad_request(self, model_config, tokenizer):
-        conversation = [{"role": "user", "content": "Hello"}]
+        conversation: list[ConversationMessage] = [{"role": "user", "content": "Hello"}]
         with pytest.raises(VLLMValidationError, match="unrelated reason"):
             safe_apply_chat_template(
                 model_config,
@@ -1010,7 +1020,7 @@ def test_template_error_reason_falls_back_to_message():
 
 class TestConsolidateSystemMessages:
     def test_no_system_messages_unchanged(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
         ]
@@ -1018,7 +1028,7 @@ class TestConsolidateSystemMessages:
         assert result == conversation
 
     def test_single_system_at_start_unchanged(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
         ]
@@ -1026,7 +1036,7 @@ class TestConsolidateSystemMessages:
         assert result == conversation
 
     def test_system_at_non_first_position_moved(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "You are helpful."},
         ]
@@ -1037,7 +1047,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["content"] == "Hello"
 
     def test_multiple_system_messages_merged(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "Be concise."},
@@ -1049,7 +1059,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["role"] == "user"
 
     def test_list_content_handled(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {
                 "role": "system",
@@ -1065,7 +1075,7 @@ class TestConsolidateSystemMessages:
         assert result[1]["role"] == "user"
 
     def test_does_not_mutate_original(self):
-        conversation = [
+        conversation: list[ConversationMessage] = [
             {"role": "user", "content": "Hello"},
             {"role": "system", "content": "You are helpful."},
         ]
