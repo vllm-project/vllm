@@ -66,7 +66,13 @@ from vllm.utils.torch_utils import (
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
-from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    EXECUTE_MODEL_FAST_PATH_TAG,
+    GrammarOutput,
+    SchedulerOutput,
+    pack_scheduler_output_for_execute_model_fast_path,
+    unpack_scheduler_output_from_execute_model_fast_path,
+)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
@@ -415,9 +421,30 @@ class MultiprocExecutor(Executor):
 
         if isinstance(method, str):
             send_method = method
+            method_name = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+            method_name = "<callable>"
+        execute_model_fast_path = envs.VLLM_TP_EXECUTE_MODEL_FAST_PATH
+        if (
+            method_name == "execute_model"
+            and execute_model_fast_path == "1"
+            and len(args) == 1
+            and isinstance(args[0], SchedulerOutput)
+            and not kwargs
+        ):
+            scheduler_payload = pack_scheduler_output_for_execute_model_fast_path(
+                args[0]
+            )
+            self.rpc_broadcast_mq.enqueue(
+                (
+                    EXECUTE_MODEL_FAST_PATH_TAG,
+                    scheduler_payload,
+                    output_rank,
+                )
+            )
+        else:
+            self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
@@ -1030,7 +1057,22 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
-            self._execute_worker_rpc(self.rpc_broadcast_mq.dequeue(indefinite=True))
+            rpc_message = self.rpc_broadcast_mq.dequeue(indefinite=True)
+            if len(rpc_message) == 3 and rpc_message[0] == EXECUTE_MODEL_FAST_PATH_TAG:
+                _, scheduler_payload, output_rank = rpc_message
+                rpc_request = (
+                    "execute_model",
+                    (
+                        unpack_scheduler_output_from_execute_model_fast_path(
+                            scheduler_payload
+                        ),
+                    ),
+                    {},
+                    output_rank,
+                )
+            else:
+                rpc_request = rpc_message
+            self._execute_worker_rpc(rpc_request)
 
     def _execute_worker_rpc(
         self,

@@ -240,6 +240,7 @@ if TYPE_CHECKING:
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
+    VLLM_TP_EXECUTE_MODEL_FAST_PATH: str = "0"
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: (
         Literal["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"]
@@ -1787,6 +1788,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # executor (only applies when TP > 1).
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
+    ),
+    # execute_model RPC encoding in MultiprocExecutor (TP > 1 only):
+    # "0"=default pickle, "1"=compact tuple fast path.
+    "VLLM_TP_EXECUTE_MODEL_FAST_PATH": lambda: os.getenv(
+        "VLLM_TP_EXECUTE_MODEL_FAST_PATH", "0"
     ),
     # Timeout in seconds for engine and worker process shutdown
     "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(

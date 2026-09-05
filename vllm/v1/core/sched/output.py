@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from array import array
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -308,6 +309,225 @@ class SchedulerOutput:
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
         )
+
+
+EXECUTE_MODEL_FAST_PATH_TAG = "__vllm_execute_model_fast_path_v1__"
+
+
+def pack_scheduler_output_for_execute_model_fast_path(
+    scheduler_output: SchedulerOutput,
+) -> tuple:
+    """Pack SchedulerOutput as positional tuples for execute_model RPC.
+
+    The regular multiprocessing RPC pickles a dataclass object graph. This fixed
+    schema avoids dataclass __dict__ and field-name metadata while using
+    array('i') for int lists to speed up pickle/unpickle.
+    """
+
+    def pack_int_list(value: list[int] | None):
+        return None if value is None else array("i", value)
+
+    def pack_int_list_dict(value: dict[str, list[int]]):
+        return {key: pack_int_list(val) for key, val in value.items()}
+
+    def pack_block_ids(value: tuple[list[int], ...]):
+        return tuple(pack_int_list(block_ids) for block_ids in value)
+
+    def pack_optional_block_ids(value: tuple[list[int], ...] | None):
+        return None if value is None else pack_block_ids(value)
+
+    def pack_kv_connector_block_state(
+        value: KVConnectorBlockState | None,
+    ):
+        if value is None:
+            return None
+        return (
+            {
+                req_id: pack_block_ids(block_ids)
+                for req_id, block_ids in value.block_ids.items()
+            },
+            value.boundary_state_offloads,
+        )
+
+    cached = scheduler_output.scheduled_cached_reqs
+    scheduled_new_reqs = tuple(
+        (
+            req.req_id,
+            pack_int_list(req.prompt_token_ids),
+            req.mm_features,
+            req.sampling_params,
+            req.pooling_params,
+            pack_block_ids(req.block_ids),
+            req.num_computed_tokens,
+            req.lora_request,
+            req.prompt_embeds,
+            req.prompt_is_token_ids,
+            pack_int_list(req.prefill_token_ids),
+        )
+        for req in scheduler_output.scheduled_new_reqs
+    )
+    scheduled_cached_reqs = (
+        cached.req_ids,
+        cached.resumed_req_ids,
+        [pack_int_list(token_ids) for token_ids in cached.new_token_ids],
+        pack_int_list_dict(cached.all_token_ids),
+        [pack_optional_block_ids(block_ids) for block_ids in cached.new_block_ids],
+        cached.num_computed_tokens,
+        cached.num_output_tokens,
+    )
+    return (
+        scheduled_new_reqs,
+        scheduled_cached_reqs,
+        scheduler_output.num_scheduled_tokens,
+        scheduler_output.total_num_scheduled_tokens,
+        pack_int_list_dict(scheduler_output.scheduled_spec_decode_tokens),
+        pack_int_list_dict(scheduler_output.scheduled_encoder_inputs),
+        pack_int_list(scheduler_output.num_common_prefix_blocks),
+        scheduler_output.finished_req_ids,
+        scheduler_output.free_encoder_mm_hashes,
+        scheduler_output.scheduled_encoder_input_stats,
+        scheduler_output.preempted_req_ids,
+        scheduler_output.has_structured_output_requests,
+        scheduler_output.pending_structured_output_tokens,
+        scheduler_output.num_invalid_spec_tokens,
+        scheduler_output.kv_connector_metadata,
+        scheduler_output.has_sync_kv_loads,
+        scheduler_output.ec_connector_metadata,
+        scheduler_output.ec_manager_metadata,
+        pack_int_list(scheduler_output.new_block_ids_to_zero),
+        scheduler_output.kv_cache_block_copies,
+        pack_kv_connector_block_state(scheduler_output.kv_connector_block_state),
+        scheduler_output.num_spec_tokens_to_schedule,
+    )
+
+
+def unpack_scheduler_output_from_execute_model_fast_path(
+    payload: tuple,
+) -> SchedulerOutput:
+    """Rebuild SchedulerOutput from the execute_model fast-path payload."""
+
+    def unpack_int_list(value):
+        return None if value is None else list(value)
+
+    def unpack_int_list_dict(value):
+        return {key: unpack_int_list(val) for key, val in value.items()}
+
+    def unpack_block_ids(value):
+        return tuple(unpack_int_list(block_ids) for block_ids in value)
+
+    def unpack_optional_block_ids(value):
+        return None if value is None else unpack_block_ids(value)
+
+    def unpack_kv_connector_block_state(value):
+        if value is None:
+            return None
+        block_ids_payload, boundary_state_offloads = value
+        return KVConnectorBlockState(
+            block_ids={
+                req_id: unpack_block_ids(block_ids)
+                for req_id, block_ids in block_ids_payload.items()
+            },
+            boundary_state_offloads=boundary_state_offloads,
+        )
+
+    (
+        scheduled_new_reqs_payload,
+        scheduled_cached_reqs_payload,
+        num_scheduled_tokens,
+        total_num_scheduled_tokens,
+        scheduled_spec_decode_tokens,
+        scheduled_encoder_inputs,
+        num_common_prefix_blocks,
+        finished_req_ids,
+        free_encoder_mm_hashes,
+        scheduled_encoder_input_stats,
+        preempted_req_ids,
+        has_structured_output_requests,
+        pending_structured_output_tokens,
+        num_invalid_spec_tokens,
+        kv_connector_metadata,
+        has_sync_kv_loads,
+        ec_connector_metadata,
+        ec_manager_metadata,
+        new_block_ids_to_zero,
+        kv_cache_block_copies,
+        kv_connector_block_state,
+        num_spec_tokens_to_schedule,
+    ) = payload
+    scheduled_new_reqs = [
+        NewRequestData(
+            req_id=req_id,
+            prompt_token_ids=unpack_int_list(prompt_token_ids),
+            mm_features=mm_features,
+            sampling_params=sampling_params,
+            pooling_params=pooling_params,
+            block_ids=unpack_block_ids(block_ids),
+            num_computed_tokens=num_computed_tokens,
+            lora_request=lora_request,
+            prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
+            prefill_token_ids=unpack_int_list(prefill_token_ids),
+        )
+        for (
+            req_id,
+            prompt_token_ids,
+            mm_features,
+            sampling_params,
+            pooling_params,
+            block_ids,
+            num_computed_tokens,
+            lora_request,
+            prompt_embeds,
+            prompt_is_token_ids,
+            prefill_token_ids,
+        ) in scheduled_new_reqs_payload
+    ]
+    (
+        req_ids,
+        resumed_req_ids,
+        new_token_ids,
+        all_token_ids,
+        new_block_ids,
+        cached_num_computed_tokens,
+        num_output_tokens,
+    ) = scheduled_cached_reqs_payload
+    scheduled_cached_reqs = CachedRequestData(
+        req_ids=req_ids,
+        resumed_req_ids=resumed_req_ids,
+        new_token_ids=[unpack_int_list(token_ids) for token_ids in new_token_ids],
+        all_token_ids=unpack_int_list_dict(all_token_ids),
+        new_block_ids=[
+            unpack_optional_block_ids(block_ids) for block_ids in new_block_ids
+        ],
+        num_computed_tokens=cached_num_computed_tokens,
+        num_output_tokens=num_output_tokens,
+    )
+    return SchedulerOutput(
+        scheduled_new_reqs=scheduled_new_reqs,
+        scheduled_cached_reqs=scheduled_cached_reqs,
+        num_scheduled_tokens=num_scheduled_tokens,
+        total_num_scheduled_tokens=total_num_scheduled_tokens,
+        scheduled_spec_decode_tokens=unpack_int_list_dict(scheduled_spec_decode_tokens),
+        scheduled_encoder_inputs=unpack_int_list_dict(scheduled_encoder_inputs),
+        num_common_prefix_blocks=unpack_int_list(num_common_prefix_blocks),
+        finished_req_ids=finished_req_ids,
+        free_encoder_mm_hashes=free_encoder_mm_hashes,
+        scheduled_encoder_input_stats=scheduled_encoder_input_stats,
+        preempted_req_ids=preempted_req_ids,
+        has_structured_output_requests=has_structured_output_requests,
+        pending_structured_output_tokens=pending_structured_output_tokens,
+        num_invalid_spec_tokens=num_invalid_spec_tokens,
+        kv_connector_metadata=kv_connector_metadata,
+        has_sync_kv_loads=has_sync_kv_loads,
+        ec_connector_metadata=ec_connector_metadata,
+        ec_manager_metadata=ec_manager_metadata,
+        new_block_ids_to_zero=unpack_int_list(new_block_ids_to_zero),
+        kv_cache_block_copies=kv_cache_block_copies,
+        kv_connector_block_state=unpack_kv_connector_block_state(
+            kv_connector_block_state
+        ),
+        num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+    )
 
 
 @dataclass
