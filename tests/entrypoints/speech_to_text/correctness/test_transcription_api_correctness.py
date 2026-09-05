@@ -60,7 +60,11 @@ normalizer_tokenizer = get_tokenizer(
     tokenizer_mode=normalizer_model_info.tokenizer_mode,
     trust_remote_code=normalizer_model_info.trust_remote_code,
 )
-normalizer = EnglishTextNormalizer(normalizer_tokenizer.english_spelling_normalizer)
+# english_spelling_normalizer is specific to the Whisper tokenizer and is not
+# part of the TokenizerLike protocol that get_tokenizer is annotated to return.
+normalizer = EnglishTextNormalizer(
+    normalizer_tokenizer.english_spelling_normalizer  # type: ignore[attr-defined]
+)
 
 
 async def transcribe_audio(client, tokenizer, y, sr, extra_body=None):

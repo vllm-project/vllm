@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import numpy as np
 import pytest
 import torch
@@ -9,6 +11,7 @@ pytest.importorskip("triton")
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for sampler flag tests", allow_module_level=True)
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.states import RequestState
@@ -37,7 +40,7 @@ def _make_sampler() -> Sampler:
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockReasoningConfig(),
+        reasoning_config=cast(ReasoningConfig, MockReasoningConfig()),
     )
 
 

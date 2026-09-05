@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.models.gpt_oss import (
     GptOssForCausalLM,
     GptOssModel,
@@ -24,8 +26,11 @@ class _TestExperts(GptOssRoutedExperts):
         dtype: torch.dtype = torch.float32,
     ) -> None:
         torch.nn.Module.__init__(self)
-        self.moe_config = SimpleNamespace(
-            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank)
+        self.moe_config = cast(
+            FusedMoEConfig,
+            SimpleNamespace(
+                moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank)
+            ),
         )
         self.quant_method = type(
             quant_method_name, (), {"weight_dtype": weight_dtype}

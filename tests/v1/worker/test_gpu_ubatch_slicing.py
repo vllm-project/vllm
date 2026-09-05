@@ -665,6 +665,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         CP_INTERLEAVE,
         num_reqs_padded=input_batch.num_reqs_after_padding,
     )
+    assert input_batch.dcp_local_seq_lens is not None
     parent_lens = input_batch.dcp_local_seq_lens.clone()
 
     ubatches, _ = _slice_with_dcp(input_batch, dcp_rank)
@@ -683,9 +684,11 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
     # lands on this rank with a different local length than the full batch
     # reports (507 vs 512 -> 254 vs 256 for dcp_size=2, interleave=1); copying
     # the parent's row would ship the stale value.
-    assert ubatches[0].num_reqs == 3
-    assert ubatches[0].seq_lens[2].item() == 507
-    assert ubatches[0].dcp_local_seq_lens[2].item() != parent_lens[2].item()
+    leading = ubatches[0]
+    assert leading.num_reqs == 3
+    assert leading.seq_lens[2].item() == 507
+    assert leading.dcp_local_seq_lens is not None
+    assert leading.dcp_local_seq_lens[2].item() != parent_lens[2].item()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")

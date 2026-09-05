@@ -13,7 +13,7 @@ See https://github.com/vllm-project/vllm/issues/49224.
 import contextlib
 import gc
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import torch
@@ -285,7 +285,7 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
             pass
 
     wrapper = _FakeWrapper()
-    cgu.CUDAGraphWrapper._all_instances.add(wrapper)
+    cgu.CUDAGraphWrapper._all_instances.add(cast(cgu.CUDAGraphWrapper, wrapper))
     try:
         capture_model = runner.capture_model
 
@@ -300,7 +300,7 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
         assert wrapper.pool_during_capture == THROWAWAY_POOL
         assert wrapper.graph_pool == GLOBAL_POOL
     finally:
-        cgu.CUDAGraphWrapper._all_instances.discard(wrapper)
+        cgu.CUDAGraphWrapper._all_instances.discard(cast(cgu.CUDAGraphWrapper, wrapper))
 
 
 def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatch):

@@ -35,7 +35,9 @@ class DummyConfig:
 
 
 def make_model(config: DummyConfig) -> KeyeForConditionalGeneration:
-    model = object.__new__(KeyeForConditionalGeneration)
+    model = object.__new__(
+        KeyeForConditionalGeneration  # type: ignore[type-abstract]
+    )
     model.config = config
     return model
 
@@ -53,7 +55,7 @@ def make_mm_feature(
             {
                 field_name: MultiModalFieldElem(
                     data=torch.tensor(grid_thw),
-                    field=None,  # HACK.
+                    field=None,  # type: ignore[arg-type]  # HACK.
                 ),
             }
         ),

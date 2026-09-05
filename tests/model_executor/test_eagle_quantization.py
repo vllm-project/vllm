@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -35,7 +36,7 @@ def test_get_draft_quant_config_with_draft_model():
         result = get_draft_quant_config(mock_vllm_config)
 
         # Verify the function calls get_quantization_config with draft model config
-        VllmConfig.get_quantization_config.assert_called_once_with(
+        cast(Mock, VllmConfig.get_quantization_config).assert_called_once_with(
             mock_draft_model_config, mock_load_config
         )
         assert result == mock_quant_config

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,7 +27,10 @@ from vllm.entrypoints.speech_to_text.base.serving import (
     SpeechToTextBaseServing,
     asr_inter_chunk_separator,
 )
-from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+)
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
@@ -142,7 +146,7 @@ class _StubTranscriptionModel:
     ) -> SpeechToTextConfig:
         return SpeechToTextConfig(
             sample_rate=16000.0,
-            max_audio_clip_s=5.0,
+            max_audio_clip_s=5,
         )
 
     @classmethod
@@ -205,11 +209,12 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
-    serving.model_cls = _StubTranscriptionModel
+    serving.model_cls = cast(type[SupportsTranscription], _StubTranscriptionModel)
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -221,7 +226,7 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     out_lines: list[str] = []
     agen = OpenAIServingTranscription.transcription_stream_generator(
         serving,
-        request=request,
+        request=cast(TranscriptionRequest, request),
         result_generator=[gen_hello(), gen_world()],
         request_id="test-req",
         request_metadata=RequestResponseMetadata(request_id="test-req"),
@@ -245,11 +250,12 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
-    serving.model_cls = _StubTranscriptionModel
+    serving.model_cls = cast(type[SupportsTranscription], _StubTranscriptionModel)
     serving.streaming_post_processor_cls = (
         _StubTranscriptionModel.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-model",
         stream_include_usage=False,
@@ -261,7 +267,7 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
     out_lines: list[str] = []
     agen = OpenAIServingTranscription.transcription_stream_generator(
         serving,
-        request=request,
+        request=cast(TranscriptionRequest, request),
         result_generator=[gen_a(), gen_b()],
         request_id="test-req-zh",
         request_metadata=RequestResponseMetadata(request_id="test-req-zh"),
@@ -288,11 +294,14 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
-    serving.model_cls = Qwen3ASRForConditionalGeneration
+    serving.model_cls = cast(
+        type[SupportsTranscription], Qwen3ASRForConditionalGeneration
+    )
     serving.streaming_post_processor_cls = (
         Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
     )
-    serving.task_type = "transcribe"
+    # task_type is Final on the real class; this instance is built with __new__.
+    serving.task_type = "transcribe"  # type: ignore[misc]
     request = SimpleNamespace(
         model="stub-qwen3-asr",
         stream_include_usage=False,
@@ -302,7 +311,7 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
     out_lines: list[str] = []
     agen = OpenAIServingTranscription.transcription_stream_generator(
         serving,
-        request=request,
+        request=cast(TranscriptionRequest, request),
         result_generator=[gen_hello(), gen_world()],
         request_id="test-qwen3-asr",
         request_metadata=RequestResponseMetadata(request_id="test-qwen3-asr"),
@@ -366,6 +375,7 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             b"\x00\x00", req_en, raw_request=None
         )
         assert not isinstance(out_en, ErrorResponse)
+        assert isinstance(out_en, TranscriptionResponse)
         assert out_en.text == "hello world"
 
         async def gen_nihao() -> AsyncGenerator[RequestOutput, None]:
@@ -387,4 +397,5 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             b"\x00\x00", req_zh, raw_request=None
         )
         assert not isinstance(out_zh, ErrorResponse)
+        assert isinstance(out_zh, TranscriptionResponse)
         assert out_zh.text == "你好世界"

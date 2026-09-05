@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
 
 import vllm.v1.worker.gpu.model_runner as model_runner_module
+from vllm.config import CacheConfig, LoRAConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -18,7 +21,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
@@ -28,24 +37,31 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.dcp_size = 1
     runner.dcp_rank = 0
     runner.cp_interleave = 1
-    runner.cache_config = SimpleNamespace(enable_prefix_caching=True)
+    runner.cache_config = cast(CacheConfig, SimpleNamespace(enable_prefix_caching=True))
     parallel_config = SimpleNamespace(
         decode_context_parallel_size=1,
         cp_kv_cache_interleave_size=1,
     )
-    runner.parallel_config = parallel_config
-    runner.vllm_config = SimpleNamespace(
-        parallel_config=parallel_config,
-        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+    runner.parallel_config = cast(ParallelConfig, parallel_config)
+    runner.vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            parallel_config=parallel_config,
+            cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        ),
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
-    runner.model_state = SimpleNamespace(
-        get_additional_cg_support=lambda: (),
-        num_new_sampled_tokens_per_step=1,
+    runner.model_state = cast(
+        ModelState,
+        SimpleNamespace(
+            get_additional_cg_support=lambda: (),
+            num_new_sampled_tokens_per_step=1,
+        ),
     )
     runner.speculator = None
-    runner.req_states = []
-    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    # Only forwarded to the (patched out) adaptive-verification factory.
+    runner.req_states = cast(RequestState, [])
+    runner.input_buffers = cast(InputBuffers, SimpleNamespace(query_start_loc=None))
     runner.vocab_size = 1
     runner.max_num_reqs = 1
     runner.max_num_tokens = 2
@@ -181,7 +197,9 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     monkeypatch.setattr(model_runner_module, "get_block_table_width", capture_width)
 
     with pytest.raises(_CapturedWidths):
-        GPUModelRunner.initialize_kv_cache(runner, kv_cache_config)
+        GPUModelRunner.initialize_kv_cache(
+            cast(GPUModelRunner, runner), kv_cache_config
+        )
 
     # Attention KV is local to one of eight DCP ranks; KDA state is replicated
     # and therefore needs one table entry for every global 16-token page.
@@ -200,9 +218,9 @@ def test_append_block_ids_rejects_write_past_row_capacity():
     block_tables = BlockTables.__new__(BlockTables)
     block_tables.num_kv_cache_groups = 1
     block_tables.blocks_per_kv_block = [1]
-    block_tables.block_tables = [_BlockTable()]
-    block_tables.num_blocks = SimpleNamespace(
-        np=torch.tensor([[0, 3]], dtype=torch.int32)
+    block_tables.block_tables = [cast(StagedWriteTensor, _BlockTable())]
+    block_tables.num_blocks = cast(
+        UvaBackedTensor, SimpleNamespace(np=torch.tensor([[0, 3]], dtype=torch.int32))
     )
 
     with pytest.raises(
@@ -218,26 +236,38 @@ def test_append_block_ids_rejects_write_past_row_capacity():
     assert block_tables.num_blocks.np[0, 1] == 3
 
 
+@contextlib.contextmanager
+def _no_dummy_loras(
+    lora_config: LoRAConfig | None, remove_lora: bool = True
+) -> Iterator[None]:
+    """No-op stand-in for LoRAModelRunnerMixin.maybe_setup_dummy_loras."""
+    yield
+
+
 def _make_capture_runner(captured: bool) -> GPUModelRunner:
     """Minimal V2 runner for capture_model: fakes everything except the
     cudagraph_manager's needs_capture decision."""
     runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.model_state = SimpleNamespace(supports_mm_inputs=False)
-    runner.cudagraph_manager = SimpleNamespace(
-        needs_capture=lambda: captured,
-        capture=lambda *args, **kwargs: None,
+    runner.model_state = cast(ModelState, SimpleNamespace(supports_mm_inputs=False))
+    runner.cudagraph_manager = cast(
+        ModelCudaGraphManager,
+        SimpleNamespace(
+            needs_capture=lambda: captured,
+            capture=lambda *args, **kwargs: None,
+        ),
     )
     runner.lora_config = None
-    runner.maybe_setup_dummy_loras = lambda _cfg: contextlib.nullcontext()
+    runner.maybe_setup_dummy_loras = _no_dummy_loras  # type: ignore[method-assign]
     runner.speculator = None
     runner.adaptive_verification = None
     runner.model = None
-    runner.input_buffers = None
+    # Only handed to the stubbed cudagraph_manager.capture, never dereferenced.
+    runner.input_buffers = cast(InputBuffers, None)
     runner.pcp_manager = None
     runner.intermediate_tensors = None
-    runner.block_tables = None
-    runner.attn_groups = None
-    runner.kv_cache_config = None
+    runner.block_tables = cast(BlockTables, None)
+    runner.attn_groups = cast(list[list[AttentionGroup]], None)
+    runner.kv_cache_config = cast(KVCacheConfig, None)
     runner.use_aux_hidden_state_outputs = False
     runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import pytest
 import torch
 
@@ -11,6 +13,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
@@ -86,7 +89,9 @@ def _apply(
 
 def test_v2_thinking_budget_forces_end_after_budget_reached():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -100,7 +105,9 @@ def test_v2_thinking_budget_forces_end_after_budget_reached():
 
 def test_v2_thinking_budget_restores_masked_end_token():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -113,7 +120,9 @@ def test_v2_thinking_budget_restores_masked_end_token():
 
 def test_v2_thinking_budget_allows_tokens_before_budget():
     req_states = _make_req_states([1, START, 10, 11], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -125,7 +134,9 @@ def test_v2_thinking_budget_allows_tokens_before_budget():
 
 def test_v2_thinking_budget_continues_multi_token_end_marker():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockMultiTokenEndReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -143,7 +154,9 @@ def test_v2_thinking_budget_continues_multi_token_end_marker():
 
 def test_v2_thinking_budget_uses_distinct_forced_end_marker():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockDistinctEndReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -164,7 +177,9 @@ def test_v2_thinking_budget_stops_after_natural_end_marker():
         [1, START, 10, END, 20, 21, 22],
         prompt_len=1,
     )
-    state = ThinkingBudgetState(req_states, MockDistinctEndReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockDistinctEndReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -176,7 +191,9 @@ def test_v2_thinking_budget_stops_after_natural_end_marker():
 
 def test_v2_thinking_budget_ignores_plain_request():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams())
     state.apply_staged_writes()
 
@@ -194,7 +211,7 @@ def test_v2_greedy_sampling_applies_thinking_budget():
         vocab_size=VOCAB_SIZE,
         device=DEVICE,
         req_states=req_states,
-        reasoning_config=MockReasoningConfig(),
+        reasoning_config=cast(ReasoningConfig, MockReasoningConfig()),
     )
     sampler.add_request(
         req_idx=3,
@@ -229,7 +246,9 @@ def test_v2_thinking_budget_latest_prefill_end_disables_forcing():
         [1, START, 10, 11, 12, END, 13],
         prompt_len=1,
     )
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -244,7 +263,9 @@ def test_v2_thinking_budget_uses_latest_prefill_start_boundary():
         [1, START, 10, 11, 12, END, 13, START, 14, 15, 16],
         prompt_len=1,
     )
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 
@@ -258,7 +279,9 @@ def test_v2_thinking_budget_incrementally_scans_long_generation():
     """Guard against rescanning the full token history on every decode step."""
     tokens = [1, START, *([10] * 16382)]
     req_states = _make_req_states(tokens)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=32768))
     state.apply_staged_writes()
 
@@ -276,7 +299,9 @@ def test_v2_thinking_budget_incrementally_scans_long_generation():
 def test_v2_thinking_budget_clamps_oversized_budget():
     """Budgets beyond int32 must not crash and behave as unlimited."""
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
-    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=2**40))
     state.apply_staged_writes()
 
@@ -290,7 +315,9 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
     """A resumed prompt ending with a partial forced-end marker must not
     restart the marker sequence and duplicate its first token."""
     req_states = _make_req_states([1, START, 10, 11, END_A], prompt_len=5)
-    state = ThinkingBudgetState(req_states, MockMultiTokenEndReasoningConfig())
+    state = ThinkingBudgetState(
+        req_states, cast(ReasoningConfig, MockMultiTokenEndReasoningConfig())
+    )
     state.add_request(3, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
 

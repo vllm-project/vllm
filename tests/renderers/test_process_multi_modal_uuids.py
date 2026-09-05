@@ -135,7 +135,11 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    mm_uuid_items = parse_mm_uuids(mm_uuids)
+    # A whole-modality `None` is allowed in `mm_data` (`ModalityData`) but not
+    # in `mm_uuids` (`MultiModalUUIDDict`), even though the renderer treats
+    # `"video": None` as "no UUIDs given" (see `_validate_mm_uuids`). That
+    # tolerance is what this test pins down.
+    mm_uuid_items = parse_mm_uuids(mm_uuids)  # type: ignore[arg-type]
 
     processed_mm_uuids = renderer._process_mm_uuids(
         mm_data, mm_data_items, mm_uuid_items, "req-3"
@@ -167,7 +171,9 @@ def test_multi_modal_uuids_accepts_empty(
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-    mm_uuid_items = parse_mm_uuids(mm_uuids)
+    # `"video": None` is outside `MultiModalUUIDDict`; see the note in
+    # `test_multi_modal_uuids_accepts_none_and_passes_through`.
+    mm_uuid_items = parse_mm_uuids(mm_uuids)  # type: ignore[arg-type]
 
     processed_mm_uuids = renderer._process_mm_uuids(
         mm_data, mm_data_items, mm_uuid_items, "req-4"

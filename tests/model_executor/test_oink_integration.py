@@ -22,7 +22,7 @@ def _test_oink_availability_impl(
 
     # Mock device capability (class method, override on class)
     dc = platforms.interface.DeviceCapability(*device_capability)
-    platforms.current_platform.__class__.get_device_capability = lambda device_id=0: dc
+    platforms.current_platform.__class__.get_device_capability = lambda device_id=0: dc  # type: ignore[method-assign]
 
     # Mock oink ops
     oink_ops = types.SimpleNamespace()
