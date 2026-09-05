@@ -1,0 +1,81 @@
+# Allowlist for tools/pre_commit/check_test_tethering.py
+#
+# Every path below is a test file that is collected by NO Buildkite job - not in
+# .buildkite/test_areas/ and not in .buildkite/test-amd.yaml. These are
+# pre-existing gaps, captured when the check was first added so that the gate
+# could start green. The list is meant to only ever shrink.
+#
+# Rules:
+#   * Every entry needs a trailing `# <reason>` on its own line saying why the
+#     test isn't wired into a job. A bare path is rejected by the check.
+#   * Do not add a new entry to unblock a PR without a real justification.
+#   * To remove an entry: add the test to a job's `commands` (and matching
+#     `source_file_dependencies`) in .buildkite/test_areas/, then delete the line.
+#   * `check_test_tethering.py --all` reports entries here that have since
+#     become tethered, and entries whose file no longer exists.
+#
+# Tracking: https://github.com/vllm-project/vllm/issues/53944
+
+# tests/distributed/ - multi-GPU / multi-node suites, launched via torchrun or a
+# custom runner rather than a directory-level pytest invocation.
+tests/distributed/test_dcp_a2a.py  # multi-GPU DCP all-to-all; no dir-level pytest job
+tests/distributed/test_dcp_direct_a2a_lse_reduce.py  # multi-GPU DCP all-to-all; no dir-level pytest job
+tests/distributed/test_eplb_events.py  # multi-GPU EPLB; no dir-level pytest job
+tests/distributed/test_eplb_fused_moe_layer.py  # multi-GPU EPLB; no dir-level pytest job
+tests/distributed/test_eplb_fused_moe_layer_dep_nvfp4.py  # multi-GPU EPLB nvfp4; no dir-level pytest job
+tests/distributed/test_eplb_quant_scale_consistency.py  # multi-GPU EPLB; no dir-level pytest job
+tests/distributed/test_expert_parallel.py  # multi-GPU expert parallel; no dir-level pytest job
+tests/distributed/test_expert_placement.py  # multi-GPU expert placement; no dir-level pytest job
+tests/distributed/test_file_store.py  # no distributed.yaml job collects this path
+tests/distributed/test_flashinfer_pcie_ipc_all_reduce.py  # multi-GPU PCIe IPC all-reduce (#53576); no job
+tests/distributed/test_kimi_linear_context_parallel.py  # multi-GPU context parallel; no dir-level pytest job
+tests/distributed/test_kv_cache_events.py  # needs multi-proc KV-events setup; no job
+tests/distributed/test_kvlayout.py  # no distributed.yaml job collects this path
+tests/distributed/test_mq_connect_ip.py  # no distributed.yaml job collects this path
+tests/distributed/test_pipeline_partition.py  # no distributed.yaml job collects this path
+tests/distributed/test_split_group.py  # no distributed.yaml job collects this path
+tests/distributed/test_weight_transfer_nccl_uid.py  # sibling test_weight_transfer.py is tethered; not added to that job (#53784)
+
+# tests/kernels/
+tests/kernels/test_shuffle_rows.py  # explicitly --ignore'd in kernels.yaml with no follow-up job
+
+# tests/lora/ - explicitly --ignore'd from the sharded LoRA run, with no
+# dedicated *_tp job (unlike the other ignored *_tp tests).
+tests/lora/test_deepseekv2_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
+tests/lora/test_qwen3moe_tp.py  # --ignore'd from sharded LoRA run; no dedicated *_tp job
+
+# tests/models/ - the models_*.yaml jobs run specific paths, not all of models/.
+tests/models/deepseek_v32/test_sequence_parallel.py  # no models_*.yaml job collects this path
+tests/models/test_deepseek_v4_fi_moe_ep.py  # no models_*.yaml job collects this path
+tests/models/test_deepseek_v4_rocm_compressor_gemm_fusion.py  # no models_*.yaml job collects this path
+tests/models/test_dspark_mla.py  # no models_*.yaml job collects this path
+tests/models/test_language_model_cache_is_weak.py  # no models_*.yaml job collects this path
+tests/models/test_qwen3_5_mtp_config.py  # no models_*.yaml job collects this path
+tests/models/transformers/test_layer_registry.py  # no models_*.yaml job collects this path
+
+# tests/ root-level - misc.yaml runs a hand-picked set of these by name
+# (test_regression.py, test_envs.py, test_outputs.py, test_pooling_params.py);
+# the rest are unreferenced.
+tests/test_access_log_filter.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_attention_backend_registry.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_audio_media_size_precheck.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_cmake_utils.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_connections.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_embedded_commit.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_force_first_config.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_fxgraphcache_pickle_patch.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_logprobs.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_quantization_revision_pin.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_ray_env_utils.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_request_input_bounds.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_scalartype.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_tensorizer_revision_pin.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_triton_utils.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_version.py  # root test_*.py not in misc.yaml's by-name list
+tests/test_zen_cpu_platform_detection.py  # root test_*.py not in misc.yaml's by-name list
+
+# tests/platforms/
+tests/platforms/test_cpu.py  # CPU-only unit test; no job targets tests/platforms/
+
+# tests/tools/
+tests/tools/test_config_validator.py  # logic covered by the validate-config pre-commit hook; no test_areas job

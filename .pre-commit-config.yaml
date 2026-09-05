@@ -177,6 +177,14 @@ repos:
     files: ^\.github/mergify\.yml$
     pass_filenames: false
     additional_dependencies: [PyYAML, regex]
+  - id: check-test-tethering
+    name: Check new tests are wired into Buildkite CI
+    language: python
+    entry: python tools/pre_commit/check_test_tethering.py
+    files: ^(tests/.*\.py|\.buildkite/test_areas/.*\.yaml|tools/pre_commit/test_tethering_allowlist\.txt)$
+    additional_dependencies: [PyYAML]
+    verbose: true # full-scan `note:` lines are advisory, so the hook passes
+    require_serial: true # one full scan, not one per pre-commit file batch
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
