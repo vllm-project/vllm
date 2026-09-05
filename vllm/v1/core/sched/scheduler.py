@@ -798,6 +798,31 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                # Issue #52693: a resumable session can sit in both
+                # `self.running` and a waiting queue in one schedule()
+                # call. The running loop already owns it this step.
+                # Peeking it here with status RUNNING used to raise at
+                # the WAITING/PREEMPTED gate and kill EngineCore.
+                if (
+                    # RUNNING means the running-requests loop already
+                    # claimed this object. Re-scheduling it double-commits
+                    # KV blocks and then trips the invalid-status raise.
+                    request.status == RequestStatus.RUNNING
+                    # num_scheduled_tokens is filled before this waiting
+                    # loop. If this id is already a key, this step already
+                    # assigned tokens; a second pass would overwrite them.
+                    or request_id in num_scheduled_tokens
+                ):
+                    # Pop the stale waiting entry so later iterations of
+                    # this while-loop do not see the same head again.
+                    # Do not prepend it back: that livelocks on peek/pop.
+                    request_queue.pop_request()
+                    # Skip allocation, running.append, and the status gate.
+                    # Do not finish_requests: this id is already in
+                    # num_scheduled_tokens, and deleting it KeyErrors in
+                    # _update_after_schedule. The running list keeps it.
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -2241,9 +2266,25 @@ class Scheduler(SchedulerInterface):
         )
 
     def _enqueue_waiting_request(self, request: Request) -> None:
+        # Issue #52693: dual membership is how a RUNNING session reaches
+        # the waiting-loop status gate. A second add() of the same object
+        # leaves it in two queues; the next schedule() then double-commits.
+        # Identity `in` is required: we compare the Request instance, not
+        # request_id strings, because the crash is the same object twice.
+        if request in self.waiting or request in self.skipped_waiting:
+            # Already queued. Returning here is the enqueue-side half of
+            # "do not put a running session on waiting a second time".
+            return
+        # Blocked statuses (remote KV, grammar, streaming pause) must not
+        # occupy the main FCFS/priority waiting queue. They live in
+        # skipped_waiting until promotion makes them schedulable.
         if self._is_blocked_waiting_status(request.status):
+            # skipped_waiting is the only legal home for a paused
+            # streaming session. The waiting loop peeks it and promotes.
             self.skipped_waiting.add_request(request)
         else:
+            # WAITING / PREEMPTED: eligible this step, main waiting queue.
+            # New sessions enter here from add_request's first-insert path.
             self.waiting.add_request(request)
 
     def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
@@ -2260,20 +2301,47 @@ class Scheduler(SchedulerInterface):
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
+        # Non-resumable requests have no session to continue. The caller
+        # will _free_request. Streaming sessions always take the paths
+        # below so a pipelined chunk cannot be applied while RUNNING.
         if not request.resumable:
             return True
 
-        if request.streaming_queue:
-            update = request.streaming_queue.popleft()
-            if update is None:
-                # Streaming request finished.
-                return True
-            self._update_request_as_session(request, update)
-        else:
+        # A None at the head of streaming_queue is the client close
+        # sentinel from add_request, not a prompt delta. There is no
+        # next chunk to wait for, so the session is actually finished.
+        # Peek first: a real continuation must stay queued if we pause.
+        if request.streaming_queue and request.streaming_queue[0] is None:
+            # Consume the sentinel so a later schedule() does not see a
+            # paused session with a close marker and try to promote it.
+            request.streaming_queue.popleft()
+            # True tells update_from_output to free KV and emit finish.
+            return True
+
+        # Issue #52693: this method used to pop a buffered continuation
+        # and call _update_request_as_session + _enqueue_waiting_request
+        # while the request was still on self.running (the caller only
+        # removes stopped_running_reqs after we return). That merged the
+        # next prompt and put the same object on a waiting queue before
+        # it left RUNNING — the dual-schedule crash.
+        # Continuations stay in streaming_queue until the request has
+        # left RUNNING. Promotion applies them on a later schedule().
+        if request.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+            # Pause for the next input chunk, or for a chunk already on
+            # streaming_queue. Status must change before enqueue so the
+            # waiting loop sees a blocked status, not RUNNING.
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+            # This counter is the worker-slot stand-in for paused
+            # sessions. Increment only when entering the status so a
+            # second stop cannot double-count the same session.
             self.num_waiting_for_streaming_input += 1
 
+        # Enqueue as blocked-waiting so the next schedule() can promote
+        # and apply a queued continuation. Duplicate enqueue is a no-op
+        # inside _enqueue_waiting_request (same-object guard above).
         self._enqueue_waiting_request(request)
+        # False: the session is not finished; do not free KV. The caller
+        # still removes it from self.running via stopped_running_reqs.
         return False
 
     def _update_request_with_output(
@@ -2398,16 +2466,42 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
+            # Same request_id means this is a session continuation (or a
+            # close sentinel), not a new request. StreamingUpdate is the
+            # only payload we keep; the wrapper Request is discarded.
             update = StreamingUpdate.from_request(request)
-            if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
-                assert existing.streaming_queue is not None, "duplicate request id"
-                # Queue next input chunk (or finished sentinel).
+            # Resumable sessions always have a deque. A missing queue with
+            # a colliding id is a programming error (duplicate non-session).
+            assert existing.streaming_queue is not None, "duplicate request id"
+            # Issue #52693: a pipelined continuation must not mutate the
+            # in-flight session. "In flight" is RUNNING status or
+            # membership in self.running (status can lag the list).
+            # Either one means the current chunk is not finished.
+            in_flight = (
+                existing.status == RequestStatus.RUNNING or existing in self.running
+            )
+            # Apply immediately only when the session is paused for the
+            # next chunk and is no longer running. Any other state —
+            # including WAITING_FOR_STREAMING_REQ while still in
+            # self.running — buffers on streaming_queue.
+            paused_for_next_chunk = (
+                existing.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+            )
+            if in_flight or not paused_for_next_chunk:
+                # Buffer the delta (or close sentinel) until the current
+                # chunk finishes and this request leaves RUNNING.
+                # Do not _update_request_as_session and do not enqueue:
+                # the running loop already owns this object.
                 existing.streaming_queue.append(update)
             elif update is not None:
-                # Commence next input chunk.
+                # Paused and not running: this is the only legal moment
+                # to merge a chunk from add_request. Promotion handles
+                # chunks that were queued while we were still RUNNING.
                 self._update_request_as_session(existing, update)
             else:
-                # Streaming-input session finished.
+                # Paused, not running, and the client closed the stream.
+                # FINISHED_ABORTED matches the previous close-while-paused
+                # path used by test_process_streaming_requests_with_finish.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
             if request.resumable:
@@ -2912,8 +3006,29 @@ class Scheduler(SchedulerInterface):
             return True
 
         if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-            assert not request.streaming_queue
-            return False
+            # The session has left RUNNING: we are in the waiting loop,
+            # not the running loop. A buffered continuation may now be
+            # applied. This is the second half of the #52693 rule.
+            if not request.streaming_queue:
+                # Client has not sent the next chunk yet. Stay blocked
+                # in skipped_waiting; do not treat this as WAITING.
+                return False
+            # Pop one update. The queue can hold several pipelined
+            # chunks; later schedule() steps promote the rest one by one.
+            update = request.streaming_queue.popleft()
+            if update is None:
+                # Close sentinel arrived while paused. Put it back so
+                # add_request/finish still see a close, and do not
+                # promote into WAITING (there is nothing to compute).
+                request.streaming_queue.appendleft(update)
+                return False
+            # Merge the queued chunk now that we are not RUNNING.
+            # _update_request_as_session sets status to WAITING so this
+            # same peek can be scheduled in the current waiting iteration.
+            self._update_request_as_session(request, update)
+            # True: caller must not re-skip this request; fall through
+            # and allocate tokens for the newly merged prompt delta.
+            return True
 
         raise AssertionError(
             "Unexpected blocked waiting status in promotion: "
