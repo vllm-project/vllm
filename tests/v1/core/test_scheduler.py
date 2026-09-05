@@ -387,6 +387,100 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
+def _setup_cache_aware(num_tokens: int = 48, **kwargs):
+    """A scheduler where `warm`'s prompt is already cached and `cold`'s is not.
+
+    Returns `(scheduler, warm, cold)`, with neither request added yet.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=True, **kwargs)
+    seed, warm = create_requests(
+        num_requests=2,
+        num_tokens=num_tokens,
+        same_prompt=True,
+        req_ids=["seed", "warm"],
+    )
+    # Only index 0 of a `same_prompt` batch collides with a distinct-prompt
+    # batch, so index 1 here is a prompt no other request shares.
+    cold = create_requests(
+        num_requests=2, num_tokens=num_tokens, req_ids=["unused", "cold"]
+    )[1]
+
+    # Run `seed` far enough to leave its prompt in the prefix cache.
+    scheduler.add_request(seed)
+    output = scheduler.schedule()
+    assert "seed" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.finish_requests("seed", RequestStatus.FINISHED_ABORTED)
+
+    assert scheduler.kv_cache_manager.get_num_cached_tokens(warm) > 0
+    assert scheduler.kv_cache_manager.get_num_cached_tokens(cold) == 0
+    return scheduler, warm, cold
+
+
+def test_cache_aware_admission_prefers_cached_prefix():
+    """Within the window, a request whose prefix is already cached is admitted
+    ahead of one that would have to compute its own, so the cold request cannot
+    evict blocks the resident one still needs.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=4)
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
+
+
+def test_cache_aware_admission_does_not_look_past_the_window():
+    """The window bounds how far a cached request can be promoted from, so a
+    request outside it keeps its place in arrival order.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=1)
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
+
+
+def test_cache_aware_admission_skipped_below_threshold():
+    """Below the usage threshold there are no evictions worth avoiding, so
+    admission stays in arrival order.
+    """
+    scheduler, warm, cold = _setup_cache_aware(
+        cache_aware_admission_window=4, cache_aware_admission_threshold=0.9
+    )
+    assert scheduler.kv_cache_manager.usage < 0.9
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # Reordering by queue position is meaningless in a priority heap.
+        {"policy": "priority", "enable_prefix_caching": True},
+        # Nothing to reorder by without a prefix cache.
+        {"enable_prefix_caching": False},
+    ],
+)
+def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
+    scheduler = create_scheduler(cache_aware_admission_window=4, **kwargs)
+    assert scheduler.cache_aware_window == 0
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
