@@ -2,9 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import TYPE_CHECKING
+
 import torch
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationStrategy,
+    QuantizationType,
+)
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -27,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
@@ -40,20 +49,82 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.utils.humming import HummingInputSchema
+
 logger = init_logger(__name__)
+
+# moe_backend values whose experts class comes from the MXFP4 oracle instead of
+# this method's own device probe.
+ORACLE_MOE_BACKENDS = ("b12x", "humming")
+
+# Activation dtypes an MXFP4 checkpoint can pair with that Humming can consume.
+_HUMMING_ACTIVATION_DTYPES: dict[tuple[str, int], str] = {
+    (QuantizationType.FLOAT, 8): "float8e4m3",
+    (QuantizationType.FLOAT, 4): "float4e2m1",
+}
+
+
+def _humming_input_schema(
+    input_quant: QuantizationArgs | None,
+) -> "HummingInputSchema | None":
+    """Build the Humming activation schema from the checkpoint.
+
+    Returns None when ``VLLM_HUMMING_INPUT_QUANT_CONFIG`` is set, so that the
+    env override keeps precedence over the checkpoint.
+
+    This deliberately does not route through humming's
+    ``CompressedTensorsInputSchema``, which keeps the group size only for FP4
+    activations and would silently turn a block-FP8 (group-128) activation into
+    a per-token one.
+    """
+    if envs.VLLM_HUMMING_INPUT_QUANT_CONFIG:
+        return None
+
+    from vllm.utils.humming import HummingInputSchema
+
+    if input_quant is None or not input_quant.dynamic:
+        # W4A16: Humming dequantizes the MXFP4 weights, activations stay bf16.
+        # Static activation scales have no place to come from -- this method
+        # loads no input_scale -- so they fall back to weight-only as well.
+        return HummingInputSchema()
+
+    a_dtype = _HUMMING_ACTIVATION_DTYPES.get((input_quant.type, input_quant.num_bits))
+    if a_dtype is None:
+        raise NotImplementedError(
+            f"Humming MXFP4 MoE does not support "
+            f"{input_quant.type}{input_quant.num_bits} activations."
+        )
+
+    if input_quant.strategy == QuantizationStrategy.TOKEN:
+        group_size = 0
+    elif input_quant.strategy in (
+        QuantizationStrategy.GROUP,
+        QuantizationStrategy.TENSOR_GROUP,
+    ):
+        assert input_quant.group_size is not None
+        group_size = input_quant.group_size
+    else:
+        raise NotImplementedError(
+            f"Humming MXFP4 MoE does not support "
+            f"{input_quant.strategy} activation scales."
+        )
+
+    return HummingInputSchema(a_dtype=a_dtype, input_scale_group_size=group_size)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe):
+    def __init__(self, moe, input_quant: QuantizationArgs | None = None):
         super().__init__(moe)
         self.group_size = 32
+        self.input_quant = input_quant
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         # Backend selection must match the weight preparation below: CUTLASS
-        # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
-        # repacks weights and scales.
+        # swizzles scales, b12x and XPU consume checkpoint packing, Humming
+        # repacks into its own layout, and Marlin repacks weights and scales.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
-        if moe.moe_backend == "b12x":
+        if moe.moe_backend in ORACLE_MOE_BACKENDS:
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
             assert experts_cls is not None
             self.experts_cls = experts_cls
@@ -147,7 +218,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_scale=layer.w2_weight_scale,
             )
         else:
-            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16.
+            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16;
+            # Humming reads the schemas recorded by the weight conversion.
             return make_mxfp4_moe_quant_config(
                 mxfp4_backend=self.mxfp4_backend,
                 w1_scale=layer.w13_weight_scale,
@@ -196,6 +268,19 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
+            )
+        elif self.mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+            # Repacks the checkpoint's MXFP4 weights and e8m0 scales into the
+            # Humming kernel layout and records the per-sublayer LayerConfigs
+            # (and weight/input schemas) that the quant config reads back.
+            convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                humming_input_schema=_humming_input_schema(self.input_quant),
             )
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
