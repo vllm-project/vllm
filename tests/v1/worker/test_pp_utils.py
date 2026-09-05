@@ -4,12 +4,14 @@
 
 from collections import deque
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
 from vllm.v1.worker.gpu.pp_utils import (
@@ -190,6 +192,51 @@ def test_immediate_receive_launches_at_origin_step() -> None:
     handler._queue_receive(cast(PendingRecv, _FakeSlot(3)))
 
     assert launches == [(3, 3)]
+
+
+def test_launch_receive_includes_speculative_drafts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = PPHandler.__new__(PPHandler)
+    handler.main_stream = Mock()
+    handler.broadcast_stream = Mock()
+    handler.broadcast_stream.record_event.return_value = Mock()
+    handler.last_rank = 3
+    handler.broadcast_group = Mock()
+    handler.recv_launch_delay = 3
+    handler.num_deferred_recv_launches = 0
+
+    sampled_tokens = Mock()
+    combined = Mock()
+    draft_tokens = Mock()
+    slot = PendingRecv(
+        event=None,
+        sampled_tokens=sampled_tokens,
+        combined=combined,
+        num_sampled=Mock(),
+        num_rejected=Mock(),
+        idx_mapping=Mock(),
+        idx_mapping_np=np.array([0]),
+        need_sampled_mask=np.array([True]),
+        gen_at_receive_np=np.array([0]),
+        draft_tokens=draft_tokens,
+    )
+    broadcast = Mock()
+    monkeypatch.setattr(torch.cuda, "stream", lambda _: nullcontext())
+    monkeypatch.setattr(torch.distributed, "broadcast", broadcast)
+
+    handler._launch_receive(slot)
+
+    assert broadcast.call_args_list == [
+        call(sampled_tokens, src=3, group=handler.broadcast_group),
+        call(combined, src=3, group=handler.broadcast_group),
+        call(draft_tokens, src=3, group=handler.broadcast_group),
+    ]
+    assert slot.event is handler.broadcast_stream.record_event.return_value
+    sampled_tokens.record_stream.assert_called_once_with(handler.main_stream)
+    combined.record_stream.assert_called_once_with(handler.main_stream)
+    draft_tokens.record_stream.assert_called_once_with(handler.main_stream)
+    assert handler.num_deferred_recv_launches == 1
 
 
 def test_post_model_receive_waits_for_explicit_launch() -> None:
