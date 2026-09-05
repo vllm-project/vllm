@@ -3,9 +3,9 @@
 """Entropy-gated deferred verification for FLy speculative decoding.
 
 FLy defers a high-entropy rejection when the next ``W`` draft tokens would be
-accepted natively. Its pre-pass makes the native kernels emit that decision by
-replacing the target argmax for greedy sampling or the uniform sample for
-random sampling.
+accepted natively. ModelRunnerV1 encodes these decisions in a pre-pass by
+replacing target argmaxes or uniform samples. ModelRunnerV2 applies them
+inside its rejection kernel.
 """
 
 import torch
@@ -14,20 +14,28 @@ import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 
-def compute_fly_entropy(target_probs: torch.Tensor) -> torch.Tensor:
-    """Compute FLy's top-k entropy from processed target probabilities."""
+def compute_fly_entropy(
+    values: torch.Tensor, *, from_logits: bool = False
+) -> torch.Tensor:
+    """Compute FLy's top-k entropy from processed target probabilities or logits."""
 
-    if target_probs.ndim != 2:
-        raise ValueError("FLy expects 2-D target probabilities")
-    if target_probs.shape[-1] == 0:
+    if values.ndim != 2:
+        raise ValueError("FLy expects 2-D target probabilities or logits")
+    if values.shape[-1] == 0:
         raise ValueError("FLy requires a non-empty target vocabulary")
 
     entropy_top_k = envs.VLLM_FLY_ENTROPY_TOP_K
     if entropy_top_k <= 0:
         raise ValueError("VLLM_FLY_ENTROPY_TOP_K must be greater than zero")
-    top_k = min(entropy_top_k, target_probs.shape[-1])
-    top_probs = torch.topk(target_probs.to(torch.float32), k=top_k, dim=-1).values
-    top_log_probs = top_probs.log()
+    top_k = min(entropy_top_k, values.shape[-1])
+    values = values.to(torch.float32)
+    top_values = torch.topk(values, k=top_k, dim=-1).values
+    if from_logits:
+        top_log_probs = top_values - values.logsumexp(dim=-1, keepdim=True)
+        top_probs = top_log_probs.exp()
+    else:
+        top_probs = top_values
+        top_log_probs = top_probs.log()
 
     entropy_terms = torch.where(
         top_probs > 0,
