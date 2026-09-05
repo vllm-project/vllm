@@ -1241,7 +1241,9 @@ class Scheduler(SchedulerInterface):
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
         with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
+            # Deferred references are not request owners, so block refcounts
+            # cannot establish a shared prefix until those references drain.
+            if self.running and not self.deferred_frees:
                 any_request_id = self.running[0].request_id
                 num_common_prefix_blocks = (
                     self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
