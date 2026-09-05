@@ -29,6 +29,7 @@ class FinishReason(IntEnum):
     ABORT = 2
     ERROR = 3
     REPETITION = 4
+    REJECTED = 5
 
 
 # Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
