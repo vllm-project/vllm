@@ -22,14 +22,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
-MOE_LAYER_ROUTER_GATE_SUFFIXES = {
-    "gate",
-    "router",
-    "router_gate",
-    "shared_expert_gate",
-    "expert_gate",
-}
-
 
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,

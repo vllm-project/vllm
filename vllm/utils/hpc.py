@@ -76,27 +76,6 @@ def fuse_moe_impl(
     )
 
 
-# @torch.library.register_fake(
-#     "vllm::fuse_moe_impl",
-# )
-def fuse_moe_impl_fake(
-    x: torch.Tensor,
-    gate_up_weight: torch.Tensor,
-    down_weight: torch.Tensor,
-    gate_up_scale: torch.Tensor,
-    down_scale: torch.Tensor,
-    act_and_mul_scale: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_scale: torch.Tensor,
-    rank_ep: int,
-    num_expert_total: int,
-    use_bf16_mul: bool = True,
-    shared_output: torch.Tensor = None,
-    output: torch.Tensor = None,
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
 def hpc_fuse_moe(
     x: torch.Tensor,
     gate_up_weight: torch.Tensor,
@@ -164,26 +143,6 @@ def fuse_moe_blockwise_impl(
         shared_output,
         output=output,
     )
-
-
-# @torch.library.register_fake(
-#     "vllm::fuse_moe_blockwise_impl",
-# )
-def fuse_moe_blockwise_impl_fake(
-    x: torch.Tensor,
-    x_scale: torch.Tensor,
-    gate_up_weight: torch.Tensor,
-    gate_up_weight_scale: torch.Tensor,
-    down_weight: torch.Tensor,
-    down_weight_scale: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_scale: torch.Tensor,
-    rank_ep: int,
-    num_expert_total: int,
-    shared_output: torch.Tensor = None,
-    output: torch.Tensor = None,
-) -> torch.Tensor:
-    return torch.empty_like(x)
 
 
 def hpc_fuse_moe_blockwise(
