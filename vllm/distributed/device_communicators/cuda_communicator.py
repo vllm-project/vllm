@@ -15,6 +15,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
+    is_symmetric_memory_tensor,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -24,6 +25,10 @@ from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+# Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
+# non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
+NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -454,9 +459,28 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ):
+        return self._reduce_scatterv(input_, dim, sizes)
+
+    def reduce_scatterv_into_output(
+        self,
+        input_: torch.Tensor,
+        output: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        return self._reduce_scatterv(input_, dim, sizes, output)
+
+    def _reduce_scatterv(
+        self,
+        input_: torch.Tensor,
+        dim: int,
+        sizes: list[int] | None,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
+        assert not pynccl_comm.disabled, "reduce_scatterv requires PyNccl"
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -473,25 +497,46 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert input_tensor.shape[0] % world_size == 0
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
+        if output is not None:
+            assert dim == 0, "preallocated reduce-scatter output requires dim=0"
+            assert output.shape == output_shape
+            assert output.dtype == input_tensor.dtype
+            assert output.device == input_tensor.device
+            assert output.is_contiguous()
 
         # Symmetric memory is only used when all ranks have uniform sizes.
         # ncclCommWindowRegister is collective: asymmetric pool allocations
         # from variable per-rank sizes cause deadlocks.
-        use_symm_mem = sizes is None and should_nccl_symm_mem_ag_rs()
+        uniform_sizes = sizes is None or all(size == sizes[0] for size in sizes)
+        direct_output_supported = (
+            output is None
+            or is_symmetric_memory_tensor(output)
+            or pynccl_comm.nccl_version >= NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
+        )
+        use_symm_mem = (
+            uniform_sizes
+            and direct_output_supported
+            and (sizes is None or is_symmetric_memory_tensor(input_tensor))
+            and should_nccl_symm_mem_ag_rs()
+        )
         if use_symm_mem:
-            output = self._reduce_scatter_symm_mem(input_tensor)
+            output = self._reduce_scatter_symm_mem(input_tensor, output)
         else:
-            output = torch.empty(
-                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-            )
+            if output is None:
+                output = torch.empty(
+                    output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+                )
             use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and world_size > 2
             if use_deterministic_rs:
                 # Reduce to a fixed root (0) for determinism
                 reduced = torch.empty_like(input_tensor)
-                sizes = sizes if sizes else [chunk_size] * world_size
+                scatter_sizes = sizes
+                if scatter_sizes is None:
+                    scatter_sizes = [chunk_size] * world_size
                 pynccl_comm.reduce(reduced, input_tensor, root=0)
-                pynccl_comm.scatter(output, reduced, sizes, root=0)
-            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
+                pynccl_comm.scatter(output, reduced, scatter_sizes, root=0)
+            elif not uniform_sizes:
+                assert sizes is not None
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)
@@ -510,54 +555,64 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         Allocating a fresh symm tensor per collective pays the
         ``nccl_symm_mem_context`` snapshot + window-registration scan on every
-        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
-        allocate once per ``(role, shape, dtype)``, register once, and reuse.
+        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead,
+        each ``(role, shape[1:], dtype, device)`` keeps a geometric high-water
+        allocation and returns a leading slice. Superseded allocations remain
+        referenced because a captured CUDA graph may still use their pointers;
+        geometric growth bounds their total capacity to less than twice the
+        current allocation.
 
-        Safe for serial (eager) sequence parallelism: each collective's result
-        is consumed on the same stream before the next same-role collective
-        reuses the buffer. Distinct roles (e.g. ``rs_in`` vs ``ag_out``, both
-        full-size) get distinct buffers so a reduce-scatter input copy never
-        clobbers a still-live all-gather output.
+        Safe across serial MoE layers and eager sequence parallelism: the
+        producer and collective are ordered on the same stream before the next
+        same-role operation reuses the buffer. DBO microbatches use distinct
+        cache entries. Any future cross-layer communication overlap must also
+        use distinct roles.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             nccl_symm_mem_context,
         )
+        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
+        assert shape, "symmetric scratch buffers require at least one dimension"
         cache = self.__dict__.setdefault("_symm_scratch_bufs", {})
-        key = (role, tuple(shape), dtype)
+        key = (role, dbo_current_ubatch_id(), tuple(shape[1:]), dtype, device)
         buf = cache.get(key)
-        if buf is None:
+        requested_rows = shape[0]
+        if buf is None or buf.shape[0] < requested_rows:
+            capacity = (
+                requested_rows if buf is None else max(requested_rows, 2 * buf.shape[0])
+            )
             with nccl_symm_mem_context(pynccl_comm):
-                buf = torch.empty(shape, dtype=dtype, device=device)
+                new_buf = torch.empty(
+                    (capacity, *shape[1:]), dtype=dtype, device=device
+                )
+            if buf is not None:
+                retired = self.__dict__.setdefault("_retired_symm_scratch_bufs", {})
+                retired.setdefault(key, []).append(buf)
+            buf = new_buf
             cache[key] = buf
-        return buf
+        return buf[:requested_rows]
 
     def _reduce_scatter_symm_mem(
         self,
         input_tensor: torch.Tensor,
+        output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """ReduceScatter using NCCL symmetric memory (NVLS).
 
-        Only called for uniform-size reduce_scatter (variable sizes are
-        guarded out by the caller to avoid asymmetric ncclCommWindowRegister).
-        Uses persistent pre-registered scratch (see _get_symm_scratch).
+        The MoE reduce_scatterv path passes explicit uniform sizes and calls
+        this only with an already-registered input, so that path never stages.
+        Plain reduce_scatter and reduce_scatterv without explicit sizes retain
+        their existing opt-in behavior and stage ordinary input into registered
+        scratch. The output may be ordinary memory.
         """
-        from vllm.distributed.device_communicators.pynccl_allocator import (
-            is_symmetric_memory_tensor,
-        )
-
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-
         chunk = input_tensor.shape[0] // self.world_size
         output_shape = (chunk,) + tuple(input_tensor.shape[1:])
 
-        symm_output = self._get_symm_scratch(
-            "rs_out", output_shape, input_tensor.dtype, input_tensor.device
-        )
-        # NVLS reduce-scatter (LDMC) requires the input in symmetric memory.
         if is_symmetric_memory_tensor(input_tensor):
             symm_input = input_tensor
         else:
@@ -569,8 +624,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
             symm_input.copy_(input_tensor)
 
-        pynccl_comm.reduce_scatter(symm_output, symm_input)
-        return symm_output
+        if output is None:
+            output = self._get_symm_scratch(
+                "rs_out", output_shape, input_tensor.dtype, input_tensor.device
+            )
+        pynccl_comm.reduce_scatter(output, symm_input)
+        return output
+
+    def get_symmetric_memory_buffer(
+        self,
+        role: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        pynccl_comm = self.pynccl_comm
+        if (
+            pynccl_comm is None
+            or pynccl_comm.disabled
+            or pynccl_comm.world_size == 1
+            or pynccl_comm.nccl_version < NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION
+            or not should_nccl_symm_mem_ag_rs()
+        ):
+            return None
+        output = self._get_symm_scratch(role, shape, dtype, device)
+        return output if is_symmetric_memory_tensor(output) else None
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
@@ -819,6 +897,29 @@ class CudaCommunicator(DeviceCommunicatorBase):
         return self.all2all_manager.combine(
             hidden_states,
             is_sequence_parallel,
+        )
+
+    def allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor | None:
+        assert self.all2all_manager is not None
+        return self.all2all_manager.allocate_combine_input(
+            shape, dtype, device, is_sequence_parallel
+        )
+
+    def combine_into_output(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        return self.all2all_manager.combine_into_output(
+            hidden_states, output, is_sequence_parallel
         )
 
     def batch_isend_irecv(self, p2p_ops: list):
