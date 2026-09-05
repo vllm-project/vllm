@@ -545,6 +545,14 @@ class KVCacheManager:
             num_encoder_tokens,
         )
 
+        if num_external_computed_tokens > 0:
+            # A Mamba "align" boundary inside the loaded prefix is not
+            # re-registered as a local partial-tail entry (see
+            # MambaManager._cache_partial_tail_block).
+            request.num_externally_loaded_tokens = (
+                num_local_computed_tokens + num_external_computed_tokens
+            )
+
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
@@ -875,7 +883,7 @@ class KVCacheManager:
         return offloads
 
     def finalize_partial_tail_offloads(
-        self, request: Request
+        self, request: Request, allow_in_flight: bool = False
     ) -> list[tuple[int, int, int]]:
         """Consume safe producer partial tails when a request finishes.
 
@@ -883,13 +891,17 @@ class KVCacheManager:
         token was forwarded. The connector pins and queues the exact table
         block before request cleanup, then releases the pin when every worker
         reports the store job complete.
+
+        ``allow_in_flight`` is for preemption: the chunk ending at the boundary
+        may still be executing, but the connector fences its read on an event
+        recorded after the next forward, so the state is complete by then.
         """
         offloads: list[tuple[int, int, int]] = []
         for mgr in self.coordinator.single_type_managers:
             finalized = mgr.finalize_partial_tail_offload(
                 request.request_id,
                 request.num_computed_tokens,
-                request.num_in_flight_tokens,
+                0 if allow_in_flight else request.num_in_flight_tokens,
             )
             if finalized is None:
                 continue

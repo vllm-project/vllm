@@ -1427,11 +1427,34 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            self.connector is not None
+            and kv_transfer_config is not None
+            and kv_transfer_config.is_kv_producer
+        ):
+            # A preempted producer gives its blocks back like a finished one,
+            # so a completed partial-tail boundary state has to be handed off
+            # now. Otherwise it is dropped with the blocks, and the request,
+            # which resumes from the local cache entry, never owns that
+            # boundary block again.
+            partial_tails = self.kv_cache_manager.finalize_partial_tail_offloads(
+                request, allow_in_flight=True
+            )
+            if partial_tails:
+                block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
+                    request_id=request.request_id,
+                    num_computed_tokens=request.num_computed_tokens,
+                )
+                self.connector.register_finished_partial_tail(
+                    request, block_ids, partial_tails
+                )
         self._free_request_blocks(request)
         self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        request.num_externally_loaded_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are

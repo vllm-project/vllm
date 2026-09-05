@@ -586,9 +586,12 @@ def test_internal_checkpoint_requires_block_aligned_start():
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
 
 
-def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
-    """An external mid-block hit must become a running request even when its
-    first continuation does not need another Mamba block."""
+def test_external_mamba_hit_continues_in_place_without_cow():
+    """A boundary state a connector loaded into the request's private block is
+    not re-registered as a local partial-tail entry: the store already has it,
+    and registering it would make the first continuation need a CoW block that
+    admission never reserved (with every block holder waiting on a load nothing
+    is preemptible and the scheduler deadlocks). The request continues in place."""
     hash_block_size = 2
     mamba_block_size = 4 * hash_block_size
     kv_cache_config = KVCacheConfig(
@@ -626,36 +629,48 @@ def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
     loaded_blocks = manager.allocate_slots(
         request,
         num_new_tokens=0,
-        num_external_computed_tokens=10,
+        num_external_computed_tokens=14,
         delay_cache_blocks=True,
     )
     assert loaded_blocks is not None
+    assert request.num_externally_loaded_tokens == 14
 
-    request.num_computed_tokens = 10
-    first_step_blocks = manager.allocate_slots(request, num_new_tokens=4)
-    assert first_step_blocks is not None
-
-    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
-    partial_hash = request.block_hashes[14 // hash_block_size - 1]
-    partial_block = manager.block_pool.get_cached_block(
-        partial_hash, kv_cache_group_ids=[1]
-    )
-    assert partial_block is not None
-    assert partial_block[0].block_id == source_block_id
-
+    # The load landed: the scheduler caches the loaded prefix, whose end is the
+    # prompt's last hash boundary (14 of 15 tokens).
     request.num_computed_tokens = 14
+    manager.cache_blocks(request, 14)
+    partial_hash = request.block_hashes[14 // hash_block_size - 1]
+    assert (
+        manager.block_pool.get_cached_block(partial_hash, kv_cache_group_ids=[1])
+        is None
+    )
+    assert (
+        manager.block_pool.get_cached_block(partial_hash, kv_cache_group_ids=[0])
+        is not None
+    )
+    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
+
     continuation_blocks = manager.allocate_slots(request, num_new_tokens=1)
     assert continuation_blocks is not None
-
     assert continuation_blocks.get_block_ids()[1] == []
     assert manager.get_blocks("0").get_block_ids()[1][1] == source_block_id
     copies, _ = manager.take_kv_cache_block_copies()
-    cow_copy = next(c for c in copies if c.src_block_id == source_block_id)
-    assert cow_copy.dst_block_id != source_block_id
+    assert copies == []
+    assert manager.finalize_partial_tail_offloads(request) == []
 
-    moved = manager.block_pool.get_cached_block(partial_hash, kv_cache_group_ids=[1])
-    assert moved is not None
-    assert moved[0].block_id == cow_copy.dst_block_id
+    # A prefix computed locally still registers its boundary and CoWs on continue.
+    local = make_request("1", [1] * 15, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(local)
+    assert manager.allocate_slots(local, 14, num_computed, computed_blocks) is not None
+    local.num_computed_tokens = 14
+    local_hash = local.block_hashes[14 // hash_block_size - 1]
+    assert (
+        manager.block_pool.get_cached_block(local_hash, kv_cache_group_ids=[1])
+        is not None
+    )
+    assert manager.allocate_slots(local, num_new_tokens=1) is not None
+    copies, _ = manager.take_kv_cache_block_copies()
+    assert copies
 
 
 def test_boundary_state_offloads_returns_cow_target():
@@ -2279,3 +2294,135 @@ def test_boundary_states_offered_past_prompt_for_resumed_prefill():
     offered = [b for _, _, b in drain_boundary_state_offloads(manager).get("0", [])]
     assert 2 * block_size in offered
     assert req0.num_prompt_tokens < 2 * block_size
+
+
+def test_connector_preempt_registers_partial_tail_before_cleanup():
+    """A preempted producer loses its blocks like a finished one, so a
+    completed partial-tail boundary state must be handed off before the free;
+    otherwise the request resumes from the local entry and the boundary is
+    never offloaded."""
+    from vllm.v1.request import RequestStatus
+
+    calls: list[str] = []
+
+    class _Connector(SupportsHMA):
+        def register_finished_partial_tail(self, request, block_ids, offloads):
+            calls.append("register")
+            self.registered = (request, block_ids, offloads)
+            return True
+
+        def request_finished_all_groups(self, request, block_ids):
+            return False, None
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = _Connector()
+    scheduler.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_producer=True)
+    )
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.kv_cache_manager.finalize_partial_tail_offloads.return_value = [
+        (1, 9, 12)
+    ]
+    scheduler.kv_cache_manager.get_block_ids_for_computed_tokens.return_value = (
+        [3],
+        [9],
+    )
+    scheduler._free_request_blocks = MagicMock(
+        side_effect=lambda request: calls.append("free")
+    )
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler._inflight_prefills = MagicMock()
+    scheduler.log_stats = False
+    scheduler.waiting = MagicMock()
+    scheduler.reset_preempted_req_ids = set()
+    request = SimpleNamespace(
+        request_id="0",
+        status=RequestStatus.RUNNING,
+        num_computed_tokens=12,
+        num_in_flight_tokens=0,
+        num_prompt_tokens=20,
+        spec_token_ids=[],
+        drop_stale_output=False,
+        num_stale_output_tokens=0,
+        num_output_placeholders=0,
+        num_preemptions=0,
+    )
+
+    scheduler._preempt_request(request, timestamp=0.0)
+
+    assert calls == ["register", "free"]
+    assert scheduler.connector.registered == (request, ([3], [9]), [(1, 9, 12)])
+    # The boundary chunk may still be executing at preemption time; the hand-off
+    # must not be refused for that (the store job fences on the next step).
+    scheduler.kv_cache_manager.finalize_partial_tail_offloads.assert_called_once_with(
+        request, allow_in_flight=True
+    )
+    scheduler.kv_cache_manager.get_block_ids_for_computed_tokens.assert_called_once_with(
+        request_id="0", num_computed_tokens=12
+    )
+    assert request.status == RequestStatus.PREEMPTED
+    assert request.num_computed_tokens == 0
+    assert "0" in scheduler.reset_preempted_req_ids
+
+
+def test_finalize_partial_tail_allows_in_flight_boundary_chunk_on_preemption():
+    """At preemption the chunk that ends at the boundary can still be in
+    flight; the finish-time rule refuses that, the preemption rule accepts it
+    (the store job fences on a later event), and either way the producer tail
+    is consumed exactly once."""
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+    def make_in_flight_request(manager, request_id):
+        req = make_request(request_id, [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+        computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+        assert manager.allocate_slots(req, 6, num_computed, computed_blocks) is not None
+        req.num_computed_tokens = 6
+        req.num_in_flight_tokens = 6
+        return req
+
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req0 = make_in_flight_request(manager, "0")
+    source_block_id = manager.get_blocks("0").get_block_ids()[1][1]
+    assert manager.finalize_partial_tail_offloads(req0, allow_in_flight=True) == [
+        (1, source_block_id, 6)
+    ]
+    assert manager.finalize_partial_tail_offloads(req0, allow_in_flight=True) == []
+
+    strict_manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    req1 = make_in_flight_request(strict_manager, "1")
+    assert strict_manager.finalize_partial_tail_offloads(req1) == []

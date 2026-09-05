@@ -1915,6 +1915,13 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
+        if num_tokens <= getattr(request, "num_externally_loaded_tokens", 0):
+            # The boundary state was loaded by a connector into this request's
+            # private block. Registering it as a partial-tail entry would make
+            # the next chunk need a CoW block that admission never reserved;
+            # with every block holder waiting on a load nothing is preemptible
+            # and the scheduler deadlocks. The store already has this state.
+            return None
         if num_tokens != latest_prompt_hash_boundary:
             return None
 

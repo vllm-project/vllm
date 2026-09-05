@@ -510,6 +510,16 @@ class MooncakeStoreScheduler:
             if block_id == NULL_BLOCK_ID:
                 return False
             pinned_block_ids.append(block_id)
+        # The sub-block tail put also reads the other groups' blocks for the
+        # boundary chunk, and a preempted request frees its table in the same
+        # scheduling pass, so pin those too until every rank reports the job.
+        pinned_block_ids.extend(
+            block_id
+            for group_id, group in enumerate(block_ids)
+            if group_id not in self._boundary_state_group_ids
+            for block_id in group
+            if block_id != NULL_BLOCK_ID
+        )
         pinned_block_ids = list(dict.fromkeys(pinned_block_ids))
 
         pool = self._gpu_block_pool
