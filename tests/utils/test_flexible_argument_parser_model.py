@@ -4,9 +4,12 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def _serve_parser() -> FlexibleArgumentParser:
+    # Mirror the real CLI: `serve` is a subparser that owns model_tag.
     parser = FlexibleArgumentParser(description="test")
-    parser.add_argument("model_tag", nargs="?")
-    parser.add_argument("--port", type=int, default=8000)
+    subparsers = parser.add_subparsers(dest="subparser", required=False)
+    serve = subparsers.add_parser("serve")
+    serve.add_argument("model_tag", nargs="?")
+    serve.add_argument("--port", type=int, default=8000)
     return parser
 
 
