@@ -26,6 +26,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -114,7 +116,7 @@ class LlamaMLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -543,13 +545,25 @@ class LlamaForCausalLM(
         return loader.load_weights(weights)
 
 
-class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+if TYPE_CHECKING:
+    _LlamaBidirectionalForSequenceClassificationBase = LlamaForCausalLM
+    _LlamaBidirectionalModelBase = LlamaForCausalLM
+else:
+    _LlamaBidirectionalForSequenceClassificationBase = as_seq_cls_model(
+        LlamaForCausalLM
+    )
+    _LlamaBidirectionalModelBase = as_embedding_model(LlamaForCausalLM)
+
+
+class LlamaBidirectionalForSequenceClassification(
+    _LlamaBidirectionalForSequenceClassificationBase
+):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
 
 
-class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+class LlamaBidirectionalModel(_LlamaBidirectionalModelBase):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass

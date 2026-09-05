@@ -201,8 +201,8 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -1063,6 +1063,17 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
+            )
+
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
             )
 
         return self

@@ -186,8 +186,10 @@ class Sampler:
 
         sampling_mask_tensors = None
         if self.return_sampling_mask:
+            # Size by the validated top_k batch max; wider supports use the bitmask.
+            max_num_kept = int(np.max(self.sampling_states.top_k.np[idx_mapping_np]))
             sampling_mask_tensors = SamplingMaskTensors.from_logits(
-                processed_logits, num_sampled
+                processed_logits, num_sampled, max_num_kept
             )
 
         # These are GPU tensors.
@@ -317,6 +319,7 @@ class Sampler:
                 self.sampling_states.seeds.gpu,
                 pos,
                 apply_temperature=False,
+                is_drafting=False,
                 use_fp64=self.use_fp64_gumbel,
             )
         return sampled, processed_logits
