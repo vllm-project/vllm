@@ -1084,6 +1084,18 @@ class Platform:
         return False
 
     @classmethod
+    def supports_moe_padding_sentinel(cls) -> bool:
+        """
+        Returns whether this platform's MoE kernels treat a topk_id of -1
+        as a skip sentinel (see VLLM_MOE_SKIP_PADDING).
+
+        Platforms whose moe_align_block_size does not reject negative expert
+        ids must return False, otherwise the sentinel is used as an index and
+        the kernel writes outside its output buffer.
+        """
+        return True
+
+    @classmethod
     def supports_mx(cls) -> bool:
         """
         Returns whether the current platform supports MX types.

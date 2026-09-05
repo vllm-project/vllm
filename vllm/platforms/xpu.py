@@ -478,6 +478,16 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
+    def supports_moe_padding_sentinel(cls) -> bool:
+        # The SYCL moe_align_block_size in vllm-xpu-kernels only rejects
+        # expert ids >= num_experts, so a topk_id of -1 reaches
+        # cumsum_buffer[-1] and _count_and_sort_expert_tokens then writes
+        # token indices at an arbitrary offset past sorted_token_ids,
+        # corrupting device memory. The small-batch-expert variant of this
+        # kernel has no bound check at all, so it is exposed the same way.
+        return False
+
+    @classmethod
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":

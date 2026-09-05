@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -9,8 +10,10 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.router import base_router
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
+    get_padding_mask,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     FusedTopKBiasRouter,
@@ -964,3 +967,70 @@ def test_eplb_map_num_unpadded_tokens(
 
     exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
     torch.testing.assert_close(load, exp_load)
+
+
+# ---------------------------------------------------------------------------
+# Tests for get_padding_mask / _skip_padding_enabled
+# ---------------------------------------------------------------------------
+
+
+def _patch_padding_gate(monkeypatch, *, skip_padding: bool, sentinel_supported: bool):
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1" if skip_padding else "0")
+    monkeypatch.setattr(
+        base_router.current_platform,
+        "supports_moe_padding_sentinel",
+        lambda: sentinel_supported,
+    )
+
+
+def test_get_padding_mask_disabled_by_env(monkeypatch):
+    """VLLM_MOE_SKIP_PADDING=0 must disable the mask regardless of platform."""
+    _patch_padding_gate(monkeypatch, skip_padding=False, sentinel_supported=True)
+    monkeypatch.setattr(base_router, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        base_router,
+        "get_forward_context",
+        lambda: SimpleNamespace(is_padding=torch.ones(4, dtype=torch.bool)),
+    )
+
+    assert get_padding_mask(4) is None
+
+
+def test_get_padding_mask_disabled_by_platform(monkeypatch):
+    """A platform whose kernels can't consume the -1 sentinel (e.g. XPU) must
+    disable the mask even though VLLM_MOE_SKIP_PADDING defaults to on."""
+    _patch_padding_gate(monkeypatch, skip_padding=True, sentinel_supported=False)
+    monkeypatch.setattr(base_router, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        base_router,
+        "get_forward_context",
+        lambda: SimpleNamespace(is_padding=torch.ones(4, dtype=torch.bool)),
+    )
+
+    assert get_padding_mask(4) is None
+
+
+def test_get_padding_mask_no_forward_context(monkeypatch):
+    """Outside a forward pass (e.g. during warmup) there is no padding info."""
+    _patch_padding_gate(monkeypatch, skip_padding=True, sentinel_supported=True)
+    monkeypatch.setattr(base_router, "is_forward_context_available", lambda: False)
+
+    assert get_padding_mask(4) is None
+
+
+def test_get_padding_mask_returns_sliced_tensor(monkeypatch):
+    """When enabled and supported, the mask is the forward context's
+    is_padding tensor, sliced to the requested number of tokens."""
+    _patch_padding_gate(monkeypatch, skip_padding=True, sentinel_supported=True)
+    is_padding = torch.tensor([True, True, False, False, False], dtype=torch.bool)
+    monkeypatch.setattr(base_router, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        base_router,
+        "get_forward_context",
+        lambda: SimpleNamespace(is_padding=is_padding),
+    )
+
+    mask = get_padding_mask(3)
+
+    assert mask is not None
+    torch.testing.assert_close(mask, is_padding[:3])
