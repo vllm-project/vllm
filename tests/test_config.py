@@ -907,6 +907,20 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+def test_ubatching_rejects_unsupported_all2all_backend():
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Microbatching currently only supports.*"
+            "allgather_reducescatter is not supported"
+        ),
+    ):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(enable_dbo=True),
+        )
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
