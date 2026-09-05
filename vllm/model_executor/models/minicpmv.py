@@ -600,7 +600,9 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     @cached_property
     def _image_processor_cls(self):
         model_config = self.ctx.model_config
-        model_path = convert_model_repo_to_path(model_config.model)
+        model_path = convert_model_repo_to_path(
+            model_config.model, revision=model_config.revision
+        )
 
         from transformers import ImageProcessingMixin
 

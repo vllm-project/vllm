@@ -166,9 +166,11 @@ def get_processor_cls_name_from_config(
 
 def get_video_processor_cls_name_from_config(
     processor_name: str,
-    revision: str | None = "main",
+    revision: str | None = None,
 ) -> str | None:
-    processor_name = convert_model_repo_to_path(processor_name)
+    processor_name = convert_model_repo_to_path(processor_name, revision=revision)
+    if revision is None:
+        revision = "main"
     config_file = [
         "video_preprocessor_config.json",
         "preprocessor_config.json",
@@ -211,10 +213,10 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
-    if revision is None:
-        revision = "main"
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = convert_model_repo_to_path(processor_name, revision=revision)
+        if revision is None:
+            revision = "main"
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )
@@ -401,7 +403,7 @@ def get_feature_extractor(
     """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = convert_model_repo_to_path(processor_name, revision=revision)
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
             *args,
@@ -452,7 +454,7 @@ def get_image_processor(
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = convert_model_repo_to_path(processor_name, revision=revision)
         processor_cls = processor_cls_overrides or AutoImageProcessor
         processor = processor_cls.from_pretrained(
             processor_name,
@@ -505,7 +507,7 @@ def get_video_processor(
 ):
     """Load a video processor for the given model name via HuggingFace."""
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = convert_model_repo_to_path(processor_name, revision=revision)
         processor_cls = processor_cls_overrides or AutoVideoProcessor
         processor = processor_cls.from_pretrained(
             processor_name,

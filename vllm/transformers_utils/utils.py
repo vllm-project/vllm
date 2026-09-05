@@ -115,11 +115,29 @@ def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
         return metadata
 
 
-def convert_model_repo_to_path(model_repo: str) -> str:
+def convert_model_repo_to_path(model_repo: str, revision: str | None = None) -> str:
     """When VLLM_USE_MODELSCOPE is True convert a model
     repository string to a Path str."""
     if not envs.VLLM_USE_MODELSCOPE or Path(model_repo).exists():
         return model_repo
     from modelscope.utils.file_utils import get_model_cache_root
 
-    return os.path.join(get_model_cache_root(), model_repo)
+    legacy_path = os.path.join(get_model_cache_root(), model_repo)
+    if Path(legacy_path).is_dir():
+        return legacy_path
+
+    try:
+        from modelscope_hub import get_default_config
+    except ImportError:
+        return legacy_path
+
+    snapshot_path = (
+        Path(get_default_config().cache_dir)
+        / "models"
+        / model_repo.replace("/", "--")
+        / "snapshots"
+        / (revision or "master")
+    )
+    if snapshot_path.is_dir():
+        return str(snapshot_path)
+    return legacy_path
