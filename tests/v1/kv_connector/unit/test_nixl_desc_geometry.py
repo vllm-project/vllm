@@ -11,13 +11,195 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import msgspec
 import numpy as np
 import pytest
 import torch
 
 from .utils import create_vllm_config
+
+
+def _make_packed_mla_worker(
+    layouts, block_stride, *, pp_size=1, push=True, backend_names=("FLASHMLA",)
+):
+    """Register real strided views; only NIXL and distributed runtime are fake."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import (
+        KVCacheConfig,
+        KVCacheGroupSpec,
+        KVCacheLayout,
+        KVCacheTensor,
+        MLAAttentionSpec,
+        create_kv_cache_views,
+    )
+
+    num_blocks, block_size = 4, 16
+    raw = torch.zeros(num_blocks * block_stride, dtype=torch.int8)
+    tensors, groups, caches = [], [], {}
+    for name, (offset, page_size) in layouts.items():
+        spec = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=page_size // block_size,
+            dtype=torch.uint8,
+        )
+        tensor = KVCacheTensor(
+            size=raw.nbytes,
+            layers=[name],
+            layer_stride=page_size,
+            block_stride=block_stride,
+            offset=offset,
+        )
+        tensors.append(tensor)
+        groups.append(KVCacheGroupSpec([name], spec))
+        (caches[name],) = create_kv_cache_views(
+            raw, spec, num_blocks, KVCacheLayout.BLHNC, tensor
+        )
+
+    config = create_vllm_config(block_size=block_size)
+    config.parallel_config.pipeline_parallel_size = pp_size
+    config.kv_transfer_config.kv_role = "kv_producer"
+    config.cache_config.kv_cache_layout = "BLHNC"
+    backends = []
+    for name in backend_names:
+        backend = MagicMock()
+        backend.get_supported_kernel_block_sizes.return_value = [block_size]
+        backend.get_name.return_value = name
+        backend.full_cls_name.return_value = f"fake.{name}"
+        backends.append(backend)
+    worker_cls = NixlPushConnectorWorker if push else NixlConnectorWorker
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=backends),
+        patch("threading.Thread"),
+    ):
+        worker = worker_cls(
+            config,
+            "producer" if pp_size > 1 else "consumer",
+            KVCacheConfig(num_blocks, tensors, groups),
+        )
+        worker.use_mla = True
+        worker.register_kv_caches(caches)
+    return worker, raw
+
+
+@pytest.mark.parametrize("push", [False, True])
+@pytest.mark.parametrize("num_members", [1, 2])
+def test_packed_mla_pp1_preserves_whole_row_transfers(push, num_members):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+
+    layouts = {f"L{i}": (i * 128, 128) for i in range(num_members)}
+    stride = num_members * 128
+    worker, raw = _make_packed_mla_worker(layouts, stride, push=push)
+    assert worker._registered_descs == [[(raw.data_ptr(), raw.nbytes, 0, "")]]
+    assert worker.src_blocks_data.tolist() == [
+        [raw.data_ptr() + block * stride, stride, 0] for block in range(4)
+    ]
+    assert worker._member_group_ids == ()
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    assert metadata.packed_member_layouts == (layouts if push else {})
+
+
+@pytest.mark.parametrize(
+    "remote_backends, compatible",
+    [
+        (("INDEXER", "FLASHMLA"), True),
+        (("FLASHMLA", "OTHER"), False),
+        (("FLASHMLA",), False),
+    ],
+)
+def test_packed_push_compatibility_hash_uses_all_backends_in_stable_order(
+    remote_backends, compatible
+):
+    producer, _ = _make_packed_mla_worker(
+        {"L0": (0, 128)},
+        128,
+        pp_size=2,
+        backend_names=("FLASHMLA", "INDEXER"),
+    )
+    consumer, _ = _make_packed_mla_worker(
+        {"L0": (0, 128)}, 128, backend_names=remote_backends
+    )
+    assert (producer.compat_hash == consumer.compat_hash) is compatible
+
+
+def test_packed_mla_pp_pairs_asymmetric_strides_and_overlapping_members():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+
+    # Different cache groups overlay pages of different sizes at the same address.
+    # PP also changes both the placement and the stride of the matching D pages.
+    producer, p_raw = _make_packed_mla_worker(
+        {"L2": (0, 128), "L2.swa": (0, 64), "L3": (128, 64)}, 192, pp_size=2
+    )
+    consumer, d_raw = _make_packed_mla_worker(
+        {"L0": (0, 128), "L2": (128, 128), "L2.swa": (0, 64), "L3": (64, 64)},
+        256,
+    )
+    assert producer.block_len_per_layer == [128, 64, 64]
+    assert producer._member_group_ids == (0, 1, 2)
+    local_ids = producer._compute_desc_ids([[1], [2], [3]], 4, None, 1)
+    remote_ids = producer._compute_desc_ids([[3], [1], [2]], 4, None, 1)
+    assert producer.src_blocks_data[local_ids].tolist() == [
+        [p_raw.data_ptr() + 192, 128, 0],
+        [p_raw.data_ptr() + 2 * 192, 64, 0],
+        [p_raw.data_ptr() + 128 + 3 * 192, 64, 0],
+    ]
+    # Each decoder TP rank receives the complete MLA page, without head slicing.
+    for rank in (0, 1):
+        metadata = msgspec.msgpack.decode(
+            consumer.xfer_handshake_metadata.agent_metadata_bytes,
+            type=NixlAgentMetadata,
+        )
+        producer.add_remote_agent(metadata, remote_tp_rank=rank, remote_tp_size=2)
+        handle = producer.dst_xfer_side_handles[consumer.engine_id][rank]
+        remote_descs = producer.nixl_wrapper.dlists[handle]
+        assert remote_descs[remote_ids].tolist() == [
+            [d_raw.data_ptr() + 128 + 3 * 256, 128, 0],
+            [d_raw.data_ptr() + 256, 64, 0],
+            [d_raw.data_ptr() + 64 + 2 * 256, 64, 0],
+        ]
+        aligned = msgspec.msgpack.encode(metadata)
+        producer._align_remote_regions_by_member(metadata)
+        assert msgspec.msgpack.encode(metadata) == aligned
+
+
+@pytest.mark.parametrize("remote_block_size", [8, 32])
+def test_packed_mla_rejects_unequal_block_sizes_before_peer_registration(
+    remote_block_size,
+):
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlAgentMetadata,
+    )
+
+    producer, _ = _make_packed_mla_worker({"L0": (0, 128)}, 128, pp_size=2)
+    metadata = msgspec.msgpack.decode(
+        producer.xfer_handshake_metadata.agent_metadata_bytes, type=NixlAgentMetadata
+    )
+    metadata.engine_id = "remote"
+    metadata.block_size = remote_block_size
+    with pytest.raises(NotImplementedError, match="identical P/D block sizes"):
+        producer.add_remote_agent(metadata)
+    assert len(producer.nixl_wrapper.dlists) == 1  # Only the local list exists.
+    assert producer.tp_mappings == {}
+    assert "remote" not in producer.dst_num_blocks
+    with pytest.raises(KeyError):
+        producer.transfer_topo.get_engine_info("remote")
 
 
 class _RecordingNixl:

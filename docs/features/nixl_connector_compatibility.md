@@ -120,7 +120,8 @@ Current push PP + HMA limitations:
 - Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
 - Hybrid SSM/Mamba layouts are not supported under PP.
 - HMA requires the same block size on P and D.
-- Attention-HMA member routing requires decode TP to be no greater than prefill TP.
+- Non-MLA attention-HMA member routing requires decode TP to be no greater than prefill TP.
+- Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; member pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
 
 ### Quantized KV cache
 

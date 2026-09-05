@@ -156,6 +156,7 @@ class NixlBaseConnectorWorker:
     _member_names: tuple[str, ...] = ()
     _member_local_regions: tuple[int, ...] = ()
     _member_group_ids: tuple[int, ...] = ()
+    _has_packed_cache: bool = False
 
     def _compute_desc_ids(
         self,
@@ -377,11 +378,11 @@ class NixlBaseConnectorWorker:
         self._member_group_ids = tuple(group_by_member[member] for member in members)
 
     def _requires_member_identity(self) -> bool:
-        """Whether PP push must match HMA layers by name, not region index."""
+        """Whether PP push must match HMA/packed layers by name, not region index."""
         return (
             self._supports_member_identity
             and self.pp_size > 1
-            and self._is_hma_required
+            and (self._is_hma_required or self._has_packed_cache)
             and not self._has_mamba
         )
 
@@ -410,6 +411,9 @@ class NixlBaseConnectorWorker:
         missing = [m for m in self._member_names if m not in remote_region_by_member]
         assert not missing, f"Remote is missing locally owned layers: {missing}"
 
+        packed_regions = {
+            remote_region_by_member[m] for m in nixl_agent_meta.packed_member_layouts
+        }
         remote_regions = [remote_region_by_member[m] for m in self._member_names]
         nixl_agent_meta.kv_caches_base_addr = [
             nixl_agent_meta.kv_caches_base_addr[i] for i in remote_regions
@@ -420,6 +424,24 @@ class NixlBaseConnectorWorker:
         nixl_agent_meta.block_strides = [
             nixl_agent_meta.block_strides[i] for i in remote_regions
         ]
+        if nixl_agent_meta.packed_member_layouts:
+            for i, member in enumerate(self._member_names):
+                if remote_regions[i] not in packed_regions:
+                    continue
+                assert member in nixl_agent_meta.packed_member_layouts, (
+                    f"Remote packed layer {member!r} has no layout"
+                )
+                offset, page_size = nixl_agent_meta.packed_member_layouts[member]
+                assert (
+                    0 <= offset < offset + page_size <= nixl_agent_meta.block_lens[i]
+                ), f"Remote packed layer {member!r} escapes its block"
+                local_region = self._member_local_regions[i]
+                assert page_size == self.block_len_per_layer[local_region], (
+                    f"Packed MLA page sizes must match for layer {member!r}"
+                )
+                nixl_agent_meta.kv_caches_base_addr[i] += offset
+                nixl_agent_meta.block_lens[i] = page_size
+            nixl_agent_meta.packed_member_layouts = {}
         # One member per region keeps a second alignment pass a no-op.
         nixl_agent_meta.region_members = [[m] for m in self._member_names]
 
@@ -1227,6 +1249,7 @@ class NixlBaseConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
+        self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1244,9 +1267,15 @@ class NixlBaseConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
+        backend_name = self.backend_name
+        if self._supports_member_identity and self._has_packed_cache:
+            # PP can reorder the same backends across stages of a packed model.
+            backend_name = ",".join(
+                sorted(backend.get_name() for backend in self.attn_backends)
+            )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config,
-            self.backend_name,
+            backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
 
@@ -1288,6 +1317,15 @@ class NixlBaseConnectorWorker:
         # CSA-linear needs separate logical regions for attention and state
         # aliases even though every view shares one block-major allocation.
         packed_storage = packed_storage and not self._is_csa_linear
+        if (
+            self._requires_member_identity()
+            and self._has_packed_cache
+            and any(
+                not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                for spec in self._layer_specs.values()
+            )
+        ):
+            raise NotImplementedError("PP push with packed KV caches requires MLA")
 
         layer_specs: dict[str, KVCacheSpec] = {}
         compressed_region_owners: dict[int, torch.Tensor] = {}
@@ -1316,10 +1354,11 @@ class NixlBaseConnectorWorker:
 
         track_region_members = (
             self._supports_member_identity
-            and self._is_hma_required
+            and (self._is_hma_required or self._has_packed_cache)
             and not self._has_mamba
         )
         region_members: list[list[str]] = []
+        packed_member_layouts: dict[str, tuple[int, int]] = {}
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1440,6 +1479,27 @@ class NixlBaseConnectorWorker:
                     region_specs = [
                         (storage_addr, storage_block_len, storage_block_len)
                     ]
+                    if track_region_members and is_mla_region:
+                        offset = cache.data_ptr() - storage_addr
+                        assert (
+                            offset >= 0 and offset + physical_page_size <= block_stride
+                        )
+                        if self._requires_member_identity():
+                            # A PP producer transfers only its own layer pages.
+                            region_specs = [
+                                (
+                                    cache.data_ptr(),
+                                    physical_page_size,
+                                    block_stride,
+                                )
+                            ]
+                        else:
+                            # PP=1 keeps whole-row transfers, but advertises the
+                            # slices a PP producer needs to address this cache.
+                            packed_member_layouts[layer_name] = (
+                                offset,
+                                physical_page_size,
+                            )
                 elif storage_is_block_major:
                     region_specs = [
                         (cache.data_ptr(), physical_page_size, block_stride)
@@ -1469,7 +1529,9 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses:
+                if base_addr in seen_base_addresses and not (
+                    self._has_packed_cache and self._requires_member_identity()
+                ):
                     region_index = seen_base_addresses.index(base_addr)
                     self._region_is_mla[region_index] |= is_mla_region
                 else:
@@ -1534,7 +1596,7 @@ class NixlBaseConnectorWorker:
 
         self._set_region_members(region_members)
 
-        if self.pp_size > 1 and not self._is_hma_required:
+        if self.pp_size > 1 and not self._requires_member_identity():
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
                 self.vllm_config.parallel_config
             )
@@ -1595,6 +1657,7 @@ class NixlBaseConnectorWorker:
             dcp_size=self.dcp_size,
             pcp_size=self.pcp_size,
             region_members=self.region_members,
+            packed_member_layouts=packed_member_layouts,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None

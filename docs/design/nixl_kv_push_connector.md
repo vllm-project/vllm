@@ -204,6 +204,19 @@ registers its KV caches, and every transfer it issues uses that order.
 owns and reorders them to match, so both sides stay paired regardless of
 how each remote rank happens to order its metadata.
 
+Packed MLA caches interleave layer pages within each block. PP stages can
+pack different members at different offsets and block strides. A PP producer
+registers one logical transfer region per member, while memory registration
+still covers the shared allocation once. A `PP=1` peer keeps whole-row
+transfers and advertises each member's byte offset and page size through
+`packed_member_layouts`. The producer folds those offsets into the remote
+region addresses; the ordinary descriptor builders then use each side's
+own `block_strides`. Aliased members remain distinct when their page sizes
+differ. Pull-mode registration and transfers are unchanged.
+Packed push hashes the sorted attention-backend names, since PP can change
+their discovery order without changing the cache format. A different backend
+set still fails the compatibility check.
+
 Invariants enforced when the remote regions are aligned:
 
 * every locally owned member must be advertised exactly once by the
@@ -218,7 +231,9 @@ Invariants enforced when the remote regions are aligned:
   remote descriptor list is rebuilt per rank.
 
 Decode-side PP is unsupported because completions are counted per
-consumer rank. Mamba/SSM hybrids are unsupported under PP.
+consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
+requires MLA caches and equal P/D block sizes. MLA pages are replicated
+across TP ranks, so producer TP1 to consumer TP2 is supported.
 
 ## Scheduler-side responsibilities
 
