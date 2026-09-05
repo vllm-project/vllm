@@ -16,38 +16,23 @@ from vllm.entrypoints.serve.utils.api_utils import (
 
 
 @pytest.mark.parametrize("mode", ["full", "incremental"])
-def test_kv_cache_report_header_preserves_other_extra_args(mode):
+@pytest.mark.parametrize("body_mode", [None, "full", "incremental"])
+def test_kv_cache_report_header_fills_missing_body_mode(mode, body_mode):
     request = Request(
         {
             "type": "http",
-            "headers": [
-                (b"x-kv-cache-report-mode", mode.encode()),
-            ],
+            "headers": [(b"x-kv-cache-report-mode", mode.encode())],
         }
     )
     extra_args = {"custom": 1}
+    if body_mode is not None:
+        extra_args["kv_cache_report_mode"] = body_mode
+    original = extra_args.copy()
 
     result = api_utils.resolve_kv_cache_report_mode(extra_args, request)
 
-    assert result == {"custom": 1, "kv_cache_report_mode": mode}
-    assert extra_args == {"custom": 1}
-
-
-@pytest.mark.parametrize("mode", [None, "full", "incremental"])
-def test_kv_cache_report_body_takes_precedence(mode):
-    request = Request(
-        {
-            "type": "http",
-            "headers": [
-                (b"x-kv-cache-report-mode", b"full"),
-            ],
-        }
-    )
-    extra_args = {} if mode is None else {"kv_cache_report_mode": mode}
-
-    result = api_utils.resolve_kv_cache_report_mode(extra_args, request)
-
-    assert result == {"kv_cache_report_mode": mode or "full"}
+    assert result == {"custom": 1, "kv_cache_report_mode": body_mode or mode}
+    assert extra_args == original
 
 
 @pytest.mark.parametrize(

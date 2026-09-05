@@ -102,12 +102,14 @@ impl InferenceServiceImpl {
 
     async fn prepare_request(
         &self,
-        mut proto_request: pb::GenerateRequest,
+        request: Request<pb::GenerateRequest>,
         data_parallel_rank: Option<u32>,
-        kv_cache_report_mode: Option<String>,
         stream: bool,
         rpc: &'static str,
     ) -> Result<PreparedGrpcRequest, Status> {
+        let (metadata, _, mut proto_request) = request.into_parts();
+        let kv_cache_report_mode =
+            metadata.get(KV_CACHE_REPORT_MODE_HEADER).and_then(|value| value.to_str().ok());
         let started_at = Instant::now();
         let arrival_time = current_unix_timestamp_secs();
         if proto_request.request_id.is_empty() {
@@ -138,7 +140,7 @@ impl InferenceServiceImpl {
                 convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
             text_request.sampling_params.vllm_xargs = merge_kv_cache_report_mode(
                 text_request.sampling_params.vllm_xargs,
-                kv_cache_report_mode.as_deref(),
+                kv_cache_report_mode,
             );
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
@@ -225,26 +227,12 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<pb::GenerateResponse>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
-        let kv_cache_report_mode = request
-            .metadata()
-            .get(KV_CACHE_REPORT_MODE_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let proto_req = request.into_inner();
-        let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+        let response_opts = ResponseOpts::from_proto(request.get_ref().response.as_ref());
         let PreparedGrpcRequest {
             text_request,
             request_span,
             started_at,
-        } = self
-            .prepare_request(
-                proto_req,
-                data_parallel_rank,
-                kv_cache_report_mode,
-                false,
-                "Generate",
-            )
-            .await?;
+        } = self.prepare_request(request, data_parallel_rank, false, "Generate").await?;
 
         let stream = self
             .state
@@ -300,25 +288,13 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
         let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
-        let kv_cache_report_mode = request
-            .metadata()
-            .get(KV_CACHE_REPORT_MODE_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let proto_req = request.into_inner();
-        let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
+        let response_opts = ResponseOpts::from_proto(request.get_ref().response.as_ref());
         let PreparedGrpcRequest {
             text_request,
             request_span,
             started_at,
         } = self
-            .prepare_request(
-                proto_req,
-                data_parallel_rank,
-                kv_cache_report_mode,
-                true,
-                "GenerateStream",
-            )
+            .prepare_request(request, data_parallel_rank, true, "GenerateStream")
             .await?;
 
         let stream = self

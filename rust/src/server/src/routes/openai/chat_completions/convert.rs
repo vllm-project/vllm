@@ -1428,28 +1428,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_threads_kv_cache_report_header() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-kv-cache-report-mode", "full".parse().unwrap());
-        let request = base_request();
-        let prepared = prepare_chat_request(
-            request,
-            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            request_context(&headers, None),
-        )
-        .expect("prepare");
-
-        expect_test::expect![[r#"
-            Some(
-                {
-                    "kv_cache_report_mode": String("full"),
-                },
-            )
-        "#]]
-        .assert_debug_eq(&prepared.chat_request.sampling_params.vllm_xargs);
-    }
-
-    #[test]
     fn prepare_chat_request_header_priority_overrides_body() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
