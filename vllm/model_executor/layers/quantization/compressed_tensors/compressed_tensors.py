@@ -288,7 +288,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list = sparsity_config.ignore or list()
 
         # Raise DeprecationError if non-empty sparse_scheme_map is detected
-        if sparse_scheme_map:
+        # A ``format: dense`` sparsity_config carries only vestigial sparsity
+        # metadata (weights are stored dense) and loads fine as a normal
+        # quantized model, so only reject actually-sparse (compressed) formats.
+        if (
+            sparse_scheme_map
+            and sparsity_config.format != CompressionFormat.dense.value
+        ):
             raise DeprecationWarning(
                 "Sparsity support has been removed from compressed-tensors. "
                 "Please use a model without sparsity configuration."
