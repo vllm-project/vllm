@@ -56,6 +56,25 @@ class AiterCustomAllreduce:
     def custom_all_reduce(self, inp: torch.Tensor) -> torch.Tensor | None:
         return self._impl.custom_all_reduce(inp)
 
+    def custom_all_reduce_out(
+        self, inp: torch.Tensor, out: torch.Tensor
+    ) -> torch.Tensor | None:
+        if not self.should_custom_ar(inp):
+            return None
+
+        impl = self._impl
+        if impl._IS_CAPTURING:
+            if not torch.cuda.is_current_stream_capturing():
+                out.zero_()
+                return out
+            return impl.all_reduce(
+                inp,
+                out=out,
+                registered_input=impl.enable_register_for_capturing,
+            )
+
+        return impl.all_reduce(inp, out=out, registered_input=False)
+
     def capture(self):
         return self._impl.capture()
 
