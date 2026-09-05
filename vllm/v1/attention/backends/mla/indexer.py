@@ -697,6 +697,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # so this is None; its own split uses self.decode_threshold.
     reorder_batch_threshold: int | None = None
     requires_block_table_width = True
+    supports_multi_step_drafting = True
 
     @classmethod
     def get_cudagraph_support(

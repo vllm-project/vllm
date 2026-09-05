@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -39,8 +38,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -259,67 +256,6 @@ class SpecDecodeBaseProposer:
             self.max_positions, dtype=torch.int64, device=device
         )
 
-        # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: tuple | None = None
-        if current_platform.is_rocm():
-            from vllm.models.deepseek_v4.amd.rocm import (
-                DeepseekV4ROCMAiterMLASparseMetadata,
-                DeepseekV4ROCMAiterSparseSWAMetadata,
-            )
-
-            # MiniMax-M3 sparse (lightning-indexer) attention. The multi-step
-            # drafting machinery is shared code at num_speculative_tokens>1.
-            # this just opts the metadata into the ROCm allowlist.
-            from vllm.models.minimax_m3.common.sparse_attention import (
-                MiniMaxM3SparseMetadata,
-            )
-            from vllm.v1.attention.backends.mla.indexer import (
-                DeepseekV32IndexerMetadata,
-            )
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
-                ROCMAiterMLASparseMetadata,
-            )
-            from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadata
-
-            rocm_types = [
-                TritonAttentionMetadata,
-                RocmAttentionMetadata,
-                ROCMAiterMLASparseMetadata,
-                DeepseekV4ROCMAiterMLASparseMetadata,
-                DeepseekV4ROCMAiterSparseSWAMetadata,
-                DeepseekV32IndexerMetadata,
-                MiniMaxM3SparseMetadata,
-            ]
-            # ROCM_AITER_FA is an optional backend
-            # We check is_enabled() here to avoid importing the backend module during
-            # auto-discovery when VLLM_ROCM_USE_AITER=0, which would trigger aiter
-            # import and JIT compilation warnings. Explicit backend selection via
-            # attention_config still works because the backend module is loaded
-            # directly when selected, not through this auto-discovery path.
-            # Check if backend module exists to allow explicit selection
-            if find_spec(
-                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
-            ):
-                from vllm.v1.attention.backends.rocm_aiter_fa import (
-                    AiterFlashAttentionMetadata,
-                )
-
-                rocm_types.append(AiterFlashAttentionMetadata)
-
-            # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
-            from vllm.model_executor.layers.attention.mla_attention import (
-                MLACommonMetadata,
-            )
-
-            rocm_types.append(MLACommonMetadata)
-
-            # FlexAttention backend support
-            from vllm.v1.attention.backends.flex_attention import FlexAttentionMetadata
-
-            rocm_types.append(FlexAttentionMetadata)
-
-            self.allowed_attn_types = tuple(rocm_types)
-
     def _raise_if_padded_drafter_batch_disabled(self):
         if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
@@ -341,6 +277,24 @@ class SpecDecodeBaseProposer:
             raise NotImplementedError(
                 "Speculative Decoding with draft models or parallel drafting "
                 "does not support M-RoPE yet"
+            )
+
+    def _raise_if_unsupported_multi_step_drafting(self) -> None:
+        if not current_platform.is_rocm():
+            return
+
+        unsupported_backends = sorted(
+            {
+                attn_group.backend.get_name()
+                for attn_group in self.draft_attn_groups
+                if not attn_group.supports_multi_step_drafting
+            }
+        )
+        if unsupported_backends:
+            raise ValueError(
+                "Unsupported attention backend(s) for speculative decoding "
+                "with num_speculative_tokens > 1 on ROCm: "
+                f"{', '.join(unsupported_backends)}"
             )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -651,15 +605,7 @@ class SpecDecodeBaseProposer:
         )
         draft_probs_list = None if draft_probs is None else [draft_probs]
 
-        if self.allowed_attn_types is not None:
-            for group_md in per_group_attn_metadata:
-                if not isinstance(group_md, self.allowed_attn_types):
-                    raise ValueError(
-                        f"Unsupported attention metadata type for speculative "
-                        "decoding with num_speculative_tokens > 1: "
-                        f"{type(group_md)}. Supported types are: "
-                        f"{self.allowed_attn_types}"
-                    )
+        self._raise_if_unsupported_multi_step_drafting()
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]

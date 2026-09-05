@@ -230,6 +230,7 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
     # Full cudagraphs for uniform decode batches, incl. spec-decode verify
     # batches with >1 query token/request.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_multi_step_drafting = True
     # Raised to 1 + num_speculative_tokens by _init_reorder_batch_threshold when
     # spec decode is on; must match the indexer builder so the splits agree.
     reorder_batch_threshold: int = 1

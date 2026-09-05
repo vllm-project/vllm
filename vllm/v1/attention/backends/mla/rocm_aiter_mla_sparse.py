@@ -396,6 +396,7 @@ class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_multi_step_drafting = True
 
     def __init__(
         self,

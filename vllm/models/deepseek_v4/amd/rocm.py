@@ -368,6 +368,8 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    supports_multi_step_drafting = True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
@@ -435,6 +437,7 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    supports_multi_step_drafting = True
     # Keep fused multi-step decode disabled until update_draft_decode_metadata()
     # also refreshes the ROCm-specific ragged SWA indices and indptrs.
     supports_draft_decode_metadata_update = False

@@ -597,6 +597,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False
+    # Whether autoregressive multi-step drafting supports this metadata builder.
+    supports_multi_step_drafting: bool = False
 
     @abstractmethod
     def __init__(
