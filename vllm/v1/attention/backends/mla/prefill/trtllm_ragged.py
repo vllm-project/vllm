@@ -102,9 +102,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             )
         min_query_len = int(torch.min(query_lens_cpu).item())
         if min_query_len < 0:
-            raise ValueError(
-                "TRTLLM ragged prefill query lengths must be non-negative"
-            )
+            raise ValueError("TRTLLM ragged prefill query lengths must be non-negative")
         self._has_active_rows = min_query_len > 0
         if not self._has_active_rows:
             has_mixed_rows = bool(torch.any(query_lens_cpu > 0).item())
