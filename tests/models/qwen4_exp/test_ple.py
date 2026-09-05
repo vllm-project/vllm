@@ -16,6 +16,7 @@ import vllm.model_executor.parameter as parameter_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
+    ModelOptNvFp4Config,
 )
 from vllm.models.qwen4_exp.common.ple import (
     PLEShardOverlap,
@@ -318,6 +319,55 @@ def test_ple_fp8_embedding_supports_mixed_precision_config() -> None:
             quant_config,
             "model.language_model.layers.2.moe.gate_proj",
         )
+        is None
+    )
+
+
+def _nvfp4_config(exclude_modules: list[str]) -> ModelOptNvFp4Config:
+    """Mirrors ``config.json``'s ``quantization_config`` in NVFP4 checkpoints."""
+    return ModelOptNvFp4Config.from_config(
+        {
+            "quant_algo": "NVFP4",
+            "quant_method": "modelopt",
+            "ignore": exclude_modules,
+            "group_size": 16,
+        }
+    )
+
+
+def test_ple_fp8_embedding_loads_under_nvfp4_checkpoint() -> None:
+    """An NVFP4 body keeps the FP8 PLE table's global scale (see #54765)."""
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = _nvfp4_config(["*.ple.*"])
+
+    assert isinstance(
+        _get_ple_embedding_quant_method(quant_config, prefix, "float8_e4m3fn"),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+    assert isinstance(
+        _get_ple_embedding_quant_method(quant_config, prefix, torch.float8_e4m3fn),
+        Qwen4ExpPLEFp8EmbeddingMethod,
+    )
+
+
+@pytest.mark.parametrize(
+    "exclude_modules,ple_embedding_dtype",
+    [
+        # The table is excluded but stored unquantized.
+        (["*.ple.*"], None),
+        (["*.ple.*"], "bfloat16"),
+        # The table is not excluded, so NVFP4 shards are expected.
+        ([], "float8_e4m3fn"),
+    ],
+)
+def test_ple_fp8_embedding_skipped_for_non_fp8_nvfp4_tables(
+    exclude_modules: list[str], ple_embedding_dtype: object
+) -> None:
+    prefix = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding"
+    quant_config = _nvfp4_config(exclude_modules)
+
+    assert (
+        _get_ple_embedding_quant_method(quant_config, prefix, ple_embedding_dtype)
         is None
     )
 
