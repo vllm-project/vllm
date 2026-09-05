@@ -147,6 +147,21 @@ class QSAIndexer(nn.Module):
 
         cache_config = vllm_config.cache_config
         cache_prefix = f"{prefix}." if prefix else ""
+        # Plain e4m3 without scales: Q and the compressed K are RMSNormed
+        # before quantization, and the logits kernels dot fp8 x fp8 directly.
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        if self.indexer_kv_dtype in ("fp8", "fp8_e4m3"):
+            indexer_dtype = torch.float8_e4m3fn
+        elif self.indexer_kv_dtype == "bf16":
+            indexer_dtype = torch.bfloat16
+        else:
+            raise NotImplementedError(
+                f"indexer_kv_dtype={self.indexer_kv_dtype!r} is not supported "
+                "by the Qwen4Exp QSA indexer (only 'bf16' or 'fp8'/'fp8_e4m3')."
+            )
+        self.indexer_dtype = indexer_dtype
         self.raw_key_cache = QSAKeyStateCache(
             head_size=self.index_head_dim,
             dtype=torch.bfloat16,
@@ -158,7 +173,7 @@ class QSAIndexer(nn.Module):
         )
         self.compressed_key_cache = QSACompressedKeyCache(
             head_size=self.index_head_dim,
-            dtype=torch.bfloat16,
+            dtype=indexer_dtype,
             compress_ratio=self.compress_ratio,
             prefix=f"{cache_prefix}compressed_key_cache",
             cache_config=cache_config,
@@ -278,6 +293,7 @@ class QSAIndexer(nn.Module):
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
+                dtype=self.indexer_dtype,
             )
             qsa_pre_indexer(
                 projected_q,
@@ -315,6 +331,7 @@ class QSAIndexer(nn.Module):
                 self.q_layernorm.variance_epsilon,
             ).reshape_as(q)
             q = apply_qsa_rope(self.rotary_emb, positions, q)
+            q = q.to(self.indexer_dtype)
 
             raw_key_cache = raw_key_state_cache.key_cache
             rope_position_cache = raw_key_state_cache.rope_position_cache

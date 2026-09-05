@@ -49,8 +49,21 @@ def _make_block_table(block_counts):
     return table, num_blocks
 
 
+def assert_fp8_within_one_ulp(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    # e4m3 is sign-magnitude, so within a sign the uint8 code order matches the
+    # value order and one ulp is one code step. In the denormal range the grid
+    # is absolute-spaced and the bf16 intermediates differ in absolute terms
+    # (cancellation in pooling/norm), so fall back to the bf16 atol there.
+    code_diff = (
+        actual.view(torch.uint8).int() - expected.view(torch.uint8).int()
+    ).abs()
+    abs_diff = (actual.float() - expected.float()).abs()
+    assert bool(((code_diff <= 1) | (abs_diff <= ATOL)).all())
+
+
 @requires_qsa_kernels
 @pytest.mark.usefixtures("default_vllm_config")
+@pytest.mark.parametrize("indexer_dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize(
     "mrope,is_2d_positions,cache_rope_positions,state_size,seq_lens,query_lens,history_lens",
     [
@@ -74,6 +87,7 @@ def _make_block_table(block_counts):
     ],
 )
 def test_qsa_fused_pre_indexer_matches_unfused(
+    indexer_dtype,
     mrope,
     is_2d_positions,
     cache_rope_positions,
@@ -215,7 +229,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     fused_compressed_storage = torch.zeros(
         num_compressed_blocks,
         compressed_page_elements + 16,
-        dtype=torch.bfloat16,
+        dtype=indexer_dtype,
         device=device,
     )
     fused_compressed = torch.as_strided(
@@ -231,7 +245,7 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     q_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
     k_weight = torch.randn(D, dtype=torch.bfloat16, device=device) * 0.2
 
-    fused_query = torch.empty(num_tokens, HQ, D, dtype=torch.bfloat16, device=device)
+    fused_query = torch.empty(num_tokens, HQ, D, dtype=indexer_dtype, device=device)
     qsa_pre_indexer(
         projected_qk[:, : HQ * D],
         projected_qk[:, HQ * D :],
@@ -290,8 +304,16 @@ def test_qsa_fused_pre_indexer_matches_unfused(
     if rope_positions is not None:
         qsa_store_cache_rows(rope_positions, raw_slots, position_rows)
 
-    torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
+    if indexer_dtype == torch.float8_e4m3fn:
+        # Both paths round the same ~bf16 intermediates to e4m3.
+        unfused_query = unfused_query.to(indexer_dtype)
+        assert_fp8_within_one_ulp(fused_query, unfused_query)
+    else:
+        torch.testing.assert_close(fused_query, unfused_query, rtol=RTOL, atol=ATOL)
     assert torch.equal(fused_raw.view(torch.int16), unfused_raw.view(torch.int16))
-    torch.testing.assert_close(
-        fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
-    )
+    if indexer_dtype == torch.float8_e4m3fn:
+        assert_fp8_within_one_ulp(fused_compressed, unfused_compressed)
+    else:
+        torch.testing.assert_close(
+            fused_compressed, unfused_compressed, rtol=RTOL, atol=ATOL
+        )
