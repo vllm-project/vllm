@@ -216,7 +216,7 @@ impl Normalizable for CompletionRequest {
 /// Do not skip serializing `None` fields here: non-streaming response types
 /// should serialize `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CompletionResponse {
+pub(crate) struct CompletionResponse {
     pub id: String,
     pub object: String,
     pub created: u64,
@@ -230,7 +230,7 @@ pub(super) struct CompletionResponse {
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CompletionChoice {
+pub(crate) struct CompletionChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
@@ -244,7 +244,7 @@ pub(super) struct CompletionChoice {
 /// Mirrors the Python vLLM `CompletionStreamResponse` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CompletionStreamResponse {
+pub(crate) struct CompletionStreamResponse {
     #[serde(flatten)]
     pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<CompletionStreamChoice>,
@@ -265,7 +265,7 @@ impl CompletionStreamResponse {
 /// Mirrors the Python vLLM `CompletionResponseStreamChoice` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize)]
-pub(super) struct CompletionStreamChoice {
+pub(crate) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
     pub logprobs: Option<LogProbs>,
