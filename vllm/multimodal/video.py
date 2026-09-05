@@ -813,6 +813,14 @@ class GLMGAVideoBackend(VideoBackend):
         max_frame_idx = source.total_frames_num - 1
         max_frames = min(kwargs.get("max_frames", cls._MAX_FRAMES), cls._MAX_FRAMES)
 
+        # vLLM reports original_fps == 0 for clips with unknown/variable fps
+        # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
+        if original_fps <= 0:
+            raise ValueError(
+                "GLMGA video sampling needs a known source fps, but the "
+                "container reported 0 (variable or unknown frame rate)."
+            )
+
         duration = duration or round(max_frame_idx / original_fps) + 1
 
         extract_t = int(duration * target_fps)
