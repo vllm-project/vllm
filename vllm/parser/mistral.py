@@ -110,6 +110,19 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
+def _is_tool_call_array(parsed: Any) -> bool:
+    """Whether `parsed` is the array of tool-call objects this format expects.
+
+    The pre-v11 format is ``[TOOL_CALLS][{"name": ..., "arguments": ...}]``.
+    Anything else the model happens to emit -- a bare object, an array of
+    scalars, entries without a name -- must not be indexed as if it were.
+    """
+    return isinstance(parsed, list) and all(
+        isinstance(tool_call, dict) and isinstance(tool_call.get("name"), str)
+        for tool_call in parsed
+    )
+
+
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     if is_mistral_tokenizer(model_tokenizer):
         return model_tokenizer.version < 11
@@ -552,9 +565,19 @@ class MistralParser(ParserEngine):
             raw_tool_calls = content_and_raw_tool_calls[1:]
             # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
             if len(raw_tool_calls) != 1:
-                raise ValueError(
-                    "Only one BOT token should have been outputted, "
-                    f"but got {model_output}."
+                # More than one marker is malformed *model* output, not a
+                # server fault. `parse()` is called outside any try in
+                # `chat_completion_full_generator`, so raising here surfaces
+                # as a 500; hand the text back as content instead, which is
+                # what the JSON-decode failure below already does.
+                logger.warning(
+                    "Expected exactly one %s marker in the model output, "
+                    "got %d; returning the output as content.",
+                    self.bot_token,
+                    len(raw_tool_calls),
+                )
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
                 )
             stringified_tool_calls = raw_tool_calls[0].strip()
         elif tool_choice == "required" or isinstance(
@@ -571,21 +594,11 @@ class MistralParser(ParserEngine):
             # Use raw_decode to parse the first valid JSON value,
             # ignoring trailing tokens the model may emit after
             # the tool call array.
-            tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
+            parsed, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
         except json.JSONDecodeError:
             try:
                 raw_tool_call = self.tool_call_regex.findall(stringified_tool_calls)[0]
-                tool_calls = json.loads(raw_tool_call)
-                tool_calls = [
-                    {
-                        "name": tool_call["name"],
-                        "arguments": json.dumps(
-                            tool_call.get("arguments", {}),
-                            ensure_ascii=False,
-                        ),
-                    }
-                    for tool_call in tool_calls
-                ]
+                parsed = json.loads(raw_tool_call)
             except (IndexError, json.JSONDecodeError):
                 logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(
@@ -593,17 +606,32 @@ class MistralParser(ParserEngine):
                     tool_calls=[],
                     content=stringified_tool_calls,
                 )
-        else:
-            tool_calls = [
-                {
-                    "name": tool_call["name"],
-                    "arguments": json.dumps(
-                        tool_call.get("arguments", {}),
-                        ensure_ascii=False,
-                    ),
-                }
-                for tool_call in tool_calls
-            ]
+
+        # The JSON parsed, but nothing guarantees it is the array of
+        # `{"name": ..., "arguments": ...}` objects this format expects. A
+        # model can emit a bare object, an array of scalars, or entries with
+        # no name; indexing those blindly raises TypeError/KeyError, which
+        # reaches the client as a 500.
+        if not _is_tool_call_array(parsed):
+            logger.warning(
+                "Model output after %s is not an array of tool calls; "
+                "returning the output as content.",
+                self.bot_token,
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        tool_calls = [
+            {
+                "name": tool_call["name"],
+                "arguments": json.dumps(
+                    tool_call.get("arguments", {}),
+                    ensure_ascii=False,
+                ),
+            }
+            for tool_call in parsed
+        ]
 
         mistral_tool_calls: list[MistralToolCall] = [
             MistralToolCall(
