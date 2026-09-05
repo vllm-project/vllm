@@ -8,8 +8,10 @@ import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
+    apply_top_k_top_p_pytorch,
     flashinfer_sample,
     flashinfer_sampler_supported,
 )
@@ -64,6 +66,56 @@ class Sampler:
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
+        self.device = device
+
+    @torch.inference_mode()
+    def warmup_top_k_top_p_buffer(self, num_rows: int) -> None:
+        """Warm the shape-dependent top-k/top-p sampler workspace.
+
+        Speculative verification applies filters to the flattened target rows
+        (one row for each draft step plus the bonus row). The normal profile
+        sampler only uses one row per request, so a larger Triton workspace
+        could otherwise be allocated after the KV cache and CUDA graphs are
+        already committed.
+        """
+        if num_rows < 8:
+            # The dispatcher uses the eager PyTorch path for small batches.
+            return
+
+        vocab_size = self.sampling_states.vocab_size
+        if vocab_size <= 0:
+            return
+        max_warmup_bytes = envs.VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES
+        if max_warmup_bytes > 0:
+            # ``apply_top_k_top_p`` materializes a float32 logits workspace.
+            # Bound the profile-only allocation so speculative warmup cannot
+            # consume the KV-cache headroom on large vocabularies.
+            max_rows_by_memory = max_warmup_bytes // (vocab_size * 4)
+            if max_rows_by_memory < 8:
+                return
+            num_rows = min(num_rows, max_rows_by_memory)
+        logits = torch.zeros(
+            (num_rows, vocab_size), dtype=torch.float32, device=self.device
+        )
+        top_k = torch.full(
+            (num_rows,), min(20, vocab_size), dtype=torch.int32, device=self.device
+        )
+        top_p = torch.full(
+            (num_rows,), 0.95, dtype=torch.float32, device=self.device
+        )
+        # A CPU sampler can be constructed by unit tests even when the
+        # process-wide platform is CUDA.  The dispatcher otherwise sees
+        # ``HAS_TRITON`` and attempts to launch a Triton kernel on CPU tensors.
+        if self.device.type == "cpu":
+            apply_top_k_top_p_pytorch(logits, top_k, top_p, allow_cpu_sync=True)
+        else:
+            apply_top_k_top_p(logits, top_k, top_p)
+        # Profiling normally runs on CUDA, but keeping the helper usable by
+        # CPU/unit-test runners avoids asking torch.accelerator to initialize
+        # a nonexistent CUDA device.
+        if self.device.type != "cpu":
+            torch.accelerator.synchronize()
+        del logits, top_k, top_p
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -102,6 +154,166 @@ class Sampler:
         self.thinking_budget_state.apply_staged_writes()
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
+
+    def get_vocab_parallel_sampling_params(
+        self, input_batch: InputBatch
+    ) -> tuple[str, int, float, float, bool] | None:
+        """Return uniform parameters for a compact vocab-parallel sampler.
+
+        The vocab-parallel path can preserve an unrestricted distribution via
+        keyed local Gumbel-max, and a bounded top-k distribution when the only
+        logits processor is presence penalty. Repetition and frequency
+        penalties are non-constant over a token's sign/count and therefore
+        remain on the full-vocabulary path. The boolean in the return tuple
+        indicates that presence-only metadata must be passed to the model-level
+        sampler. Request seeds are handled by the keyed V2 kernels; the legacy
+        runner keeps its separate generator gate.
+        """
+        idx_mapping_np = input_batch.idx_mapping_np
+        if (
+            idx_mapping_np.size == 0
+            or self.compute_nans
+            or self.return_sampling_mask
+            or self.trace_replay_state is not None
+            or self.sampling_states.max_num_logprobs(idx_mapping_np) != NO_LOGPROBS
+            or self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np) > 0
+            # The keyed request RNG is implemented by Triton.  Do not accept
+            # a CUDA-like device without Triton and silently fall back to the
+            # global RNG, because that would violate explicit-seed semantics.
+            or (
+                getattr(getattr(self, "device", None), "type", "cpu") != "cpu"
+                and not HAS_TRITON
+            )
+        ):
+            return None
+
+        # Logit bias, bad words and thinking-budget forcing alter individual
+        # token scores and cannot be reconstructed from a compact candidate
+        # matrix. Temperature/top-k/top-p are handled below and are expected to
+        # make ``needs_logits_processing`` true for random requests.
+        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
+            return None
+        if np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0):
+            return None
+        if self.thinking_budget_state.enabled and np.any(
+            self.thinking_budget_state.use_thinking_budget[idx_mapping_np]
+        ):
+            return None
+
+        use_penalty = self.penalties_state.use_penalty[idx_mapping_np]
+        presence_only = False
+        if np.any(use_penalty):
+            repetition = self.penalties_state.repetition_penalty.np[idx_mapping_np]
+            frequency = self.penalties_state.frequency_penalty.np[idx_mapping_np]
+            presence_only = bool(
+                np.all(repetition == 1.0) and np.all(frequency == 0.0)
+            )
+            if not presence_only:
+                return None
+
+        temperatures = self.sampling_states.temperature.np[idx_mapping_np]
+        top_ks = self.sampling_states.top_k.np[idx_mapping_np]
+        top_ps = self.sampling_states.top_p.np[idx_mapping_np]
+        min_ps = self.sampling_states.min_p.np[idx_mapping_np]
+        if not np.all(min_ps == 0.0):
+            return None
+
+        default_filters = (
+            np.all(top_ks == self.sampling_states.vocab_size)
+            and np.all(top_ps == 1.0)
+        )
+        if np.all(temperatures == 0.0):
+            # A presence penalty changes greedy argmax, so it must be applied
+            # by the regular sampler. Without penalties, top-k/top-p are
+            # argmax-invariant and the existing greedy path is safe.
+            if presence_only or not default_filters:
+                return None
+            return (
+                "greedy",
+                self.sampling_states.vocab_size,
+                1.0,
+                0.0,
+                False,
+            )
+
+        # Full-distribution random sampling is supported by a local Gumbel-max
+        # reduction; only request modes with mixed temperature remain unsafe.
+        if (
+            self.use_fp64_gumbel
+            or np.any(temperatures <= 0.0)
+            or not np.all(temperatures == temperatures[0])
+        ):
+            return None
+
+        top_k = int(top_ks[0])
+        top_p = float(top_ps[0])
+        temperature = float(temperatures[0])
+        if default_filters:
+            # Gumbel-max over each TP-local shard is exact for an unrestricted
+            # softmax distribution and avoids gathering the full vocabulary.
+            # A presence penalty changes every previously seen token and would
+            # require a full-vocabulary penalty application before Gumbel-max.
+            if presence_only:
+                return None
+            return (
+                "full",
+                self.sampling_states.vocab_size,
+                1.0,
+                temperature,
+                False,
+            )
+        if (
+            top_k <= 0
+            or top_k > 64
+            or top_p <= 0.0
+            or top_p > 1.0
+            or not np.all(top_ks == top_k)
+            or not np.all(top_ps == top_p)
+            or not np.all(temperatures == temperature)
+        ):
+            return None
+
+        # Presence-only penalties are supported by the compact path. This is
+        # intentionally returned only for bounded top-k, never for full random
+        # sampling where a candidate approximation would change probabilities.
+        return ("topk", top_k, top_p, temperature, presence_only)
+
+    def get_vocab_parallel_presence_inputs(
+        self, input_batch: InputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return row-aligned presence penalties and persistent output counts."""
+        request_indices = input_batch.idx_mapping.to(torch.int64)
+        presence_penalties = self.penalties_state.presence_penalty.gpu.index_select(
+            0, request_indices
+        )
+        return (
+            presence_penalties,
+            self.penalties_state.output_bin_counts,
+            request_indices,
+        )
+
+    def make_sampler_output(
+        self,
+        sampled: torch.Tensor,
+        input_batch: InputBatch,
+        *,
+        num_nans: torch.Tensor | None = None,
+    ) -> SamplerOutput:
+        """Build the standard one-token output for pre-sampled rows."""
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
+        return SamplerOutput(
+            sampled_token_ids=sampled.view(-1, 1),
+            logprobs_tensors=None,
+            num_nans=num_nans,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+        )
 
     def get_logprobs_dims(
         self, idx_mapping_np: np.ndarray, include_token_ids: bool = True

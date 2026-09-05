@@ -191,6 +191,11 @@ if TYPE_CHECKING:
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_B12X_MOE_FP4_FORCE_A16: bool = False
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
+    VLLM_HYBRID_NVFP4_LM_HEAD: bool = False
+    VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES: int = 128
+    VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS: int = 512
+    VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS: int = 2048
+    VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES: int = 256 * 1024 * 1024
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
@@ -862,6 +867,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+    # Experimental approximate NVFP4 coarse search plus BF16 candidate refine.
+    # It is disabled by default and only applies to explicitly compatible heads.
+    "VLLM_HYBRID_NVFP4_LM_HEAD": lambda: bool(
+        int(os.getenv("VLLM_HYBRID_NVFP4_LM_HEAD", "0"))
+    ),
+    "VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES": lambda: int(
+        os.getenv("VLLM_HYBRID_NVFP4_LM_HEAD_CANDIDATES", "128")
+    ),
+    "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS": lambda: int(
+        os.getenv("VLLM_HYBRID_NVFP4_LM_HEAD_MAX_AUTOTUNE_ROWS", "512")
+    ),
+    "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS": lambda: int(
+        os.getenv("VLLM_HYBRID_NVFP4_LM_HEAD_MAX_ROWS", "2048")
+    ),
+    "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES": lambda: int(
+        os.getenv(
+            "VLLM_HYBRID_NVFP4_LM_HEAD_MAX_WARMUP_BYTES",
+            str(256 * 1024 * 1024),
+        )
+    ),
     # Whether to use the FlashInfer top-k / top-p sampler on CUDA. Enabled
     # by default when the hardware supports it — set to 0 to opt out
     # explicitly, which forces the PyTorch-native (Triton for bs>=8) path.
