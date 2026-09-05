@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 DeepSeek
+// Derived from DeepGEMM commit 891d57b4db1071624b5c8fa0d1e51cb317fa709f;
+// see LICENSE.deepseek-deepgemm.
 // LiteTopK DSA V3 hybrid host wrapper: DeepGEMM-2.5 scoring loop + V1 KV-split;
 // scoring kernel (sm100_dsa_litetopk.cuh) with the sparse candidate epilogue,
 // plus the architecture-agnostic radix-select post-kernels (copied verbatim
@@ -65,11 +67,6 @@ __device__ __forceinline__ float decode_score_code(uint32_t code) {
   const uint32_t bits =
       (ordered & 0x80000000u) ? (ordered ^ 0x80000000u) : ~ordered;
   return __uint_as_float(bits);
-}
-
-__device__ __forceinline__ int coarse_bucket(uint32_t code) {
-  const float value = decode_score_code(code);
-  return value < 0.0f ? 0 : (value >= 256.0f ? 255 : static_cast<int>(value));
 }
 
 template <int Scale>
@@ -493,7 +490,6 @@ enum StatusBits : uint32_t {
   kBadCount = 1u << 0,
   kNonFinite = 1u << 1,
   kBadPhysical = 1u << 2,
-  kBadMapped = 1u << 3,
   kHistogramFailure = 1u << 4,
   kBoundaryOverflow = 1u << 5,
   kCompactFailure = 1u << 6,
@@ -1118,13 +1114,6 @@ void plan_and_permuted_paged_gather_out(
 
 }  // namespace pair_swap_gather
 
-static torch::TensorOptions candidate_options(
-    const torch::TensorOptions& options) {
-  // torch.float16 is only the owning 16-bit storage type here.  CUDA treats
-  // its payload as an opaque uint16 score code; no half arithmetic occurs.
-  return options.dtype(torch::kHalf);
-}
-
 static CandidateValue* candidate_data_ptr(torch::Tensor& tensor) {
   return reinterpret_cast<CandidateValue*>(tensor.data_ptr<at::Half>());
 }
@@ -1187,9 +1176,7 @@ static CUtensorMap make_2d(void* ptr, CUtensorMapDataType dt, int elem_size,
 
 static inline int align_up(int x, int a) { return (x + a - 1) / a * a; }
 
-constexpr int NUM_HEADS = 32;
 constexpr int HEAD_DIM = 128;
-constexpr int BLOCK_Q = 4;  // 128 q*h rows per UMMA tile / 32 heads
 constexpr int BLOCK_KV = 256;
 constexpr int NUM_Q_STAGES = 1;  // one q-block per CTA
 constexpr int NUM_KV_STAGES = 4;
@@ -1740,7 +1727,6 @@ constexpr int kCarryMaxBlocks =
     (kCarryMaxItems + kCarryTileItems - 1) / kCarryTileItems;
 constexpr int kCarryThreads = 256;
 constexpr int kCarryWarps = kCarryThreads / 32;
-constexpr int kCarryPlannerWindow = 8192;
 
 enum CarryStateOffset : int {
   kCarryTicket = 0,
@@ -1753,15 +1739,6 @@ enum CarryStateOffset : int {
 };
 constexpr int kCarryStateInts = kCarryBlockOffsets + kCarryMaxBlocks + 1;
 
-enum CarryPlannerStateOffset : int {
-  kCarryPlannerPairCount = 0,
-  kCarryPlannerTicket = 1,
-  kCarryPlannerStatus = 2,
-  kCarryPlannerSelectedInside = 3,
-  kCarryPlannerPreviousWindow = 4,
-};
-constexpr int kCarryPlannerStateInts = 5;
-
 __device__ __forceinline__ int carry_warp_sum(int value) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -1770,36 +1747,17 @@ __device__ __forceinline__ int carry_warp_sum(int value) {
   return value;
 }
 
-template <bool FusePlanner>
 __global__ void carry_votes_plan_litetopk_kernel(
     const int32_t* __restrict__ votes, int count, int min_index, int out_k,
     int max_vote, volatile int16_t* __restrict__ partial, int partial_stride,
-    int32_t* __restrict__ state, int32_t* __restrict__ permutation,
-    int32_t* __restrict__ planner_state) {
+    int32_t* __restrict__ state) {
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
   const int block = blockIdx.x;
-  const int begin = (FusePlanner ? min_index : 0) + block * kCarryTileItems;
+  const int begin = block * kCarryTileItems;
   const int end = min(begin + kCarryTileItems, count);
   const int bins = max_vote + 1;
-  const int previous_window_start =
-      FusePlanner ? planner_state[kCarryPlannerPreviousWindow] : 0;
-
-  // In the fused path the physical HOT window itself is the compact list of
-  // the previous pair swaps. Restore those pairs while K1 is already reading
-  // the next vote histogram; no epoch array or planner launch is needed.
-  if constexpr (FusePlanner) {
-    for (int offset = block * kCarryThreads + tid; offset < kCarryPlannerWindow;
-         offset += gridDim.x * kCarryThreads) {
-      const int b = previous_window_start + offset;
-      const int a = permutation[b];
-      if (a != b) {
-        permutation[a] = a;
-        permutation[b] = b;
-      }
-    }
-  }
 
   extern __shared__ uint32_t s_freq[];
   __shared__ int s_warp_sum[kCarryWarps];
@@ -1979,22 +1937,6 @@ __global__ void carry_votes_plan_litetopk_kernel(
   }
   __syncthreads();
 
-  // The last K1 CTA already owns the exact selected count for the first
-  // aligned 8192-position window. It initializes all K2 planner state, so
-  // the fused path needs neither a memset nor a separate init kernel.
-  if constexpr (FusePlanner) {
-    if (tid == 0) {
-      const int selected_inside = s_block_count[0];
-      planner_state[kCarryPlannerPairCount] =
-          kCarryPlannerWindow - selected_inside;
-      planner_state[kCarryPlannerTicket] = 0;
-      planner_state[kCarryPlannerStatus] = 0;
-      planner_state[kCarryPlannerSelectedInside] = selected_inside;
-      planner_state[kCarryPlannerPreviousWindow] = min_index;
-    }
-  }
-  __syncthreads();
-
   if (tid == 0) {
     int offset = 0;
     for (int source_block = 0; source_block < gridDim.x; ++source_block) {
@@ -2012,17 +1954,14 @@ __global__ void carry_votes_plan_litetopk_kernel(
   }
 }
 
-template <bool FusePlanner>
 __global__ void carry_votes_emit_reset_litetopk_kernel(
     int32_t* __restrict__ votes, int count, int min_index, int max_vote,
-    int64_t* __restrict__ out_idx, const int32_t* __restrict__ state,
-    int32_t* __restrict__ permutation, int32_t* __restrict__ planner_state,
-    int window_start, int target_length) {
+    int64_t* __restrict__ out_idx, const int32_t* __restrict__ state) {
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
   const int block = blockIdx.x;
-  const int begin = (FusePlanner ? min_index : 0) + block * kCarryTileItems;
+  const int begin = block * kCarryTileItems;
   const int threshold = state[kCarryThreshold];
   const int tie_block = state[kCarryTieBlock];
   const int tie_take = state[kCarryTieTake];
@@ -2038,16 +1977,6 @@ __global__ void carry_votes_emit_reset_litetopk_kernel(
     s_tie_seen = 0;
   }
   __syncthreads();
-
-  if constexpr (FusePlanner) {
-    // The aligned fused grid excludes LongCat's sink positions. Preserve
-    // the existing contract that K2 clears every live vote.
-    if (block == 0) {
-      for (int index = tid; index < min_index; index += kCarryThreads) {
-        votes[index] = 0;
-      }
-    }
-  }
 
   constexpr unsigned kFullMask = 0xffffffffu;
   const unsigned lane_mask = lane == 0 ? 0u : ((1u << lane) - 1u);
@@ -2110,60 +2039,11 @@ __global__ void carry_votes_emit_reset_litetopk_kernel(
       out_idx[output_base + s_tile_output_base + local_rank] =
           static_cast<int64_t>(index);
     }
-    if constexpr (FusePlanner) {
-      if (block == 0 && valid && !selected) {
-        // Every non-selected position in the physical HOT window is a
-        // hole. Reuse the already-consumed vote prefix as its compact
-        // endpoint list; hole_rank needs no extra ballot or atomic.
-        const int position = tile + tid;
-        const int hole_rank = position - (s_tile_output_base + local_rank);
-        reinterpret_cast<volatile int32_t*>(votes)[hole_rank] = index;
-      }
-    }
     __syncthreads();
     if (tid == 0) {
       s_tile_output_base += s_tile_total;
     }
     __syncthreads();
-  }
-
-  if constexpr (FusePlanner) {
-    // Qualified small-sequence grids have at most 16 CTAs on B200, so all
-    // CTAs are simultaneously resident. Each producer releases its own
-    // endpoint stores before publishing a ticket; the final -1 is the
-    // acquire/release point for the parallel pair pass.
-    __threadfence();
-    __syncthreads();
-    if (tid == 0) {
-      const int old = atomicAdd(&planner_state[kCarryPlannerTicket], 1);
-      if (old == gridDim.x - 1) {
-        atomicExch(&planner_state[kCarryPlannerTicket], -1);
-      } else {
-        while (atomicAdd(&planner_state[kCarryPlannerTicket], 0) != -1) {
-          __nanosleep(64);
-        }
-      }
-    }
-    __syncthreads();
-
-    const int selected_inside = planner_state[kCarryPlannerSelectedInside];
-    const int pair_count = planner_state[kCarryPlannerPairCount];
-    for (int rank = block * kCarryThreads + tid; rank < pair_count;
-         rank += gridDim.x * kCarryThreads) {
-      const int a = static_cast<int>(
-          reinterpret_cast<volatile int64_t*>(out_idx)[selected_inside + rank]);
-      const int b = reinterpret_cast<volatile int32_t*>(votes)[rank];
-      if (a < window_start + kCarryPlannerWindow || a >= count ||
-          b < window_start || b >= window_start + kCarryPlannerWindow ||
-          b >= target_length) {
-        atomicOr(&planner_state[kCarryPlannerStatus], 1);
-        asm volatile("trap;");
-      } else {
-        permutation[a] = b;
-        permutation[b] = a;
-      }
-      votes[rank] = 0;
-    }
   }
 }
 
@@ -2185,27 +2065,6 @@ __global__ void carry_votes_emit_reset_litetopk_kernel(
 // The two fallback modes mirror compact_topk_min_thr_litetopk_kernel:
 //   * threshold too loose (lt >= K): compact/radix the lt set;
 //   * threshold underfilled: compact/radix every finite buffered candidate.
-__device__ __forceinline__ void dsa_litetopk_accumulate_inplace_votes(
-    const int32_t* __restrict__ out_idx, int K, int tid, int threads,
-    int32_t* __restrict__ votes, int votes_len, int row, int row_stride) {
-  // Keep the same total vote volume as row subsampling, but cover every
-  // query row.  For stride=8 and K=2048 each row contributes one rotating
-  // 256-winner slice instead of only row%8==0 contributing all 2048.  This
-  // removes a fixed phase blind spot without adding winner loads/atomics.
-  if (votes == nullptr || votes_len <= 0) {
-    return;
-  }
-  // Every call site is a block-uniform exit. Wait until all winner stores
-  // are visible, then count this row's phase while they are still hot.
-  __syncthreads();
-  const int phase = row & (row_stride - 1);
-  for (int j = tid + phase * threads; j < K; j += threads * row_stride) {
-    int32_t col = out_idx[j];
-    col = col < 0 ? 0 : (col >= votes_len ? votes_len - 1 : col);
-    atomicAdd(votes + col, 1);
-  }
-}
-
 // Late-map production epilogue.  Selection stays entirely in physical
 // pair-swapped workspace space; this grid-wide kernel then maps only Q*K
 // winners with enough independent warps to hide the random permutation-read
@@ -2249,11 +2108,11 @@ __global__ void map_topk_indices_and_accumulate_votes_litetopk_kernel(
       stat_local_max = m > stat_local_max ? m : stat_local_max;
       stat_local_over += __shfl_down_sync(0xffffffffu, stat_local_over, off);
     }
-    __shared__ int stat_smax[32], stat_over[32];
+    __shared__ int stat_smax[32], stat_shared_over[32];
     const int wid = threadIdx.x >> 5;
     if ((threadIdx.x & 31) == 0) {
       stat_smax[wid] = stat_local_max;
-      stat_over[wid] = stat_local_over;
+      stat_shared_over[wid] = stat_local_over;
     }
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -2261,7 +2120,7 @@ __global__ void map_topk_indices_and_accumulate_votes_litetopk_kernel(
       const int warps = (blockDim.x + 31) >> 5;
       for (int w = 0; w < warps; ++w) {
         m = stat_smax[w] > m ? stat_smax[w] : m;
-        ov += stat_over[w];
+        ov += stat_shared_over[w];
       }
       if (m > 0) atomicMax(stat_run_max, m);
       if (ov > 0) atomicAdd(stat_over, ov);
@@ -2300,13 +2159,11 @@ __global__ void map_topk_indices_and_accumulate_votes_litetopk_kernel(
   }
 }
 
-template <bool kOnlineFixedPayload = false>
 __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     CandidateValue* __restrict__ val, int32_t* __restrict__ idx,
     const int32_t* __restrict__ cnt, const int32_t* __restrict__ th_in,
     const int32_t* __restrict__ boundary_meta, int R, int CAP, int K, int NB,
-    int32_t* __restrict__ out_idx, int32_t* __restrict__ votes, int votes_len,
-    int vote_row_stride) {
+    int32_t* __restrict__ out_idx) {
   constexpr int BT = 256;
   constexpr int RADIX = 256;
   const unsigned FULL = 0xffffffffu;
@@ -2327,8 +2184,6 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     for (int j = tid; j < K; j += BT) {
       oi[j] = 0;
     }
-    dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len, row,
-                                          vote_row_stride);
     return;
   }
 
@@ -2375,7 +2230,6 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
                            meta_lt + meta_eq <= n;
     s_count_lt = s_have_boundary_meta ? meta_lt : 0;
     s_count_eq = s_have_boundary_meta ? meta_eq : 0;
-    s_count_valid = 0;
   }
   __syncthreads();
 
@@ -2387,47 +2241,12 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     return;
   }
 
-  if (!s_have_boundary_meta) {
-    int local_lt = 0;
-    int local_eq = 0;
-    int local_valid = 0;
-    for (int j = tid; j < n; j += BT) {
-      float v = 0.0f;
-      uint32_t score_code = 0u;
-      if constexpr (kOnlineFixedPayload) {
-        score_code = dsa_litetopk::candidate_load_score_code(vrow[j], irow[j]);
-      } else {
-        v = dsa_litetopk::candidate_decode_score(vrow[j], irow[j]);
-        if (!isfinite(v)) continue;
-      }
-      ++local_valid;
-      int b;
-      if constexpr (kOnlineFixedPayload) {
-        b = static_cast<int>(score_code >> 16);
-      } else {
-        const int braw = static_cast<int>(v);
-        b = braw < 0 ? 0 : (braw > NB - 1 ? NB - 1 : braw);
-      }
-      local_lt += b < th;
-      local_eq += b == th;
-    }
-    atomicAdd(&s_count_lt, local_lt);
-    atomicAdd(&s_count_eq, local_eq);
-    atomicAdd(&s_count_valid, local_valid);
-  }
-  __syncthreads();
   if (tid == 0) {
-    const int need = K - s_count_lt;
-    if (s_count_lt < K && need > 0 && need <= s_count_eq) {
-      s_mode = 0;
-      s_k_target = need;
-    } else if (s_count_lt >= K) {
-      s_mode = 1;
-      s_k_target = K;
-    } else {
-      s_mode = 2;
-      s_k_target = min(K, s_count_valid);
-    }
+    // The validated certificate guarantees count_lt < K and
+    // 0 < K-count_lt <= count_eq. Recount mismatch may still republish a
+    // fallback mode below.
+    s_mode = 0;
+    s_k_target = K - s_count_lt;
   }
   __syncthreads();
 
@@ -2453,16 +2272,10 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
       // The sign-aware FP32 high24 code is monotonic across negative and
       // positive bucket-space values. Truncating the low byte cannot
       // cross an exactly represented integer bucket edge.
-      uint32_t th_code;
-      uint32_t next_th_code;
-      if constexpr (kOnlineFixedPayload) {
-        th_code = static_cast<uint32_t>(th) << 16;
-        next_th_code = static_cast<uint32_t>(th + 1) << 16;
-      } else {
-        th_code = dsa_litetopk::candidate_fp24_code(static_cast<float>(th));
-        next_th_code =
-            dsa_litetopk::candidate_fp24_code(static_cast<float>(th + 1));
-      }
+      const uint32_t th_code =
+          dsa_litetopk::candidate_fp24_code(static_cast<float>(th));
+      const uint32_t next_th_code =
+          dsa_litetopk::candidate_fp24_code(static_cast<float>(th + 1));
       const bool is_lt = valid && th > 0 && score_code < th_code;
       const bool is_eq = valid && score_code < next_th_code &&
                          (th == 0 || score_code >= th_code);
@@ -2535,8 +2348,6 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
         for (int j = tid; j < boundary_n; j += BT) {
           oi[output_base + j] = s_boundary_idx[j];
         }
-        dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len,
-                                              row, vote_row_stride);
         return;
       }
 
@@ -2544,16 +2355,14 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
         // For th>0, boundary values lie in [th, th+1), so their
         // sign-aware FP32 high byte is fixed. Bucket zero also owns
         // every negative value, so it needs the full three-byte key.
-        s_fast_desired = (!kOnlineFixedPayload && th == 0)
-                             ? 0u
-                             : (s_boundary_val[0] & 0xff0000u);
+        s_fast_desired = th == 0 ? 0u : (s_boundary_val[0] & 0xff0000u);
         s_fast_kfind = static_cast<uint32_t>(k_target);
       }
       __syncthreads();
       uint32_t fast_mask = 0u;
 #pragma unroll
       for (int pass = 0; pass < 3; ++pass) {
-        const bool full_key = !kOnlineFixedPayload && th == 0;
+        const bool full_key = th == 0;
         const int num_passes = full_key ? 3 : 2;
         if (pass < num_passes) {
           const int shift = (full_key ? 16 : 8) - pass * 8;
@@ -2602,8 +2411,6 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
           }
         }
       }
-      dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len,
-                                            row, vote_row_stride);
       return;
     }
   }
@@ -2628,18 +2435,11 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     if (j < n) {
       raw_value = vrow[j];
       raw_idx = irow[j];
-      if constexpr (kOnlineFixedPayload) {
-        const uint32_t score_code =
-            dsa_litetopk::candidate_load_score_code(raw_value, raw_idx);
-        b = static_cast<int>(score_code >> 16);
-        valid = true;
-      } else {
-        v = dsa_litetopk::candidate_decode_score(raw_value, raw_idx);
-        valid = isfinite(v);
-        if (valid) {
-          int braw = static_cast<int>(v);
-          b = braw < 0 ? 0 : (braw > NB - 1 ? NB - 1 : braw);
-        }
+      v = dsa_litetopk::candidate_decode_score(raw_value, raw_idx);
+      valid = isfinite(v);
+      if (valid) {
+        int braw = static_cast<int>(v);
+        b = braw < 0 ? 0 : (braw > NB - 1 ? NB - 1 : braw);
       }
     }
 
@@ -2700,16 +2500,12 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     for (int j = selected_n + tid; j < K; j += BT) {
       oi[j] = 0;
     }
-    dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len, row,
-                                          vote_row_stride);
     return;
   }
   if (selected_n == 0 || k_target == 0) {
     for (int j = output_base + tid; j < K; j += BT) {
       oi[j] = 0;
     }
-    dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len, row,
-                                          vote_row_stride);
     return;
   }
 
@@ -2728,8 +2524,8 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
   __syncthreads();
 
   uint32_t mask = 0u;
-  constexpr int kRadixPasses = kOnlineFixedPayload ? 3 : 4;
-  constexpr int kFirstRadixShift = kOnlineFixedPayload ? 16 : 24;
+  constexpr int kRadixPasses = 4;
+  constexpr int kFirstRadixShift = 24;
 #pragma unroll
   for (int pass = 0; pass < kRadixPasses; ++pass) {
     const int shift = kFirstRadixShift - pass * 8;
@@ -2737,13 +2533,8 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
     __syncthreads();
     const uint32_t d = desired;
     for (int j = tid; j < selected_n; j += BT) {
-      uint32_t e;
-      if constexpr (kOnlineFixedPayload) {
-        e = dsa_litetopk::candidate_load_score_code(vrow[j], irow[j]);
-      } else {
-        e = compact_enc_float(
-            dsa_litetopk::candidate_decode_score(vrow[j], irow[j]));
-      }
+      const uint32_t e = compact_enc_float(
+          dsa_litetopk::candidate_decode_score(vrow[j], irow[j]));
       if ((e & mask) == (d & mask)) atomicAdd(&hist[(e >> shift) & 0xffu], 1u);
     }
     __syncthreads();
@@ -2761,13 +2552,8 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
   __syncthreads();
   int pivot_lt = 0;
   for (int j = tid; j < selected_n; j += BT) {
-    uint32_t e;
-    if constexpr (kOnlineFixedPayload) {
-      e = dsa_litetopk::candidate_load_score_code(vrow[j], irow[j]);
-    } else {
-      e = compact_enc_float(
-          dsa_litetopk::candidate_decode_score(vrow[j], irow[j]));
-    }
+    const uint32_t e = compact_enc_float(
+        dsa_litetopk::candidate_decode_score(vrow[j], irow[j]));
     pivot_lt += e < pivot;
   }
   atomicAdd(&s_pivot_lt, pivot_lt);
@@ -2775,13 +2561,8 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
   const int eq_take = max(k_target - s_pivot_lt, 0);
 
   for (int j = tid; j < selected_n; j += BT) {
-    uint32_t e;
-    if constexpr (kOnlineFixedPayload) {
-      e = dsa_litetopk::candidate_load_score_code(vrow[j], irow[j]);
-    } else {
-      const float v = dsa_litetopk::candidate_decode_score(vrow[j], irow[j]);
-      e = compact_enc_float(v);
-    }
+    const float v = dsa_litetopk::candidate_decode_score(vrow[j], irow[j]);
+    const uint32_t e = compact_enc_float(v);
     if (e < pivot) {
       const int w = atomicAdd(&s_write_lt, 1);
       const int pos = output_base + w;
@@ -2798,8 +2579,6 @@ __global__ void compact_topk_min_thr_inplace_idx_out_litetopk_kernel(
       }
     }
   }
-  dsa_litetopk_accumulate_inplace_votes(oi, K, tid, BT, votes, votes_len, row,
-                                        vote_row_stride);
 }
 
 template <int kImplHeads, int kImplBlockQ>
@@ -2827,29 +2606,6 @@ static int compute_smem_bytes_t(bool include_hist = true) {
 }
 
 constexpr int NUM_KV_STAGES_FP4 = 6;
-
-template <int kImplHeads, int kImplBlockQ>
-static int compute_smem_bytes_fp4_t(bool include_hist) {
-  const int esz_i32 = 4;
-  const int smem_q = kImplBlockQ * kImplHeads * (HEAD_DIM / 2);
-  const int smem_w = kImplBlockQ * kImplHeads * 4;
-  const int smem_kv = BLOCK_KV * (HEAD_DIM / 2);
-  const int smem_ks = align_up(align_up(BLOCK_KV, 128) * esz_i32, 512);
-  const int smem_sfq = align_up(kImplBlockQ * kImplHeads, 128) * esz_i32;
-  const int num_barriers = NUM_Q_STAGES * 2 + NUM_KV_STAGES_FP4 * 2 + 3 * 2 +
-                           NUM_KV_STAGES_FP4;  // 3 TMEM stages + sf_ready
-  const int smem_barriers = num_barriers * 8;
-  const int smem_slots = 4 * (int)sizeof(uint32_t);
-  const int smem_warpq =
-      (MATH_THREADS / 32) * kImplBlockQ *
-      ((int)sizeof(int32_t) +
-       dsa_litetopk::kEmitLaneSlots * 32 * (int)sizeof(uint32_t));
-  const int smem_hist =
-      include_hist ? kImplBlockQ * 256 * (int)sizeof(int32_t) : 0;
-  return NUM_Q_STAGES * smem_q + NUM_Q_STAGES * smem_w +
-         NUM_KV_STAGES_FP4 * smem_kv + NUM_KV_STAGES_FP4 * smem_ks + smem_sfq +
-         smem_barriers + smem_slots + smem_warpq + smem_hist;
-}
 
 void launch_seed_prep(const float* slog, int64_t slog_stride, int Q, int head,
                       int NB, int K, float headroom, float* origin,
@@ -3355,12 +3111,11 @@ void cand_count_stats_litetopk_(torch::Tensor cand_cnt, torch::Tensor stats) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-template <bool FusePlanner>
-void carry_votes_topk_reset_litetopk_impl_(
-    torch::Tensor votes, torch::Tensor out_idx, torch::Tensor partial,
-    torch::Tensor state, torch::Tensor permutation, torch::Tensor planner_state,
-    int64_t k64, int64_t max_vote64, int64_t min_index64,
-    int64_t window_start64) {
+void carry_votes_topk_reset_litetopk_(torch::Tensor votes,
+                                      torch::Tensor out_idx,
+                                      torch::Tensor partial,
+                                      torch::Tensor state, int64_t k64,
+                                      int64_t max_vote64, int64_t min_index64) {
   TORCH_CHECK(votes.is_cuda() && out_idx.is_cuda() && partial.is_cuda() &&
                   state.is_cuda(),
               "votes/out_idx/partial/state must be CUDA tensors");
@@ -3381,22 +3136,6 @@ void carry_votes_topk_reset_litetopk_impl_(
   TORCH_CHECK(state.dim() == 1 && state.numel() >= kCarryStateInts,
               "state is too small for the carry top-k ABI");
 
-  if constexpr (FusePlanner) {
-    TORCH_CHECK(permutation.is_cuda() && planner_state.is_cuda(),
-                "permutation/planner_state must be CUDA tensors");
-    TORCH_CHECK(permutation.is_contiguous() && planner_state.is_contiguous(),
-                "permutation/planner_state must be contiguous");
-    TORCH_CHECK(permutation.scalar_type() == torch::kInt &&
-                    planner_state.scalar_type() == torch::kInt,
-                "permutation/planner_state must be int32");
-    TORCH_CHECK(permutation.dim() == 1 && planner_state.dim() == 1 &&
-                    planner_state.numel() >= kCarryPlannerStateInts,
-                "invalid fused carry-planner workspace");
-    TORCH_CHECK(votes.device() == permutation.device() &&
-                    votes.device() == planner_state.device(),
-                "planner workspace must be on the carry CUDA device");
-  }
-
   const int64_t count64 = votes.numel();
   TORCH_CHECK(count64 >= 1 && count64 <= kCarryMaxItems,
               "votes length must be in [1,1048576]");
@@ -3411,24 +3150,7 @@ void carry_votes_topk_reset_litetopk_impl_(
   const int out_k = static_cast<int>(min(k64, static_cast<int64_t>(eligible)));
   const int max_vote = static_cast<int>(max_vote64);
   const int bins = max_vote + 1;
-  const int blocks = ((FusePlanner ? eligible : count) + kCarryTileItems - 1) /
-                     kCarryTileItems;
-  if constexpr (FusePlanner) {
-    TORCH_CHECK(out_k == kCarryPlannerWindow,
-                "fused carry planner requires k=8192");
-    TORCH_CHECK(window_start64 == min_index64,
-                "fused carry planner requires window_start=min_index");
-    TORCH_CHECK(min_index64 + kCarryPlannerWindow <= count64,
-                "fused carry planner window exceeds the vote extent");
-    TORCH_CHECK(permutation.numel() >= count64,
-                "permutation must cover the complete vote extent");
-    TORCH_CHECK(permutation.numel() <= std::numeric_limits<int>::max(),
-                "permutation is too large for the int32 planner ABI");
-    // The software grid barrier is qualified only for the <=128K exact
-    // path: at most 16 of these 256-thread CTAs on fixed B200 hardware.
-    TORCH_CHECK(blocks <= 16,
-                "fused carry planner is restricted to at most 16 CTAs");
-  }
+  const int blocks = (count + kCarryTileItems - 1) / kCarryTileItems;
   TORCH_CHECK(out_idx.numel() == out_k,
               "out_idx must have min(k,votes.numel()-min_index) elements");
   TORCH_CHECK(partial.size(0) >= blocks && partial.size(1) >= bins,
@@ -3438,33 +3160,15 @@ void carry_votes_topk_reset_litetopk_impl_(
   const size_t dynamic_smem = static_cast<size_t>(bins) * sizeof(uint32_t);
   const c10::cuda::CUDAGuard device_guard(votes.device());
   auto stream = c10::cuda::getCurrentCUDAStream();
-  carry_votes_plan_litetopk_kernel<FusePlanner>
-      <<<blocks, kCarryThreads, dynamic_smem, stream>>>(
-          votes.data_ptr<int32_t>(), count, min_index, out_k, max_vote,
-          partial.data_ptr<int16_t>(), partial_stride,
-          state.data_ptr<int32_t>(),
-          FusePlanner ? permutation.data_ptr<int32_t>() : nullptr,
-          FusePlanner ? planner_state.data_ptr<int32_t>() : nullptr);
+  carry_votes_plan_litetopk_kernel<<<blocks, kCarryThreads, dynamic_smem,
+                                     stream>>>(
+      votes.data_ptr<int32_t>(), count, min_index, out_k, max_vote,
+      partial.data_ptr<int16_t>(), partial_stride, state.data_ptr<int32_t>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  carry_votes_emit_reset_litetopk_kernel<FusePlanner>
-      <<<blocks, kCarryThreads, 0, stream>>>(
-          votes.data_ptr<int32_t>(), count, min_index, max_vote,
-          out_idx.data_ptr<int64_t>(), state.data_ptr<int32_t>(),
-          FusePlanner ? permutation.data_ptr<int32_t>() : nullptr,
-          FusePlanner ? planner_state.data_ptr<int32_t>() : nullptr,
-          static_cast<int>(window_start64),
-          FusePlanner ? static_cast<int>(permutation.numel()) : 0);
+  carry_votes_emit_reset_litetopk_kernel<<<blocks, kCarryThreads, 0, stream>>>(
+      votes.data_ptr<int32_t>(), count, min_index, max_vote,
+      out_idx.data_ptr<int64_t>(), state.data_ptr<int32_t>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-void carry_votes_topk_reset_litetopk_(torch::Tensor votes,
-                                      torch::Tensor out_idx,
-                                      torch::Tensor partial,
-                                      torch::Tensor state, int64_t k64,
-                                      int64_t max_vote64, int64_t min_index64) {
-  carry_votes_topk_reset_litetopk_impl_<false>(votes, out_idx, partial, state,
-                                               torch::Tensor(), torch::Tensor(),
-                                               k64, max_vote64, min_index64, 0);
 }
 
 // Same map/vote pass with the per-call candidate-count telemetry folded in:
@@ -3526,16 +3230,14 @@ void map_topk_vote_stats_litetopk_(
 void compact_topk_min_thr_inplace_idx_out_litetopk(
     torch::Tensor cand_val, torch::Tensor cand_idx, torch::Tensor cand_cnt,
     torch::Tensor th_bucket, torch::Tensor boundary_meta, int64_t num_buckets64,
-    int64_t k64, torch::Tensor out_idx, torch::Tensor votes,
-    int64_t vote_row_stride64) {
+    int64_t k64, torch::Tensor out_idx) {
   TORCH_CHECK(cand_val.is_cuda() && cand_idx.is_cuda() && cand_cnt.is_cuda() &&
                   th_bucket.is_cuda() && boundary_meta.is_cuda() &&
-                  out_idx.is_cuda() && votes.is_cuda(),
+                  out_idx.is_cuda(),
               "tensors must be CUDA");
   TORCH_CHECK(cand_val.is_contiguous() && cand_idx.is_contiguous() &&
                   cand_cnt.is_contiguous() && th_bucket.is_contiguous() &&
-                  boundary_meta.is_contiguous() && out_idx.is_contiguous() &&
-                  votes.is_contiguous(),
+                  boundary_meta.is_contiguous() && out_idx.is_contiguous(),
               "tensors must be contiguous");
   check_candidate_dtype(cand_val);
   TORCH_CHECK(cand_idx.scalar_type() == torch::kInt &&
@@ -3546,7 +3248,6 @@ void compact_topk_min_thr_inplace_idx_out_litetopk(
               "th_bucket must be int32");
   TORCH_CHECK(boundary_meta.scalar_type() == torch::kInt,
               "boundary_meta must be int32");
-  TORCH_CHECK(votes.scalar_type() == torch::kInt, "votes must be int32");
   TORCH_CHECK(cand_val.dim() == 2 && cand_idx.sizes() == cand_val.sizes(),
               "candidate tensors must be [R,CAP]");
   const int R = static_cast<int>(cand_val.size(0));
@@ -3565,21 +3266,12 @@ void compact_topk_min_thr_inplace_idx_out_litetopk(
   TORCH_CHECK(
       out_idx.dim() == 2 && out_idx.size(0) == R && out_idx.size(1) == K,
       "out_idx must be [R,K]");
-  TORCH_CHECK(votes.dim() == 1, "votes must be a 1-D histogram (or empty)");
-  const int votes_len = static_cast<int>(votes.numel());
-  TORCH_CHECK(vote_row_stride64 == 1 || vote_row_stride64 == 8 ||
-                  vote_row_stride64 == 16,
-              "vote_row_stride must be one of {1, 8, 16}");
-  const int vote_row_stride = static_cast<int>(vote_row_stride64);
   auto stream = c10::cuda::getCurrentCUDAStream();
-  compact_topk_min_thr_inplace_idx_out_litetopk_kernel<false>
-      <<<R, 256, 0, stream>>>(
-          candidate_data_ptr(cand_val), cand_idx.data_ptr<int32_t>(),
-          cand_cnt.data_ptr<int32_t>(), th_bucket.data_ptr<int32_t>(),
-          boundary_meta.data_ptr<int32_t>(), R, CAP, K, NB,
-          out_idx.data_ptr<int32_t>(),
-          votes_len > 0 ? votes.data_ptr<int32_t>() : nullptr, votes_len,
-          vote_row_stride);
+  compact_topk_min_thr_inplace_idx_out_litetopk_kernel<<<R, 256, 0, stream>>>(
+      candidate_data_ptr(cand_val), cand_idx.data_ptr<int32_t>(),
+      cand_cnt.data_ptr<int32_t>(), th_bucket.data_ptr<int32_t>(),
+      boundary_meta.data_ptr<int32_t>(), R, CAP, K, NB,
+      out_idx.data_ptr<int32_t>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -3793,6 +3485,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("cand_val"), pybind11::arg("cand_idx"),
         pybind11::arg("cand_cnt"), pybind11::arg("th_bucket"),
         pybind11::arg("boundary_meta"), pybind11::arg("num_buckets"),
-        pybind11::arg("topk"), pybind11::arg("out_idx"), pybind11::arg("votes"),
-        pybind11::arg("vote_row_stride") = 1);
+        pybind11::arg("topk"), pybind11::arg("out_idx"));
 }

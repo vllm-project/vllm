@@ -957,6 +957,26 @@ def stash_carry(
     _HOT_CARRY[(str(dev), hot_key)] = (hot, publish_extent, ev, min_index)
 
 
+def stash_dense_carry(
+    idx,
+    S,
+    hot_key,
+    *,
+    use_fp4=False,
+    pcp_world_size=1,
+):
+    """Seed carry from a dense chunk immediately before the fused crossover."""
+    min_s = production_min_s(use_fp4)
+    seed_window = max(32768, 2 * max(1, int(pcp_world_size)) * FUSED_QUERY_LEN)
+    if (
+        hot_key is None
+        or not min_s - seed_window <= S < min_s
+        or not production_extension_available(use_fp4=use_fp4, topk=idx.shape[1])
+    ):
+        return
+    stash_carry(hot_key, idx, S)
+
+
 def try_large_exact_once_chunk(
     q,
     k,
@@ -1286,8 +1306,6 @@ def try_large_exact_once_chunk(
                 NB,
                 topk,
                 out_idx,
-                candidate_count[:0],
-                1,
             )
         if _CAND_ACC is None or _CAND_ACC[0].device != q.device:
             _CAND_ACC = (

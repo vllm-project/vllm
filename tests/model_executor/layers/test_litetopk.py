@@ -9,7 +9,6 @@ import torch
 
 from vllm import envs
 from vllm.model_executor.layers import (
-    dsa_litetopk,
     litetopk_indexer,
     sparse_attn_indexer,
 )
@@ -20,7 +19,6 @@ from vllm.v1.attention.backends.mla import indexer as indexer_metadata
 @pytest.fixture(autouse=True)
 def clear_litetopk_caches():
     caches = (
-        dsa_litetopk.dsa_litetopk_latest_available,
         litetopk_indexer.production_extension_available,
         deep_gemm_utils._import_deep_gemm,
         deep_gemm_utils._get_fp8_fp4_mqa_logits_out_impl,
@@ -33,7 +31,7 @@ def clear_litetopk_caches():
         cache.cache_clear()
 
 
-def test_litetopk_envs_are_registered_without_litedsa():
+def test_litetopk_envs_are_registered():
     expected = {
         "VLLM_LITETOPK",
         "VLLM_LITETOPK_BUILD",
@@ -46,27 +44,7 @@ def test_litetopk_envs_are_registered_without_litedsa():
         "VLLM_LITETOPK_PCP_FRONTIER_CARRY",
         "VLLM_LITETOPK_TP_QUERY_SHARD",
     }
-    removed = {
-        "VLLM_LITEDSA_SO",
-        "VLLM_LITEDSA_UNION_SO",
-        "VLLM_DSV4_PACKED_ATTN",
-        "VLLM_DSV4_PACKED_SO",
-    }
     assert expected <= envs.environment_variables.keys()
-    assert removed.isdisjoint(envs.environment_variables)
-
-
-def test_dense_selector_is_retired():
-    retired_envs = {
-        "VLLM_LITETOPK_DENSE_SELECT",
-        "VLLM_LITETOPK_DENSE_SELECT_MIN_S",
-        "VLLM_LITETOPK_DENSE_SELECT_MAX_S",
-        "VLLM_LITETOPK_DENSE_SELECT_BINS",
-        "VLLM_LITETOPK_DENSE_SELECT_MIN_LOGITS_MB",
-    }
-    assert retired_envs.isdisjoint(envs.environment_variables)
-    assert not hasattr(dsa_litetopk, "dsa_litetopk_latest_dense_topk")
-    assert not hasattr(litetopk_indexer, "try_dense_topk")
 
 
 def test_deepgemm_mqa_out_keyword_detection():
@@ -156,7 +134,6 @@ def test_fused_planner_preflights_extension_and_capacity(monkeypatch):
 
     monkeypatch.setattr(litetopk_indexer, "MERGE_CAP", 49151)
     litetopk_indexer.production_extension_available.cache_clear()
-    dsa_litetopk.dsa_litetopk_latest_available.cache_clear()
     assert not indexer_metadata._litetopk_extension_ready_for_planning(
         use_fp4=False,
         topk=2048,
@@ -331,15 +308,17 @@ def test_dense_seed_window_tracks_pcp_scheduler_stride(
     monkeypatch, pcp_world_size, seq_len, should_seed
 ):
     calls = []
-    monkeypatch.setattr(dsa_litetopk, "dsa_litetopk_latest_available", lambda **_: True)
+    monkeypatch.setattr(
+        litetopk_indexer, "production_extension_available", lambda **_: True
+    )
     monkeypatch.setattr(
         litetopk_indexer, "stash_carry", lambda *args, **kwargs: calls.append(args)
     )
 
-    dsa_litetopk.dsa_litetopk_latest_stash_dense(
+    litetopk_indexer.stash_dense_carry(
         torch.empty((1, 2048), dtype=torch.int32),
-        seq_len=seq_len,
-        hot_key="model.layers.0.indexer",
+        seq_len,
+        "model.layers.0.indexer",
         pcp_world_size=pcp_world_size,
     )
 

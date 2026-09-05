@@ -202,11 +202,11 @@ def _configured_litetopk_fused_min_seq_len(use_fp4: bool = False) -> int:
 
 def _litetopk_extension_ready_for_planning(*, use_fp4: bool, topk: int) -> bool:
     """Preflight the real extension before disabling dense budget splitting."""
-    from vllm.model_executor.layers.dsa_litetopk import (
-        dsa_litetopk_latest_available,
+    from vllm.model_executor.layers.litetopk_indexer import (
+        production_extension_available,
     )
 
-    return dsa_litetopk_latest_available(use_fp4=use_fp4, topk=topk)
+    return production_extension_available(use_fp4=use_fp4, topk=topk)
 
 
 def _should_plan_fused_indexer(
@@ -1240,10 +1240,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and tp_query_shard_planning
                 and self.use_fp4_indexer_cache
             )
-            # Upper bound is exact for prefill rows (the `[num_decodes:]`
-            # slice below).
-            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             chunk_specs = split_indexer_prefill_chunks(
                 compressed_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,

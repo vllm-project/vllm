@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 DeepSeek
+// Derived from DeepGEMM commit 891d57b4db1071624b5c8fa0d1e51cb317fa709f;
+// see LICENSE.deepseek-deepgemm.
 
 #pragma once
 
@@ -27,10 +29,8 @@ using namespace deep_gemm;
 inline constexpr uint32_t kEmitChunkBlocks = 256;
 inline constexpr uint32_t kEmitLaneSlots = 18;
 inline constexpr uint32_t kGateStride = 64;
-inline constexpr uint32_t kWarpQueueCap = 64;
 inline constexpr uint32_t kMathRegisters = 240;
 inline constexpr uint32_t kSpecializedRegisters = 24;
-inline constexpr uint32_t kTmemRows = 4;
 inline constexpr uint32_t kUmmaStages = 2;
 inline constexpr uint32_t kSparseRefreshNs = 512;
 inline constexpr uint32_t kSparseRefreshIdleNs = 2048;

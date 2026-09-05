@@ -1425,7 +1425,6 @@ package_data = {
         "model_executor/layers/litetopk_kernels/*.cu",
         "model_executor/layers/litetopk_kernels/*.cuh",
         "model_executor/layers/litetopk_kernels/LICENSE*",
-        "model_executor/layers/litetopk_kernels/README.md",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",

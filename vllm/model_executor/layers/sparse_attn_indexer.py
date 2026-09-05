@@ -16,14 +16,7 @@ from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.dsa_litetopk import (
-    dsa_litetopk_latest_available,
-    dsa_litetopk_latest_prepare_permuted_gather,
-    dsa_litetopk_latest_release_pair_swap_workspace,
-    dsa_litetopk_latest_stash_carry,
-    dsa_litetopk_latest_stash_dense,
-    dsa_litetopk_latest_streaming_indexer,
-)
+from vllm.model_executor.layers import litetopk_indexer
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -608,7 +601,7 @@ def sparse_attn_indexer(
             hidden_states.device,
         )
     if not has_prefill:
-        dsa_litetopk_latest_release_pair_swap_workspace(hidden_states.device)
+        litetopk_indexer.release_pair_swap_workspace(hidden_states.device)
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
@@ -736,7 +729,7 @@ def sparse_attn_indexer(
                     and _litetopk_tp_guarded_call(
                         tp_query_shard,
                         "availability preflight",
-                        dsa_litetopk_latest_available,
+                        litetopk_indexer.production_extension_available,
                         use_fp4=use_fp4_cache,
                         topk=topk_tokens,
                     )
@@ -748,7 +741,7 @@ def sparse_attn_indexer(
                     permuted_plan = _litetopk_tp_guarded_call(
                         tp_query_shard,
                         "permuted-gather preparation",
-                        dsa_litetopk_latest_prepare_permuted_gather,
+                        litetopk_indexer.prepare_permuted_gather,
                         kv_cache,
                         k_quant,
                         k_scale,
@@ -769,7 +762,6 @@ def sparse_attn_indexer(
                             + shard_row_offset
                         ),
                         window_start=0,
-                        topk=topk_tokens,
                         hot_key=k_cache_prefix,
                     )
                     if permuted_plan is not None and tp_query_shard is not None:
@@ -826,7 +818,7 @@ def sparse_attn_indexer(
                     and _litetopk_tp_guarded_call(
                         tp_query_shard,
                         "runtime availability",
-                        dsa_litetopk_latest_available,
+                        litetopk_indexer.production_extension_available,
                         use_fp4=use_fp4_cache,
                         topk=topk_tokens,
                     )
@@ -868,7 +860,7 @@ def sparse_attn_indexer(
                     shard_lo, shard_hi, fused_topk_indices = tp_query_shard[:3]
                 if fused_indexer_runtime_eligible:
                     try:
-                        fused_ok = dsa_litetopk_latest_streaming_indexer(
+                        fused_ok = litetopk_indexer.try_large_exact_once_chunk(
                             q_slice_cast[shard_lo:shard_hi],
                             k_quant_cast,
                             k_scale_cast,
@@ -878,8 +870,9 @@ def sparse_attn_indexer(
                             ],
                             cu_seqlen_ks[shard_lo:shard_hi],
                             cu_seqlen_ke[shard_lo:shard_hi],
-                            topk_tokens,
                             fused_topk_indices,
+                            topk_tokens,
+                            permuted_plan=permuted_plan,
                             num_reqs=chunk.num_reqs,
                             ke_min_hint=(
                                 chunk.common_ke_min
@@ -887,8 +880,10 @@ def sparse_attn_indexer(
                                 else chunk.total_seq_lens - query_length + 1
                             )
                             + shard_row_offset,
+                            cap=litetopk_indexer.MERGE_CAP,
                             hot_key=k_cache_prefix,
-                            permuted_plan=permuted_plan,
+                            ks_common_hint=0,
+                            carry_extent_hint=k_quant_cast.shape[0],
                             q_sf=(
                                 q_scale_slice[shard_lo:shard_hi]
                                 if q_scale_slice is not None
@@ -904,7 +899,7 @@ def sparse_attn_indexer(
                                 if carry_broadcast is not None
                                 else None
                             ),
-                            publish_carry=tp_query_shard is None,
+                            _carry_io=tp_query_shard is None,
                         )
                     except Exception:
                         if tp_query_shard is None:
@@ -931,14 +926,14 @@ def sparse_attn_indexer(
                         torch.all(all_status == 1),
                         "LiteTopK TP query shard declined on a peer rank",
                     )
-                    dsa_litetopk_latest_stash_carry(
+                    litetopk_indexer.stash_carry(
+                        k_cache_prefix,
                         topk_indices,
-                        seq_len=chunk.max_local_total_seq_lens,
-                        hot_key=k_cache_prefix,
-                        carry_broadcast_src=(
+                        chunk.max_local_total_seq_lens,
+                        broadcast_src=(
                             carry_broadcast[0] if carry_broadcast is not None else None
                         ),
-                        carry_broadcast_extent=(
+                        broadcast_extent=(
                             carry_broadcast[1] if carry_broadcast is not None else None
                         ),
                     )
@@ -990,10 +985,10 @@ def sparse_attn_indexer(
                         logits.stride(1),
                         topk_tokens,
                     )
-                    dsa_litetopk_latest_stash_dense(
+                    litetopk_indexer.stash_dense_carry(
                         topk_indices,
-                        seq_len=chunk.total_seq_lens,
-                        hot_key=k_cache_prefix,
+                        chunk.total_seq_lens,
+                        k_cache_prefix,
                         use_fp4=use_fp4_cache,
                         pcp_world_size=(get_pcp_group().world_size if use_pcp else 1),
                     )
