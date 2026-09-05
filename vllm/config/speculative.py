@@ -1774,6 +1774,13 @@ class SpeculativeConfig:
                 "omit it."
             )
 
+        if self.use_heterogeneous_vocab and self.use_local_argmax_reduction:
+            raise ValueError(
+                "use_heterogeneous_vocab and use_local_argmax_reduction cannot "
+                "be used together because local argmax reduction bypasses the "
+                "vocabulary mask and token mapping."
+            )
+
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
