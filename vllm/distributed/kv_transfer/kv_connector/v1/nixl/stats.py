@@ -23,7 +23,33 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """
+    Container for NIXL KV cache transfer performance metrics.
+
+    This class collects per-transfer telemetry from each TP rank and aggregates
+    them for periodic logging and Prometheus metric emission.
+
+    IMPORTANT: Metrics Aggregation Semantics (Multi-Rank / TP > 1)
+    ---------------------------------------------------------------
+    In tensor-parallel deployments (TP > 1), each TP rank independently records
+    its own transfer telemetry via `record_transfer()`. The stats from all ranks
+    are then concatenated (via `aggregate()` using `list.extend()`) into a single
+    observation pool. The `reduce()` method computes summary statistics (averages,
+    percentiles, throughput) over this **combined pool of observations from all
+    ranks**.
+
+    This means the logged metrics represent **per-rank averages over the combined
+    observation pool**, NOT per-engine totals or aggregate system throughput.
+    Specifically:
+    - "Num successful transfers" = total count across all TP ranks
+    - "Avg MB per transfer" = average over all individual rank-level transfers
+    - "Throughput (MB/s)" = total_MB_all_ranks / total_time_all_ranks
+      (effectively an average per-rank throughput)
+    - Percentiles (P90) = computed over the combined distribution of all ranks
+
+    This design uses fire-and-forget reporting from workers; the logger receives
+    pre-aggregated stats and computes final summaries.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -31,18 +57,24 @@ class NixlKVConnectorStats(KVConnectorStats):
             self.reset()
 
     def reset(self):
-        # Must be serializable
+        # Must be serializable for IPC transmission from worker to logger.
         self.data: dict[str, list[float | int]] = {
-            "transfer_duration": [],
-            "post_duration": [],
-            "bytes_transferred": [],
-            "num_descriptors": [],
-            "num_failed_transfers": [],
-            "num_failed_notifications": [],
-            "num_kv_expired_reqs": [],
+            "transfer_duration": [],      # seconds; async data movement time (xferDuration)
+            "post_duration": [],          # seconds; RDMA post/submit time (postDuration)
+            "bytes_transferred": [],      # bytes; total bytes moved per transfer
+            "num_descriptors": [],        # count; RDMA work request descriptors used
+            "num_failed_transfers": [],   # count; failed transfer operations
+            "num_failed_notifications": [],  # count; failed send_notif calls
+            "num_kv_expired_reqs": [],    # count; requests with expired KV blocks (tracked on P)
         }
 
     def record_transfer(self, res: "nixlXferTelemetry"):
+        """Record a successful NIXL transfer's telemetry.
+
+        Args:
+            res: NIXL transfer telemetry containing duration, bytes, and descriptors.
+                 Time units are converted from microseconds to seconds for consistency.
+        """
         # Keep metrics units consistent with rest of the code: time us->s
         self.data["transfer_duration"].append(res.xferDuration / 1e6)
         self.data["post_duration"].append(res.postDuration / 1e6)
@@ -50,15 +82,19 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["num_descriptors"].append(res.descCount)
 
     def record_failed_transfer(self):
-        """Record a failed NIXL transfer operation."""
+        """Record a failed NIXL transfer operation (data movement failure)."""
         self.data["num_failed_transfers"].append(1)
 
     def record_failed_notification(self):
-        """Record a failed NIXL notification (send_notif)."""
+        """Record a failed NIXL notification (send_notif failure, pre-transfer)."""
         self.data["num_failed_notifications"].append(1)
 
     def record_kv_expired_req(self):
-        """Record a request that had its KV blocks expire."""
+        """Record a request that had its KV blocks expire (lease timeout).
+
+        Tracked on the prefiller (P) instance when KV blocks are evicted before
+        the decoder can consume them.
+        """
         self.data["num_kv_expired_reqs"].append(1)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
@@ -76,6 +112,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """
+        Aggregate stats from another instance (typically from a different TP rank).
+
+        Uses `list.extend()` to concatenate observations, building a combined pool
+        across all ranks. Called by the logger when collecting stats from workers.
+        """
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -84,6 +126,25 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
+        """
+        Reduce collected observations to summary statistics for CLI logging.
+
+        Computes averages, percentiles, and throughput over the **combined pool
+        of observations from all TP ranks**. The returned dict represents
+        per-rank averages over the aggregated observation pool, NOT per-engine
+        totals or aggregate system throughput.
+
+        Returns:
+            Dict with keys:
+            - "Num successful transfers": total count across all ranks
+            - "Avg xfer time (ms)": mean transfer duration in milliseconds
+            - "P90 xfer time (ms)": 90th percentile transfer duration
+            - "Avg post time (ms)": mean RDMA post/submit time
+            - "P90 post time (ms)": 90th percentile post time
+            - "Avg MB per transfer": mean bytes per transfer (converted to MB)
+            - "Throughput (MB/s)": total_MB / total_time_seconds (per-rank average)
+            - "Avg number of descriptors": mean RDMA descriptors per transfer
+        """
         # Compute compact representative stats suitable for CLI logging
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
@@ -130,6 +191,22 @@ class NixlKVConnectorStats(KVConnectorStats):
 
 
 class NixlPromMetrics(KVConnectorPromMetrics):
+    """
+    Prometheus metrics implementation for the NIXL KV connector.
+
+    Registers the following metrics (all per-engine via 'engine' label):
+    - vllm:nixl_xfer_time_seconds (Histogram): Transfer duration (async data movement)
+    - vllm:nixl_post_time_seconds (Histogram): RDMA post/submit time
+    - vllm:nixl_bytes_transferred (Histogram): Bytes moved per transfer
+    - vllm:nixl_num_descriptors (Histogram): RDMA work request descriptors per transfer
+    - vllm:nixl_num_failed_transfers (Counter): Failed transfer operations
+    - vllm:nixl_num_failed_notifications (Counter): Failed send_notif calls
+    - vllm:nixl_num_kv_expired_reqs (Counter): Requests with expired KV blocks (P instance)
+
+    Metrics are recorded from pre-aggregated stats data (combined across all TP ranks).
+    The observe() method processes each observation in the aggregated lists.
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -238,6 +315,19 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        """
+        Record NIXL transfer statistics to Prometheus metrics.
+
+        Processes pre-aggregated stats data (combined across all TP ranks) and
+        updates the corresponding histograms and counters for the given engine.
+
+        Args:
+            transfer_stats_data: Dictionary containing lists of observations from
+                all TP ranks (keys: transfer_duration, post_duration,
+                bytes_transferred, num_descriptors, num_failed_transfers,
+                num_failed_notifications, num_kv_expired_reqs).
+            engine_idx: Engine index for multi-engine deployments (default 0).
+        """
         for prom_obj, list_item_key in zip(
             [
                 self.nixl_histogram_xfer_time,
