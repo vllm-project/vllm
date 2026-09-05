@@ -25,7 +25,12 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -37,6 +42,10 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.relu2_fp8_quant import (
+    is_relu_squared_static_fp8_quant_config_supported,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -54,6 +63,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -79,6 +92,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
@@ -93,6 +107,7 @@ class NemotronHMLP(nn.Module):
         bias: bool = False,
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
+        enable_relu2_fp8_quant: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -115,10 +130,26 @@ class NemotronHMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
+        # Only replace the compiled-native ReLU2 and QuantFP8 pair; preserve
+        # either CUDA custom op when it is explicitly enabled.
+        self.use_relu2_fp8_quant = (
+            enable_relu2_fp8_quant
+            and current_platform.is_cuda()
+            and not self.act_fn.enabled()
+            and not QuantFP8.enabled()
+            and current_platform.has_device_capability(90)
+            and is_relu_squared_static_fp8_quant_config_supported()
+            and get_tensor_model_parallel_world_size() == 1
+            and getattr(self.down_proj, "input_quant_key", None) == kFp8StaticTensorSym
+            and hasattr(self.down_proj, "input_scale")
+        )
 
     def forward(self, x: torch.Tensor):
         x, _ = self.up_proj(x)
-        x = self.act_fn(x)
+        if self.use_relu2_fp8_quant and x.dtype == torch.bfloat16:
+            x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
+        else:
+            x = self.act_fn(x)
         x, _ = self.down_proj(x)
         return x
 
@@ -145,6 +176,10 @@ class NemotronHMoE(nn.Module):
         )
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        vllm_config = get_current_vllm_config_or_none()
+        is_lora_enabled = (
+            vllm_config is not None and vllm_config.lora_config is not None
+        )
 
         self.gate = GateLinear(
             config.hidden_size,
@@ -179,6 +214,8 @@ class NemotronHMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 is_sequence_parallel=self.is_sequence_parallel,
+                # LoRA needs the BF16 activation for its adapter branch.
+                enable_relu2_fp8_quant=not is_lora_enabled,
                 prefix=f"{prefix}.shared_experts",
             )
 
