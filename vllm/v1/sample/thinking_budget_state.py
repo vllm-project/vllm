@@ -36,6 +36,7 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
+    think_end_detect_ids: list[int]
 
     def __init__(
         self,
@@ -56,11 +57,16 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.think_end_detect_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            # Detect the natural end of thinking by the final token of the
+            # configured end sequence (the model's own end tag, e.g.
+            # </think>). Forcing still emits the full configured sequence.
+            self.think_end_detect_ids = self.think_end_token_ids[-1:]
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -189,7 +195,7 @@ class ThinkingBudgetStateHolder:
                 prompt_tok_ids, self.think_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
+                prompt_tok_ids, self.think_end_detect_ids
             )
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
@@ -249,7 +255,7 @@ class ThinkingBudgetStateHolder:
             scan_offset = state.get("scan_offset", 0)
             output_slice = state.get("output_tok_ids", [])[scan_offset:]
             end_thinking = self._find_last_sequence_index(
-                output_slice, self.think_end_token_ids
+                output_slice, self.think_end_detect_ids
             )
             if end_thinking >= 0:
                 end_thinking += scan_offset
