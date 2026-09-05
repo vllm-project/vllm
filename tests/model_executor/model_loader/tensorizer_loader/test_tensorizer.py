@@ -15,6 +15,7 @@ import pytest
 import torch
 
 import vllm.model_executor.model_loader.tensorizer
+from tests.models.utils import check_logprobs_close
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -141,9 +142,12 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 def test_deserialized_hf_model_has_same_outputs(
     hf_runner, vllm_runner, tmp_path, model_ref, model_path
 ):
+    max_tokens = 50
+    num_logprobs = 5
     with hf_runner(model_ref) as hf_model:
-        max_tokens = 50
-        outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
+        outputs = hf_model.generate_greedy_logprobs_limit(
+            prompts, max_tokens, num_logprobs
+        )
         with open_stream(model_path, "wb+") as stream:
             serializer = TensorSerializer(stream)
             serializer.write_module(hf_model.model)
@@ -156,11 +160,16 @@ def test_deserialized_hf_model_has_same_outputs(
             num_readers=1,
         ),
     ) as loaded_hf_model:
-        deserialized_outputs = loaded_hf_model.generate_greedy(
-            prompts, max_tokens=max_tokens
+        deserialized_outputs = loaded_hf_model.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
         )
 
-        assert outputs == deserialized_outputs
+        check_logprobs_close(
+            outputs_0_lst=outputs,
+            outputs_1_lst=deserialized_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
 
 
 def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
@@ -237,13 +246,16 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     vllm_runner, tmp_path
 ):
     model_ref = "EleutherAI/pythia-1.4b"
+    logprobs_sampling_params = SamplingParams(
+        temperature=0.8, top_p=0.95, seed=0, logprobs=5
+    )
     # record outputs from un-sharded un-tensorized model
     with vllm_runner(
         model_ref,
         disable_custom_all_reduce=True,
         enforce_eager=True,
     ) as base_model:
-        outputs = base_model.generate(prompts, sampling_params)
+        outputs = base_model.generate_w_logprobs(prompts, logprobs_sampling_params)
 
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / model_ref / "model-%02d.tensors")
@@ -274,9 +286,16 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
         enforce_eager=True,
         model_loader_extra_config=tensorizer_config,
     ) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate_w_logprobs(
+            prompts, logprobs_sampling_params
+        )
 
-    assert outputs == deserialized_outputs
+    check_logprobs_close(
+        outputs_0_lst=outputs,
+        outputs_1_lst=deserialized_outputs,
+        name_0="tp1",
+        name_1="tp2",
+    )
 
 
 @pytest.mark.flaky(reruns=3)

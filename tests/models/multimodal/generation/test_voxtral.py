@@ -67,7 +67,9 @@ def test_models_with_multiple_audios(
     )
 
 
-def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
+def test_online_serving(
+    vllm_runner, audio_assets: AudioTestAssets, monkeypatch: pytest.MonkeyPatch
+):
     """Two-layer accuracy and serving validation using Mistral format.
 
     1. Offline vLLM greedy output (runs first to avoid CUDA fork issues
@@ -82,6 +84,9 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     question = f"What's happening in these {len(audio_assets)} audio clips?"
     max_tokens = 10
     audio_data = [asset.audio_and_sample_rate for asset in audio_assets]
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     vllm_prompt = _get_prompt(audio_assets, question)
     with vllm_runner(
@@ -127,7 +132,7 @@ def test_online_serving(vllm_runner, audio_assets: AudioTestAssets):
     with RemoteOpenAIServer(
         MODEL_NAME,
         server_args,
-        env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30"},
+        env_dict={"VLLM_AUDIO_FETCH_TIMEOUT": "30", "VLLM_BATCH_INVARIANT": "1"},
     ) as remote_server:
         client = remote_server.get_client()
         completion = client.chat.completions.create(

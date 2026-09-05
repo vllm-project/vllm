@@ -54,19 +54,6 @@ models_pre_quant_8bit_to_test = [
 ]
 
 
-def log_generated_texts(prompts, outputs, runner_name):
-    logged_texts = []
-    for i, (_, generated_text) in enumerate(outputs):
-        logged_texts.append(
-            {
-                "prompt": prompts[i],
-                "runner_name": runner_name,
-                "generated_text": generated_text,
-            }
-        )
-    return logged_texts
-
-
 def validate_generated_texts(
     hf_runner,
     vllm_runner,
@@ -75,20 +62,22 @@ def validate_generated_texts(
     pre_quant=False,
     hf_model_kwargs=None,
     vllm_tp_size=1,
+    vllm_pp_size=1,
     max_tokens=8,
 ):
+    num_logprobs = 5
     with vllm_runner(
         model_name,
         quantization=None if pre_quant else "bitsandbytes",
         tensor_parallel_size=vllm_tp_size,
+        pipeline_parallel_size=vllm_pp_size,
         enforce_eager=False,
         default_torch_num_threads=1,
         tokenizer_mode="hf",
         load_format="hf",
         config_format="hf",
     ) as llm:
-        vllm_outputs = llm.generate_greedy(prompts, max_tokens)
-        vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
+        vllm_outputs = llm.generate_greedy_logprobs(prompts, max_tokens, num_logprobs)
 
     if hf_model_kwargs is None:
         hf_model_kwargs = {}
@@ -96,20 +85,16 @@ def validate_generated_texts(
     with hf_runner(
         model_name, model_kwargs=hf_model_kwargs, default_torch_num_threads=1
     ) as llm:
-        hf_outputs = llm.generate_greedy(prompts, max_tokens)
-        hf_logs = log_generated_texts(prompts, hf_outputs, "HfRunner")
-
-    for hf_log, vllm_log in zip(hf_logs, vllm_logs):
-        hf_str = hf_log["generated_text"]
-        vllm_str = vllm_log["generated_text"]
-        prompt = hf_log["prompt"]
-        assert hf_str == vllm_str, (
-            f"Model: {model_name}"
-            f"Mismatch between HF and vLLM outputs:\n"
-            f"Prompt: {prompt}\n"
-            f"HF Output: '{hf_str}'\n"
-            f"vLLM Output: '{vllm_str}'"
+        hf_outputs = llm.generate_greedy_logprobs_limit(
+            prompts, max_tokens, num_logprobs
         )
+
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
 
 
 @pytest.mark.parametrize("model_name, description", models_4bit_to_test)
@@ -170,7 +155,7 @@ def test_load_pp_4bit_bnb_model(
         model_name,
         False,
         hf_model_kwargs,
-        vllm_tp_size=2,
+        vllm_pp_size=2,
     )
 
 

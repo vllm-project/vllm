@@ -98,12 +98,15 @@ def test_beam_search_with_concurrency_limit(
     dtype: str,
     max_tokens: int,
     beam_width: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # example_prompts[1]&[3]&[7] fails due to unknown reason even without
     # concurrency limit. skip them for now.
     example_prompts = example_prompts[:8]
     concurrency_limit = 2
     assert len(example_prompts) > concurrency_limit
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     with vllm_runner(model, dtype=dtype, **EXTRA_ENGINE_KWARGS) as vllm_model:
         outputs_with_limit = vllm_model.generate_beam_search(
             example_prompts,
