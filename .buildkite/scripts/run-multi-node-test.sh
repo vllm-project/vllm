@@ -38,8 +38,19 @@ for command in "${COMMANDS[@]}"; do
 done
 
 
+STARTED_CONTAINERS=()
+NETWORK_CREATED=0
+
 start_network() {
+    if docker network inspect docker-net > /dev/null 2>&1; then
+        if [ "$(docker network inspect --format '{{len .Containers}}' docker-net)" != 0 ]; then
+            echo "docker-net still has attached containers; refusing to reuse it." >&2
+            return 1
+        fi
+        docker network rm docker-net
+    fi
     docker network create --subnet=192.168.10.0/24 docker-net
+    NETWORK_CREATED=1
 }
 
 start_nodes() {
@@ -67,10 +78,11 @@ start_nodes() {
         # 3. map the huggingface cache directory to the container
         # 3. assign ip addresses to the containers (head node: 192.168.10.10, worker nodes:
         #    starting from 192.168.10.11)
-        docker run -d "${GPU_DEVICES[@]}" --shm-size=10.24gb -e HF_TOKEN \
+        CONTAINER_ID=$(docker run -d "${GPU_DEVICES[@]}" --shm-size=10.24gb -e HF_TOKEN \
             -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \
             --network docker-net --ip 192.168.10.$((10 + $node)) --rm "$DOCKER_IMAGE" \
-            /bin/bash -c "tail -f /dev/null"
+            /bin/bash -c "tail -f /dev/null")
+        STARTED_CONTAINERS+=("$CONTAINER_ID")
 
         # organize containers into a ray cluster
         if [ "$node" -eq 0 ]; then
@@ -115,13 +127,20 @@ run_nodes() {
     done
 }
 cleanup() {
-    for node in $(seq 0 $(($NUM_NODES-1))); do
-        docker stop "node$node"
+    local status=$?
+    local cleanup_status=0
+    for container_id in "${STARTED_CONTAINERS[@]}"; do
+        docker stop "$container_id" || cleanup_status=$?
     done
-    docker network rm docker-net
+    if [ "$NETWORK_CREATED" -eq 1 ]; then
+        docker network rm docker-net || cleanup_status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+        return "$status"
+    fi
+    return "$cleanup_status"
 }
 trap cleanup EXIT
 start_network
 start_nodes
 run_nodes
-
