@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_ROCM_PP_TRANSPORT: Literal["disabled", "stream"] = "disabled"
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1353,6 +1354,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # Optional fixed-schema BF16 PP transport for ROCm on the V1 worker path.
+    "VLLM_ROCM_PP_TRANSPORT": env_with_choices(
+        "VLLM_ROCM_PP_TRANSPORT",
+        "disabled",
+        ["disabled", "stream"],
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
