@@ -897,3 +897,113 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+
+class TestBareAndMalformedOpeners:
+    """Tests for bare and malformed tool call openers.
+
+    See https://github.com/vllm-project/vllm/issues/53431.
+    """
+
+    def test_bare_opener_non_streaming(self, parser, mock_request):
+        model_output = (
+            '<|tool_call>:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "London"}
+
+    def test_documented_form_still_works(self, parser, mock_request):
+        model_output = (
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+
+    def test_bare_opener_multiple_args(self, parser, mock_request):
+        model_output = (
+            '<|tool_call>:get_weather{'
+            'location:<|"|>Tokyo<|"|>,unit:<|"|>celsius<|"|>}'
+            "<tool_call|>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "Tokyo", "unit": "celsius"}
+
+    def test_malformed_no_brace_bounded(self, parser, mock_request):
+        model_output = "<|tool_call>call:bad_func no brace<tool_call|>"
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        name = result.tool_calls[0].function.name
+        assert "<tool_call|>" not in name
+
+    def test_malformed_then_well_formed(self, parser, mock_request):
+        model_output = (
+            "<|tool_call>call:bad_func no brace<tool_call|>"
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}'
+            "<tool_call|>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "bad_func no brace"
+        assert result.tool_calls[1].function.name == "get_weather"
+        assert "London" in result.tool_calls[1].function.arguments
+
+    def test_bare_malformed_then_well_formed(self, parser, mock_request):
+        model_output = (
+            "<|tool_call>:bad_func no brace<tool_call|>"
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}'
+            "<tool_call|>"
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "bad_func no brace"
+        assert result.tool_calls[1].function.name == "get_weather"
+
+    def test_three_mixed_calls(self, parser, mock_request):
+        model_output = (
+            "<|tool_call>:bad no brace<tool_call|>"
+            '<|tool_call>call:search{input:<|"|>hello<|"|>}<tool_call|>'
+            '<|tool_call>:set{flag:true,count:5}<tool_call|>'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 3
+        assert result.tool_calls[0].function.name == "bad no brace"
+        assert result.tool_calls[1].function.name == "search"
+        assert result.tool_calls[2].function.name == "set"
+
+    def test_colon_in_content_not_broken(self, parser, mock_request):
+        model_output = (
+            "Hello: world"
+            '<|tool_call>:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+        )
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert result.content is not None
+        assert "Hello" in result.content
+
+    def test_bare_opener_empty_args(self, parser, mock_request):
+        model_output = "<|tool_call>:set_status{}<tool_call|>"
+        result = parser.extract_tool_calls(model_output, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "set_status"
