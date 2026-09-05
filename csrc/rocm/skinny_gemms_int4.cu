@@ -135,6 +135,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   __shared__ scalar_t s[max_lds_len];
 
+  // TODO: this stages a dense K * N block and never reads stride(0), so a
+  // strided activation silently yields wrong values. The caller in
+  // rdna_hybrid_w4a16.py reshapes without densifying. Needs the same guard
+  // wvSplitKQ has in skinny_gemms.cu; unverified here as this is GFX1X-only.
   for (uint32_t k = 0; k < min__(K * N, max_lds_len);
        k += THRDS * WvPrGrp * A_CHUNK) {
     uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
