@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
 
 import torch
 
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
@@ -13,6 +15,13 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    FlashInferMoeEpEpilogue,
+    FlashInferMoeEpWeights,
+    is_flashinfer_moe_ep_backend,
+    make_flashinfer_moe_ep,
+    validate_flashinfer_moe_ep_config,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -44,6 +53,35 @@ _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
 logger = init_logger(__name__)
 
 
+def _require_finite_positive(name: str, value: torch.Tensor) -> None:
+    if not torch.isfinite(value).all() or not (value > 0).all():
+        raise ValueError(f"{name} must contain finite positive scales")
+
+
+def _require_exact_shard_match(name: str, value: torch.Tensor) -> torch.Tensor:
+    _require_finite_positive(name, value)
+    if not torch.equal(value[:, 0], value[:, 1]):
+        raise ValueError(f"{name} must match exactly between w1 and w3")
+    return value[:, 0].contiguous()
+
+
+def _global_exact_scale(local_scales: torch.Tensor) -> float:
+    local_min, local_max = torch.aminmax(local_scales)
+    bounds = torch.stack((local_max, -local_min))
+    torch.distributed.all_reduce(
+        bounds,
+        op=torch.distributed.ReduceOp.MAX,
+        group=get_ep_group().device_group,
+    )
+    global_max = bounds[0]
+    global_min = -bounds[1]
+    if not torch.equal(global_min, global_max):
+        raise ValueError(
+            "w13_input_global_scale must match exactly across all routed experts"
+        )
+    return float(global_min.item())
+
+
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
@@ -54,6 +92,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 16
         self.use_a16 = use_a16
+        self.use_flashinfer_moe_ep = is_flashinfer_moe_ep_backend(self.moe.moe_backend)
+        self.load_input_scales_by_shard = self.use_flashinfer_moe_ep
+
+        if self.use_flashinfer_moe_ep:
+            validate_flashinfer_moe_ep_config(moe, "nvfp4", use_a16=use_a16)
+            self.use_global_sf = False
+            return
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -68,6 +113,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
     @property
     def supports_eplb(self) -> bool:
+        if self.use_flashinfer_moe_ep:
+            return False
         return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
     def create_weights(
@@ -144,8 +191,21 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # Weight Global Scales
+        w13_weight_global_data = (
+            torch.full(
+                (num_experts, w13_num_shards),
+                torch.nan,
+                dtype=torch.float32,
+            )
+            if self.use_flashinfer_moe_ep
+            else torch.empty(
+                num_experts,
+                w13_num_shards,
+                dtype=torch.float32,
+            )
+        )
         w13_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            w13_weight_global_data,
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
@@ -154,8 +214,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
 
+        w2_weight_global_data = (
+            torch.full((num_experts,), torch.nan, dtype=torch.float32)
+            if self.use_flashinfer_moe_ep
+            else torch.empty(num_experts, dtype=torch.float32)
+        )
         w2_weight_scale_2 = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            w2_weight_global_data,
+            requires_grad=False,
         )
         layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
         extra_weight_attrs.update(
@@ -164,8 +230,21 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
         # Input Global Scales
+        w13_input_data = (
+            torch.full(
+                (num_experts, w13_num_shards),
+                torch.nan,
+                dtype=torch.float32,
+            )
+            if self.use_flashinfer_moe_ep
+            else torch.empty(
+                num_experts,
+                w13_num_shards,
+                dtype=torch.float32,
+            )
+        )
         w13_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            w13_input_data,
             requires_grad=False,
         )
         layer.register_parameter("w13_input_global_scale", w13_input_scale)
@@ -174,8 +253,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w13_input_scale, extra_weight_attrs)
 
+        w2_input_data = (
+            torch.full((num_experts,), torch.nan, dtype=torch.float32)
+            if self.use_flashinfer_moe_ep
+            else torch.empty(num_experts, dtype=torch.float32)
+        )
         w2_input_scale = torch.nn.Parameter(
-            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+            w2_input_data,
+            requires_grad=False,
         )
         layer.register_parameter("w2_input_global_scale", w2_input_scale)
         extra_weight_attrs.update(
@@ -187,6 +272,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        if self.use_flashinfer_moe_ep:
+            self._process_flashinfer_moe_ep_weights(layer)
+            return
+        nvfp4_backend = cast(NvFp4MoeBackend, self.nvfp4_backend)
+
         # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
         # requires this naming convention. However, the name change breaks
         # reloading because the state dict no longer matches disk. Once we
@@ -222,7 +312,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale_2,
             a2_scale,
         ) = convert_to_nvfp4_moe_kernel_format(
-            nvfp4_backend=self.nvfp4_backend,
+            nvfp4_backend=nvfp4_backend,
             layer=layer,
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
@@ -252,14 +342,82 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            backend=self.nvfp4_backend,
+            backend=nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
+    def _process_flashinfer_moe_ep_weights(
+        self,
+        layer: RoutedExperts,
+    ) -> None:
+        w13_weight_global = _require_exact_shard_match(
+            "w13_weight_global_scale",
+            layer.w13_weight_global_scale,
+        )
+        w13_input_global = _require_exact_shard_match(
+            "w13_input_global_scale",
+            layer.w13_input_global_scale,
+        )
+        _require_finite_positive(
+            "w2_weight_global_scale",
+            layer.w2_weight_global_scale,
+        )
+        _require_finite_positive(
+            "w2_input_global_scale",
+            layer.w2_input_global_scale,
+        )
+
+        # CT stores the FI norm constants directly: q * stored_sf reconstructs
+        # x * norm_const, and alpha cancels the activation and weight constants.
+        input_norm_const = _global_exact_scale(w13_input_global)
+        fc1_alpha = torch.reciprocal(w13_weight_global * w13_input_global).contiguous()
+        fc1_norm_const = layer.w2_input_global_scale.contiguous()
+        fc2_alpha = torch.reciprocal(
+            layer.w2_weight_global_scale * layer.w2_input_global_scale
+        ).contiguous()
+
+        weights = FlashInferMoeEpWeights(
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+        )
+        epilogue = FlashInferMoeEpEpilogue(
+            input_norm_const=input_norm_const,
+            fc1_alpha=fc1_alpha,
+            fc2_alpha=fc2_alpha,
+            fc1_norm_const=fc1_norm_const,
+        )
+        adapter = make_flashinfer_moe_ep(
+            self.moe,
+            layer,
+            weights,
+            epilogue,
+        )
+        self.direct_backend = adapter
+        self.moe_quant_config = FusedMoEQuantConfig.make(
+            "nvfp4",
+            weight_dtype="nvfp4",
+        )
+
+        for name in (
+            "w13_weight_packed",
+            "w2_weight_packed",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_weight_global_scale",
+            "w2_weight_global_scale",
+            "w13_input_global_scale",
+            "w2_input_global_scale",
+        ):
+            delattr(layer, name)
+
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        if self.use_flashinfer_moe_ep:
+            return cast(FusedMoEQuantConfig, self.moe_quant_config)
         return make_nvfp4_moe_quant_config(
-            backend=self.nvfp4_backend,
+            backend=cast(NvFp4MoeBackend, self.nvfp4_backend),
             w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
@@ -306,6 +464,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.direct_backend is not None:
+            return self.direct_backend(x, topk_ids, topk_weights)
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

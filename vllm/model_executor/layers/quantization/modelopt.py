@@ -28,6 +28,12 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    is_flashinfer_moe_ep_backend,
+    make_flashinfer_moe_ep,
+    modelopt_nvfp4_moe_ep_data,
+    validate_flashinfer_moe_ep_config,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -827,6 +833,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # activation scales in convert_to_nvfp4_moe_kernel_format, so no
         # other change is needed.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        self.use_flashinfer_moe_ep = is_flashinfer_moe_ep_backend(self.moe.moe_backend)
+        if self.use_flashinfer_moe_ep:
+            validate_flashinfer_moe_ep_config(
+                moe_config,
+                "nvfp4",
+                use_a16=self.use_a16,
+            )
+            self.nvfp4_backend = None
+            self.experts_cls = None
+            self.use_global_sf = False
+            return
+
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
@@ -925,13 +943,29 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
 
         w13_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, w13_num_shards, dtype=torch.float32),
+            data=(
+                torch.full(
+                    (num_experts, w13_num_shards),
+                    torch.nan,
+                    dtype=torch.float32,
+                )
+                if self.use_flashinfer_moe_ep
+                else torch.empty(
+                    num_experts,
+                    w13_num_shards,
+                    dtype=torch.float32,
+                )
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
 
         w2_weight_scale_2 = PerTensorScaleParameter(
-            data=torch.empty(num_experts, dtype=torch.float32),
+            data=(
+                torch.full((num_experts,), torch.nan, dtype=torch.float32)
+                if self.use_flashinfer_moe_ep
+                else torch.empty(num_experts, dtype=torch.float32)
+            ),
             weight_loader=weight_loader,
         )
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
@@ -964,6 +998,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
+        if self.use_flashinfer_moe_ep:
+            self._process_flashinfer_moe_ep_weights(layer)
+            return
+        assert self.nvfp4_backend is not None
+        nvfp4_backend = self.nvfp4_backend
+
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
@@ -984,7 +1024,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2,
             a2_scale,
         ) = convert_to_nvfp4_moe_kernel_format(
-            nvfp4_backend=self.nvfp4_backend,
+            nvfp4_backend=nvfp4_backend,
             layer=layer,
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
@@ -1014,12 +1054,47 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            backend=self.nvfp4_backend,
+            backend=nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
+    def _process_flashinfer_moe_ep_weights(self, layer: RoutedExperts) -> None:
+        weights, epilogue = modelopt_nvfp4_moe_ep_data(
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            layer.w13_weight_scale_2,
+            layer.w2_weight_scale_2,
+            intermediate_size=self.moe.intermediate_size,
+        )
+        self.direct_backend = make_flashinfer_moe_ep(
+            self.moe,
+            layer,
+            weights,
+            epilogue,
+        )
+        self.moe_quant_config = FusedMoEQuantConfig.make(
+            "nvfp4",
+            weight_dtype="nvfp4",
+        )
+        for name in (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_weight_scale_2",
+            "w2_weight_scale_2",
+            "w13_input_scale",
+            "w2_input_scale",
+        ):
+            delattr(layer, name)
+
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        if self.use_flashinfer_moe_ep:
+            return cast(FusedMoEQuantConfig, self.moe_quant_config)
+        assert self.nvfp4_backend is not None
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1037,7 +1112,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     @property
     def supports_eplb(self) -> bool:
-        return True
+        return not self.use_flashinfer_moe_ep
 
     def apply_monolithic(
         self,
@@ -1072,6 +1147,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.direct_backend is not None:
+            return self.direct_backend(x, topk_ids, topk_weights)
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(

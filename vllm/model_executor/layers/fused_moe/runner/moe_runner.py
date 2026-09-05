@@ -424,10 +424,7 @@ class MoERunner(MoERunnerInterface):
 
     @property
     def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
+        return self._quant_method.output_is_reduced
 
     def _maybe_reduce_shared_expert_output(
         self,

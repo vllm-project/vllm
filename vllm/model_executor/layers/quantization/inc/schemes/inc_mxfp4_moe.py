@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -19,6 +21,11 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
+)
+from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep import (
+    is_flashinfer_moe_ep_backend,
+    make_mxfp4_flashinfer_moe_ep,
+    validate_flashinfer_moe_ep_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -53,6 +60,15 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe) -> None:
         super().__init__(moe)
         self.group_size = 32
+        self.experts_cls: type[mk.FusedMoEExperts] | None = None
+        self.use_flashinfer_moe_ep = is_flashinfer_moe_ep_backend(moe.moe_backend)
+        if self.use_flashinfer_moe_ep:
+            validate_flashinfer_moe_ep_config(moe, "mxfp4")
+            self.use_cutlass_mxfp4 = False
+            self.mxfp4_backend = Mxfp4MoeBackend.NONE
+            self.experts_cls = None
+            return
+
         # Backend selection must stay consistent with the weight preparation in
         # process_weights_after_loading / get_fused_moe_quant_config, which use
         # three layouts: CUTLASS swizzle (true W4A4), b12x and XPU packed
@@ -61,7 +77,6 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         # device falls back to Marlin.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        self.experts_cls: type[mk.FusedMoEExperts] | None = None
         if moe.moe_backend == "b12x":
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
             self.use_cutlass_mxfp4 = False
@@ -144,6 +159,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        if self.use_flashinfer_moe_ep:
+            return cast(FusedMoEQuantConfig, self.moe_quant_config)
         if self.use_cutlass_mxfp4:
             # W4A4: both weights and activations quantized to MXFP4.
             return mxfp4_moe_quant_config(
@@ -158,6 +175,28 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if self.use_flashinfer_moe_ep:
+            self.direct_backend = make_mxfp4_flashinfer_moe_ep(
+                self.moe,
+                layer,
+                layer.w13_weight_packed,
+                layer.w2_weight_packed,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            )
+            self.moe_quant_config = FusedMoEQuantConfig.make(
+                "nvfp4",
+                weight_dtype="mxfp4",
+            )
+            for name in (
+                "w13_weight_packed",
+                "w2_weight_packed",
+                "w13_weight_scale",
+                "w2_weight_scale",
+            ):
+                delattr(layer, name)
+            return
+
         layer.w13_weight = torch.nn.Parameter(
             layer.w13_weight_packed.data, requires_grad=False
         )
@@ -229,6 +268,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.direct_backend is not None:
+            return self.direct_backend(x, topk_ids, topk_weights)
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,

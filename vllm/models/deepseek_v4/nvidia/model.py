@@ -11,7 +11,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS, MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -85,10 +85,6 @@ from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.flashinfer_moe_ep import (
-    is_fi_moe_ep_backend,
-    validate_fi_moe_ep_config,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -761,9 +757,7 @@ class DeepseekV4MoE(nn.Module):
         self.prefix = prefix
         self.use_sequence_parallel = use_sequence_parallel
         moe_backend = vllm_config.kernel_config.moe_backend
-        validate_fi_moe_ep_config(vllm_config)
         self.use_mega_moe = moe_backend in MEGA_MOE_BACKENDS
-        self.use_fi_mega_moe = is_fi_moe_ep_backend(moe_backend)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -895,28 +889,13 @@ class DeepseekV4MoE(nn.Module):
         # Native DeepGEMM fusion requires each EP rank to own the complete
         # shared MLP. Sequence parallel replicates those weights while sharding
         # tokens. TP=1 is also naturally replicated. With PP+TP the shared MLP
-        # remains tensor-sharded, so retain the serial path. The FlashInfer
-        # megakernel has no shared-expert fusion, so it keeps the serial path.
+        # remains tensor-sharded, so retain the serial path.
         fuse_shared_experts = bool(
             self.shared_experts is not None
             and not envs.VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION
             and (self.use_sequence_parallel or self.tp_size == 1)
-            and not self.use_fi_mega_moe
         )
 
-        activation_clamp = (
-            float(self.swiglu_limit) if self.swiglu_limit is not None else None
-        )
-        if self.use_fi_mega_moe:
-            # Deferred: fi_moe subclasses DeepseekV4MegaMoEExperts, so a
-            # module-level import here would be circular.
-            from vllm.models.deepseek_v4.nvidia.fi_moe import (
-                DeepseekV4MegaMoEExpertsFI,
-            )
-
-            experts_cls: type[DeepseekV4MegaMoEExperts] = DeepseekV4MegaMoEExpertsFI
-        else:
-            experts_cls = DeepseekV4MegaMoEExperts
         expert_kwargs: dict[str, typing.Any] = dict(
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
@@ -928,9 +907,7 @@ class DeepseekV4MoE(nn.Module):
             num_shared_experts=(self.n_shared_experts if fuse_shared_experts else 0),
             prefix=f"{prefix}.experts",
         )
-        if self.use_fi_mega_moe:
-            expert_kwargs["activation_clamp"] = activation_clamp
-        self.experts = experts_cls(vllm_config, **expert_kwargs)
+        self.experts = DeepseekV4MegaMoEExperts(vllm_config, **expert_kwargs)
 
     def _init_fused_moe_experts(
         self,
@@ -1084,12 +1061,15 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
 def _use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
-    use_mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
+    moe_backend = vllm_config.kernel_config.moe_backend
+    uses_internal_expert_parallel = (
+        moe_backend in MEGA_MOE_BACKENDS or moe_backend in FLASHINFER_MOE_EP_BACKENDS
+    )
     return (
         parallel_config.pipeline_parallel_size == 1
         and parallel_config.enable_expert_parallel
         and parallel_config.tensor_parallel_size > 1
-        and (use_mega_moe or parallel_config.data_parallel_size > 1)
+        and (uses_internal_expert_parallel or parallel_config.data_parallel_size > 1)
     )
 
 
