@@ -52,6 +52,7 @@ from vllm.transformers_utils.repo_utils import resolve_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
@@ -415,6 +416,7 @@ class ModelConfig:
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
+    paged_shm_block_size: InitVar[int | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -548,6 +550,7 @@ class ModelConfig:
         mm_ipc_gpu_memory_gb: float | None,
         mm_device_do_normalize: bool | None,
         mm_processor_device: MMProcessorDevice | None,
+        paged_shm_block_size: int | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -789,6 +792,12 @@ class ModelConfig:
                 mm_processor_kwargs, mm_processor_device
             )
 
+            if mm_processor_cache_type == "paged_shm":
+                assert mm_processor_cache_gb is not None
+                paged_shm_size = mm_processor_cache_gb * GiB_bytes
+            else:
+                paged_shm_size = 0
+
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
@@ -815,6 +824,8 @@ class ModelConfig:
                 mm_device_do_normalize=self._resolve_mm_device_do_normalize(
                     mm_device_do_normalize
                 ),
+                paged_shm_size=paged_shm_size,
+                paged_shm_block_size=paged_shm_block_size,
             )
 
             mm_config_kwargs = {

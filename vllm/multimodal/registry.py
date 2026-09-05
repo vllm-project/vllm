@@ -275,7 +275,7 @@ class MultiModalRegistry:
     def _get_cache_type(
         self,
         vllm_config: "VllmConfig",
-    ) -> Literal[None, "processor_only", "lru", "shm"]:
+    ) -> Literal[None, "processor_only", "lru", "shm", "paged_shm"]:
         model_config = vllm_config.model_config
         if not self.supports_multimodal_inputs(model_config):
             return None
@@ -312,6 +312,10 @@ class MultiModalRegistry:
             return MultiModalProcessorSenderCache(vllm_config.model_config)
         elif cache_type == "shm":
             return ShmObjectStoreSenderCache(vllm_config)
+        elif cache_type == "paged_shm":
+            from .paged_shm.cache import PagedShmSenderCache
+
+            return PagedShmSenderCache(vllm_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -336,6 +340,10 @@ class MultiModalRegistry:
             return None
         elif cache_type == "lru":
             return MultiModalReceiverCache(vllm_config.model_config)
+        elif cache_type == "paged_shm":
+            from .paged_shm.cache import PagedShmReceiverCache
+
+            return PagedShmReceiverCache(vllm_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
@@ -350,6 +358,10 @@ class MultiModalRegistry:
             return None
         elif cache_type == "shm":
             return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
+        elif cache_type == "paged_shm":
+            from .paged_shm.cache import PagedShmReceiverCache
+
+            return PagedShmReceiverCache(vllm_config)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
 
