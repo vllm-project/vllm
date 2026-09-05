@@ -283,10 +283,7 @@ class KimiMLP(nn.Module):
             if gemm_rs_ar.can_run(self.down_proj):
                 self.gemm_rs_ar = gemm_rs_ar
             else:
-                logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
-                    prefix,
-                )
+                gemm_rs_ar.warn_incompatible_projection()
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
         elif hidden_act == "situ":

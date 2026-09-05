@@ -33,6 +33,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     sharded_weight_loader,
@@ -428,8 +431,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
         self._projection_overlap_max_tokens = 0
 
-        # Keep f_a before the narrow beta shard, then pad each TP-local row
-        # to select the aligned BF16 GEMM path.
+        # Keep f_a before the narrow beta shard, then align each TP-local row.
         qkvg_output_sizes = [self.projection_size] * 4
         in_proj_output_sizes = qkvg_output_sizes + [
             self.head_dim,
@@ -438,7 +440,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         local_output_size = (
             4 * self.local_projection_size + self.head_dim + self.local_num_heads
         )
-        self.in_proj_padding = -local_output_size % 16
+        in_proj_prefix = f"{prefix}.in_proj_qkvgfab"
+        alignment = (
+            128
+            if isinstance(self.quant_config, ModelOptMixedPrecisionConfig)
+            and self.quant_config._resolve_quant_algo(in_proj_prefix) == "FP8_PB_WO"
+            else 16
+        )
+        self.in_proj_padding = -local_output_size % alignment
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
@@ -448,7 +457,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             tp_size=self.tp_size,
             bias=False,
             quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvgfab",
+            prefix=in_proj_prefix,
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
@@ -588,10 +597,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             if gemm_rs_ar.can_run(self.o_proj):
                 self.gemm_rs_ar = gemm_rs_ar
             else:
-                logger.warning_once(
-                    "GEMM-RS/AR is disabled for %s due to an incompatible projection.",
-                    prefix,
-                )
+                gemm_rs_ar.warn_incompatible_projection()
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
