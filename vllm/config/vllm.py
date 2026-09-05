@@ -26,6 +26,10 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import (
+    get_torch_allocator_settings,
+    torch_allocator_uses_expandable_segments,
+)
 
 from .attention import AttentionConfig
 from .cache import CacheConfig
@@ -1013,7 +1017,12 @@ class VllmConfig:
         ):
             return
 
-        # PyTorch's expandable_segments allocator uses CUDA VMM, which can
+        from vllm.platforms import current_platform
+
+        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            return
+
+        # PyTorch's expandable_segments allocator uses accelerator VMM, which can
         # remap a virtual address range to different physical pages over the
         # engine's lifetime. KV connectors that pin KV cache memory (e.g.
         # NixlConnector via ibv_reg_mr, MooncakeConnector) end up with their
@@ -1024,28 +1033,30 @@ class VllmConfig:
         # pins memory, so we conservatively reject the combination whenever
         # any KV connector is configured.
         #
-        # CuMem allocator is exempt: CuMemAllocator.use_memory_pool toggles
-        # expandable_segments off around its pool (see #40812), so the KV
-        # cache allocated within that context lands on stable physical pages
-        # even when the env var is set.
-        if "expandable_segments:True" not in os.environ.get(
-            "PYTORCH_CUDA_ALLOC_CONF", ""
-        ):
+        # CuMem allocator is exempt on CUDA/ROCm: CuMemAllocator.use_memory_pool
+        # toggles expandable_segments off around its pool (see #40812), so the
+        # KV cache allocated within that context lands on stable physical pages.
+        allocator_settings = get_torch_allocator_settings()
+        if not torch_allocator_uses_expandable_segments(allocator_settings):
             return
-        if self.model_config is not None and (self.model_config.enable_cumem_allocator):
+        if (
+            current_platform.is_cuda_alike()
+            and self.model_config is not None
+            and self.model_config.enable_cumem_allocator
+        ):
             return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
-            "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "unless enable_cumem_allocator is also enabled. PyTorch's CUDA VMM "
-            "allocator can remap KV cache virtual addresses to different "
+            "incompatible with the PyTorch allocator setting "
+            "expandable_segments:True. PyTorch's accelerator VMM allocator "
+            "can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
-            "unset expandable_segments:True or enable the cumem allocator "
-            "(sleep mode does this automatically and also "
-            "routes KV allocations through CuMemAllocator's pool, where "
-            "expandable_segments is automatically disabled)."
+            "disable expandable_segments in PYTORCH_ALLOC_CONF (or a legacy "
+            "PYTORCH_CUDA_ALLOC_CONF/PYTORCH_HIP_ALLOC_CONF). On CUDA/ROCm, "
+            "the cumem allocator is also safe because it disables expandable "
+            "segments around its pool; sleep mode enables it automatically."
         )
 
     def _verify_sampling_replay_config(self) -> None:
