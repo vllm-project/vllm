@@ -766,6 +766,8 @@ class DelegatingParser(Parser):
     def _in_tool_call_phase(self, state: StreamState) -> bool:
         if self._tool_parser is None:
             return False
+        if self._reasoning_parser is None:
+            return True
         return state.reasoning_ended
 
     def _append_unstreamed_tool_args(

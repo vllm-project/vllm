@@ -980,7 +980,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         parameter="tool_choice.function.name",
                     )
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
+                    if isinstance(tool, dict):
+                        t_func = tool.get("function")
+                        t_name = (
+                            t_func.get("name")
+                            if isinstance(t_func, dict)
+                            else getattr(t_func, "name", None)
+                        )
+                    else:
+                        t_func = getattr(tool, "function", None)
+                        t_name = (
+                            getattr(t_func, "name", None)
+                            if not isinstance(t_func, dict)
+                            else t_func.get("name")
+                        )
+                    if t_name == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
