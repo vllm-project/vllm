@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore
@@ -27,12 +29,17 @@ def make_iteration_details() -> SchedulerIterationDetails:
     )
 
 
-def make_fake_engine(log_stats: bool = True) -> SimpleNamespace:
+def make_fake_engine(
+    log_stats: bool = True,
+    log_iteration_details: bool = True,
+    collect_iteration_details: bool = False,
+) -> SimpleNamespace:
     return SimpleNamespace(
         log_stats=log_stats,
         vllm_config=SimpleNamespace(
             observability_config=SimpleNamespace(
-                enable_logging_iteration_details=True,
+                enable_logging_iteration_details=log_iteration_details,
+                collect_iteration_details=collect_iteration_details,
             )
         ),
     )
@@ -50,14 +57,28 @@ def test_capture_iteration_details_disabled_without_log_stats():
 def test_capture_iteration_details_fills_elapsed_time():
     engine = make_fake_engine()
 
-    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
+    with (
+        patch("vllm.v1.engine.core.time.monotonic", side_effect=[10.0, 10.0067]),
+        EngineCore.capture_iteration_details(engine, None) as iteration_details,
+    ):
         assert iteration_details is not None
         assert iteration_details.elapsed_ms == 0.0
         assert iteration_details.is_dummy
-        time.sleep(0.001)
 
     assert iteration_details is not None
-    assert iteration_details.elapsed_ms > 0.0
+    assert iteration_details.elapsed_ms == pytest.approx(6.7)
+    assert engine._iteration_index == 1
+
+
+def test_capture_iteration_details_when_requested_by_stat_logger():
+    engine = make_fake_engine(
+        log_iteration_details=False,
+        collect_iteration_details=True,
+    )
+
+    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
+        assert iteration_details is not None
+
     assert engine._iteration_index == 1
 
 

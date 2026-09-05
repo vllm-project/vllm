@@ -5,6 +5,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -35,10 +36,19 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+ITERATION_PHASE_PREFILL = "prefill"
+ITERATION_PHASE_DECODE = "decode"
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
+
+
+@dataclass(frozen=True, slots=True)
+class StatLoggerRequirements:
+    """Optional engine statistics requested by a stat logger plugin."""
+
+    iteration_details: bool = False
 
 
 class StatLoggerBase(ABC):
@@ -48,6 +58,11 @@ class StatLoggerBase(ABC):
     However, note that the `SchedulerStats` and `IterationStats` classes
     are not considered stable interfaces and may change in future versions.
     """
+
+    @classmethod
+    def get_requirements(cls, vllm_config: VllmConfig) -> StatLoggerRequirements:
+        """Declare optional statistics that must be collected for this logger."""
+        return StatLoggerRequirements()
 
     @abstractmethod
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0): ...
@@ -69,6 +84,26 @@ class StatLoggerBase(ABC):
 
     def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
+
+
+def get_stat_logger_requirements(
+    stat_logger_factories: list[StatLoggerFactory],
+    vllm_config: VllmConfig,
+) -> StatLoggerRequirements:
+    """Merge collection requirements declared by stat logger factories."""
+    iteration_details = False
+    for stat_logger_factory in stat_logger_factories:
+        get_requirements = getattr(stat_logger_factory, "get_requirements", None)
+        if get_requirements is None:
+            continue
+        requirements = get_requirements(vllm_config)
+        if not isinstance(requirements, StatLoggerRequirements):
+            raise TypeError(
+                "Stat logger get_requirements() must return "
+                f"StatLoggerRequirements (got {requirements!r})."
+            )
+        iteration_details |= requirements.iteration_details
+    return StatLoggerRequirements(iteration_details=iteration_details)
 
 
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
@@ -168,6 +203,8 @@ class LoggingStatLogger(StatLoggerBase):
     def _log_iteration_details(
         self, scheduler_stats: SchedulerStats, engine_idx: int
     ) -> None:
+        if not self.vllm_config.observability_config.enable_logging_iteration_details:
+            return
         details = scheduler_stats.iteration_details
         if details is None:
             return
@@ -448,6 +485,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _kv_connector_cls = KVConnectorProm
     _perf_metrics_cls = PerfMetricsProm
 
+    @classmethod
+    def get_requirements(cls, vllm_config: VllmConfig) -> StatLoggerRequirements:
+        return StatLoggerRequirements(iteration_details=True)
+
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
     ):
@@ -464,7 +505,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
-
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
@@ -759,6 +799,49 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_iteration_tokens = create_metric_per_engine(
             histogram_iteration_tokens, per_engine_labelvalues
         )
+
+        phases = [ITERATION_PHASE_PREFILL, ITERATION_PHASE_DECODE]
+        histogram_iteration_requests = self._histogram_cls(
+            name="vllm:iteration_requests",
+            documentation=(
+                "Histogram of request counts in each engine iteration, "
+                "split by prefill and decode phase."
+            ),
+            buckets=[
+                0,
+                *build_1_2_5_buckets(vllm_config.scheduler_config.max_num_seqs),
+            ],
+            labelnames=labelnames + ["phase"],
+        )
+        histogram_iteration_tokens_by_phase = self._histogram_cls(
+            name="vllm:iteration_tokens_by_phase",
+            documentation=(
+                "Histogram of scheduled token counts in each engine iteration, "
+                "split by prefill and decode phase."
+            ),
+            buckets=[
+                0,
+                *build_1_2_5_buckets(
+                    vllm_config.scheduler_config.max_num_batched_tokens
+                ),
+            ],
+            labelnames=labelnames + ["phase"],
+        )
+        self.histogram_iteration_requests: dict[str, dict[int, Histogram]] = {}
+        self.histogram_iteration_tokens_by_phase: dict[str, dict[int, Histogram]] = {}
+        for phase in phases:
+            per_engine_phase_labelvalues = {
+                idx: labelvalues + [phase]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.histogram_iteration_requests[phase] = create_metric_per_engine(
+                histogram_iteration_requests,
+                per_engine_phase_labelvalues,
+            )
+            self.histogram_iteration_tokens_by_phase[phase] = create_metric_per_engine(
+                histogram_iteration_tokens_by_phase,
+                per_engine_phase_labelvalues,
+            )
 
         histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
@@ -1116,6 +1199,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
+            self._record_iteration_metrics(scheduler_stats, engine_idx)
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
@@ -1270,6 +1354,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+    def _record_iteration_metrics(
+        self, scheduler_stats: SchedulerStats, engine_idx: int
+    ) -> None:
+        details = scheduler_stats.iteration_details
+        if details is None or details.is_dummy:
+            return
+
+        self.histogram_iteration_requests[ITERATION_PHASE_PREFILL][engine_idx].observe(
+            details.num_ctx_requests
+        )
+        self.histogram_iteration_tokens_by_phase[ITERATION_PHASE_PREFILL][
+            engine_idx
+        ].observe(details.num_ctx_tokens)
+        self.histogram_iteration_requests[ITERATION_PHASE_DECODE][engine_idx].observe(
+            details.num_generation_requests
+        )
+        self.histogram_iteration_tokens_by_phase[ITERATION_PHASE_DECODE][
+            engine_idx
+        ].observe(details.num_generation_tokens)
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1

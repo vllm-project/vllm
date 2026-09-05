@@ -536,6 +536,7 @@ class EngineCore:
     ) -> Generator[SchedulerIterationDetails | None, None, None]:
         enable_details = (
             self.vllm_config.observability_config.enable_logging_iteration_details
+            or self.vllm_config.observability_config.collect_iteration_details
         )
         if not self.log_stats or not enable_details:
             yield None
