@@ -346,7 +346,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if cached_results is not None:
         write_flashinfer_autotune_cache(cache_path, cached_results)
         world.barrier()
-        tuner.load_configs(str(cache_path))
+        # Only load with one rank. Under expert parallelism the per-rank MoE
+        # problem shapes differ, so with a warm cache some ranks hit and skip
+        # profiling while others miss and profile. The autotuner's per-tactic
+        # all-reduce then fires a different number of times per rank and the
+        # warmup deadlocks.
+        if world.world_size == 1:
+            tuner.load_configs(str(cache_path))
 
     group = world.cpu_group if world.world_size > 1 else None
     set_autotune_process_group(group)
