@@ -25,10 +25,19 @@ def test_input() -> RequestFuncInput:
     )
 
 
-async def test_readiness_timeout_cancels_stalled_request(test_input):
+@pytest.mark.parametrize("prior_failure", [False, True])
+async def test_readiness_timeout_cancels_request_and_preserves_failure(
+    test_input, prior_failure
+):
+    failure = RequestFuncOutput(success=False, error="Model is still loading")
     cancelled = asyncio.Event()
+    calls = 0
 
-    async def stalled_request(**kwargs):
+    async def request(**kwargs):
+        nonlocal calls
+        calls += 1
+        if prior_failure and calls == 1:
+            return failure
         try:
             await asyncio.Event().wait()
         finally:
@@ -36,35 +45,18 @@ async def test_readiness_timeout_cancels_stalled_request(test_input):
 
     output = await asyncio.wait_for(
         ready_checker.wait_for_endpoint(
-            stalled_request, test_input, session=None, timeout_seconds=1
-        ),
-        timeout=5,
-    )
-    assert not output.success
-    assert output.error == "Endpoint readiness timed out after 1s."
-    assert cancelled.is_set()
-
-
-async def test_readiness_timeout_preserves_last_failure(test_input):
-    failure = RequestFuncOutput(success=False, error="Model is still loading")
-    calls = 0
-
-    async def request(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return failure
-        await asyncio.Event().wait()
-
-    output = await asyncio.wait_for(
-        ready_checker.wait_for_endpoint(
             request, test_input, session=None, timeout_seconds=1, retry_interval=0
         ),
         timeout=5,
     )
-    assert output is failure
-    assert output.error == "Model is still loading"
-    assert calls == 2
+    assert not output.success
+    assert cancelled.is_set()
+    assert calls == 1 + prior_failure
+    if prior_failure:
+        assert output is failure
+        assert output.error == "Model is still loading"
+    else:
+        assert output.error == "Endpoint readiness timed out after 1s."
 
 
 @pytest.mark.parametrize("failures", [0, 1])
@@ -120,6 +112,6 @@ async def test_readiness_propagates_external_cancellation(test_input):
         await asyncio.wait_for(started.wait(), timeout=5)
     finally:
         task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
     assert cancelled.is_set()
