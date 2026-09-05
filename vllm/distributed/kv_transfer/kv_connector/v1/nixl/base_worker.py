@@ -1271,7 +1271,12 @@ class NixlBaseConnectorWorker:
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
         # register separate conv/ssm sub-regions (see `_build_mamba_local`).
-        for layer_name in sorted(xfer_buffers, key=_region_sort_key):
+        layer_names = (
+            xfer_buffers
+            if self._is_csa_linear
+            else sorted(xfer_buffers, key=_region_sort_key)
+        )
+        for layer_name in layer_names:
             cache = xfer_buffers[layer_name]
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers

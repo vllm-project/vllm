@@ -163,6 +163,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.model_config.get_total_num_kv_heads.return_value = 1
     worker.attn_backends = []
     worker._has_mamba = False
+    worker._is_csa_linear = False
     worker.vllm_config = MagicMock()
     worker.backend_name = "FLASHMLA"
     worker.num_blocks = num_blocks
