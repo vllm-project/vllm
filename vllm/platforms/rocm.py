@@ -487,7 +487,8 @@ def _get_backend_priorities(
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
-    elif rocm_aiter_ops.is_rdna_aiter_enabled():
+    elif rocm_aiter_ops.is_rdna_aiter_enabled() and on_rdna4():
+        # gfx11/RDNA3 is excluded: no proof aiter unified attn beats Triton there.
         backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
