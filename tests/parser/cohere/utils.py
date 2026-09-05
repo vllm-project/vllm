@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import itertools
+from typing import TYPE_CHECKING, cast
 
 import regex as re
 
@@ -12,6 +13,10 @@ from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+
+if TYPE_CHECKING:
+    from vllm.tokenizers import TokenizerLike
+    from vllm.tool_parsers.abstract_tool_parser import Tool
 
 _SPECIAL_TOKEN_RE = re.compile(r"(<\|[A-Z_]+\|>)")
 REPLACEMENT_CHAR = "�"
@@ -104,8 +109,16 @@ def make_parser(
     cls = ParserManager.get_parser(name, name, enable_auto_tools=True)
     assert cls is not None
     return cls(
-        tokenizer,
-        tools,
+        # ``MockCohereTokenizer`` implements only the members the parser
+        # touches (``convert_tokens_to_ids``/``get_vocab``/``encode``/
+        # ``decode``) rather than the full protocol.
+        cast("TokenizerLike", tokenizer),
+        # Raw dicts on purpose: ``CohereCommandParser`` folds tool schemas in
+        # from ``request.tools``, and the constructor argument only reaches
+        # ``ToolParser.__init__``, which keeps validated
+        # ``ChatCompletionToolsParam``/``FunctionTool`` entries and is never
+        # read back by the Cohere shims.
+        cast("list[Tool] | None", tools),
         model_config=model_config,
         chat_template_kwargs=chat_template_kwargs or {},
     )

@@ -11,6 +11,7 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.custom_op import CustomOp, op_registry
 from vllm.model_executor.layers.activation import (
     GeluAndMul,
@@ -77,7 +78,7 @@ class Relu3(ReLUSquaredActivation):
 )
 def test_enabled_ops(
     env: str | None,
-    compilation_mode: int,
+    compilation_mode: CompilationMode,
     backend: str,
     ops_enabled: list[int],
     default_on: bool,

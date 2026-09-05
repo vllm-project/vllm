@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
@@ -282,7 +283,7 @@ def test_static_model_tensors_survive_level2_restore(
         )
 
     model = case.model or _create_local_model_config(case, tmp_path / case.name)
-    llm_kwargs = {
+    llm_kwargs: dict[str, Any] = {
         "model": model,
         "load_format": "dummy",
         "enable_sleep_mode": True,
