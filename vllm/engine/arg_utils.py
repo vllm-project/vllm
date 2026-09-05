@@ -2614,6 +2614,33 @@ class EngineArgs:
                 _raise_unsupported_error(feature_name=name)
 
     @classmethod
+    def _use_high_bw_batch_defaults(cls, device_memory: int, device_name: str) -> bool:
+        """Return whether to use the H100/H200 token and seq defaults.
+
+        Full cards use the 70 GiB gate. MIG slices of those GPUs report far
+        less memory but keep the same memory generation, so option 1 of
+        issue #55381 (torch memory fallback) is not enough by itself.
+        """
+        high_bw_mig_markers = (
+            "h100",
+            "h200",
+            "h20",
+            "h800",
+            "b200",
+            "b300",
+            "gb200",
+        )
+        if "a100" in device_name:
+            return False
+        if device_memory >= 70 * GiB_bytes:
+            return True
+        return (
+            "mig" in device_name
+            and device_memory >= 24 * GiB_bytes
+            and any(marker in device_name for marker in high_bw_mig_markers)
+        )
+
+    @classmethod
     def get_batch_defaults(
         cls,
         world_size: int,
@@ -2676,7 +2703,7 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 1024,
                 UsageContext.OPENAI_API_SERVER: 1024,
             }
-        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+        elif cls._use_high_bw_batch_defaults(device_memory, device_name):
             # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
