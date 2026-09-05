@@ -327,6 +327,19 @@ class DeltaFunctionCall(BaseModel):
     name: str | None = None
     arguments: str | None = None
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        """Serialize DeltaFunctionCall, stripping None fields
+
+        for OpenAI spec compatibility.
+        """
+        data = handler(self)
+        if data.get("name") is None:
+            data.pop("name", None)
+        if data.get("arguments") is None:
+            data.pop("arguments", None)
+        return data
+
 
 # a tool call delta where everything is optional
 class DeltaToolCall(OpenAIBaseModel):
@@ -334,6 +347,21 @@ class DeltaToolCall(OpenAIBaseModel):
     type: Literal["function"] | None = None
     index: int
     function: DeltaFunctionCall | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        """Serialize DeltaToolCall, stripping None fields
+
+        for OpenAI spec compatibility.
+        """
+        data = handler(self)
+        if data.get("id") is None:
+            data.pop("id", None)
+        if data.get("type") is None:
+            data.pop("type", None)
+        if data.get("function") is None:
+            data.pop("function", None)
+        return data
 
 
 class ExtractedToolCallInformation(BaseModel):
