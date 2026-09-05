@@ -24,6 +24,8 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
+    KpoolTailMetadataBuilder,
+    compute_kpool_tail_slot_mapping,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
@@ -643,6 +645,126 @@ def test_generate_fused_drafts_non_advancing_never_updates_metadata():
     speculator._generate_fused_drafts(2, 2, metadata, None, None, CUDAGraphMode.NONE)
 
     assert events == ["generate", "generate", "generate"]
+
+
+def _make_kpool_tail_builder(
+    monkeypatch, *, enable: bool = True, kpool: int = 4, max_tokens: int = 16
+) -> KpoolTailMetadataBuilder:
+    # setenv (not setattr on the envs module): monkeypatch teardown of a
+    # module-attr shadow would materialize the lazily-resolved value as a
+    # permanent attribute and poison later env-gating tests.
+    monkeypatch.setenv("VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA", str(int(enable)))
+    monkeypatch.setenv("VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA", "0")
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
+    )
+    return KpoolTailMetadataBuilder(
+        kv_cache_spec=SimpleNamespace(block_size=kpool),
+        layer_names=["tail"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+    )
+
+
+def _make_kpool_common(
+    positions: torch.Tensor,
+    *,
+    num_reqs: int = 2,
+    kpool: int = 4,
+    num_actual_tokens: int | None = None,
+) -> SimpleNamespace:
+    if num_actual_tokens is None:
+        num_actual_tokens = positions.numel()
+    block_table = torch.tensor([[7, 0], [9, 0]], dtype=torch.int32)
+    query_start_loc = torch.tensor(
+        [0, num_actual_tokens // num_reqs, num_actual_tokens],
+        dtype=torch.int32,
+    )
+    return SimpleNamespace(
+        seq_lens=torch.full((num_reqs,), 8, dtype=torch.int32),
+        max_seq_len=8,
+        slot_mapping=torch.zeros(num_actual_tokens, dtype=torch.int64),
+        block_table_tensor=block_table,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.to("cpu"),
+        positions=positions,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=1,
+    )
+
+
+def test_kpool_tail_update_refreshes_buffer_in_place(monkeypatch):
+    # Capture safety: advancing positions must update the persistent
+    # slot_mapping_buffer contents without reallocating it.
+    builder = _make_kpool_tail_builder(monkeypatch)
+    positions = torch.tensor([3, 3, 3, 3], dtype=torch.int64)
+    common = _make_kpool_common(positions)
+    metadata = builder.build(0, common)
+    data_ptr_before = builder.slot_mapping_buffer.data_ptr()
+
+    positions.fill_(4)
+    builder.update_draft_decode_metadata(metadata)
+
+    assert builder.slot_mapping_buffer.data_ptr() == data_ptr_before
+    assert metadata.slot_mapping.data_ptr() == data_ptr_before
+    # kpool=4: pos 4 wraps to slot 0; req blocks are 7 and 9.
+    expected = torch.tensor([7 * 4, 7 * 4, 9 * 4, 9 * 4], dtype=torch.int64)
+    assert torch.equal(metadata.slot_mapping, expected)
+
+
+def test_kpool_tail_update_wraps_circular_positions(monkeypatch):
+    # pos%4: 3 -> 0 rotation must match a fresh build after the advance.
+    builder = _make_kpool_tail_builder(monkeypatch)
+    positions = torch.tensor([2, 3], dtype=torch.int64)
+    common = _make_kpool_common(positions, num_actual_tokens=2)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common.query_start_loc = query_start_loc
+    metadata = builder.build(0, common)
+    before = metadata.slot_mapping.clone()
+
+    positions += 1  # 3 -> 4 (wraps to 0)
+    builder.update_draft_decode_metadata(metadata)
+
+    assert not torch.equal(metadata.slot_mapping, before)
+    fresh = compute_kpool_tail_slot_mapping(
+        common.slot_mapping,
+        common.block_table_tensor,
+        query_start_loc,
+        positions,
+        2,
+        2,
+        4,
+    )
+    assert torch.equal(metadata.slot_mapping, fresh)
+    # pos 3 -> own_block*4+3; pos 4 -> own_block*4+0
+    assert metadata.slot_mapping.tolist() == [7 * 4 + 3, 9 * 4]
+
+
+def test_kpool_tail_update_empty_batch_is_early_noop(monkeypatch):
+    builder = _make_kpool_tail_builder(monkeypatch)
+    positions = torch.zeros(0, dtype=torch.int64)
+    common = _make_kpool_common(positions, num_actual_tokens=0)
+    metadata = builder.build(0, common)
+    assert builder._last_num_actual_tokens == 0
+
+    builder.update_draft_decode_metadata(metadata)
+
+    assert torch.equal(metadata.slot_mapping, torch.zeros(0, dtype=torch.int64))
+
+
+def test_kpool_tail_support_declines_without_positions(monkeypatch):
+    builder = _make_kpool_tail_builder(monkeypatch)
+    assert builder.supports_draft_decode_metadata_update is True
+    common = _make_kpool_common(torch.tensor([1, 1], dtype=torch.int64))
+    common.positions = None
+    builder.build(0, common)
+    assert builder.supports_draft_decode_metadata_update is False
+
+
+def test_kpool_tail_support_env_gating(monkeypatch):
+    builder = _make_kpool_tail_builder(monkeypatch, enable=False)
+    assert builder.supports_draft_decode_metadata_update is False
 
 
 def _make_indexer_builder(**overrides) -> DeepseekV32IndexerMetadataBuilder:
