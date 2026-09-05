@@ -7,6 +7,10 @@ from prometheus_client import REGISTRY
 from prometheus_client import Metric as PromMetric
 from prometheus_client.samples import Sample
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 @dataclass
 class Metric:
@@ -69,6 +73,11 @@ class Histogram(Metric):
 
 def get_metrics_snapshot() -> list[Metric]:
     """An API for accessing in-memory Prometheus metrics.
+
+    Returns only the collector types this reader can represent - gauge,
+    counter and histogram. Other prometheus_client collector types
+    (summary, info, stateset, untyped) are skipped, so a metric registered
+    under the vllm: prefix with one of those types will not appear here.
 
     Example:
         >>> for metric in llm.get_metrics():
@@ -138,7 +147,16 @@ def get_metrics_snapshot() -> list[Metric]:
                     )
                 )
         else:
-            raise AssertionError(f"Unknown metric type {metric.type}")
+            # prometheus_client also ships summary, info, stateset and untyped
+            # collectors, and any custom collector may return them. Raising here
+            # takes down two public paths - LLM.get_metrics() and the ORCA
+            # endpoint-load-metrics header - over a metric neither of them was
+            # going to read. Skip what this reader cannot represent, keep the rest.
+            logger.debug(
+                "Skipping metric %s: unsupported metric type %s",
+                metric.name,
+                metric.type,
+            )
 
     return collected
 
