@@ -44,6 +44,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
+from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -144,12 +145,19 @@ class AsyncLLM(EngineClient):
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        self.admission_stats = SharedAdmissionStats(
+            client_addresses,
+            client_count,
+            client_index,
+        )
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            admission_stats=self.admission_stats,
         )
 
         # EngineCore (starts the engine in background process).
@@ -290,8 +298,9 @@ class AsyncLLM(EngineClient):
         Both limits return HTTP 503 (Service Unavailable) so that load
         balancers and client SDKs retry on a different instance.
 
-        - ``max_num_queued_reqs``: hard cap on the number of unfinished requests
-          (waiting + running).  A request with ``n > 1`` counts as ``n`` slots.
+        - ``max_num_queued_reqs``: approximate global cap on the number of
+          unfinished requests (waiting + running). A request with ``n > 1``
+          counts as ``n`` slots.
         - ``max_num_queued_tokens``: TTFT QoS — cap on the total prompt
           tokens of requests still in prefill.
 
@@ -309,19 +318,17 @@ class AsyncLLM(EngineClient):
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
+        current_requests = self.admission_stats.get_num_requests()
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
-        if max_num_reqs is not None:
-            current = self.get_num_unfinished_requests()
-            if current + n > max_num_reqs:
-                logger.info(
-                    "Request queue full - rejecting request %s "
-                    "(current=%d, n=%d, max=%d).",
-                    request_id,
-                    current,
-                    n,
-                    max_num_reqs,
-                )
-                raise QueueOverflowError()
+        if max_num_reqs is not None and current_requests + n > max_num_reqs:
+            logger.info(
+                "Request queue full - rejecting request %s (current=%d, n=%d, max=%d).",
+                request_id,
+                current_requests,
+                n,
+                max_num_reqs,
+            )
+            raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
