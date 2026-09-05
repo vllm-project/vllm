@@ -76,7 +76,10 @@ class MoeWNA16Config(QuantizationConfig):
                 -1 if capability_tuple is None else capability_tuple.to_int()
             )
             awq_min_capability = AutoAWQConfig.get_min_capability()
-            if device_capability < awq_min_capability:
+            # XPU reports no CUDA-style device capability
+            # (get_device_capability() is None), and the WNA16 kernels used
+            # on XPU do not depend on it, so skip the CUDA capability gate.
+            if not current_platform.is_xpu() and device_capability < awq_min_capability:
                 raise ValueError(
                     "The quantization method moe_wna16 + awq is not supported "
                     "for the current GPU. "
@@ -163,7 +166,7 @@ class MoeWNA16Config(QuantizationConfig):
         awq_compatible = (
             quant_method == "awq"
             and num_bits == 4
-            and device_capability >= awq_min_capability
+            and (device_capability >= awq_min_capability or current_platform.is_xpu())
         )
 
         return gptq_compatible or awq_compatible
