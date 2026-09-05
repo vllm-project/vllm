@@ -35,7 +35,7 @@ from vllm.utils.registry import ExtensionManager
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
 from .base import MediaIO, MediaWithBytes
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .video import VideoEmbeddingMediaIO, VideoMediaIO
 
 logger = init_logger(__name__)
 
@@ -652,4 +652,29 @@ class MediaConnector:
 
         return await loop.run_in_executor(
             global_thread_pool, audio_embedding_io.load_base64, "", data
+        )
+
+    def fetch_video_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load video embedding from a URL.
+        """
+        video_embedding_io = VideoEmbeddingMediaIO()
+
+        return video_embedding_io.load_base64("", data)
+
+    async def fetch_video_embedding_async(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Asynchronously load video embedding from a URL.
+        """
+        video_embedding_io = VideoEmbeddingMediaIO()
+        loop = asyncio.get_running_loop()
+
+        return await loop.run_in_executor(
+            global_thread_pool, video_embedding_io.load_base64, "", data
         )

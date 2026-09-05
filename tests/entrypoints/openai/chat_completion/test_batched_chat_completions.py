@@ -8,13 +8,13 @@ import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.chat_completion.batch_serving import (
     OpenAIServingChatBatch,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # any model with a chat template defined in tokenizer_config should work here

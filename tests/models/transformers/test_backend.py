@@ -2,19 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the functionality of the Transformers modeling backend."""
 
+import ast
 import contextlib
 import os
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 import torch.nn as nn
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, PretrainedConfig
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
+from vllm.model_executor.models.transformers.fusers import AttentionFuser
+from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
 from vllm.model_executor.models.utils import StageMissingLayer
 
@@ -316,6 +320,8 @@ def test_pooling(
 
 
 VOCAB_SIZE = 64
+PER_LAYER_VOCAB_SIZE = 32
+NUM_POSITIONS = 16
 HIDDEN_SIZE = 8
 EMBED_SCALE = 3.0
 
@@ -397,10 +403,10 @@ def replace(embedding):
     return new_embedding
 
 
-def assert_scaled(vpe, module, embedding=None):
-    """`module`'s output is `embedding`'s unscaled output times `EMBED_SCALE`."""
+def assert_scaled(vpe, module):
+    """`module`'s output is its own unscaled output times `EMBED_SCALE`."""
     input_ids = torch.arange(VOCAB_SIZE)
-    unscaled = vpe.forward(embedding if embedding is not None else module, input_ids)
+    unscaled = vpe.forward(module, input_ids)
     torch.testing.assert_close(module(input_ids), unscaled * EMBED_SCALE)
 
 
@@ -434,56 +440,106 @@ def test_replace_inherited_embedding(vpe):
     assert_scaled(vpe, new_embedding)
 
 
-def test_replace_composed_embedding(vpe):
-    """Wrappers are left alone; only the `nn.Embedding` they hold is replaced."""
-    embedding = ComposedWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
-    new_embedding = replace(embedding)
+def test_replace_is_idempotent(tp_init):
+    """A tied table is reached twice by the recursion, and must not be rebased twice."""
+    from vllm.model_executor.models.transformers.utils import replace_embedding_class
 
-    assert new_embedding is embedding
-    assert type(embedding.embed) is vpe
-    assert_scaled(vpe, new_embedding, embedding.embed)
+    new_embedding = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=2))
+    again = replace_embedding_class(new_embedding)
+
+    assert again is new_embedding
+    assert type(again) is type(new_embedding)
 
 
-def test_replace_nested_embedding(vpe):
-    """The composed `nn.Embedding` is found and set however deeply it is nested."""
-    wrapper = nn.Module()
-    wrapper.add_module("inner", nn.Module())
-    wrapper.inner.add_module(
-        "embed", ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+class FakeVocabModel(nn.Module):
+    """The embedding tables a model can hold, only one of which is a vocab table.
+
+    `embed_tokens_per_layer` mirrors Gemma 3n, whose per-layer table is sized by
+    `vocab_size_per_layer_input` rather than `vocab_size`.
+    """
+
+    def __init__(self, per_layer: bool = False, composed: bool = False):
+        super().__init__()
+        embed_cls = ComposedWordEmbedding if composed else ScaledWordEmbedding
+        self.embed_tokens = embed_cls(VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE)
+        if per_layer:
+            self.embed_tokens_per_layer = ScaledWordEmbedding(
+                PER_LAYER_VOCAB_SIZE, HIDDEN_SIZE, embed_scale=EMBED_SCALE
+            )
+        # Not a vocab table: indexed by position, and read as a whole by models
+        # which interpolate it (e.g. `SiglipVisionEmbeddings`)
+        self.position_embedding = nn.Embedding(NUM_POSITIONS, HIDDEN_SIZE)
+
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+
+def replace_vocab_embeddings(model, **config_kwargs):
+    """Replace `model`'s vocab tables as `recursive_replace` would, and return them."""
+    from vllm.model_executor.models.transformers.utils import attrsetter
+
+    stub = nn.Module()
+    stub.model = model
+    stub.config = PretrainedConfig(
+        vocab_size=VOCAB_SIZE, num_positions=NUM_POSITIONS, **config_kwargs
     )
-    replace(wrapper)
+    embeddings = Base._vocab_embeddings(stub)
 
-    assert isinstance(wrapper.inner.embed, vpe)
-    assert_scaled(vpe, wrapper.inner.embed)
-
-
-@pytest.mark.parametrize("num_embeddings", [0, 2])
-def test_replace_ambiguous_embedding(tp_init, num_embeddings):
-    """Composing anything but one `nn.Embedding` is an error, not a silent guess."""
-    wrapper = nn.Module()
-    for i in range(num_embeddings):
-        wrapper.add_module(f"embed_{i}", nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
-
-    with pytest.raises(ValueError, match=f"found {num_embeddings}"):
-        replace(wrapper)
+    replaced = []
+    for name, module in list(model.named_modules()):
+        if module in embeddings:
+            replaced.append(replace(module))
+            attrsetter(name)(model, replaced[-1])
+    return replaced
 
 
-def test_replaced_embedding_exposes_one_vpe(vpe):
-    """`CausalMixin` ties `lm_head` to the one `VocabParallelEmbedding` it can find.
+def test_only_vocab_tables_are_replaced(vpe):
+    """Position embeddings share the `nn.Embedding` type, but not the treatment."""
+    model = FakeVocabModel()
 
-    `tie_weights` reads `.weight`, which a composing module does not have, so it must
-    be handed the composed embedding instead.
+    assert replace_vocab_embeddings(model) == [model.embed_tokens]
+    assert isinstance(model.embed_tokens, vpe)
+    assert type(model.position_embedding) is nn.Embedding
+
+
+def test_per_layer_vocab_table_is_replaced(vpe):
+    """A second vocab table is found by its size, without a bespoke accessor."""
+    model = FakeVocabModel(per_layer=True)
+    replaced = replace_vocab_embeddings(
+        model, vocab_size_per_layer_input=PER_LAYER_VOCAB_SIZE
+    )
+
+    assert replaced == [model.embed_tokens, model.embed_tokens_per_layer]
+    assert all(isinstance(module, vpe) for module in replaced)
+
+
+def test_composed_input_embeddings_are_replaced(vpe):
+    """A wrapper is left alone; only the `nn.Embedding` it composes is replaced.
+
+    `CausalMixin` ties `lm_head` to whichever `VocabParallelEmbedding` it finds under
+    `get_input_embeddings()`, reading a `.weight` the wrapper does not have.
     """
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-    inherited = replace(ScaledWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE))
-    composed = replace(ComposedWordEmbedding(VOCAB_SIZE, HIDDEN_SIZE, EMBED_SCALE))
+    model = FakeVocabModel(composed=True)
+    wrapper = model.embed_tokens
+    replaced = replace_vocab_embeddings(model)
 
-    assert [m for m in inherited.modules() if isinstance(m, vpe)] == [inherited]
-    assert [m for m in composed.modules() if isinstance(m, vpe)] == [composed.embed]
+    assert model.embed_tokens is wrapper
+    assert replaced == [m for m in wrapper.modules() if isinstance(m, vpe)]
 
     lm_head = ParallelLMHead(VOCAB_SIZE, HIDDEN_SIZE)
-    assert lm_head.tie_weights(composed.embed).weight is composed.embed.weight
+    assert lm_head.tie_weights(replaced[0]).weight is replaced[0].weight
+
+
+def test_missing_input_embeddings_are_skipped(tp_init):
+    """Pipeline ranks without the embeddings have a `PPMissingLayer` in their place."""
+    from vllm.model_executor.models.utils import PPMissingLayer
+
+    model = FakeVocabModel()
+    model.embed_tokens = PPMissingLayer()
+
+    assert replace_vocab_embeddings(model) == []
 
 
 MULTIMODAL_MODEL = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
@@ -531,3 +587,141 @@ def test_marking_skipped_without_tokenizer():
     """
     vision_tower = build_marked_model(0, skip_tokenizer_init=True).vision_tower
     assert not isinstance(vision_tower, StageMissingLayer)
+
+
+NUM_LAYERS = 4
+
+
+def build_model(model_type: str, **overrides) -> nn.Module:
+    """A tiny HF model of `NUM_LAYERS` layers, built on the meta device."""
+    try:
+        config = AutoConfig.for_model(
+            model_type,
+            num_hidden_layers=NUM_LAYERS,
+            hidden_size=64,
+            intermediate_size=128,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            vocab_size=VOCAB_SIZE,
+            **overrides,
+        )
+    except ValueError:
+        pytest.skip(f"The installed transformers has no {model_type!r} model")
+    with torch.device("meta"):
+        return AutoModel.from_config(config)
+
+
+ATTENTION_MODEL_TYPES = [
+    # The default `head_size**-0.5` happens to be right here
+    "llama",
+    # Scales the query by a learnable per-dim weight, so it declares 1.0
+    "gemma4_text",
+    # MLA, and declares yarn's `mscale`
+    "deepseek_v3",
+]
+
+
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_dispatch_is_matched(model_type: str):
+    """Exactly the decoder layers' attention modules match an `AttentionFuser`.
+
+    That match is what `recursive_replace` records, and so what
+    `create_attention_instances` attaches vLLM's attention layer to.
+    """
+    model = build_model(model_type)
+    matched = {
+        name
+        for name, module in model.named_modules()
+        if AttentionFuser.match(None, module) is not None
+    }
+    assert matched == {f"layers.{i}.self_attn" for i in range(NUM_LAYERS)}
+
+
+def test_attention_layer_index_is_the_modules_own():
+    """The layer served comes from the module, not from its position in the stack.
+
+    LongCat Flash gives each decoder layer two attention sublayers numbered
+    `2i` and `2i + 1`, so `num_hidden_layers` is twice the length of the stack
+    and the enclosing layer's position is not the index the KV cache is keyed by.
+    A vision tower is excluded separately, by `validate`: only the text config is
+    patched to dispatch to vLLM, so a tower's attention is left to Transformers.
+    """
+    model = build_model("longcat_flash", num_layers=2)
+    text_config = model.config.get_text_config()
+    assert len(model.layers) * 2 == text_config.num_hidden_layers
+
+    attentions = [
+        model.get_submodule(f"layers.{i}.self_attn.{j}") for i in (0, 1) for j in (0, 1)
+    ]
+    fusers = [AttentionFuser.match(None, attn) for attn in attentions]
+    assert all(fuser is not None for fuser in fusers)
+    assert [f.layer_index(a) for f, a in zip(fusers, attentions)] == [0, 1, 2, 3]
+
+    # Not dispatching to vLLM yet, as a vision tower never would be. The vLLM
+    # config is not consulted, only the one the module was built with.
+    assert not any(f.validate(a, None) for f, a in zip(fusers, attentions))
+    text_config._attn_implementation = VLLM_ATTN_IMPL
+    assert all(f.validate(a, None) for f, a in zip(fusers, attentions))
+
+
+def test_attention_dispatch_is_required(monkeypatch: pytest.MonkeyPatch):
+    """Models selected by the permissive registry fail clearly without dispatch."""
+    monkeypatch.setattr(
+        "vllm.model_executor.models.transformers.base.get_pp_indices",
+        lambda *_: (0, 1),
+    )
+    model = SimpleNamespace(
+        text_config=SimpleNamespace(num_hidden_layers=1),
+        pp_group=SimpleNamespace(rank_in_group=0, world_size=1),
+        attention_fusers={},
+        _get_attn_cls=lambda: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Layer 0 does not dispatch through the Transformers attention interface",
+    ):
+        Base.create_attention_instances(model)
+
+
+@pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
+def test_attention_scale_is_the_declared_one(model_type: str):
+    """The scale comes off the module, not from the `head_size**-0.5` default.
+
+    Two of the three model types declare something the default would silently
+    replace, so they are what makes this more than a tautology.
+    """
+    attention = build_model(model_type).layers[0].self_attn
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == attention.scaling
+
+
+def test_attention_scale_is_the_argument_not_the_attribute():
+    """OPT applies the scale to the query itself, then declares a literal 1.0.
+
+    Its `self.scaling` is the `head_size**-0.5` it has already applied, so
+    reading the attribute rather than the argument the module hands the
+    interface would scale twice.
+    """
+    model = build_model("opt", ffn_dim=128, word_embed_proj_dim=64)
+    attention = model.get_submodule("decoder.layers.0.self_attn")
+    fuser = AttentionFuser.match(None, attention)
+    assert fuser is not None
+    assert fuser.scale(attention) == 1.0 != attention.scaling
+
+
+def test_attention_scale_rejects_unresolvable_expression():
+    """Unresolvable declared scales must not silently use the Llama default."""
+
+    class Attention(nn.Module):
+        head_dim = 16
+
+    fuser = AttentionFuser(
+        source_cls="Attention",
+        scale_expr=ast.parse("self.head_dim**-0.5 * self.factor", mode="eval").body,
+    )
+
+    with pytest.raises(ValueError, match="Cannot resolve attention scaling expression"):
+        fuser.scale(Attention())

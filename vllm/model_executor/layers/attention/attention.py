@@ -19,7 +19,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -183,7 +186,9 @@ def _init_kv_cache_quant(
     layer._o_scale_float = None
 
     quant_method = (
-        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+        resolve_quant_method(quant_config, layer, prefix=prefix)
+        if quant_config
+        else None
     )
 
     # See [Note: Register q/k/v/prob scales in state dict]
@@ -584,7 +589,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
             if self.quant_config
             else None
         )
