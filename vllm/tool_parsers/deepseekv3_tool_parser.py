@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -95,7 +96,10 @@ class DeepSeekV3ToolParser(ToolParser):
                 # tag and end-of-string so the result of
                 # findall is an array of tuples where one is a function call and
                 # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+                function_call_tuples = self.tool_call_regex.findall(
+                    model_output,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                )
 
                 tool_calls = []
                 for match in function_call_tuples:
@@ -116,6 +120,17 @@ class DeepSeekV3ToolParser(ToolParser):
                     content=content if content else None,
                 )
 
+            except TimeoutError:
+                logger.warning(
+                    "Regex timeout occurred when matching tool call pattern."
+                )
+                logger.debug(
+                    "Regex timeout occurred when matching user input: %s",
+                    model_output,
+                )
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
             except Exception:
                 logger.exception("Error in extracting tool call from response.")
                 return ExtractedToolCallInformation(
@@ -251,7 +266,8 @@ class DeepSeekV3ToolParser(ToolParser):
             current_tool_call = dict()
             if tool_call_portion:
                 current_tool_call_matches = self.stream_tool_call_portion_regex.match(
-                    tool_call_portion
+                    tool_call_portion,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
                 )
                 if current_tool_call_matches:
                     tool_type, tool_name, tool_args = current_tool_call_matches.groups()
@@ -259,7 +275,10 @@ class DeepSeekV3ToolParser(ToolParser):
                     current_tool_call["arguments"] = tool_args
                 else:
                     current_tool_call_name_matches = (
-                        self.stream_tool_call_name_regex.match(tool_call_portion)
+                        self.stream_tool_call_name_regex.match(
+                            tool_call_portion,
+                            timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS,
+                        )
                     )
                     if current_tool_call_name_matches:
                         tool_type, tool_name = current_tool_call_name_matches.groups()
@@ -390,6 +409,9 @@ class DeepSeekV3ToolParser(ToolParser):
 
             return delta
 
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             return None  # do not stream a delta. skip this token ID.
