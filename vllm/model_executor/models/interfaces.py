@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         VllmConfig,
     )
     from vllm.config.multimodal import VideoPruningMethod
-    from vllm.inputs import PromptType, TokensPrompt
+    from vllm.inputs import EngineInput, PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -1406,6 +1406,17 @@ class SupportsTranscription(Protocol):
         Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
+        """
+        return None
+
+    @classmethod
+    def get_speech_to_text_max_tokens(
+        cls,
+        engine_input: "EngineInput",
+    ) -> int | None:
+        """
+        Return a model-specific generation limit for transcription.
+        A return value of ``None`` applies no additional limit.
         """
         return None
 

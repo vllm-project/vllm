@@ -17,7 +17,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.inputs import EngineInput, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
@@ -454,6 +454,29 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             sample_rate=sample_rate,
             min_energy_split_window_size=None,
         )
+
+    # Offline transcription must stop when its aligned audio embeddings are exhausted.
+    @classmethod
+    def get_speech_to_text_max_tokens(cls, engine_input: EngineInput) -> int:
+        assert engine_input["type"] == "multimodal"
+
+        audio_placeholders = engine_input["mm_placeholders"].get("audio", [])
+        assert len(audio_placeholders) == 1, (
+            "Voxtral realtime transcription requires exactly one audio input"
+        )
+
+        audio_placeholder = audio_placeholders[0]
+
+        # Limit generation to the audio-aligned positions remaining after the prompt.
+        max_tokens = (
+            audio_placeholder.offset
+            + audio_placeholder.length
+            - len(engine_input["prompt_token_ids"])
+        )
+        if max_tokens < 1:
+            raise ValueError("Audio is too short for the transcription prompt")
+
+        return max_tokens
 
     @classmethod
     # for speech-to-text transcription

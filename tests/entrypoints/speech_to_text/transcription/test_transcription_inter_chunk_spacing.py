@@ -146,6 +146,10 @@ class _StubTranscriptionModel:
         )
 
     @classmethod
+    def get_speech_to_text_max_tokens(cls, _engine_input: object) -> None:
+        return None
+
+    @classmethod
     def post_process_output(cls, text: str) -> str:
         return text
 
