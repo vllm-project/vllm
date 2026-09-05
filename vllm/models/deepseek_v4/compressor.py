@@ -18,7 +18,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
-    save_partial_states,
+    _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
@@ -306,6 +306,15 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _SAVE_PARTIAL_STATES_KERNEL.register_warmup()
+            if self.head_dim != 512:
+                from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+                )
+
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]
@@ -351,7 +360,7 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
+        _SAVE_PARTIAL_STATES_KERNEL(
             kv=kv,
             score=score,
             ape=self.ape,
