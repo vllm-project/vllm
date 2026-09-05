@@ -756,6 +756,11 @@ def is_residual_scattered_for_sp(
         return False
 
     min_token_num = vllm_config.compilation_config.pass_config.sp_min_token_num
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    if min_token_num is not None and max_num_batched_tokens is not None:
+        # Keep the runtime layout decision in sync with the compile pass,
+        # which clamps the threshold to the largest compiled token count.
+        min_token_num = min(min_token_num, max_num_batched_tokens)
     if min_token_num is not None and num_input_tokens < min_token_num:
         return False
 

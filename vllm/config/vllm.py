@@ -190,15 +190,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
-def enable_sp_moe(cfg: "VllmConfig") -> bool:
-    """Enable the MoE SP compile pass only for an SP-MoE runtime layout."""
-    from vllm.platforms import current_platform
-
-    return cfg.parallel_config.use_sequence_parallel_moe and (
-        current_platform.is_cuda_alike() or current_platform.is_xpu()
-    )
-
-
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     """Enable if rotary embedding custom op is active and
     use_inductor_graph_partition is enabled.
@@ -306,7 +297,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
-            "enable_sp_moe": enable_sp_moe,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
@@ -330,7 +321,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
-            "enable_sp_moe": enable_sp_moe,
+            "enable_sp_moe": False,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
