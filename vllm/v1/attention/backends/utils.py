@@ -1110,7 +1110,11 @@ def get_dcp_local_seq_lens(
         )
         seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
     else:
-        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        # Keep the rank-specific path capture-safe. Creating a CPU scalar
+        # tensor on a CUDA device here triggers a CPU-to-CUDA copy during
+        # CUDA graph capture. Python scalar arithmetic is lowered into the
+        # existing device operation without that copy.
+        rank_offsets = dcp_rank
         seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled

@@ -10,6 +10,13 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
 class MTPSpeculator(AutoRegressiveSpeculator):
+    # NOTE: index sharing reuses the step-0 topk indices for later draft
+    # steps. It is only valid for single-chain drafting (one draft token
+    # per request per step, i.e. topk == 1); a tree/topk > 1 drafter would
+    # reorder topk rows between steps and desync the shared buffer
+    # (cf. SGLang, which gates index sharing to topk == 1). The
+    # autoregressive speculator only drafts chains, so the guard holds by
+    # construction here.
     share_mtp_topk_indices: bool = False
 
     def load_draft_model(

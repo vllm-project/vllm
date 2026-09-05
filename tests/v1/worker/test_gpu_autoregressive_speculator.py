@@ -19,12 +19,19 @@ from vllm.model_executor.models.mistral_large_3_eagle import (
 )
 from vllm.v1.attention.backends import flash_attn as flash_attn_module
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.mla import indexer as indexer_module
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as spec_module
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
     MultiModuleMTPSpeculator,
 )
@@ -485,3 +492,392 @@ def test_update_draft_decode_metadata_skips_without_scheduler_metadata(monkeypat
 
     assert not called
     assert metadata.scheduler_metadata is None
+
+
+def _speculator_cls(advance_draft_positions: bool) -> type[_TestSpeculator]:
+    class _Speculator(_TestSpeculator):
+        @property
+        def advance_draft_positions(self) -> bool:
+            return advance_draft_positions
+
+    return _Speculator
+
+
+def _make_configured_speculator(
+    *,
+    advance_draft_positions: bool = True,
+    backend_supports_updates: bool = True,
+    share_mtp_topk_indices: bool | None = None,
+    num_nextn_predict_layers: int = 1,
+    num_speculative_steps: int = 3,
+):
+    speculator = object.__new__(_speculator_cls(advance_draft_positions))
+    speculator.num_speculative_steps = num_speculative_steps
+    speculator.attn_groups = [
+        [
+            SimpleNamespace(
+                supports_draft_decode_metadata_update=backend_supports_updates,
+                backend=SimpleNamespace(get_name=lambda: "MOCK_BACKEND"),
+            )
+        ]
+    ]
+    speculator.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(num_nextn_predict_layers=num_nextn_predict_layers)
+    )
+    if share_mtp_topk_indices is not None:
+        speculator.share_mtp_topk_indices = share_mtp_topk_indices
+    return speculator
+
+
+@pytest.mark.parametrize(
+    ("advance", "supports", "expected_fused"),
+    [
+        (True, True, True),
+        (True, False, False),
+        # Non-advancing configs must not bypass the backend support check:
+        # pre-change this enabled fused mode and crashed with
+        # NotImplementedError at the first propose.
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+def test_configure_fused_multi_step_decode_requires_declared_support(
+    advance, supports, expected_fused
+):
+    speculator = _make_configured_speculator(
+        advance_draft_positions=advance,
+        backend_supports_updates=supports,
+    )
+
+    speculator._configure_fused_multi_step_decode()
+
+    assert speculator.use_fused_multi_step_decode is expected_fused
+
+
+def test_configure_fused_multi_step_decode_disabled_for_single_step():
+    speculator = _make_configured_speculator(num_speculative_steps=1)
+
+    speculator._configure_fused_multi_step_decode()
+
+    assert speculator.use_fused_multi_step_decode is False
+
+
+def test_configure_fused_multi_step_decode_rejects_multi_layer_index_sharing():
+    # With index sharing, draft steps reuse step-0 topk rows from per-layer
+    # buffers while step -> layer selection cycles through the predictor
+    # layers; more than one layer would read rows another layer never wrote.
+    speculator = _make_configured_speculator(
+        share_mtp_topk_indices=True,
+        num_nextn_predict_layers=2,
+    )
+
+    with pytest.raises(ValueError, match="single MTP layer"):
+        speculator._configure_fused_multi_step_decode()
+
+
+def test_configure_fused_multi_step_decode_allows_multi_layer_without_sharing():
+    speculator = _make_configured_speculator(num_nextn_predict_layers=2)
+
+    speculator._configure_fused_multi_step_decode()
+
+    assert speculator.use_fused_multi_step_decode is True
+
+
+def _make_fused_loop_speculator(
+    advance_draft_positions: bool, events: list[str], metadata: dict
+):
+    speculator = object.__new__(_speculator_cls(advance_draft_positions))
+    speculator.num_speculative_steps = 4
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(2),
+        query_start_loc=torch.arange(3),
+    )
+    speculator.idx_mapping = torch.arange(2)
+    speculator.block_tables = SimpleNamespace(
+        compute_slot_mappings=lambda *a, **k: events.append("slots")
+    )
+
+    def _generate_draft(*args, **kwargs):
+        # Represents one captured draft forward: the seq_lens increment
+        # (_update_draft_inputs_kernel) launches at its tail.
+        events.append("generate")
+
+    speculator._generate_draft = _generate_draft
+
+    def _update(received_metadata):
+        assert received_metadata is metadata
+        events.append("update")
+
+    return speculator, _update
+
+
+def test_generate_fused_drafts_reuses_metadata_and_skips_terminal_update():
+    metadata = {"layer": object()}
+    events: list[str] = []
+    speculator, update = _make_fused_loop_speculator(True, events, metadata)
+    speculator.attn_groups = [[SimpleNamespace(update_draft_decode_metadata=update)]]
+
+    speculator._generate_fused_drafts(2, 2, metadata, None, None, CUDAGraphMode.NONE)
+
+    # The seq_lens increment (tail of _generate_draft) must precede each
+    # metadata update, the same metadata object is reused across steps,
+    # and no update runs after the terminal forward.
+    assert events == [
+        "generate",
+        "slots",
+        "update",
+        "generate",
+        "slots",
+        "update",
+        "generate",
+    ]
+
+
+def test_generate_fused_drafts_non_advancing_never_updates_metadata():
+    metadata = {"layer": object()}
+    events: list[str] = []
+    speculator, update = _make_fused_loop_speculator(False, events, metadata)
+    speculator.attn_groups = [[SimpleNamespace(update_draft_decode_metadata=update)]]
+
+    speculator._generate_fused_drafts(2, 2, metadata, None, None, CUDAGraphMode.NONE)
+
+    assert events == ["generate", "generate", "generate"]
+
+
+def _make_indexer_builder(**overrides) -> DeepseekV32IndexerMetadataBuilder:
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.dcp_world_size = 1
+    builder.dcp_rank = 0
+    builder.cp_kv_cache_interleave_size = 1
+    builder.compress_ratio = 1
+    builder.kv_cache_spec = SimpleNamespace(num_states=16)
+    builder.num_sms = 8
+    for key, value in overrides.items():
+        setattr(builder, key, value)
+    return builder
+
+
+def _make_indexer_metadata(
+    common_seq_lens: torch.Tensor,
+    *,
+    dcp: bool,
+) -> DeepseekV32IndexerMetadata:
+    num_reqs = common_seq_lens.shape[0]
+    decode_seq_lens = torch.zeros(num_reqs, 1, dtype=torch.int32)
+    schedule_metadata = torch.full((9, 2), -1, dtype=torch.int32)
+    decode = DeepSeekV32IndexerDecodeMetadata(
+        block_table=torch.arange(num_reqs * 4, dtype=torch.int32).view(num_reqs, 4),
+        seq_lens=decode_seq_lens,
+        decode_lens=torch.ones(num_reqs, dtype=torch.int32),
+        requires_padding=False,
+        schedule_metadata=schedule_metadata[:5],
+        global_seq_lens=common_seq_lens if dcp else None,
+        indices=torch.arange(num_reqs, dtype=torch.int32) if dcp else None,
+    )
+    return DeepseekV32IndexerMetadata(
+        seq_lens=common_seq_lens,
+        max_seq_len=64,
+        slot_mapping=torch.zeros(num_reqs, dtype=torch.int64),
+        num_decodes=num_reqs,
+        num_decode_tokens=num_reqs,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        decode=decode,
+    )
+
+
+def _patch_indexer_deep_gemm(monkeypatch, refreshed: list) -> torch.Tensor:
+    monkeypatch.setattr(indexer_module, "has_deep_gemm", lambda: True)
+    monkeypatch.setattr(indexer_module.current_platform, "is_cuda", lambda: True)
+    marker = torch.full((5, 2), 7, dtype=torch.int32)
+
+    def fake_get_paged_mqa_logits_metadata(seq_lens, *args, **kwargs):
+        refreshed.append(seq_lens)
+        return marker
+
+    monkeypatch.setattr(
+        indexer_module,
+        "get_paged_mqa_logits_metadata",
+        fake_get_paged_mqa_logits_metadata,
+    )
+    return marker
+
+
+def test_indexer_update_draft_decode_metadata_non_dcp(monkeypatch):
+    builder = _make_indexer_builder()
+    common = torch.tensor([10, 20, 30], dtype=torch.int32)
+    metadata = _make_indexer_metadata(common, dcp=False)
+    refreshed: list = []
+    marker = _patch_indexer_deep_gemm(monkeypatch, refreshed)
+
+    builder.update_draft_decode_metadata(metadata)
+
+    # Field-by-field equivalence with a fresh build: the per-token bound
+    # for the decode_lens == 1 draft batch is seq_lens[b].
+    assert torch.equal(metadata.decode.seq_lens, common.view(3, 1).to(torch.int32))
+    # The raw alias path reads metadata.seq_lens; global_seq_lens stays
+    # absent and the schedule slice is refreshed in place.
+    assert metadata.decode.global_seq_lens is None
+    assert torch.equal(metadata.decode.schedule_metadata, marker)
+    assert len(refreshed) == 1
+    assert refreshed[0] is metadata.decode.seq_lens
+
+
+def test_indexer_update_draft_decode_metadata_dcp_localizes(monkeypatch):
+    builder = _make_indexer_builder(dcp_world_size=2, dcp_rank=1)
+    common = torch.tensor([10, 20, 30], dtype=torch.int32)
+    metadata = _make_indexer_metadata(common, dcp=True)
+    refreshed: list = []
+    marker = _patch_indexer_deep_gemm(monkeypatch, refreshed)
+    block_table_before = metadata.decode.block_table.clone()
+    indices_before = metadata.decode.indices.clone()
+
+    builder.update_draft_decode_metadata(metadata)
+
+    # Rank-local bounds recomputed from the advanced global lengths
+    # (never an increment): [10, 20, 30] // 2 on rank 1 -> [5, 10, 15].
+    assert torch.equal(
+        metadata.decode.seq_lens, torch.tensor([[5], [10], [15]], dtype=torch.int32)
+    )
+    # The alias must be read, never written: it stays the same tensor
+    # object with its advanced values intact.
+    assert metadata.decode.global_seq_lens is common
+    assert torch.equal(common, torch.tensor([10, 20, 30], dtype=torch.int32))
+    assert torch.equal(metadata.decode.schedule_metadata, marker)
+    assert torch.equal(metadata.decode.block_table, block_table_before)
+    assert torch.equal(metadata.decode.indices, indices_before)
+    assert len(refreshed) == 1
+
+
+def test_indexer_update_draft_decode_metadata_propagates_clamped_lens(
+    monkeypatch,
+):
+    # The speculator's increment kernel clamps seq_lens at max_model_len;
+    # the hook must propagate the clamped value as-is (clamp boundary of
+    # the field-by-field equivalence).
+    builder = _make_indexer_builder()
+    common = torch.tensor([4096, 4096], dtype=torch.int32)
+    metadata = _make_indexer_metadata(common, dcp=False)
+    refreshed: list = []
+    _patch_indexer_deep_gemm(monkeypatch, refreshed)
+
+    builder.update_draft_decode_metadata(metadata)
+
+    assert torch.equal(
+        metadata.decode.seq_lens, torch.tensor([[4096], [4096]], dtype=torch.int32)
+    )
+
+
+def test_indexer_update_draft_decode_metadata_no_decode_is_noop(monkeypatch):
+    builder = _make_indexer_builder()
+    common = torch.tensor([10], dtype=torch.int32)
+    metadata = _make_indexer_metadata(common, dcp=False)
+    metadata.decode = None
+    refreshed: list = []
+    _patch_indexer_deep_gemm(monkeypatch, refreshed)
+
+    builder.update_draft_decode_metadata(metadata)
+
+    assert refreshed == []
+
+
+def _make_indexer_builder_via_init(monkeypatch) -> DeepseekV32IndexerMetadataBuilder:
+    # The support flag is CUDA-scoped; patch the platform so the env
+    # gating logic is exercised on any host.
+    monkeypatch.setattr(indexer_module.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(indexer_module, "num_compute_units", lambda _: 8)
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=4),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=3, enable_adaptive_verification=False
+        ),
+        attention_config=SimpleNamespace(
+            resolve_indexer_kv_dtype=lambda default: "fp8"
+        ),
+        model_config=SimpleNamespace(max_model_len=64),
+        num_speculative_tokens=3,
+    )
+    return DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=SimpleNamespace(num_states=16),
+        layer_names=["model.layers.61.self_attn"],
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        block_table_width=4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("enable", "disable", "expected"),
+    [
+        ("0", "0", False),
+        ("1", "0", True),
+        ("1", "1", False),
+        ("0", "1", False),
+    ],
+)
+def test_indexer_builder_support_flag_env_gating(
+    monkeypatch, enable, disable, expected
+):
+    monkeypatch.setenv("VLLM_ENABLE_FUSED_DRAFT_SPARSE_MLA", enable)
+    monkeypatch.setenv("VLLM_DISABLE_FUSED_DRAFT_SPARSE_MLA", disable)
+
+    builder = _make_indexer_builder_via_init(monkeypatch)
+
+    assert builder.supports_draft_decode_metadata_update is expected
+
+
+def test_mtp_speculator_index_sharing_toggles(monkeypatch):
+    speculator = object.__new__(MTPSpeculator)
+    calls: list = []
+    speculator.model = SimpleNamespace(
+        model=SimpleNamespace(
+            set_skip_topk=lambda skip: calls.append(("skip", skip)),
+            compact_topk_indices=lambda ids: calls.append(("compact",)),
+        )
+    )
+    speculator.num_speculative_steps = 3
+    speculator.last_token_indices = torch.arange(4)
+    speculator.share_mtp_topk_indices = True
+
+    speculator.on_prefill_begin(2)
+    speculator.on_prefill_end(2)
+    speculator.on_multi_step_decode_begin(2)
+    speculator.on_multi_step_decode_end(2)
+
+    assert calls == [
+        ("skip", False),
+        ("compact",),
+        ("skip", True),
+        ("skip", False),
+    ]
+
+
+def test_mtp_speculator_without_index_sharing_never_hits_cache():
+    speculator = object.__new__(MTPSpeculator)
+    calls: list = []
+
+    def _fail(*args, **kwargs):
+        calls.append(args)
+
+    speculator.model = SimpleNamespace(
+        model=SimpleNamespace(
+            set_skip_topk=_fail,
+            compact_topk_indices=_fail,
+        )
+    )
+    speculator.num_speculative_steps = 3
+    speculator.last_token_indices = torch.arange(4)
+    speculator.share_mtp_topk_indices = False
+
+    speculator.on_prefill_begin(2)
+    speculator.on_prefill_end(2)
+    speculator.on_multi_step_decode_begin(2)
+    speculator.on_multi_step_decode_end(2)
+
+    assert calls == []
