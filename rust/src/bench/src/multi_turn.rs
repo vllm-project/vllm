@@ -30,7 +30,6 @@ use crate::ready_checker::{get_first_model, wait_for_endpoint};
 pub struct TurnOutput {
     pub turn_index: usize,
     pub request_output: RequestFuncOutput,
-    pub cumulative_input_tokens: usize,
 }
 
 /// Output from an entire conversation.
@@ -731,14 +730,12 @@ async fn run_conversation(
             turn_outputs.push(TurnOutput {
                 turn_index: turn_idx,
                 request_output: output,
-                cumulative_input_tokens: cumulative_tokens,
             });
         } else {
             all_success = false;
             turn_outputs.push(TurnOutput {
                 turn_index: turn_idx,
                 request_output: output,
-                cumulative_input_tokens: cumulative_tokens,
             });
             break; // Conversation stops on failure
         }
