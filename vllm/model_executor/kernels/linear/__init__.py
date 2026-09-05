@@ -23,6 +23,13 @@ from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kDynamicTokenScale,
+    kStaticChannelScale,
+    kStaticTensorScale,
+    kStaticTokenScale,
+)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -750,10 +757,22 @@ def init_int8_linear_kernel(
     input_symmetric: bool,
     module_name: str,
 ) -> Int8ScaledMMLinearKernel:
+    weight_scale = (
+        kStaticChannelScale if is_channelwise else kStaticTensorScale
+    )
+    weight_quant_key = QuantKey(torch.int8, weight_scale, symmetric=True)
+
+    if is_static_input_scheme:
+        act_scale = kStaticTokenScale
+    else:
+        act_scale = kDynamicTokenScale
+    activation_quant_key = QuantKey(
+        torch.int8, act_scale, symmetric=input_symmetric
+    )
+
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=is_channelwise,
-        is_static_input_scheme=is_static_input_scheme,
-        input_symmetric=input_symmetric,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
