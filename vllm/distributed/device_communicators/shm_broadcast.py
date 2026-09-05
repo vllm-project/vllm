@@ -3,6 +3,7 @@
 import copyreg
 import functools
 import io
+import math
 import os
 import pickle
 import shutil
@@ -121,6 +122,9 @@ class SpinCondition:
     await a notification on the zmq socket after a period of inactivity. This
     allows the readers to spin quickly, hence "SpinCondition".
 
+    `busy_sleep_s` bounds the busy-loop polling frequency without changing when
+    the reader enters idle mode. Zero preserves continuous polling.
+
     To support clean shutdown, a separate thread in the reader's process must be
     able to wake the reader so that it can exit. A separate cancel() method is
     implemented with an in-process socket to allow this interruption.
@@ -132,6 +136,7 @@ class SpinCondition:
         context: zmq.Context,
         notify_address: str,
         busy_loop_s: float = 1,
+        busy_sleep_s: float | None = None,
     ):
         self.is_reader = is_reader
 
@@ -141,6 +146,17 @@ class SpinCondition:
 
             # Time to keep busy-looping on the shm buffer before going idle
             self.busy_loop_s = busy_loop_s
+            self.busy_sleep_s = (
+                busy_sleep_s
+                if busy_sleep_s is not None
+                else envs.VLLM_SHM_BROADCAST_BUSY_SLEEP_S
+            )
+            if not math.isfinite(self.busy_sleep_s) or self.busy_sleep_s < 0:
+                raise ValueError(
+                    "busy_sleep_s must be finite and non-negative, got "
+                    f"{self.busy_sleep_s!r} "
+                    "(VLLM_SHM_BROADCAST_BUSY_SLEEP_S)"
+                )
 
             # Readers subscribe to write notifications
             self.local_notify_socket: zmq.Socket = context.socket(SUB)
@@ -174,6 +190,7 @@ class SpinCondition:
 
             self.last_read = 0
             self.busy_loop_s = 0
+            self.busy_sleep_s = 0
             self.read_cancel_socket = None
             self.write_cancel_socket = None
             self.poller = None
@@ -202,6 +219,8 @@ class SpinCondition:
         current_time = time.monotonic()
         if current_time <= self.last_read + self.busy_loop_s:
             sched_yield()
+            if self.busy_sleep_s > 0:
+                time.sleep(self.busy_sleep_s)
         else:
             events = dict(self.poller.poll(timeout=timeout_ms))
 
