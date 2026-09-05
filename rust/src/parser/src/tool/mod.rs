@@ -16,6 +16,7 @@ mod minimax_m3;
 mod parameters;
 mod qwen_coder;
 mod seed_oss;
+mod step3p5;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
@@ -36,6 +37,7 @@ pub use qwen_coder::Qwen3CoderToolParser;
 pub use seed_oss::SeedOssToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use step3p5::Step3p5ToolParser;
 pub use xgrammar_structural_tag::builders::StructuralTagBuilder;
 
 use crate::utils;
