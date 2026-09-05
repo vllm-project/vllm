@@ -2184,6 +2184,51 @@ def test_invalid_backend_value_raises(monkeypatch) -> None:
         _ = envs.VLLM_XPU_INC_WNA16_BACKEND
 
 
+_DISABLE_ARK_ENV = "VLLM_INC_DISABLE_ARK"
+
+
+def test_disable_ark_falls_back_to_onednn(monkeypatch) -> None:
+    """VLLM_INC_DISABLE_ARK=1 must bypass ARK even when it is importable."""
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
+    monkeypatch.setenv(_DISABLE_ARK_ENV, "1")
+    _fake_xpu(monkeypatch, ark_available=True)
+
+    method = _dispatch()
+
+    assert isinstance(method.scheme, INCXPULinearMethod)
+    assert not isinstance(method.scheme, INCARKLinearMethod)
+
+
+def test_disable_ark_rejects_int2(monkeypatch) -> None:
+    """Int2 has no non-ARK path; refuse loudly instead of serving garbage."""
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
+    monkeypatch.setenv(_DISABLE_ARK_ENV, "1")
+    _fake_xpu(monkeypatch, ark_available=True)
+
+    with pytest.raises(NotImplementedError, match="VLLM_INC_DISABLE_ARK"):
+        _dispatch(make_layer_config(bits=2))
+
+
+def test_disable_ark_conflicts_with_explicit_ark_request(monkeypatch) -> None:
+    monkeypatch.setenv(_BACKEND_ENV, "ark")
+    monkeypatch.setenv(_DISABLE_ARK_ENV, "1")
+    _fake_xpu(monkeypatch, ark_available=True)
+
+    with pytest.raises(NotImplementedError, match="VLLM_INC_DISABLE_ARK"):
+        _dispatch()
+
+
+def test_disable_ark_default_keeps_ark(monkeypatch) -> None:
+    """Unset/0 keeps current behaviour: ARK wins when importable."""
+    monkeypatch.delenv(_DISABLE_ARK_ENV, raising=False)
+    monkeypatch.delenv(_BACKEND_ENV, raising=False)
+    _fake_xpu(monkeypatch, ark_available=True)
+
+    method = _dispatch()
+
+    assert isinstance(method.scheme, INCARKLinearMethod)
+
+
 # ---------------------------------------------------------------------------
 # Partition shape
 # ---------------------------------------------------------------------------

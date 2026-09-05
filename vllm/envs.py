@@ -321,6 +321,7 @@ if TYPE_CHECKING:
     VLLM_XPU_FORCE_N_CONTIG_WEIGHT: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_XPU_INC_WNA16_BACKEND: Literal["auto", "ark", "w4a16", "w4a8"] = "auto"
+    VLLM_INC_DISABLE_ARK: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -2165,6 +2166,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_INC_WNA16_BACKEND": env_with_choices(
         "VLLM_XPU_INC_WNA16_BACKEND", "auto", ["auto", "ark", "w4a16", "w4a8"]
     ),
+    # Disable the ARK (auto_round_kernel) WOQ backend for INC quantized layers.
+    # Falls back to the oneDNN int4 path on XPU. Int2 checkpoints have no
+    # non-ARK path and will raise NotImplementedError, since silently serving
+    # them would be worse than refusing to start.
+    "VLLM_INC_DISABLE_ARK": lambda: bool(int(os.getenv("VLLM_INC_DISABLE_ARK", "0"))),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
