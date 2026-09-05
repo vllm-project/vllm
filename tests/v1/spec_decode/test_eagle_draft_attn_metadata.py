@@ -14,11 +14,18 @@ backends (e.g. ``ROCM_AITER_FA`` with eagle/eagle3 spec decode):
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import pytest
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode import speculator as base_speculator
+from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
+    AutoRegressiveSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 
 
@@ -159,3 +166,69 @@ def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens():
     assert isinstance(local, torch.Tensor)
     assert local.data_ptr() == fake.input_buffers.dcp_local_seq_lens.data_ptr()
     assert local.tolist() == [1, 4, 8, 0]
+
+
+@pytest.mark.parametrize("num_reqs", [2, 12])
+@pytest.mark.parametrize(
+    "cg_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+)
+@pytest.mark.parametrize("fused", [False, True])
+def test_draft_decode_attention_excludes_dp_token_padding(num_reqs, cg_mode, fused):
+    """DP-padded query rows must not become extra tokens for local requests."""
+    padded_tokens = 13
+    fake = _make_fake_speculator(max_num_reqs=16)
+    fake.input_buffers.positions = torch.arange(16)
+    fake.idx_mapping = torch.arange(16)
+    fake.num_speculative_steps = 3
+    fake.advance_draft_positions = True
+    fake.current_draft_step = torch.tensor(0)
+    fake.block_tables.compute_slot_mappings = Mock(
+        return_value=fake.block_tables.slot_mappings
+    )
+    fake._build_draft_attn_metadata = (
+        lambda **kwargs: EagleSpeculator._build_draft_attn_metadata(fake, **kwargs)
+    )
+    fake._generate_draft = Mock()
+    fake._generate_fused_drafts = Mock()
+    fake.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=Mock())
+    full = cg_mode == CUDAGraphMode.FULL
+    expected_reqs = padded_tokens if full else num_reqs
+    metadata_batches = []
+
+    def check_decode_batch(**kwargs):
+        common = SimpleNamespace(
+            num_reqs=kwargs["num_reqs"],
+            num_actual_tokens=kwargs["num_tokens"],
+            query_start_loc_cpu=kwargs["query_start_loc_cpu"],
+            max_query_len=kwargs["max_query_len"],
+        )
+        decodes, prefills, decode_tokens, _ = split_decodes_and_prefills(
+            common, decode_threshold=1, require_uniform=True
+        )
+        # Match the sparse indexer's reshape of DP-padded model query output.
+        query = torch.empty(padded_tokens, 64, 128)
+        decoded = query[:decode_tokens].reshape(decodes, -1, 64, 128)
+        assert decoded.shape == (expected_reqs, 1, 64, 128)
+        assert prefills == 0
+        metadata_batches.append(decodes)
+        return {}
+
+    method = (
+        AutoRegressiveSpeculator._fused_multi_step_decode
+        if fused
+        else AutoRegressiveSpeculator._multi_step_decode
+    )
+    with patch.object(base_speculator, "build_attn_metadata", check_decode_batch):
+        method(
+            fake,
+            num_reqs=num_reqs,
+            skip_attn=False,
+            batch_desc=BatchExecutionDescriptor(
+                cg_mode=cg_mode,
+                num_tokens=padded_tokens,
+                num_reqs=padded_tokens if full else None,
+            ),
+            num_tokens_across_dp=torch.tensor([num_reqs, padded_tokens]),
+            seq_lens_cpu_upper_bound=torch.full((16,), 100, dtype=torch.int32),
+        )
+    assert metadata_batches == [expected_reqs] * (1 if fused else 2)
