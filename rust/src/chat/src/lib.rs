@@ -171,7 +171,9 @@ impl ChatRequestProcessor {
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
         let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        // Pre-tokenized callers (gRPC inference, /inference/generate) carry no
+        // per-request processor overrides, so the model config applies as is.
+        let features = info.prepare_multimodal(media, token_ids, model_dtype, None).await?;
         Ok(Some(features))
     }
 

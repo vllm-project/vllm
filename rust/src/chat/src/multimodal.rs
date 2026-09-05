@@ -25,6 +25,8 @@ use llm_multimodal::{
     VisionProcessorRegistry,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -257,6 +259,95 @@ struct ModalitySupport {
     placeholder: ResolvedPlaceholder,
     processor: &'static dyn VisionPreProcessor,
     config: PreProcessorConfig,
+}
+
+/// Digest of the per-request `mm_processor_kwargs`, or `None` when there are
+/// none.
+///
+/// Media hashes double as the encoder cache key, so the same image submitted
+/// with different overrides must not reuse the first request's tensors. Keys
+/// are ordered through a `BTreeMap` so the digest does not depend on map
+/// iteration order.
+pub(crate) fn mm_processor_kwargs_tag(kwargs: Option<&HashMap<String, Value>>) -> Option<String> {
+    let kwargs = kwargs.filter(|kwargs| !kwargs.is_empty())?;
+    let canonical: BTreeMap<&String, &Value> = kwargs.iter().collect();
+    let encoded = serde_json::to_vec(&canonical).ok()?;
+    Some(format!("{:x}", Sha256::digest(encoded)))
+}
+
+/// Append the processor-kwargs digest to a media hash when overrides are set.
+pub(crate) fn tag_media_hash(hash: &str, tag: Option<&String>) -> String {
+    match tag {
+        Some(tag) => format!("{hash}-{tag}"),
+        None => hash.to_string(),
+    }
+}
+
+/// Merge per-request `mm_processor_kwargs` onto the model's resolved
+/// preprocessor config.
+///
+/// The kwargs are deserialized as a `PreProcessorConfig` so known keys are
+/// type checked, and any key the struct does not name lands in its `extra`
+/// catch-all, which is the same place model-specific keys from
+/// `preprocessor_config.json` end up. Only keys the request actually sets
+/// override the model default.
+pub(crate) fn merge_mm_processor_kwargs(
+    mut config: PreProcessorConfig,
+    kwargs: Option<&HashMap<String, Value>>,
+) -> Result<PreProcessorConfig> {
+    let Some(kwargs) = kwargs.filter(|kwargs| !kwargs.is_empty()) else {
+        return Ok(config);
+    };
+
+    let overrides: PreProcessorConfig = serde_json::from_value(Value::Object(
+        kwargs.clone().into_iter().collect(),
+    ))
+    .map_err(|error| Error::InvalidMmProcessorKwargs {
+        message: error.to_report_string(),
+    })?;
+
+    macro_rules! take_overrides {
+        ($($field:ident),+ $(,)?) => {
+            $(if overrides.$field.is_some() {
+                config.$field = overrides.$field;
+            })+
+        };
+    }
+    // TODO: keep in sync with `PreProcessorConfig` in `llm-multimodal`; new
+    // fields there are still forwarded through `extra` until listed here.
+    take_overrides!(
+        image_processor_type,
+        do_convert_rgb,
+        do_normalize,
+        do_pad,
+        do_rescale,
+        do_resize,
+        do_center_crop,
+        image_mean,
+        image_std,
+        rescale_factor,
+        resampling,
+        size,
+        crop_size,
+        patch_size,
+        merge_size,
+        min_pixels,
+        max_pixels,
+        temporal_patch_size,
+        num_crops,
+        dynamic_hd,
+        max_image_tiles,
+        num_img_tokens,
+        im_start_token,
+        im_end_token,
+        slice_start_token,
+        slice_end_token,
+        vision_start_token,
+        vision_end_token,
+    );
+    config.extra.extend(overrides.extra);
+
+    Ok(config)
 }
 
 /// Static audio preprocessor plus the resolved model contract for its output.
@@ -572,7 +663,14 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
-    let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
+    let prepared = info
+        .prepare_multimodal(
+            media_parts,
+            &mut prompt_token_ids,
+            model_dtype,
+            request.mm_processor_kwargs.as_ref(),
+        )
+        .await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
 }
@@ -701,6 +799,7 @@ impl MultimodalModelInfo {
         media_parts: Vec<MediaContentPart>,
         prompt_token_ids: &mut Vec<u32>,
         model_dtype: ModelDtype,
+        mm_processor_kwargs: Option<&HashMap<String, Value>>,
     ) -> Result<MmFeatures> {
         let media_parts_len = media_parts.len();
         if media_parts_len == 0 {
@@ -711,12 +810,35 @@ impl MultimodalModelInfo {
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    mm_processor_kwargs,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos(
+                    fetched.videos,
+                    fetched.video_uuids,
+                    model_dtype,
+                    mm_processor_kwargs,
+                )
+                .await?,
+            );
+        }
+        if !fetched.audios.is_empty()
+            && mm_processor_kwargs.is_some_and(|kwargs| !kwargs.is_empty())
+        {
+            // The audio preprocessor takes a different config type, so these
+            // overrides would be silently dropped.
+            return Err(Error::InvalidMmProcessorKwargs {
+                message: "audio inputs do not support `mm_processor_kwargs`".to_string(),
+            });
         }
         if !fetched.audios.is_empty() {
             prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
@@ -1105,5 +1227,117 @@ mod tests {
         let encoded = serde_json::to_string(&parse_limits(source)).expect("map should serialize");
 
         assert_eq!(encoded, source);
+    }
+
+    fn kwargs(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn merge_mm_processor_kwargs_keeps_model_config_when_unset() {
+        let config = PreProcessorConfig {
+            min_pixels: Some(256),
+            ..Default::default()
+        };
+
+        let merged = merge_mm_processor_kwargs(config.clone(), None).unwrap();
+        assert_eq!(merged.min_pixels, Some(256));
+
+        let merged = merge_mm_processor_kwargs(config, Some(&HashMap::new())).unwrap();
+        assert_eq!(merged.min_pixels, Some(256));
+    }
+
+    #[test]
+    fn merge_mm_processor_kwargs_overrides_only_requested_keys() {
+        let config = PreProcessorConfig {
+            min_pixels: Some(256),
+            max_pixels: Some(1024),
+            ..Default::default()
+        };
+
+        let merged = merge_mm_processor_kwargs(
+            config,
+            Some(&kwargs(&[("max_pixels", serde_json::json!(4096))])),
+        )
+        .unwrap();
+
+        assert_eq!(merged.max_pixels, Some(4096));
+        // Untouched keys keep the model default rather than being reset.
+        assert_eq!(merged.min_pixels, Some(256));
+    }
+
+    #[test]
+    fn merge_mm_processor_kwargs_forwards_unknown_keys_through_extra() {
+        let merged = merge_mm_processor_kwargs(
+            PreProcessorConfig::default(),
+            Some(&kwargs(&[("merge_kernel_size", serde_json::json!([2, 2]))])),
+        )
+        .unwrap();
+
+        assert_eq!(
+            merged.extra.get("merge_kernel_size"),
+            Some(&serde_json::json!([2, 2]))
+        );
+    }
+
+    #[test]
+    fn mm_processor_kwargs_change_the_media_cache_key() {
+        let none = mm_processor_kwargs_tag(None);
+        let empty = mm_processor_kwargs_tag(Some(&HashMap::new()));
+        let small =
+            mm_processor_kwargs_tag(Some(&kwargs(&[("max_pixels", serde_json::json!(50176))])));
+        let large =
+            mm_processor_kwargs_tag(Some(&kwargs(&[("max_pixels", serde_json::json!(200704))])));
+
+        assert!(none.is_none());
+        assert!(
+            empty.is_none(),
+            "empty kwargs must not disturb the cache key"
+        );
+        assert_ne!(
+            small, large,
+            "different overrides must not share a cache key"
+        );
+
+        // Same image, different overrides, so the encoder cache must not reuse
+        // the first request's tensors.
+        assert_ne!(
+            tag_media_hash("imagehash", small.as_ref()),
+            tag_media_hash("imagehash", large.as_ref())
+        );
+        // No overrides leaves the upstream hash untouched.
+        assert_eq!(tag_media_hash("imagehash", none.as_ref()), "imagehash");
+    }
+
+    #[test]
+    fn mm_processor_kwargs_tag_is_independent_of_key_order() {
+        let a = kwargs(&[
+            ("max_pixels", serde_json::json!(4)),
+            ("min_pixels", serde_json::json!(2)),
+        ]);
+        let b = kwargs(&[
+            ("min_pixels", serde_json::json!(2)),
+            ("max_pixels", serde_json::json!(4)),
+        ]);
+
+        assert_eq!(
+            mm_processor_kwargs_tag(Some(&a)),
+            mm_processor_kwargs_tag(Some(&b))
+        );
+    }
+
+    #[test]
+    fn merge_mm_processor_kwargs_rejects_wrong_types() {
+        let error = merge_mm_processor_kwargs(
+            PreProcessorConfig::default(),
+            Some(&kwargs(&[("max_pixels", serde_json::json!("lots"))])),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, Error::InvalidMmProcessorKwargs { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert!(error.is_request_validation_error());
     }
 }
