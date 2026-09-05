@@ -1261,7 +1261,7 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
         )
 
 
-class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
+class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """AMD Zen INT8 MoE with per-token activation and channelwise weight
     quantization, dispatched through zentorch."""
 
@@ -1297,9 +1297,7 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             if self.w2_bias is None
             else self.w2_bias.detach().to(torch.bfloat16).contiguous()
         )
-        logger.info_once(
-            "[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE (monolithic experts)"
-        )
+        logger.info_once("[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE")
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -1360,48 +1358,47 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
     def supports_expert_map(self) -> bool:
         return False
 
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # zentorch_fused_moe manages its own scratch space.
+        return (0,), (0,), (M, K)
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        num_expert_group: int | None = None,
-        e_score_correction_bias: torch.Tensor | None = None,
-        routed_scaling_factor: float | None = None,
-        topk_group: int | None = None,
-    ) -> torch.Tensor:
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            use_grouped_topk=num_expert_group is not None,
-            top_k=self.moe_config.experts_per_token,
-            renormalize=self.moe_config.routing_method
-            in (
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ),
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func="softmax",
-            routed_scaling_factor=(
-                routed_scaling_factor if routed_scaling_factor is not None else 1.0
-            ),
-            e_score_correction_bias=e_score_correction_bias,
-        )
-
+    ) -> None:
         if apply_router_weight_on_input:
             assert topk_ids.size(1) == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
             hidden_states = hidden_states.mul(topk_weights.to(hidden_states.dtype))
 
-        output = torch.empty_like(hidden_states)
         torch.ops.zentorch.zentorch_fused_moe(
             output,
             hidden_states,
@@ -1416,4 +1413,3 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             self._w1_scale_bf16,
             self._w2_scale_bf16,
         )
-        return output
