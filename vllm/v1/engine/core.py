@@ -282,6 +282,14 @@ class EngineCore:
                 )
                 vllm_config.cache_config.enable_prefix_caching = False
 
+            # SchedulerConfig validates this constraint while chunked prefill is
+            # still enabled. Revalidate after disabling it so prompts larger
+            # than the scheduling budget are rejected at startup instead of
+            # waiting indefinitely in the scheduler.
+            vllm_config.scheduler_config.verify_max_model_len(
+                vllm_config.model_config.max_model_len
+            )
+
         # Resolve the KV cache layout before memory profiling: workers that
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
