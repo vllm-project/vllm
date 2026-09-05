@@ -233,6 +233,11 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.attention.b12x_mla_query import (
+    can_implement_bf16_mla_query,
+    prewarm_bf16_mla_query,
+    run_bf16_mla_query,
+)
 from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
     get_attention_context,
@@ -262,6 +267,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.utils.b12x import B12xWarmupUnit
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.utils.torch_utils import (
@@ -314,6 +320,68 @@ logger = init_logger(__name__)
 _FP8_DTYPE = current_platform.fp8_dtype()
 
 
+def _find_linear_weight_device(layer: torch.nn.Module) -> torch.device | None:
+    while hasattr(layer, "base_layer") and hasattr(layer.base_layer, "quant_method"):
+        layer = layer.base_layer
+
+    for name in ("weight", "qweight", "weight_packed"):
+        weight = getattr(layer, name, None)
+        if isinstance(weight, torch.Tensor):
+            return weight.device
+    for parameter in layer.parameters(recurse=False):
+        return parameter.device
+    for buffer in layer.buffers(recurse=False):
+        return buffer.device
+    return None
+
+
+def _preallocate_absorbed_mla_weights(
+    layer: "MLAAttention", act_dtype: torch.dtype
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    num_heads = getattr(layer, "num_local_heads", layer.num_heads)
+    w_uv_shape = (num_heads, layer.kv_lora_rank, layer.v_head_dim)
+    w_uk_t_shape = (
+        num_heads,
+        layer.qk_nope_head_dim,
+        layer.kv_lora_rank,
+    )
+    current_w_uv = getattr(layer, "W_UV", None)
+    current_w_uk_t = getattr(layer, "W_UK_T", None)
+
+    device = _find_linear_weight_device(layer.kv_b_proj)
+    if device is None:
+        current_devices = {
+            weight.device
+            for weight in (current_w_uv, current_w_uk_t)
+            if isinstance(weight, torch.Tensor)
+        }
+        if len(current_devices) != 1:
+            raise RuntimeError(
+                "Cannot determine the device for absorbed MLA projection weights."
+            )
+        device = current_devices.pop()
+
+    def needs_storage(weight: object, shape: tuple[int, ...]) -> bool:
+        return not (
+            isinstance(weight, torch.Tensor)
+            and weight.shape == shape
+            and weight.dtype == act_dtype
+            and weight.device == device
+        )
+
+    pre_w_uv = (
+        torch.empty(w_uv_shape, dtype=act_dtype, device=device)
+        if needs_storage(current_w_uv, w_uv_shape)
+        else None
+    )
+    pre_w_uk_t = (
+        torch.empty(w_uk_t_shape, dtype=act_dtype, device=device)
+        if needs_storage(current_w_uk_t, w_uk_t_shape)
+        else None
+    )
+    return pre_w_uv, pre_w_uk_t
+
+
 def _detect_output_quant_key(
     output: torch.Tensor,
     output_scale: torch.Tensor | None,
@@ -362,6 +430,12 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
             return kv_cache_dtype
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+    ):
+        return "fp8_ds_mla"
+    if backend_name == "B12X" and kv_cache_dtype in (
         "auto",
         "fp8",
         "fp8_e4m3",
@@ -693,6 +767,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
         self.kv_cache = kv_cache.squeeze(1)
+        bind_impl = getattr(self.impl, "bind_kv_cache", None)
+        if bind_impl is not None:
+            bind_impl(self.kv_cache)
         if (
             self._vllm_config.kernel_config.enable_jit_warmup
             and self.attn_backend.get_name()
@@ -801,6 +878,44 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 q_dcp_replicated=q_dcp_replicated,
             )
             return output
+
+    def _try_fused_mla_query(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled:
+            return None
+        if self.q_pad_num_heads is not None:
+            return None
+
+        num_heads, num_tokens, nope_dim = q_nope.shape
+        supports_output = getattr(self.impl, "supports_fused_mla_query_output", None)
+        if not callable(supports_output) or not supports_output(
+            num_heads, torch.bfloat16
+        ):
+            return None
+        workspace_getter = getattr(self.impl, "get_fused_mla_query_output", None)
+        if not callable(workspace_getter):
+            return None
+
+        weight = getattr(self, "W_UK_T", None)
+        if not isinstance(weight, torch.Tensor) or weight.dtype != torch.bfloat16:
+            return None
+        if not can_implement_bf16_mla_query(
+            num_heads=num_heads,
+            max_m=num_tokens,
+            nope_dim=nope_dim,
+            latent_dim=self.kv_lora_rank,
+            output_dtype=torch.bfloat16,
+            device=q_nope.device,
+        ):
+            return None
+
+        output = workspace_getter(num_tokens, num_heads, torch.bfloat16)
+        if output is None:
+            return None
+        return run_bf16_mla_query(q_nope, weight, q_pe, output)
 
     def forward_impl(
         self,
@@ -954,7 +1069,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
+            fused_mqa_q = None
+            if not qrep_decode:
+                fused_mqa_q = self._try_fused_mla_query(mqa_q_nope, mqa_q_pe)
+
+            if fused_mqa_q is not None:
+                mqa_q = fused_mqa_q
+            elif self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
@@ -1007,14 +1128,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
+            if fused_mqa_q is None:
+                if fp8_attention and self.impl.supports_quant_query_input:
+                    assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                    assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
+                else:
+                    mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
                 assert self.dcp_manager is not None
@@ -1148,6 +1270,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return
 
+        pre_w_uv = pre_w_uk_t = None
+        if not (
+            self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled
+        ):
+            pre_w_uv, pre_w_uk_t = _preallocate_absorbed_mla_weights(self, act_dtype)
+
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
@@ -1247,9 +1375,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            w_uv = W_UV.transpose(0, 1)
+            if pre_w_uv is not None:
+                pre_w_uv.copy_(w_uv)
+                w_uv = pre_w_uv
+            replace_parameter(self, "W_UV", w_uv, prefer_copy=True)
             # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+            w_uk_t = W_UK.permute(1, 2, 0)
+            if pre_w_uk_t is not None:
+                pre_w_uk_t.copy_(w_uk_t)
+                w_uk_t = pre_w_uk_t
+            replace_parameter(self, "W_UK_T", w_uk_t, prefer_copy=True)
             if self.dcp_q_replicate:
                 self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
                     self.W_UK_T.contiguous(), dim=0
@@ -1265,6 +1401,77 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         if not should_load_quant_weights(quant_method):
             set_default_quant_scales(self, register_buffer=False)
+
+        weight = getattr(self, "W_UK_T", None)
+        impl_warmup = getattr(self.impl, "warmup", None)
+        supports_output = getattr(self.impl, "supports_fused_mla_query_output", None)
+        supports_fused_query = (
+            isinstance(weight, torch.Tensor)
+            and callable(supports_output)
+            and supports_output(int(weight.shape[0]), torch.bfloat16)
+        )
+        if (
+            isinstance(weight, torch.Tensor)
+            and supports_fused_query
+            and weight.dtype == torch.bfloat16
+            and can_implement_bf16_mla_query(
+                num_heads=int(weight.shape[0]),
+                max_m=1,
+                nope_dim=int(weight.shape[1]),
+                latent_dim=int(weight.shape[2]),
+                output_dtype=torch.bfloat16,
+                device=weight.device,
+            )
+        ) or callable(impl_warmup):
+            object.__setattr__(self, "b12x_warmup_provider", self)
+
+    def get_b12x_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        del layer, output_dtype
+        weight = getattr(self, "W_UK_T", None)
+        fused_query_rows = tuple(rows for rows in token_counts if 0 < rows <= 32)
+        impl_warmup = getattr(self.impl, "warmup", None)
+        impl_key_getter = getattr(self.impl, "b12x_warmup_key", None)
+        impl_key = impl_key_getter() if callable(impl_key_getter) else None
+        supports_output = getattr(self.impl, "supports_fused_mla_query_output", None)
+        supports_fused_query = (
+            isinstance(weight, torch.Tensor)
+            and callable(supports_output)
+            and supports_output(int(weight.shape[0]), torch.bfloat16)
+        )
+
+        def compile() -> None:
+            if (
+                isinstance(weight, torch.Tensor)
+                and supports_fused_query
+                and fused_query_rows
+                and can_implement_bf16_mla_query(
+                    num_heads=int(weight.shape[0]),
+                    max_m=max(fused_query_rows),
+                    nope_dim=int(weight.shape[1]),
+                    latent_dim=int(weight.shape[2]),
+                    output_dtype=torch.bfloat16,
+                    device=weight.device,
+                )
+            ):
+                prewarm_bf16_mla_query(weight, fused_query_rows)
+            if callable(impl_warmup):
+                impl_warmup(token_counts)
+
+        weight_key = (
+            (tuple(weight.shape), weight.dtype, weight.device)
+            if isinstance(weight, torch.Tensor) and supports_fused_query
+            else None
+        )
+        return B12xWarmupUnit(
+            name="MLA",
+            key=(type(self), weight_key, impl_key),
+            compile=compile,
+        )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
