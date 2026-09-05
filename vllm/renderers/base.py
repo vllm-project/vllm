@@ -246,19 +246,16 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         log_prefix: str,
     ) -> None:
-        from vllm.multimodal.processing import TimingContext
-
         model_config = self.model_config
-        mm_config = model_config.get_multimodal_config()
         mm_limits = {k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0}
 
         start_time = time.perf_counter()
-        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
-            seq_len=model_config.max_model_len,
+        _ = mm_registry.get_dummy_mm_inputs(
+            model_config,
             mm_counts=dict.fromkeys(mm_limits, 1),
-            mm_options=mm_config.limit_per_prompt,
+            processor=processor,
+            scheduler_config=self.config.scheduler_config,
         )
-        _ = processor.apply(processor_inputs, timing_ctx=TimingContext(enabled=False))
 
         elapsed = time.perf_counter() - start_time
         logger.info("%s warmup completed in %.3fs", log_prefix, elapsed)

@@ -67,7 +67,8 @@ def _make_profiling_runner(
     events: list[str] = []
     runner.events = events
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
+        assert profile_only
         events.append("capture")
         # Simulate the manager's per-FULL-graph memory sampling.
         samples = runner.cudagraph_manager._capture_mem_samples
@@ -183,7 +184,7 @@ def test_profile_cudagraph_memory_tears_down_on_capture_error(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL)
 
-    def _boom() -> int:
+    def _boom(*, profile_only: bool = False) -> int:
         runner.events.append("capture")
         raise RuntimeError("capture failed")
 
@@ -204,7 +205,7 @@ def test_profile_cudagraph_memory_restores_compilation_counters(monkeypatch):
     _patch_module(monkeypatch)
     runner = _make_profiling_runner(CUDAGraphMode.FULL)
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         compilation_counter.num_cudagraph_captured += 5
         compilation_counter.num_gpu_runner_capture_triggers += 1
         return 1 << 30
@@ -288,9 +289,9 @@ def test_profile_cudagraph_memory_redirects_wrapper_pools(monkeypatch):
     try:
         capture_model = runner.capture_model
 
-        def _capture_model() -> int:
+        def _capture_model(*, profile_only: bool = False) -> int:
             wrapper.pool_during_capture = wrapper.graph_pool
-            return capture_model()
+            return capture_model(profile_only=profile_only)
 
         runner.capture_model = _capture_model
 
@@ -328,9 +329,9 @@ def test_profile_cudagraph_memory_swaps_and_drops_speculator_managers(monkeypatc
     pools_seen: list[Any] = []
     capture_model = runner.capture_model
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         pools_seen.append(runner.speculator.cudagraph_manager.pool)
-        return capture_model()
+        return capture_model(profile_only=profile_only)
 
     runner.capture_model = _capture_model
 
@@ -379,7 +380,7 @@ def test_profile_cudagraph_memory_frees_throwaway_pool(monkeypatch):
         manager.pool = cgu.current_platform.get_global_graph_pool()
         r.speculator = SimpleNamespace(cudagraph_manager=manager)
 
-    def _capture_model() -> int:
+    def _capture_model(*, profile_only: bool = False) -> int:
         for owner in (
             runner.cudagraph_manager,
             runner.speculator.cudagraph_manager,

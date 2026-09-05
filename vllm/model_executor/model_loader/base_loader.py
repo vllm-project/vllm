@@ -100,6 +100,11 @@ def log_online_quantization(vllm_config: VllmConfig) -> None:
     )
 
     quant_config = vllm_config.quant_config
+    online_quantization_config = getattr(
+        quant_config, "online_quantization_config", None
+    )
+    if isinstance(online_quantization_config, OnlineQuantizationConfig):
+        quant_config = online_quantization_config
     if not isinstance(quant_config, OnlineQuantizationConfig):
         return
 
