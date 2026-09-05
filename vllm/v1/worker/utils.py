@@ -744,7 +744,10 @@ def is_residual_scattered_for_sp(
     parallelism and tensor parallelism is enabled. SP is only supported in
     full-graph compilation mode.
     """
-    if not vllm_config.compilation_config.pass_config.enable_sp:
+    if not (
+        vllm_config.compilation_config.pass_config.enable_sp
+        or vllm_config.compilation_config.pass_config.enable_sp_moe
+    ):
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size

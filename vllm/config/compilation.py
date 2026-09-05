@@ -130,6 +130,13 @@ class PassConfig:
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
+    enable_sp_moe: bool = None  # type: ignore[assignment]
+    """Enable the MoE-specific sequence-parallelism compile pass.
+
+    This pass is independent of ``enable_sp`` and is intended for MoE graphs
+    that already expose the sequence-parallel chunk/all-gather operations.
+    Requires TP>1 and full-graph compilation.
+    """
     fuse_gemm_comms: bool = None  # type: ignore[assignment]
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
@@ -229,6 +236,7 @@ class PassConfig:
         "fuse_act_quant",
         "fuse_attn_quant",
         "enable_sp",
+        "enable_sp_moe",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
@@ -1219,7 +1227,11 @@ class CompilationConfig:
 
         if (
             not self.use_inductor_graph_partition
-            and (self.pass_config.enable_sp or self.pass_config.fuse_gemm_comms)
+            and (
+                self.pass_config.enable_sp
+                or self.pass_config.enable_sp_moe
+                or self.pass_config.fuse_gemm_comms
+            )
             and self.splitting_ops
         ):
             logger.warning_once(
@@ -1526,7 +1538,9 @@ class CompilationConfig:
         self, uniform_decode_query_len: int, tensor_parallel_size: int
     ):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
+        if tensor_parallel_size > 1 and (
+            self.pass_config.enable_sp or self.pass_config.enable_sp_moe
+        ):
             multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
             if (
                 multiple_of % uniform_decode_query_len != 0
