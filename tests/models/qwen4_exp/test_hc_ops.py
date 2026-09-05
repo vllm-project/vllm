@@ -68,6 +68,18 @@ def test_hc_combine() -> None:
     torch.testing.assert_close(actual, expected.flatten(-2).to(torch.bfloat16))
 
 
+def test_hc_combine_unit_injection() -> None:
+    torch.manual_seed(0)
+    block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+    residual = torch.randn(2, HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+
+    actual = hc_combine(residual, block_output, None, HC)
+    expected = residual.unflatten(-1, (HC, HIDDEN_SIZE))
+    expected = expected + block_output.unsqueeze(-2)
+
+    assert torch.equal(actual, expected.flatten(-2))
+
+
 def test_hc_combine_norm() -> None:
     torch.manual_seed(0)
     block_output = torch.randn(2, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
@@ -92,3 +104,24 @@ def test_hc_combine_norm() -> None:
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(actual_norm, expected_norm.to(torch.bfloat16))
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 2048])
+def test_hc_combine_norm_unit_injection(num_tokens: int) -> None:
+    torch.manual_seed(0)
+    embedding = torch.randn(
+        num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    hidden = torch.randn(
+        num_tokens, HC, HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(HYPER_HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda")
+
+    actual, actual_norm = hc_combine_norm(
+        hidden.flatten(1), embedding, None, weight, EPS, HC
+    )
+
+    expected = (hidden + embedding.unsqueeze(1)).flatten(1)
+    expected_norm = grouped_gemma_rmsnorm(expected, weight, EPS, HC)
+    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual_norm, expected_norm)

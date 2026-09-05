@@ -64,6 +64,14 @@ _requires_cuda_alike = pytest.mark.skipif(
     reason="stalling the compute stream requires a CUDA-like platform",
 )
 
+_requires_swap_blocks_batch = pytest.mark.skipif(
+    not hasattr(torch.ops._C_cache_ops, "swap_blocks_batch"),
+    reason=(
+        "installed vllm C++ extension predates the swap_blocks_batch op "
+        "flush_saves/start_load_caches use; rebuild the extension to run this"
+    ),
+)
+
 # Cycles to stall the compute stream for. Must comfortably outlast the host-side
 # work the lifetime tests do while a copy is deliberately held back — ~0.5 s on
 # a current datacenter GPU.
@@ -194,6 +202,7 @@ def _warm_up_stream_pools(worker: ECCPUWorker) -> None:
 # ── save_caches ──────────────────────────────────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 @pytest.mark.parametrize(
     "n_elements,block_ids",
@@ -326,6 +335,7 @@ def test_save_caches_raises_when_allocated_blocks_too_small(make_worker):
         worker.save_caches({"h": src}, "h", _meta(saves={"h": [0, 1]}))
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_save_caches_batches_multiple_hashes(make_worker):
     """Multiple save_caches calls are batched into a single flush."""
@@ -401,6 +411,7 @@ def test_save_descriptors_hold_high_bit_source_addresses(make_worker):
 # ── start_load_caches ────────────────────────────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_start_load_caches_copies_with_correct_shape_dtype_and_bytes(make_worker):
     """Single batched load across all hashes with correct byte→dtype→shape."""
@@ -465,6 +476,7 @@ def test_start_load_caches_noop_when_loads_is_empty(make_worker):
     assert encoder_cache == {}
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
     """Every hash in ``meta.loads`` is copied from mmap, including one whose
@@ -497,6 +509,7 @@ def test_start_load_caches_skips_cached_and_loads_new_in_same_step(make_worker):
     assert torch.equal(new.cpu(), src_orig[1:])
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 @pytest.mark.parametrize(
     "tp_rank,pcp_rank",
@@ -526,6 +539,7 @@ def test_start_load_caches_works_on_all_ranks(make_worker, tp_rank, pcp_rank):
 # ── round-trip ───────────────────────────────────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_save_then_load_round_trips_bytes(make_worker):
     """Full producer→mmap→consumer byte path in one shot."""
@@ -552,6 +566,7 @@ def test_save_then_load_round_trips_bytes(make_worker):
 # ── memory lifetime across in-flight copies ─────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_cuda_alike
 def test_save_survives_encoder_cache_free_before_copy_runs(make_worker):
     """The bytes handed to ``save_caches`` must reach the mmap intact even when
@@ -612,6 +627,7 @@ def test_save_survives_encoder_cache_free_before_copy_runs(make_worker):
     )
 
 
+@_requires_swap_blocks_batch
 @_requires_cuda_alike
 def test_load_buffer_survives_eviction_while_consumer_read_is_queued(make_worker):
     """A loaded encoder cache entry must keep its bytes for a consumer already
@@ -662,6 +678,7 @@ def test_load_buffer_survives_eviction_while_consumer_read_is_queued(make_worker
 # ── buffer recycling ────────────────────────────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_buffer_pool_is_reused_across_save_steps(make_worker):
     """Once a save copy completes its descriptor buffers return to the pool and
@@ -689,6 +706,7 @@ def test_buffer_pool_is_reused_across_save_steps(make_worker):
     assert id(worker._buf_pool._pool[0].src_ptrs) == buf_id
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_buffer_pool_is_reused_across_load_steps(make_worker):
     """Once a load copy completes its descriptor buffers return to the pool and
@@ -793,6 +811,7 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
 # ── e2e: scheduler + worker pipeline ────────────────────────────────────────
 
 
+@_requires_swap_blocks_batch
 @_requires_accelerator
 def test_e2e_scheduler_worker_save_then_load(make_worker, monkeypatch):
     """Full pipeline: scheduler allocates blocks, worker saves a GPU tensor to

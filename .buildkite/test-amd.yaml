@@ -1603,6 +1603,24 @@ steps:
   commands:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
+- label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/distributed/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  - tests/utils.py
+  commands:
+  - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+
 - label: ":amd: (MI300) KDA Kernels" # TBD
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -2473,7 +2491,10 @@ steps:
   - vllm/model_executor/layers/quantization
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
+  - vllm/model_executor/layers/fused_moe/oracle/unquantized.py
+  - vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py
   - tests/quantization
+  - tests/rocm/test_moe_weight_replay.py
   commands:
 
   # temporary install here since we need nightly, will move to requirements/test.in
@@ -2486,6 +2507,7 @@ steps:
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+  - pytest -v -s rocm/test_moe_weight_replay.py
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
@@ -3445,11 +3467,32 @@ steps:
   - tests/kernels/core
   - tests/kernels/test_top_k_per_row.py
   - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_rocm_fp32_router_gemm.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
   - vllm/model_executor/layers/rotary_embedding/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: ":amd: (MI355) MiniMax Reduce RMS Kernels" # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/distributed/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  - tests/utils.py
+  commands:
+  - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
 - label: ":amd: (MI355) Kernels" # TBD
   timeout_in_minutes: 25
