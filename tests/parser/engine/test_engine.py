@@ -10,8 +10,7 @@ import pytest
 from tests.parser.engine.conftest import make_mock_tokenizer
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.incremental_lexer import (
-    LexerShape,
-    TerminalDef,
+    CONTENT_TERMINAL,
     terminals_from_literals,
 )
 from vllm.parser.engine.parser_engine_config import (
@@ -780,29 +779,74 @@ class TestToolPreambleFinish:
         assert engine.state == ParserState.CONTENT
 
 
-class TestRegexTerminalInfraRemoved:
-    """TerminalDef.priority, LexerShape.regex_terminals, and the regex
-    matching loop were removed."""
+class TestRegexTerminals:
+    """Regex terminals match at the buffer start, gated by a literal prefix,
+    with partial-match holdback mirroring literal prefix buffering."""
 
-    def test_terminal_def_no_priority(self):
-        import regex as re
+    HEADER = r"to=[A-Za-z0-9_.\-]+<\|message\|>"
 
-        td = TerminalDef(name="X", pattern=re.compile("x"))
-        assert not hasattr(td, "priority")
+    def _lexer(self):
+        from vllm.parser.engine.incremental_lexer import (
+            IncrementalLexer,
+            terminal_from_regex,
+        )
 
-    def test_lexer_shape_no_regex_terminals(self):
-        shape = LexerShape([])
-        assert not hasattr(shape, "regex_terminals")
+        defs = terminals_from_literals(
+            {"THINK_START": "to=self<|message|>", "EOM": "<|eom|>"}
+        ) + [terminal_from_regex("HEADER_TOOL", self.HEADER)]
+        return IncrementalLexer(defs)
 
-    def test_terminals_from_literals_still_works(self):
-        literals = {"TOOL_START": "<tool_call>", "TOOL_END": "</tool_call>"}
-        defs = terminals_from_literals(literals)
-        assert len(defs) == 2
-        names = {d.name for d in defs}
-        assert names == {"TOOL_START", "TOOL_END"}
-        for d in defs:
-            assert d.is_literal
-            assert d.literal in ("<tool_call>", "</tool_call>")
+    def _lex(self, text, chunk):
+        lexer = self._lexer()
+        tokens = []
+        for i in range(0, len(text), chunk):
+            tokens.extend(lexer.feed(text[i : i + chunk]))
+        tokens.extend(lexer.flush())
+        return [(t.terminal, t.value) for t in tokens]
+
+    def test_prefix_derived_from_pattern(self):
+        from vllm.parser.engine.incremental_lexer import terminal_from_regex
+
+        td = terminal_from_regex("HEADER_TOOL", self.HEADER)
+        assert not td.is_literal
+        assert td.prefix == "to="
+
+    def test_pattern_without_literal_prefix_rejected(self):
+        from vllm.parser.engine.incremental_lexer import terminal_from_regex
+
+        with pytest.raises(ValueError, match="literal prefix"):
+            terminal_from_regex("BAD", r"[a-z]+")
+
+    @pytest.mark.parametrize("chunk", [1, 3, 100])
+    def test_complete_match(self, chunk):
+        tokens = self._lex("x to=weather.get<|message|>y", chunk)
+        assert ("HEADER_TOOL", "to=weather.get<|message|>") in tokens
+
+    def test_literal_wins_tie(self):
+        tokens = self._lex("to=self<|message|>", 1)
+        assert tokens[0] == ("THINK_START", "to=self<|message|>")
+
+    def test_longer_regex_match_beats_literal(self):
+        tokens = self._lex("to=selfcheck.run<|message|>", 1)
+        assert tokens[0] == ("HEADER_TOOL", "to=selfcheck.run<|message|>")
+
+    def test_partial_match_holds_until_disproved(self):
+        lexer = self._lexer()
+        tokens = lexer.feed("a to=weather")
+        # "to=weather" could still become a header: only "a " may be emitted.
+        assert "".join(t.value for t in tokens) == "a "
+        tokens = lexer.feed(" is fine")
+        assert "".join(t.value for t in tokens) == "to=weather is fine"
+
+    def test_prose_without_header_is_content(self):
+        tokens = self._lex("set x to=5 and go", 2)
+        assert all(t == CONTENT_TERMINAL for t, _ in tokens)
+        assert "".join(v for _, v in tokens) == "set x to=5 and go"
+
+    def test_dangling_partial_flushes_at_end(self):
+        tokens = self._lex("tail to=weather.g", 5)
+        assert all(t == CONTENT_TERMINAL for t, _ in tokens)
+        assert "".join(v for _, v in tokens) == "tail to=weather.g"
 
 
 class TestMultiCharTerminalInArgs:
