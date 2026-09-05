@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -100,6 +100,14 @@ class Mamba2AttentionBackend(AttentionBackend):
     @classmethod
     def is_ssm(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # Decode kernels take device offsets; ReplaySSM plans off CPU counts.
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return True
+        return not vllm_config.cache_config.use_replayssm
 
 
 @dataclass

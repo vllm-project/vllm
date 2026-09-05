@@ -22,7 +22,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
@@ -223,6 +223,31 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
+        self.use_varlen_decode_graphs = (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        )
+        if self.use_varlen_decode_graphs and self.use_replayssm:
+            raise ValueError(
+                "Adaptive verification requires device-side decode query "
+                "lengths, but ReplaySSM derives its decode write positions "
+                "from CPU token counts."
+            )
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.enable_adaptive_verification
+        ):
+            # Full graphs stay decode-only: the mode is FULL_AND_PIECEWISE.
+            return AttentionCGSupport.ALWAYS
+        return cls._cudagraph_support
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -241,7 +266,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
-        assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
+        assert self.use_varlen_decode_graphs or (
+            m.max_query_len == 1 + self.num_spec_tokens
+        )  # decode-only
 
         num_accepted_tokens = None
         if self.num_spec_tokens > 0:
