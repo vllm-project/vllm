@@ -11,6 +11,7 @@ from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
+from vllm.models.deepseek_v4.nvidia import dspark as dsv4_dspark
 from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
@@ -186,3 +187,75 @@ def test_context_kv_weights_are_loaded_as_merged_linear_shards():
     assert [weight.shard_id for _, weight in mapped] == [1, 0, 1, 1]
     assert mapped[0][1].data_ptr() == mapped[1][1].data_ptr()
     assert mapped[2][1].data_ptr() == mapped[3][1].data_ptr()
+
+
+def test_dsv4_context_wkv_weights_are_duplicated_by_draft_layer():
+    weights = [
+        ("mtp.0.attn.wkv.weight", torch.arange(4)),
+        ("mtp.1.attn.wq_a.weight", torch.arange(3)),
+        ("mtp.2.attn.wkv.scale", torch.tensor(0.5)),
+        ("mtp.3.attn.wkv.weight", torch.arange(2)),
+    ]
+
+    duplicated = list(dsv4_dspark._duplicate_context_wkv_weights(weights, 3))
+
+    assert [name for name, _ in duplicated] == [
+        "mtp.0.attn.wkv.weight",
+        "context_wkv_proj.weight",
+        "mtp.1.attn.wq_a.weight",
+        "mtp.2.attn.wkv.scale",
+        "context_wkv_proj.scale",
+        "mtp.3.attn.wkv.weight",
+    ]
+    assert duplicated[1][1].shard_id == 0
+    assert duplicated[4][1].shard_id == 2
+    assert duplicated[0][1].data_ptr() == duplicated[1][1].data_ptr()
+    assert duplicated[3][1].data_ptr() == duplicated[4][1].data_ptr()
+
+
+def test_dsv4_context_kv_uses_one_stacked_wkv_projection(monkeypatch):
+    calls = []
+    stacked_output = torch.arange(24, dtype=torch.float32).view(2, 12)
+
+    class StackedProjection:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, main_x):
+            self.calls += 1
+            assert main_x.shape == (2, 5)
+            return stacked_output
+
+    projection = StackedProjection()
+    layers = [
+        SimpleNamespace(attn=SimpleNamespace(kv_norm=lambda kv, offset=i: kv + offset))
+        for i in range(3)
+    ]
+    model = SimpleNamespace(
+        config=SimpleNamespace(head_dim=4),
+        context_wkv_proj=projection,
+        layers=layers,
+        num_dspark_layers=3,
+    )
+    slot_mappings = [torch.tensor([0, 1]), None, torch.tensor([4, 5])]
+    monkeypatch.setattr(
+        dsv4_dspark,
+        "_insert_context_kv",
+        lambda attn, kv, positions, slots: calls.append(
+            (attn, kv.clone(), positions, slots)
+        ),
+    )
+
+    dsv4_dspark.DSparkDeepseekV4Model.precompute_and_store_context_kv(
+        model,
+        torch.zeros(2, 5),
+        torch.tensor([7, 8]),
+        slot_mappings,
+    )
+
+    assert projection.calls == 1
+    assert len(calls) == 2
+    assert torch.equal(calls[0][1], stacked_output.view(2, 3, 4)[:, 0])
+    assert torch.equal(calls[1][1], stacked_output.view(2, 3, 4)[:, 2] + 2)
+    assert calls[0][3] is slot_mappings[0]
+    assert calls[1][3] is slot_mappings[2]
