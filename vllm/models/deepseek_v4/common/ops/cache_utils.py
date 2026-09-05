@@ -362,7 +362,12 @@ def dequantize_and_gather_k_cache_triton(
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
     num_reqs = seq_lens.shape[0]
-    NUM_WORKERS = 128
+    max_tokens = out.shape[1]
+
+    # Size workers to the reachable token count (not the over-allocated buffer
+    # width); num_reqs already provides batch parallelism.
+    reachable = min(int(block_table.shape[1]) * int(block_size), int(max_tokens))
+    NUM_WORKERS = min(8192, max(32, triton.next_power_of_2(reachable)))
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
         out,
         out.stride(0),
@@ -384,6 +389,7 @@ def dequantize_and_gather_k_cache_triton(
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
         use_fnuz=use_fnuz,
+        num_warps=1,
     )
 
 
