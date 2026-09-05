@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -49,7 +48,10 @@ FLASHKDA_CHUNK_SIZE = 16
 
 @cache
 def _metadata_launch_pdl() -> bool:
-    return current_platform.is_arch_support_pdl()
+    # CUDA-graph microbenchmarks show device-side overlap from PDL, but commit
+    # normally runs eagerly. In that path PDL's host launch overhead regresses
+    # end-to-end latency, so keep the RecoverSSM commit sequence non-PDL.
+    return False
 
 
 @triton.jit(do_not_specialize=["num_requests"])
@@ -293,6 +295,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
+            use_pdl=_metadata_launch_pdl(),
         )
         if align is None:
             return None
