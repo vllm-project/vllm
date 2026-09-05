@@ -199,7 +199,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             self.config.draft_vocab_size, scale=logit_scale
         )
         self.target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != self.target_vocab_size:
+        # Only a pruned draft (subset of the target vocab) needs a d2t mapping to
+        # scatter ids up. A draft >= the target vocab (e.g. padded to the target's
+        # physical embedding size) maps identically, so no d2t is needed.
+        if self.config.draft_vocab_size < self.target_vocab_size:
             self.draft_id_to_target_id = nn.Parameter(
                 torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
                 requires_grad=False,
@@ -279,7 +282,7 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
         uses_expanded_input_vocab = self.config.vocab_size > self.target_vocab_size
-        uses_reduced_vocab = self.config.draft_vocab_size != self.target_vocab_size
+        uses_reduced_vocab = self.config.draft_vocab_size < self.target_vocab_size
         if uses_expanded_input_vocab and not includes_embed_tokens:
             raise ValueError(
                 "Qwen3 DSpark checkpoints whose input vocab_size is larger than "
