@@ -53,7 +53,7 @@ Disaggregated encoding is implemented by running two parts:
 
 * **Encoder instance** – a vLLM instance to performs vision encoding.  
 * **Prefill/Decode (PD) instance(s)** – runs language pre-fill and decode.
-    * PD can be in either a single normal instance with `disagg_encoder_example.sh` (E->PD) or in disaggregated instances with `disagg_epd_example.sh` (E->P->D)
+    * PD can be in either a single normal instance with `disagg_1e1pd_example.sh` (E->PD) or in disaggregated instances with `disagg_1e1p1d_example.sh` (E->P->D)
 
 A connector transfers encoder-cache (EC) embeddings from the encoder instance to the PD instance.  
 All related code is under `vllm/distributed/ec_transfer`.
