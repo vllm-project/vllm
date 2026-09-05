@@ -1519,6 +1519,25 @@ class SpeculativeConfig:
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
 
+        if self.max_model_len is not None:
+            # Methods that reuse the target model's config never reach the
+            # _maybe_override_draft_max_model_len call above, so the requested
+            # draft window is silently dropped.
+            effective_max_model_len = (
+                self.draft_model_config.max_model_len
+                if self.draft_model_config is not None
+                else self.target_model_config.max_model_len
+            )
+            if effective_max_model_len != self.max_model_len:
+                logger.warning(
+                    "speculative_config.max_model_len=%d has no effect with "
+                    "method=%r, which does not build a separate draft model "
+                    "config; the draft window stays at %d.",
+                    self.max_model_len,
+                    self.method,
+                    effective_max_model_len,
+                )
+
         return self
 
     def _validate_suffix_decoding(self):
