@@ -70,6 +70,10 @@ pub enum Error {
     ControlClosed { message: String },
     #[error("request `{request_id}` is already in flight")]
     DuplicateRequestId { request_id: String },
+    #[error("no open resumable request `{request_id}` to continue")]
+    UnknownResumableRequestId { request_id: String },
+    #[error("resumable request `{request_id}` already has a continuation send in flight")]
+    ContinuationInProgress { request_id: String },
     #[error(
         "data parallel rank {rank} is not connected to this frontend; connected ranks: {connected_ranks:?}"
     )]
