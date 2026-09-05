@@ -41,6 +41,9 @@ from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    try_expose_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -114,8 +117,12 @@ class LlamaMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
+        self._fusion_initialized = False
 
     def forward(self, x):
+        if not self._fusion_initialized:
+            try_expose_input_quant_key(self.down_proj)
+            self._fusion_initialized = True
         x, _ = self.gate_up_proj(x)
         x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)

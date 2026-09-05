@@ -16,6 +16,7 @@ class Matches(NamedTuple):
     aiter_rms_quant_fusion: int = 0
     rms_quant_fusion: int = 0
     act_quant_fusion: int = 0
+    manual_act_quant_fusion: int = 0
     norm_rope_fusion: int = 0
     attn_quant_fusion: int = 0
     # distributed
@@ -41,45 +42,6 @@ class AttentionBackendCase(NamedTuple):
 
 is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
-
-
-def nvfp4_kernel_exposes_input_quant_key() -> bool:
-    """Check if the NVFP4 kernel selected on this platform exposes input_quant_key.
-
-    FlashInferCuteDslNvFp4LinearKernel does not expose input_quant_key() due to
-    layout incompatibility between the manual fusion kernel (silu_and_mul_nvfp4_quant)
-    output format and the cutedsl backend's expected input format.
-
-    FlashInferCutlassNvFp4LinearKernel does expose input_quant_key() and supports
-    manual fusion.
-    """
-    if not current_platform.is_cuda():
-        return False
-
-    try:
-        from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
-            FlashInferCuteDslNvFp4LinearKernel,
-        )
-
-        is_supported, _ = FlashInferCuteDslNvFp4LinearKernel.is_supported()
-        if is_supported:
-            return False
-    except ImportError:
-        pass
-
-    try:
-        from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
-            FlashInferCutlassNvFp4LinearKernel,
-        )
-
-        is_supported, _ = FlashInferCutlassNvFp4LinearKernel.is_supported()
-        if is_supported:
-            return True
-    except ImportError:
-        pass
-
-    # Fallback: assume no manual fusion support
-    return False
 
 
 def custom_ops_combos(*custom_ops: str) -> Iterable[str]:

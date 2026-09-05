@@ -985,8 +985,13 @@ class Worker(WorkerBase):
 
     def get_compilation_match_table(self) -> dict[str, int]:
         from vllm.compilation.passes.vllm_inductor_pass import get_match_table
+        from vllm.model_executor.layers.fusion.fused_act_quant import (
+            get_manual_fusion_count,
+        )
 
-        return get_match_table()
+        table = get_match_table()
+        table["manual_act_quant_fusion"] = get_manual_fusion_count()
+        return table
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         """Get encoder timing stats from model runner."""

@@ -52,6 +52,40 @@ def expose_input_quant_key(layer: torch.nn.Module, kernel) -> None:
         layer.input_quant_key = key
 
 
+def try_expose_input_quant_key(layer: torch.nn.Module) -> bool:
+    """Try to expose input_quant_key on a layer by finding its kernel.
+
+    This is a convenience function for model code that wants to enable
+    manual activation+quant fusion without knowing the internal structure
+    of the quantization method.
+
+    Returns True if input_quant_key was set, False otherwise.
+    """
+    # Check common patterns for accessing the kernel
+    quant_method = getattr(layer, "quant_method", None)
+    if quant_method is None:
+        return False
+
+    # FP8 linear methods store kernel as fp8_linear
+    kernel = getattr(quant_method, "fp8_linear", None)
+    if kernel is None:
+        # NVFP4 and other methods store kernel as kernel
+        kernel = getattr(quant_method, "kernel", None)
+    if kernel is None:
+        return False
+
+    # Check if kernel supports input_quant_key
+    input_quant_key_fn = getattr(kernel, "input_quant_key", None)
+    if input_quant_key_fn is None:
+        return False
+
+    key = input_quant_key_fn()
+    if key is not None:
+        layer.input_quant_key = key
+        return True
+    return False
+
+
 def as_quantized_activation(
     x: "torch.Tensor | QuantizedActivation", expected_key: QuantKey | None
 ) -> "QuantizedActivation | None":
