@@ -897,3 +897,99 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+
+class TestOpenerVariants:
+    """Openers the model emits that the documented grammar does not describe.
+
+    Gemma 4's chat template writes ``<|tool_call>call:name{...}``, and every
+    official artifact uses that form. Checkpoints are nonetheless observed
+    emitting the name with a bare ``:``, with no marker at all, or after a
+    ``-``. Before this was handled the FSM parked in TOOL_PREAMBLE, which has
+    no content_events entry, so the whole span produced no tool call and no
+    content either.
+
+    Reproduces https://github.com/vllm-project/vllm/issues/53431
+    """
+
+    ARGS = 'location:<|"|>London<|"|>'
+
+    def test_bare_colon_opener(self, parser, mock_request):
+        """<|tool_call>:name{...} parses the same as the documented form."""
+        text = f"<|tool_call>:get_weather{{{self.ARGS}}}<tool_call|>"
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "London"
+        }
+
+    def test_unmarked_opener(self, parser, mock_request):
+        """<|tool_call>name{...} with no marker at all still parses."""
+        text = f"<|tool_call>get_weather{{{self.ARGS}}}<tool_call|>"
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert result.tool_calls[0].function.name == "get_weather"
+
+    def test_documented_opener_unchanged(self, parser, mock_request):
+        """The specified call: form must behave exactly as before."""
+        text = f"<|tool_call>call:get_weather{{{self.ARGS}}}<tool_call|>"
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert result.tool_calls[0].function.name == "get_weather"
+
+    def test_bare_colon_with_paren_args(self, parser, mock_request):
+        """The bare opener composes with the round-bracket argument form."""
+        text = f"<|tool_call>:get_weather({self.ARGS})<tool_call|>"
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called
+        assert result.tool_calls[0].function.name == "get_weather"
+
+    def test_empty_tool_call_still_yields_nothing(self, parser, mock_request):
+        """An opener with no body must not become a tool call."""
+        result = parser.extract_tool_calls("<|tool_call><tool_call|>", mock_request)
+
+        assert not result.tools_called
+        assert not result.tool_calls
+
+    def test_colon_in_plain_content_untouched(self, parser, mock_request):
+        """A colon outside a tool span must not start or split a tool call.
+
+        Guards the alternative fix of adding a bare ":" lexer terminal, which
+        would put a colon in literal_first_chars for every state.
+        """
+        text = "Ratio is 3:1 today, no tools involved."
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert not result.tools_called
+        assert result.content == text
+
+    def test_streaming_bare_colon_opener(self, parser, mock_request):
+        """The bare opener streams the same deltas as the documented form."""
+        chunks = [
+            "<|tool_call>",
+            ":get_weather{",
+            'location:<|"|>London',
+            '<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        assert self._collect_function_name(results) == "get_weather"
+        assert json.loads(self._collect_arguments(results)) == {"location": "London"}
+
+    _SPECIAL_TOKEN_IDS = TestStreamingExtraction._SPECIAL_TOKEN_IDS
+    _simulate_streaming = TestStreamingExtraction._simulate_streaming
+    _collect_arguments = TestStreamingExtraction._collect_arguments
+    _collect_function_name = TestStreamingExtraction._collect_function_name

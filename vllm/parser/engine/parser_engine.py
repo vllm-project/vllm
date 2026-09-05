@@ -402,6 +402,16 @@ class ParserEngine(Parser):
             return json.dumps(args, ensure_ascii=False)
         return args_json
 
+    def _normalize_tool_name(self, name: str) -> str:
+        """Apply the grammar's tool name normalizer, if it declares one.
+
+        Returns *name* unchanged when the config sets no
+        ``tool_name_normalizer``, so grammars that do not need one are
+        unaffected.
+        """
+        normalizer = self.parser_engine_config.tool_name_normalizer
+        return normalizer(name) if normalizer is not None else name
+
     def _is_valid_tool_name(self, name: str) -> bool:
         if not self.parser_engine_config.validate_tool_names:
             return True
@@ -813,8 +823,14 @@ class ParserEngine(Parser):
             state.history_tool_call_cnt += 1
 
     def _handle_tool_name(self, event: SemanticEvent) -> None:
+        """Append a ``TOOL_NAME`` fragment to the slot's accumulated name.
+
+        The name arrives in pieces across deltas, so normalization runs on the
+        accumulated value rather than on each fragment.
+        """
         idx = event.tool_index
-        self._tool_slots[idx].name += event.value
+        slot = self._tool_slots[idx]
+        slot.name = self._normalize_tool_name(slot.name + event.value)
 
     def _emit_name_delta(
         self,

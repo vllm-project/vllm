@@ -100,6 +100,8 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    tool_name_normalizer: Callable[[str], str] | None = None
+
     @cached_property
     def terminal_defs(self):
         from vllm.parser.engine.incremental_lexer import terminals_from_literals
