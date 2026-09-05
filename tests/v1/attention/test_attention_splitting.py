@@ -131,6 +131,16 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
+def test_make_metadata_with_slice_preserves_is_prefilling(mixed_small_metadata):
+    """Request-phase metadata must follow the request slice, not token slice."""
+    mixed_small_metadata.is_prefilling = torch.tensor([False, True, False])
+    ubatch_slice = UBatchSlice(slice(1, 3), slice(1, 7))
+
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
+
+    assert torch.equal(result.is_prefilling, torch.tensor([True, False]))
+
+
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
     """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
