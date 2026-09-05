@@ -875,6 +875,7 @@ steps:
   - tests/distributed/
   - vllm/platforms/rocm.py
   commands:
+  - pytest -v -s distributed/test_elastic_ep_execute.py
   - pytest -v -s distributed/test_elastic_ep.py
 
 - label: ":amd: (MI300) RayExecutorV2" # TBD
