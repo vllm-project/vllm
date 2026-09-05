@@ -252,6 +252,12 @@ class FusedMoEQuantConfig:
     _w2: FusedMoEQuantDesc
     is_scale_swizzled: bool = True
 
+    # Selects the FlashInfer SM90 "humming" MXFP4-weight x FP8-activation path
+    # (PR #3738). When set, FlashInferExperts builds the 5-slot humming
+    # quant_scales and per-token residual scales; the per-expert residuals are
+    # carried in _w1/_w2.alpha_or_gscale.
+    use_wfp4afp8_humming: bool = False
+
     # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
     # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
     # in TrtLlmMxfp4ExpertsBase.
