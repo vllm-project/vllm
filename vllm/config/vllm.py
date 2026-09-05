@@ -47,6 +47,7 @@ from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
+from .snapshot import SnapshotConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
@@ -411,6 +412,8 @@ class VllmConfig:
     """The configurations for custom encoder cache manager."""
     reasoning_config: ReasoningConfig | None = None
     """The configurations for reasoning model."""
+    snapshot_config: SnapshotConfig | None = None
+    """Container snapshot configuration."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -1096,6 +1099,9 @@ class VllmConfig:
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
+
+        if self.snapshot_config is not None:
+            self.parallel_config.reserve_snapshot_ports()
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)

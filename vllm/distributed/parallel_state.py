@@ -138,6 +138,12 @@ def _split_tensor_dict(
 _group_name_counter: dict[str, int] = {}
 
 
+def reset_group_name_registry() -> None:
+    """Reset the group name counter and stale group references."""
+    _group_name_counter.clear()
+    _groups.clear()
+
+
 def _get_unique_name(name: str) -> str:
     """Get a unique name for the group.
     Example:
@@ -1779,8 +1785,14 @@ def init_distributed_environment(
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
 
-        # Use appropriate IP and port based on configuration
-        if parallel_config.nnodes > 1:
+        # Use appropriate IP and port based on configuration.
+        from vllm.snapshot.utils import is_restore
+
+        if config.snapshot_config is not None and is_restore():
+            ip = parallel_config.data_parallel_master_ip
+            port = parallel_config.get_next_dp_init_port()
+            distributed_init_method = get_distributed_init_method(ip, port)
+        elif parallel_config.nnodes > 1:
             ip = parallel_config.master_addr
             port = parallel_config.master_port
             distributed_init_method = get_distributed_init_method(ip, port)
