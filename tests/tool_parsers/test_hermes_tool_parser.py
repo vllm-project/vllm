@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from tests.tool_parsers.common_tests import ToolParserTestConfig, ToolParserTests
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -412,3 +413,78 @@ def test_hermes_streaming_content_and_tool_call_in_single_chunk(
     assert tool_parts[0].function.name == "f"
     args_str = "".join(tc.function.arguments or "" for tc in tool_parts)
     assert json.loads(args_str) == {"x": 1}
+
+
+def _hermes_config(parser_name: str) -> ToolParserTestConfig:
+    """Shared config for the `<tool_call>{json}</tool_call>` wire format."""
+    return ToolParserTestConfig(
+        parser_name=parser_name,
+        no_tool_calls_output="This is a regular response without any tool calls.",
+        single_tool_call_output=(
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "Tokyo"}}\n</tool_call>'
+        ),
+        parallel_tool_calls_output=(
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "Tokyo"}}\n</tool_call>\n'
+            '<tool_call>\n{"name": "get_time", '
+            '"arguments": {"timezone": "Asia/Tokyo"}}\n</tool_call>'
+        ),
+        various_data_types_output=(
+            '<tool_call>\n{"name": "test_function", "arguments": {'
+            '"string_field": "hello", '
+            '"int_field": 42, '
+            '"float_field": 3.14, '
+            '"bool_field": true, '
+            '"null_field": null, '
+            '"array_field": ["a", "b", "c"], '
+            '"object_field": {"nested": "value"}, '
+            '"empty_array": [], '
+            '"empty_object": {}}}\n</tool_call>'
+        ),
+        empty_arguments_output=(
+            '<tool_call>\n{"name": "refresh", "arguments": {}}\n</tool_call>'
+        ),
+        surrounding_text_output=(
+            "Let me check the weather for you.\n"
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "Tokyo"}}\n</tool_call>\n'
+            "I'll get that information."
+        ),
+        escaped_strings_output=(
+            '<tool_call>\n{"name": "test_function", "arguments": {'
+            '"quoted": "He said \\"hello\\"", '
+            '"backslash": "C:\\\\Users\\\\test", '
+            '"newline": "line1\\nline2"}}\n</tool_call>'
+        ),
+        malformed_input_outputs=[
+            '<tool_call>\n{"name": "broken", "arguments": {invalid}}\n</tool_call>',
+            '<tool_call>\n{"name": "unterminated", "arguments": {"a": 1}\n',
+            "<tool_call>\n\n</tool_call>",
+            '<tool_call>{"arguments": {"a": 1}}</tool_call>',
+        ],
+    )
+
+
+class TestHermesToolParser(ToolParserTests):
+    """Common parity suite for the Hermes 2 Pro `<tool_call>` format."""
+
+    @pytest.fixture
+    def tokenizer(self, qwen_tokenizer: TokenizerLike) -> TokenizerLike:
+        return qwen_tokenizer
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return _hermes_config("hermes")
+
+
+class TestGranite4ToolParser(ToolParserTests):
+    """Granite 4 reuses the Hermes `<tool_call>` wire format."""
+
+    @pytest.fixture
+    def tokenizer(self, qwen_tokenizer: TokenizerLike) -> TokenizerLike:
+        return qwen_tokenizer
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return _hermes_config("granite4")

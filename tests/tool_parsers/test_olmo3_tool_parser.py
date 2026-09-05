@@ -5,6 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.tool_parsers.common_tests import (
+    ToolParserTestConfig,
+    ToolParserTests,
+    pythonic_style_test_config,
+)
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
@@ -249,3 +254,22 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+class TestOlmo3ToolParser(ToolParserTests):
+    """Olmo 3 emits newline-separated calls inside `<function_calls>`."""
+
+    @pytest.fixture
+    def test_config(self) -> ToolParserTestConfig:
+        return pythonic_style_test_config(
+            "olmo3",
+            lambda calls: f"<function_calls>{chr(10).join(calls)}</function_calls>",
+            # Non-streaming extracts the call and drops the prose; streaming
+            # never leaves content mode, so it returns the whole output as
+            # content and reports no tool calls.
+            xfail_streaming={
+                "test_surrounding_text": (
+                    "streaming misses <function_calls> preceded by content"
+                ),
+            },
+        )
