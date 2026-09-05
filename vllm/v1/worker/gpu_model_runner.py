@@ -7369,6 +7369,7 @@ class GPUModelRunner(
             or slot_mapping_modes != self._init_slot_mapping_modes
             or self.cp_kv_cache_interleave_size
             != self.parallel_config.cp_kv_cache_interleave_size
+            or max_model_len != self.input_batch.max_model_len
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
