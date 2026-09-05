@@ -61,8 +61,6 @@ vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
 
 Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
 
-Sarvam MLA (`SarvamMLAForCausalLM`) supports [EAGLE3 speculative decoding](docs/features/speculative_decoding/eagle.md) with a compatible draft checkpoint and a single pipeline stage (`--pipeline-parallel-size 1`). Auxiliary hidden states are not transported across pipeline stages. Ordinary pipeline parallelism remains supported when EAGLE3 is disabled.
-
 ## Getting Started
 
 Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
