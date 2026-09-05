@@ -202,6 +202,13 @@ class FourParallelLinears(nn.Module):
         return self.proj_a(x), self.proj_b(x), self.proj_c(x), self.proj_d(x)
 
 
+class MutatingParallelLinears(FourParallelLinears):
+    def forward(self, x):
+        a = self.proj_a(x)
+        x.add_(1)
+        return a, self.proj_b(x), self.proj_c(x), self.proj_d(x)
+
+
 class ExtraProjAttention(FakeAttention):
     """A second non-qkv linear of a different width -> `o_proj` still found."""
 
@@ -537,6 +544,16 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(PerHeadQKNormAttention(), QKVFuser).o_name == "o_proj"
         # A module between o_proj and the return is transparent.
         assert get_fuser(ResidDropoutAttention(), QKVFuser).o_name == "o_proj"
+
+
+def test_merged_column_fuser_rejects_input_mutation():
+    """The later projections must not be moved ahead of an input mutation."""
+    with torch.device("meta"):
+        module = MutatingParallelLinears()
+    fuser = MergedColumnParallelFuser.match(trace(module), module)
+    assert fuser is not None
+    with pytest.raises(ValueError, match="cross other operations"):
+        fuser.update_forward(module)
 
 
 def test_merged_column_fuser_supports_any_number_of_linears(

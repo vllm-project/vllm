@@ -99,6 +99,23 @@ class MergedColumnParallelFuser(StackedFuser):
         if len({id(block) for block, _ in blocks}) != 1:
             raise ValueError("parallel linear calls are in different blocks")
 
+        block = blocks[0][0]
+        index = min(index for _, index in blocks)
+        # Moving projections must not cross operations that can change their input.
+        for statement in block[index : max(index for _, index in blocks) + 1]:
+            if not isinstance(statement, (ast.Assign, ast.Return)):
+                raise ValueError("parallel projections cross other operations")
+            if isinstance(statement, ast.Assign) and any(
+                not isinstance(target, ast.Name) for target in statement.targets
+            ):
+                raise ValueError("parallel projection assignment has side effects")
+            value = statement.value
+            values = value.elts if isinstance(value, ast.Tuple) else [value]
+            if any(value not in calls for value in values) or any(
+                not isinstance(call.args[0], ast.Name) for call in calls
+            ):
+                raise ValueError("parallel projections cross other operations")
+
         names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
         temps = [f"_vllm_merged_{index}" for index in range(len(calls))]
         if names & set(temps):
@@ -113,8 +130,6 @@ class MergedColumnParallelFuser(StackedFuser):
             if isinstance(node, ast.Name) and node.id == "__arg__"
         )
         replace_expr(assign, arg, calls[0].args[0])
-        block = blocks[0][0]
-        index = min(index for _, index in blocks)
         ast.copy_location(assign, block[index])
         block.insert(index, assign)
         for call, temp in zip(calls, temps):
