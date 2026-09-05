@@ -394,6 +394,10 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
+    # custom paged-attention is not supported on gfx1250 yet
+    if on_gfx1250():
+        return False
+
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
     if on_cdna():
