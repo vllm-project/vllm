@@ -83,6 +83,7 @@ def test_config_interface():
 
     assumes(KVTransferConfig, "kv_role")
     assumes(KVTransferConfig, "kv_connector_extra_config")
+    assumes(KVTransferConfig, "get_from_extra_config", is_callable=True)
 
     assumes(ModelConfig, "use_mla", is_instance_of=bool)
     assumes(ModelConfig, "dtype")
@@ -92,7 +93,7 @@ def test_config_interface():
     assumes(ModelConfig, "get_num_kv_heads", is_callable=True)
     assumes(ModelConfig, "get_head_size", is_callable=True)
     assumes(ModelConfig, "get_num_layers", is_callable=True)
-    assumes(ModelConfig, "get_num_kv_heads", is_callable=True)
+    assumes(ModelConfig, "hf_config")
     assumes(ModelConfig, "model")
 
     assumes(ParallelConfig, "world_size")
