@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
@@ -109,11 +110,42 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
+        self._update_state_after_alloc(request, blocks, num_external_tokens)
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
+        self._update_state_after_alloc(
+            request, blocks, load_range.num_tokens, load_range
+        )
+
+    def _update_state_after_alloc(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        load_range: KVLoadRange | None = None,
+    ) -> None:
         params = request.kv_transfer_params
+        if load_range is not None:
+            load_start_token = load_range.start_token
+            load_end_token = load_range.end_token
+        elif num_external_tokens > 0:
+            # Legacy single-source loads still need an explicit window. A P
+            # engine can serve Store misses and piecewise Store hits in any
+            # order, so transfer semantics cannot be cached per engine.
+            load_start_token = request.num_computed_tokens
+            load_end_token = load_start_token + num_external_tokens
+        else:
+            load_start_token = load_end_token = 0
         logger.debug(
             "NIXLConnector update_state_after_alloc: "
-            "num_external_tokens=%s, kv_transfer_params=%s",
+            "num_external_tokens=%s, load_range=%s, kv_transfer_params=%s",
             num_external_tokens,
+            load_range,
             params,
         )
 
@@ -147,24 +179,28 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     # a full prefix cache hit on the local node. We need to call
                     # send_notif in _read_blocks to free the memory on the remote node.
 
-                    unhashed_local_block_ids: BlockIds = (
-                        blocks.get_unhashed_block_ids_all_groups()
-                        if num_external_tokens > 0
-                        else ()
-                    )
-                    local_block_ids = self.get_exchange_clipped_blocks(
-                        unhashed_local_block_ids
-                    )
-                    # Blocks covered by the local prefix cache, per KV cache group.
-                    # Each count fixes where that group's DCP slice starts, which the
-                    # worker needs to line up with the remote's slice.
-                    local_num_computed_blocks = tuple(
-                        sum(
-                            block.block_hash is not None and not block.is_null
-                            for block in group
+                    if load_range is not None:
+                        local_block_ids = self.get_range_block_ids(blocks, load_range)
+                        local_num_computed_blocks = self.get_range_start_blocks(
+                            load_range
                         )
-                        for group in blocks.blocks
-                    )
+                    else:
+                        unhashed_local_block_ids: BlockIds = (
+                            blocks.get_unhashed_block_ids_all_groups()
+                            if num_external_tokens > 0
+                            else ()
+                        )
+                        local_block_ids = self.get_exchange_clipped_blocks(
+                            unhashed_local_block_ids
+                        )
+                        # Each count fixes where that group's DCP slice starts.
+                        local_num_computed_blocks = tuple(
+                            sum(
+                                block.block_hash is not None and not block.is_null
+                                for block in blocks.blocks[group_id]
+                            )
+                            for group_id in self.kv_cache_config.transfer_group_ids
+                        )
 
                     # Get unhashed blocks to pull from remote. Mind that a full prefix
                     # cache hit is indicated with an empty list.
@@ -172,6 +208,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         request,
                         local_block_ids,
                         local_num_computed_blocks,
+                        load_start_token,
+                        load_end_token,
                     )
 
                 else:
@@ -224,7 +262,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [], ())
+            self._reqs_need_recv[request.request_id] = (request, [], (), 0, 0)
             params["do_remote_prefill"] = False
             return False, None
 

@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -154,6 +155,7 @@ class TestPushScheduler:
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
         assert reg["remote_engine_id"] == "prefill-engine"
+        assert (reg["load_start_token"], reg["load_end_token"]) == (64, 112)
 
         # Watchdog deadline set in the future.
         deadline = sched._push_registration_deadlines[request.request_id]
@@ -162,6 +164,24 @@ class TestPushScheduler:
         assert request.kv_transfer_params["do_remote_prefill"] is False
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
+
+    def test_d_side_range_load_registers_only_owned_suffix(self):
+        sched = make_nixl_push_scheduler()
+        sched.get_range_block_ids = MagicMock(return_value=([12, 13],))
+        request = _make_request(request_id="req-d-range")
+        blocks = _BlocksMock(block_ids=([10, 11, 12, 13],))
+
+        sched.update_state_after_alloc_for_range(
+            request,
+            blocks,
+            KVLoadRange(32, 64),
+        )
+
+        registration = sched._push_pending_registrations[request.request_id]
+        assert registration["local_block_ids"] == ([12, 13],)
+        assert registration["load_start_token"] == 32
+        assert registration["load_end_token"] == 64
+        sched.get_range_block_ids.assert_called_once_with(blocks, KVLoadRange(32, 64))
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
@@ -391,6 +411,8 @@ def _registration_data(
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     remote_tp_size: int = 1,
+    load_start_token: int = 0,
+    load_end_token: int = 0,
 ) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -403,6 +425,8 @@ def _registration_data(
         "remote_host": remote_host,
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
+        "load_start_token": load_start_token,
+        "load_end_token": load_end_token,
     }
 
 
@@ -601,6 +625,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.engine_id == "decode-engine"
     # RemoteMeta.request_id is D's request id from the registration.
     assert meta.remote.request_id == "req-hs"
+    assert (meta.load_start_token, meta.load_end_token) == (0, 0)
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure():
@@ -1336,7 +1361,12 @@ class TestPushPrefixCaching:
         """D registered only its 2 uncomputed suffix blocks; P finished the
         full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
         w, _ = self._worker_driving_xfer()
-        reg = _registration_data("req-pc", local_block_ids=([500, 501],))
+        reg = _registration_data(
+            "req-pc",
+            local_block_ids=([500, 501],),
+            load_start_token=48,
+            load_end_token=80,
+        )
 
         NixlPushConnectorWorker._do_start_push_kv(
             w, "req-pc", ([10, 11, 12, 13, 14],), reg
@@ -1357,3 +1387,28 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+    def test_heterogeneous_logical_pages_use_token_window(self):
+        w, _ = self._worker_driving_xfer()
+        w._has_mamba = True
+        w._physical_blocks_per_logical_kv_block = 10
+        remote_info = w.transfer_topo.get_engine_info.return_value
+        remote_info.remote_physical_blocks_per_logical = 6
+        w._compute_desc_ids = lambda block_ids, **_: list(block_ids[0])
+        reg = _registration_data(
+            "req-hetero",
+            local_block_ids=([500, 501, 502, 503],),
+            load_start_token=96,
+            load_end_token=160,
+        )
+
+        NixlPushConnectorWorker._do_start_push_kv(
+            w,
+            "req-hetero",
+            (list(range(10)),),
+            reg,
+        )
+
+        local, remote = self._written_block_ids(w)
+        assert local == [6, 7, 8, 9]
+        assert remote == [500, 501, 502, 503]

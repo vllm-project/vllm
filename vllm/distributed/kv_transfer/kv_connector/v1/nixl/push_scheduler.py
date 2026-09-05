@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVLoadRange,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
@@ -128,14 +129,44 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        self._update_state_after_alloc(request, blocks, num_external_tokens)
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        load_range: KVLoadRange,
+    ) -> None:
+        self._update_state_after_alloc(
+            request, blocks, load_range.num_tokens, load_range
+        )
+
+    def _update_state_after_alloc(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        num_external_tokens: int,
+        load_range: KVLoadRange | None = None,
+    ) -> None:
         """In push mode, D stores registration data for the worker to send
         to P via NIXL notification (deferred to ``build_connector_meta``).
         """
         params = request.kv_transfer_params
+        if load_range is not None:
+            load_start_token = load_range.start_token
+            load_end_token = load_range.end_token
+        elif num_external_tokens > 0:
+            # Carry the window for ordinary NIXL loads too: range and
+            # non-range requests share the same remote engine and handshake.
+            load_start_token = request.num_computed_tokens
+            load_end_token = load_start_token + num_external_tokens
+        else:
+            load_start_token = load_end_token = 0
         logger.debug(
             "NixlPushConnector update_state_after_alloc: "
-            "num_external_tokens=%s, kv_transfer_params=%s",
+            "num_external_tokens=%s, load_range=%s, kv_transfer_params=%s",
             num_external_tokens,
+            load_range,
             params,
         )
 
@@ -168,8 +199,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "KV PUSH mode: D node storing registration for request %s",
             request.request_id,
         )
-        local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
-        local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
+        local_block_ids: BlockIds = (
+            self.get_range_block_ids(blocks, load_range)
+            if load_range is not None
+            else self.get_exchange_clipped_blocks(
+                blocks.get_unhashed_block_ids_all_groups()
+            )
+        )
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -186,6 +222,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "remote_port": params["remote_port"],
             "remote_tp_size": params["tp_size"],
             "remote_pp_size": params.get("pp_size", 1),
+            "load_start_token": load_start_token,
+            "load_end_token": load_end_token,
         }
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
@@ -198,7 +236,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids, ())
+        self._reqs_need_recv[request.request_id] = (
+            request,
+            local_block_ids,
+            (),
+            load_start_token,
+            load_end_token,
+        )
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -240,7 +284,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # recv so the worker emits a notif that lets P free them.
             # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
             params["remote_block_ids"] = ()
-            self._reqs_need_recv[request.request_id] = (request, [], ())
+            self._reqs_need_recv[request.request_id] = (request, [], (), 0, 0)
             params["do_remote_prefill"] = False
             return False, None
 

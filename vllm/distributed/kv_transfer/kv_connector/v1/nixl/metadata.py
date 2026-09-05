@@ -46,8 +46,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   8: Add dcp_size and pcp_size to NixlAgentMetadata
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
+#  11: Add explicit token windows to range-load metadata
 #
-NIXL_CONNECTOR_VERSION: int = 10
+NIXL_CONNECTOR_VERSION: int = 11
 
 
 @dataclass
@@ -241,6 +242,9 @@ class ReqMeta:
     remote_block_size: int | None = None
     # Remote producer pipeline-parallel size (push mode, D side).
     pp_size: int = 1
+    # Token range loaded from the remote. An end of 0 means unspecified.
+    load_start_token: int = 0
+    load_end_token: int = 0
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -270,6 +274,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -280,6 +286,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_block_size=kv_transfer_params.get("remote_block_size"),
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
+            load_start_token=load_start_token,
+            load_end_token=load_end_token,
         )
 
     def add_new_req_to_save(
@@ -298,9 +306,15 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ):
         req = self._add_new_req(
-            local_block_ids, kv_transfer_params, local_num_computed_blocks
+            local_block_ids,
+            kv_transfer_params,
+            local_num_computed_blocks,
+            load_start_token,
+            load_end_token,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],

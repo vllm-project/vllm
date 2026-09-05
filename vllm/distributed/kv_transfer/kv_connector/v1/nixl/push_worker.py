@@ -429,7 +429,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         decode_engine_id = registration_data["decode_engine_id"]
         remote_block_ids = registration_data["local_block_ids"]
         decode_request_id = registration_data["request_id"]
-
+        load_start_token = registration_data["load_start_token"]
+        load_end_token = registration_data["load_end_token"]
         # Runs on the background executor; defer the WRITE until it's ready.
         fut = self._ensure_handshake(
             decode_engine_id,
@@ -470,6 +471,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             local_block_ids=logical_local,
             local_physical_block_ids=physical_local,
             tp_size=self.world_size,
+            load_start_token=load_start_token,
+            load_end_token=load_end_token,
             remote=RemoteMeta(
                 block_ids=logical_remote,
                 host="",
@@ -585,6 +588,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                load_start_token=meta.load_start_token,
+                load_end_token=meta.load_end_token,
             )
             if handle is not None:
                 handles.append(handle)
@@ -604,6 +609,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        load_start_token: int = 0,
+        load_end_token: int = 0,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -632,14 +639,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
-        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
-        # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
+        # Pair the registered D range with the same P token window. Legacy
+        # registrations without a window retain the existing suffix trim.
         remote_block_ids, local_block_ids = self._apply_prefix_caching(
             decode_block_ids=remote_block_ids,
             prefill_block_ids=local_block_ids,
             decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
             prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+            load_start_token=load_start_token,
+            load_end_token=load_end_token,
+            block_size_ratio=block_size_ratio,
         )
 
         local_block_ids = list(local_block_ids)
