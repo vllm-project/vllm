@@ -98,6 +98,18 @@ def pad_nvfp4_weight_for_cutlass(
     return weight, weights_padding_bytes
 
 
+def restore_nvfp4_cutlass_padding_cols(layer: torch.nn.Module) -> None:
+    """Recompute ``weights_padding_cols`` for an already-padded NVFP4 weight.
+
+    The weight cache exports the post-processing (swizzled/padded) weight but not
+    ``weights_padding_cols`` (a plain int), so derive it from the padded packed
+    weight width and the logical input size.
+    """
+    packed_cols = layer.weight.shape[1]
+    logical_packed_cols = layer.input_size_per_partition // 2
+    layer.weights_padding_cols = packed_cols - logical_packed_cols
+
+
 def pad_nvfp4_activation_for_cutlass(
     x_fp4: torch.Tensor,
     weights_padding_bytes: int,
