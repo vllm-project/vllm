@@ -181,6 +181,60 @@ The completion notif sent from P to D after a WRITE is the existing
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
 
+## Pipeline parallelism and hybrid KV caches
+
+The pull connector requires the local and remote workers to expose a
+congruent list of KV regions — region *i* here corresponds to region
+*i* there. That assumption breaks under pipeline parallelism (PP)
+combined with a hybrid (HMA) KV layout:
+
+* a PP-sharded prefiller (**P**) holds only a slice of the model's
+  layers while the `PP=1` decoder (**D**) holds them all, so region
+  counts differ;
+* with HMA, several layer names are pooled into one region and the layer
+  that represents a pooled region can differ between P and D.
+
+`NixlPushConnector` handles this for PP-sharded producers by routing
+**by layer-name (member) identity** instead of by region index. Each
+worker advertises which layer names back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). A producer that
+needs member routing derives its member-major layout once, when it
+registers its KV caches, and every transfer it issues uses that order.
+`add_remote_agent` then selects exactly the remote regions this stage
+owns and reorders them to match, so both sides stay paired regardless of
+how each remote rank happens to order its metadata.
+
+Packed MLA caches interleave layer pages within each block. PP stages can
+pack different members at different offsets and block strides. A PP producer
+registers one logical transfer region per member, while memory registration
+still covers the shared allocation once. A `PP=1` peer keeps whole-row
+transfers and advertises each member's byte offset and page size through
+`packed_member_layouts`. The producer folds those offsets into the remote
+region addresses; the ordinary descriptor builders then use each side's
+own `block_strides`. Aliased members remain distinct when their page sizes
+differ. Pull-mode registration and transfers are unchanged.
+Packed push hashes the sorted attention-backend names, since PP can change
+their discovery order without changing the cache format. A different backend
+set still fails the compatibility check.
+
+Invariants enforced when the remote regions are aligned:
+
+* every locally owned member must be advertised exactly once by the
+  remote; a missing member fails the handshake rather than silently
+  leaving that layer's KV stale, and remote-only members (owned by other
+  PP stages) are ignored;
+* a remote that omits member metadata while the local layout requires
+  member routing fails the handshake instead of falling back to
+  region-index routing;
+* member order is a property of the local layout alone, so the same local
+  source descriptors serve every remote engine and TP rank; only the
+  remote descriptor list is rebuilt per rank.
+
+Decode-side PP is unsupported because completions are counted per
+consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
+requires MLA caches and equal P/D block sizes. MLA pages are replicated
+across TP ranks, so producer TP1 to consumer TP2 is supported.
+
 ## Scheduler-side responsibilities
 
 `NixlPushConnectorScheduler` extends the base scheduler with:
