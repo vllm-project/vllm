@@ -419,10 +419,6 @@ class HiSparseHotSpec(KVCacheSpec):
     blocks_per_request: int
 
     @property
-    def prefix_cacheable(self) -> bool:
-        return False
-
-    @property
     def page_size_bytes(self) -> int:
         return self.page_size
 
@@ -450,10 +446,6 @@ class HiSparseResidentSpec(KVCacheSpec):
     """Reclaimable GPU-resident pages for host-backed HiSparse KV."""
 
     page_size: int
-
-    @property
-    def prefix_cacheable(self) -> bool:
-        return False
 
     @property
     def page_size_bytes(self) -> int:
