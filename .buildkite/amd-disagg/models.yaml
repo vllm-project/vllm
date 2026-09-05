@@ -37,14 +37,14 @@ models:
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_ROCM_USE_AITER_FP8BMM: "false"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
-      #ep: '--gpu-memory-utilization 0.75 --enforce-eager'
-      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: MiniMax-M3-MXFP8
     env:
@@ -53,11 +53,14 @@ models:
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
       VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT6"
+      VLLM_KV_CACHE_LAYOUT: "HND"
     base_flags: "--trust-remote-code --attention-backend TRITON_ATTN --block-size 128 --language-model-only --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85 --enforce-eager"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: DeepSeek-R1-MXFP4
     env:
@@ -65,11 +68,14 @@ models:
       VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_FP8BMM: "false"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: Kimi-K2.5-MXFP4
     env:
@@ -79,8 +85,10 @@ models:
     base_flags: "--trust-remote-code"
     prefill:
       tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
 
   - model: Kimi-K2.6-MXFP4
     env:
@@ -89,9 +97,10 @@ models:
       VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
-      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8 --mm-encoder-tp-mode data --block-size 1 --attention-backend ROCM_AITER_MLA"
     prefill:
       tp: "--gpu-memory-utilization 0.9"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
       tp: "--gpu-memory-utilization 0.9"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","custom_ops":["+quant_fp8"]}'
