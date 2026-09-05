@@ -111,8 +111,9 @@ fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
     range.map(|range| range.start)
 }
 
-/// Streaming scan state for a buffered marker search [`take_until_marker`],
-/// so that we don't have to rescan the whole buffered prefix when resuming.
+/// Streaming scan state for buffered marker searches such as
+/// [`take_until_marker`] and [`take_until_marker_mul`], so that we don't have
+/// to rescan the whole buffered prefix when resuming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarkerScanState {
     scan_start: usize,
@@ -140,15 +141,29 @@ pub fn take_until_marker<'i, 'a>(
     marker: &'a str,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
-    move |input: &mut Partial<&'i str>| take_until_marker_(input, marker, state)
+    move |input: &mut Partial<&'i str>| {
+        take_until_marker_mul_(input, &[marker], state).map(|(body, _)| body)
+    }
 }
 
-fn take_until_marker_<'i>(
+/// Parse text until the earliest of `markers`, resuming from the last safe scan checkpoint.
+///
+/// Returns the slice before the marker and the matched marker's index, leaving
+/// the marker itself for the caller to consume.
+pub fn take_until_marker_mul<'i, 'a>(
+    markers: &'a [&'a str],
+    state: &'a mut MarkerScanState,
+) -> impl Parser<Partial<&'i str>, (&'i str, usize), ErrMode<ContextError>> + 'a {
+    move |input: &mut Partial<&'i str>| take_until_marker_mul_(input, markers, state)
+}
+
+fn take_until_marker_mul_<'i>(
     input: &mut Partial<&'i str>,
-    marker: &str,
+    markers: &[&str],
     state: &mut MarkerScanState,
-) -> ModalResult<&'i str> {
-    debug_assert!(!marker.is_empty());
+) -> ModalResult<(&'i str, usize)> {
+    debug_assert!(!markers.is_empty());
+    debug_assert!(markers.iter().all(|marker| !marker.is_empty()));
 
     let text = **input;
     if text.is_empty() {
@@ -158,15 +173,19 @@ fn take_until_marker_<'i>(
     // Normal updates store a char boundary; this keeps stale or misused state from panicking.
     let scan_start = floor_char_boundary(text, state.scan_start);
 
-    if let Some(offset) = text[scan_start..].find(marker) {
+    if let Some(offset) = find_slice_mul(&text[scan_start..], markers) {
         let marker_start = scan_start + offset;
+        let marker_index = markers
+            .iter()
+            .position(|marker| text[marker_start..].starts_with(*marker))
+            .expect("matched marker must be present");
         let body = &text[..marker_start];
         input.next_slice(marker_start);
         state.reset();
-        return Ok(body);
+        return Ok((body, marker_index));
     }
 
-    let keep_len = partial_prefix_len(text, marker);
+    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
     state.scan_start = text.len() - keep_len;
     incomplete()
 }
@@ -430,7 +449,7 @@ mod tests {
     use super::{
         JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, parse_buffered_event,
         partial_prefix_len, safe_text_len, safe_text_len_mul, take_json_object, take_json_string,
-        take_until_marker,
+        take_until_marker, take_until_marker_mul,
     };
 
     #[test]
@@ -565,6 +584,27 @@ mod tests {
 
         assert_eq!(body, "body");
         assert_eq!(*input, "</tool_call>tail");
+        assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_mul_resumes_and_reports_the_earliest_marker() {
+        let markers = ["</call>", "</tools>", "<eom>"];
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("body</too");
+
+        let error = take_until_marker_mul(&markers, &mut state).parse_next(&mut input).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, "body".len());
+
+        let mut input = Partial::new("body</tools>ignored</call>");
+        let (body, marker_index) =
+            take_until_marker_mul(&markers, &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(marker_index, 1);
+        assert_eq!(*input, "</tools>ignored</call>");
         assert_eq!(state, MarkerScanState::default());
     }
 
