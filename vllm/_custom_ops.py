@@ -2335,6 +2335,30 @@ def moe_align_block_size(
     )
 
 
+def fused_globalize_align_block_size(
+    topk_idx: torch.Tensor,
+    psum: torch.Tensor,
+    rank_expert_offset: int,
+    global_num_experts: int,
+    local_num_experts: int,
+    block_size: int,
+    sorted_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+) -> None:
+    torch.ops._moe_C.fused_globalize_align_block_size(
+        topk_idx,
+        psum,
+        rank_expert_offset,
+        global_num_experts,
+        local_num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
+
+
 def batched_moe_align_block_size(
     max_tokens_per_batch: int,
     block_size: int,
