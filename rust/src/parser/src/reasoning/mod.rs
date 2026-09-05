@@ -19,7 +19,9 @@
 
 mod cohere_cmd;
 mod deepseek_r1;
+mod deepseek_v3;
 mod delimited;
+mod glm45;
 mod hy;
 mod kimi;
 mod minimax_m3;
@@ -32,7 +34,11 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
-pub(crate) use self::delimited::{DelimitedReasoningParser, last_reasoning_boundary};
+pub use self::deepseek_v3::DeepSeekV3ReasoningParser;
+pub(crate) use self::delimited::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, last_reasoning_boundary,
+};
+pub use self::glm45::Glm45ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
@@ -40,22 +46,21 @@ pub use self::qwen3::Qwen3ReasoningParser;
 pub use self::seed_oss::SeedOssReasoningParser;
 pub use self::step3p5::Step3p5ReasoningParser;
 
-/// DeepSeek V3 currently shares the standard `<think>...</think>` parser.
-pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
-/// DeepSeek V4 currently shares the standard `<think>...</think>` parser.
-pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
-/// GLM45 currently shares the standard `<think>...</think>` parser.
-pub type Glm45ReasoningParser = Qwen3ReasoningParser;
-/// Kimi K2 currently shares the standard `<think>...</think>` parser.
+/// Nemotron V3 and Step3p5 frame all three reasoning boundaries with one newline.
+pub type NemotronV3ReasoningParser = Step3p5ReasoningParser;
+/// Step3 and DeepSeek R1 prefill a newline after the reasoning opener.
+pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
+
+/// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
+pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
+/// GLM-4.7 and GLM-5 use bare reasoning delimiters.
+pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
+/// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
 // TODO: kimi k2 may implicitly end reasoning by starting a tool call section
 // using <|tool_calls_section_begin|>, we should support that.
-pub type KimiK2ReasoningParser = Qwen3ReasoningParser;
-/// MiniMax M2 currently shares the standard `<think>...</think>` parser.
+pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
+/// MiniMax M2 currently shares the Qwen3 reasoning parser.
 pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
-/// Nemotron V3 currently shares the standard `<think>...</think>` parser.
-pub type NemotronV3ReasoningParser = Qwen3ReasoningParser;
-/// Step3 currently shares the standard `<think>...</think>` parser.
-pub type Step3ReasoningParser = Qwen3ReasoningParser;
 
 /// Result alias for reasoning parser operations.
 pub type Result<T> = std::result::Result<T, ReasoningError>;
@@ -140,6 +145,8 @@ pub trait ReasoningParser: Send {
 /// Errors produced while creating or running reasoning parsers.
 #[derive(Debug, Error)]
 pub enum ReasoningError {
+    #[error(transparent)]
+    Tokenizer(#[from] vllm_tokenizer::TokenizerError),
     #[error("tokenizer is missing reasoning delimiter token `{token}`")]
     MissingToken { token: String },
     #[error(

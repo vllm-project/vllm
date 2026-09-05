@@ -7,6 +7,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Hermes",
     start_marker: "<tool_call>",
+    framed_start_marker: None,
     end_marker: "</tool_call>",
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,
