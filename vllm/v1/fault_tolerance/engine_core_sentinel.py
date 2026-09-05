@@ -22,11 +22,11 @@ from vllm.v1.engine import (
     UtilityOutput,
 )
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.engine.core import EngineCoreProc
 
 logger = init_logger(__name__)
