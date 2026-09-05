@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Iterable, Mapping
-from typing import Annotated
+from typing import Annotated, cast
 
 import torch
 import torch.nn.functional as F
@@ -37,12 +37,17 @@ from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -271,9 +276,14 @@ class GraniteSpeechEncoderProjector(nn.Module):
             quant_config=quant_config,
             cache_config=cache_config,
             prefix=f"{prefix}.qformer",
+            use_vllm_linear=True,
         )
-        self.linear = nn.Linear(
-            config.projector_config.hidden_size, config.text_config.hidden_size
+        self.linear = ReplicatedLinear(
+            config.projector_config.hidden_size,
+            config.text_config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear",
+            return_bias=False,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -342,7 +352,12 @@ class GraniteSpeechConformerAttention(nn.Module):
     for more details.
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
 
         inner_dim = config.dim_head * config.num_heads
@@ -352,9 +367,29 @@ class GraniteSpeechConformerAttention(nn.Module):
         self.dim_head = config.dim_head
         self.scale = self.dim_head**-0.5
         self.pre_norm = nn.LayerNorm(config.hidden_dim)
-        self.to_q = nn.Linear(config.hidden_dim, inner_dim, bias=False)
-        self.to_kv = nn.Linear(config.hidden_dim, inner_dim * 2, bias=False)
-        self.to_out = nn.Linear(inner_dim, config.hidden_dim)
+        self.to_q = ReplicatedLinear(
+            config.hidden_dim,
+            inner_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_q",
+            return_bias=False,
+        )
+        self.to_kv = ReplicatedLinear(
+            config.hidden_dim,
+            inner_dim * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_kv",
+            return_bias=False,
+        )
+        self.to_out = ReplicatedLinear(
+            inner_dim,
+            config.hidden_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.to_out",
+            return_bias=False,
+        )
         self.rel_pos_emb = nn.Embedding(2 * self.max_pos_emb + 1, self.dim_head)
 
         if self.context_size <= 0 or self.context_size > self.max_pos_emb:
@@ -479,10 +514,19 @@ class GraniteSpeechConformerBlock(nn.Module):
     """Conformer block, consisting largely of linear layers,
     attention, and convolutional layers."""
 
-    def __init__(self, config: PretrainedConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.ff1 = GraniteSpeechConformerFeedForward(config, prefix=f"{prefix}.ff1")
-        self.attn = GraniteSpeechConformerAttention(config, prefix=f"{prefix}.attn")
+        self.attn = GraniteSpeechConformerAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
         self.conv = GraniteSpeechConformerConvModule(config, prefix=f"{prefix}.conv")
         self.ff2 = GraniteSpeechConformerFeedForward(config, prefix=f"{prefix}.ff2")
         self.post_norm = nn.LayerNorm(config.hidden_dim)
@@ -520,11 +564,19 @@ class GraniteSpeechCTCEncoder(nn.Module):
             + config.max_pos_emb
         )
 
-        self.input_linear = nn.Linear(config.input_dim, config.hidden_dim, bias=True)
+        self.input_linear = ReplicatedLinear(
+            config.input_dim,
+            config.hidden_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.input_linear",
+            return_bias=False,
+        )
         self.layers = nn.ModuleList(
             [
                 GraniteSpeechConformerBlock(
                     config,
+                    quant_config=quant_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(config.num_layers)
@@ -576,6 +628,8 @@ class GraniteSpeechForConditionalGeneration(
     SupportsTranscription,
 ):
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    supports_tower_connector_lora = True
+    requires_mm_lora_per_item_mapping = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -686,6 +740,7 @@ class GraniteSpeechForConditionalGeneration(
                 f"Got type: {type(input_features_mask)}"
             )
 
+        input_linear_weight = cast(torch.Tensor, self.encoder.input_linear.weight)
         if isinstance(input_features, torch.Tensor):
             # Granite speech currently only allows one audio token per instance
             # and features are already unsqueezed in the processor, so one
@@ -699,7 +754,7 @@ class GraniteSpeechForConditionalGeneration(
                     "Squeezed input features should be 3D but are of shape "
                     f"{input_features.shape}"
                 )
-            input_features = input_features.to(self.encoder.input_linear.weight.dtype)
+            input_features = input_features.to(input_linear_weight.dtype)
 
         else:
             # Otherwise we have a list of tensors, which are almost certainly
@@ -713,7 +768,7 @@ class GraniteSpeechForConditionalGeneration(
             # stack them into a 3D tensor of size [bsz, most_num_features, 160].
             input_features = self._pad_and_stack_input_features(
                 input_features,
-            ).to(self.encoder.input_linear.weight.dtype)
+            ).to(input_linear_weight.dtype)
 
         return GraniteSpeechAudioInputs(
             input_features=input_features,
@@ -739,7 +794,8 @@ class GraniteSpeechForConditionalGeneration(
         most_audio_features = int(torch.max(audio_embed_sizes))
         mask_indices = torch.arange(most_audio_features).view(1, -1)
         input_features_mask = mask_indices < audio_embed_sizes.view(-1, 1)
-        target_device = self.encoder.input_linear.weight.device
+        input_linear_weight = cast(torch.Tensor, self.encoder.input_linear.weight)
+        target_device = input_linear_weight.device
         if target_device == input_features_mask.device:
             return input_features_mask
         masked = input_features_mask.pin_memory() if PIN_MEMORY else input_features_mask
@@ -868,6 +924,79 @@ class GraniteSpeechForConditionalGeneration(
             connector="projector",
             tower_model="encoder",
         )
+
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        if num_audio_tokens == 0:
+            return 0
+
+        num_blocks = math.ceil(num_audio_tokens / self.projector.num_queries)
+        num_features = num_blocks * self.projector.window_size
+        context_size = self.config.encoder_config.context_size
+        return math.ceil(num_features / context_size) * context_size
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        if modality != "audio":
+            raise ValueError(f"Unsupported modality for Granite Speech: {modality}")
+
+        input_features = mm_kwargs.get("input_features") if mm_kwargs else None
+        if input_features is not None and isinstance(input_features.data, torch.Tensor):
+            num_features = input_features.data.shape[-2]
+        else:
+            num_blocks = math.ceil(num_mm_embeds / self.projector.num_queries)
+            num_features = num_blocks * self.projector.window_size
+
+        num_blocks = math.ceil(num_features / self.projector.window_size)
+        unpadded_tower_tokens = num_features
+        context_size = self.config.encoder_config.context_size
+        padded_attention_tokens = math.ceil(num_features / context_size) * context_size
+
+        # Most tower linears see the unpadded feature sequence. Only attention
+        # Q/K/V projections run after block padding to ``context_size``.
+        tower_tokens = {"encoder": unpadded_tower_tokens}
+        for layer_idx in range(self.config.encoder_config.num_layers):
+            attention_prefix = f"encoder.layers.{layer_idx}.attn"
+            tower_tokens[f"{attention_prefix}.to_q"] = padded_attention_tokens
+            tower_tokens[f"{attention_prefix}.to_kv"] = padded_attention_tokens
+
+        query_tokens = num_blocks * self.projector.num_queries
+        window_tokens = num_blocks * self.projector.window_size
+        connector_tokens = {"projector": query_tokens}
+        qformer_config = self.config.projector_config
+
+        # The first QFormer layer starts from the single learned query tensor
+        # (shape ``[1, num_queries, hidden_size]``). Its self-attention and the
+        # cross-attention query projection therefore run before the audio-block
+        # batch dimension is introduced by cross-attention broadcasting. All
+        # later query-side projections see ``num_blocks * num_queries`` tokens.
+        first_layer_prefix = "projector.qformer.encoder.layer.0"
+        first_self_attention_prefix = f"{first_layer_prefix}.attention"
+        for projection in ("query", "key", "value"):
+            connector_tokens[
+                f"{first_self_attention_prefix}.attention.{projection}"
+            ] = self.projector.num_queries
+        connector_tokens[f"{first_self_attention_prefix}.output.dense"] = (
+            self.projector.num_queries
+        )
+        connector_tokens[f"{first_layer_prefix}.crossattention.attention.query"] = (
+            self.projector.num_queries
+        )
+
+        for layer_idx in range(qformer_config.num_hidden_layers):
+            if layer_idx % qformer_config.cross_attention_frequency != 0:
+                continue
+            attention_prefix = (
+                f"projector.qformer.encoder.layer.{layer_idx}.crossattention.attention"
+            )
+            connector_tokens[f"{attention_prefix}.key"] = window_tokens
+            connector_tokens[f"{attention_prefix}.value"] = window_tokens
+
+        return tower_tokens, connector_tokens
 
     ### Support for speech-to-text Transcription
     @classmethod

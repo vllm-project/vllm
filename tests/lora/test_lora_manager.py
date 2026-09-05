@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
+    LoRAMappingType,
     MergedColumnParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
@@ -28,6 +30,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -45,6 +48,88 @@ DEVICES = (
 )
 
 DEFAULT_DTYPE = torch.get_default_dtype()
+
+
+@pytest.mark.skip_global_cleanup
+def test_init_mm_component_punica_wrappers_uses_prefix_token_budgets():
+    manager = object.__new__(LoRAModelManager)
+    manager.device = torch.device("cpu")
+    manager.lora_config = MagicMock()
+    manager.punica_wrapper_mapping = {}
+    wrappers = [MagicMock(), MagicMock()]
+
+    with patch(
+        "vllm.lora.model_manager.get_punica_wrapper", side_effect=wrappers
+    ) as get_wrapper:
+        initialized = manager._init_mm_component_punica_wrappers(
+            component_name="tower",
+            component_prefixes=["encoder"],
+            token_counts=[
+                {"encoder": 5, "encoder.attn": 8},
+                {"encoder": 7, "encoder.attn": 12},
+            ],
+            max_batches=4,
+        )
+
+    assert initialized
+    assert manager.punica_wrapper_mapping == {
+        "encoder": wrappers[0],
+        "encoder.attn": wrappers[1],
+    }
+    assert get_wrapper.call_args_list == [
+        call(
+            7,
+            max_batches=4,
+            device=torch.device("cpu"),
+            lora_config=manager.lora_config,
+        ),
+        call(
+            12,
+            max_batches=4,
+            device=torch.device("cpu"),
+            lora_config=manager.lora_config,
+        ),
+    ]
+
+
+@pytest.mark.skip_global_cleanup
+def test_set_adapter_mapping_dispatches_to_explicit_mm_prefix():
+    manager = object.__new__(LoRAModelManager)
+    manager.supports_mm = True
+    manager.supports_tower_connector_lora = True
+    manager.mm_mapping = MultiModelKeys.from_string_field(
+        language_model="language_model",
+        tower_model="encoder",
+    )
+    language_wrapper = MagicMock()
+    tower_wrapper = MagicMock()
+    attention_wrapper = MagicMock()
+    manager.punica_wrapper_mapping = {
+        "language_model": language_wrapper,
+        "encoder": tower_wrapper,
+        "encoder.attn": attention_wrapper,
+    }
+    manager.lora_index_to_id = [7]
+    manager.lora_config = MagicMock(max_loras=1)
+    manager.vocab_size = 128
+
+    mapping = LoRAMapping(
+        (7,) * 8,
+        (7,),
+        is_prefill=True,
+        type=LoRAMappingType.TOWER,
+        target_prefix="encoder.attn",
+    )
+    manager._set_adapter_mapping(mapping)
+
+    attention_wrapper.update_metadata.assert_called_once_with(
+        mapping,
+        [7],
+        2,
+        128,
+    )
+    tower_wrapper.update_metadata.assert_not_called()
+    language_wrapper.update_metadata.assert_not_called()
 
 
 @pytest.mark.parametrize("device", DEVICES)

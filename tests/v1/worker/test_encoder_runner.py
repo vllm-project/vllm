@@ -1,29 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
+"""Tests for Model Runner V2 multimodal encoder handling.
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
 position ahead of the target model (``draft_lookahead``). The +1 look-ahead
 feature past the processed boundary is used when its encoder output is present
 and tolerated (token-embedding fallback) when it is not, while a miss within
-the processed range still fails loudly.
+the processed range still fails loudly. It also covers multimodal LoRA mapping
+activation, including per-item and per-module mapping lengths.
 """
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, call
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.lora.layers import LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
     MultiModalSharedField,
     PlaceholderRange,
 )
+from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.mm.lora import (
+    MMEncoderLoraInput,
+    prepare_mm_lora_activation,
+    set_active_mm_loras,
+)
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
@@ -224,16 +235,24 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
     cache = EncoderCache()
     state = _model_state(cache)
     embedding = torch.ones(2, HIDDEN)
+    mm_item = MagicMock()
     # (mm_hashes, [(modality, kwargs item), ...]), as prepare_mm_inputs returns.
     state.encoder_runner.prepare_mm_inputs.return_value = (
         ["hash0"],
-        [("image", MagicMock())],
+        [("image", mm_item)],
     )
     state.encoder_runner.execute_mm_encoder.return_value = [embedding]
+    mm_lora_activation = MagicMock()
 
-    ModelState.execute_mm_encoder(state, {"req0": [0]})
+    ModelState.execute_mm_encoder(
+        state, {"req0": [0]}, mm_lora_activation=mm_lora_activation
+    )
 
     assert cache.encoder_outputs == {"hash0": embedding}
+    state.encoder_runner.execute_mm_encoder.assert_called_once_with(
+        [("image", mm_item)],
+        mm_lora_activation=mm_lora_activation,
+    )
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
 
 
@@ -309,6 +328,252 @@ def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
 
     state.encoder_runner.execute_mm_encoder.assert_not_called()
     assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_execute_mm_encoder_updates_lora_mapping_per_item():
+    model = MagicMock()
+    model.embed_multimodal.side_effect = lambda input_features: [input_features[0]]
+    runner = EncoderRunner(
+        model=model,
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    field = MultiModalBatchedField()
+    mm_kwargs = [
+        (
+            "audio",
+            MultiModalKwargsItem(
+                {
+                    "input_features": MultiModalFieldElem(
+                        data=torch.full((length, HIDDEN), value), field=field
+                    )
+                }
+            ),
+        )
+        for length, value in ((2, 1.0), (3, 2.0))
+    ]
+    mm_lora_activation = MagicMock()
+    mm_lora_activation.requires_per_item = True
+    mm_lora_activation.num_items = 2
+
+    outputs = runner.execute_mm_encoder(
+        mm_kwargs, mm_lora_activation=mm_lora_activation
+    )
+
+    assert model.embed_multimodal.call_count == 2
+    assert [output.shape[0] for output in outputs] == [2, 3]
+    assert mm_lora_activation.activate.call_args_list == [
+        call((0,)),
+        call((1,)),
+    ]
+
+
+def test_execute_mm_encoder_rejects_misaligned_per_item_lora_mapping():
+    runner = _make_runner([], [])
+    mm_lora_activation = MagicMock()
+    mm_lora_activation.requires_per_item = True
+    mm_lora_activation.num_items = 0
+
+    with pytest.raises(
+        AssertionError, match="must match the multimodal encoder inputs"
+    ):
+        runner.execute_mm_encoder(
+            [("image", MultiModalKwargsItem.dummy())],
+            mm_lora_activation=mm_lora_activation,
+        )
+
+    mm_lora_activation.activate.assert_not_called()
+
+
+def test_set_active_mm_loras_builds_tower_and_connector_mappings():
+    model = Mock()
+    model.requires_mm_lora_per_item_mapping = False
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req-with-lora"] = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=2),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="img-1",
+            mm_position=PlaceholderRange(offset=2, length=3),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="img-cached",
+            mm_position=PlaceholderRange(offset=5, length=4),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="prompt_embeds",
+            identifier="prompt-embeds",
+            mm_position=PlaceholderRange(offset=9, length=5),
+        ),
+    ]
+    encoder_cache.encoder_outputs["img-cached"] = torch.empty(4, 8)
+    encoder_cache.mm_features["req-no-lora"] = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="img-2",
+            mm_position=PlaceholderRange(offset=0, length=1),
+        )
+    ]
+
+    lora_state = LoraState(max_num_reqs=4)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-with-lora", 0, lora_request)
+    lora_state.add_request("req-no-lora", 1, None)
+
+    mm_lora_activation = set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={
+            "req-with-lora": 0,
+            "req-no-lora": 1,
+        },
+        lora_state=lora_state,
+        scheduled_encoder_inputs={
+            "req-with-lora": [1, 2, 3, 0],
+            "req-no-lora": [0],
+            "missing-req": [0],
+        },
+    )
+
+    assert mm_lora_activation is not None
+    assert not mm_lora_activation.requires_per_item
+    assert mm_lora_activation.num_items == 3
+    assert lora_manager.set_active_adapters.call_count == 2
+
+    tower_requests, tower_mapping = lora_manager.set_active_adapters.call_args_list[
+        0
+    ].args
+    assert tower_requests == {lora_request}
+    assert tower_mapping.type is LoRAMappingType.TOWER
+    assert tower_mapping.prompt_mapping == (7, 7, 0)
+    assert tower_mapping.index_mapping == (7, 7, 7, 7, 7, 7, 7, 0, 0)
+
+    connector_requests, connector_mapping = (
+        lora_manager.set_active_adapters.call_args_list[1].args
+    )
+    assert connector_requests == {lora_request}
+    assert connector_mapping.type is LoRAMappingType.CONNECTOR
+    assert connector_mapping.prompt_mapping == (7, 7, 0)
+    assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
+
+
+def test_prepare_mm_lora_activation_defers_and_slices_per_item_mapping():
+    model = Mock()
+    model.requires_mm_lora_per_item_mapping = True
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+    model.get_mm_lora_token_counts.side_effect = [(5, 3), (8, 4)]
+    lora_manager = Mock()
+    lora_requests = [
+        LoRARequest("audio-lora-1", 7, "/tmp/audio-lora-1"),
+        LoRARequest("audio-lora-2", 9, "/tmp/audio-lora-2"),
+    ]
+    inputs = [
+        MMEncoderLoraInput(
+            lora_id=lora_request.lora_int_id,
+            lora_request=lora_request,
+            modality="audio",
+            mm_kwargs=MultiModalKwargsItem.dummy(),
+            num_mm_embeds=num_mm_embeds,
+        )
+        for lora_request, num_mm_embeds in zip(lora_requests, (2, 3))
+    ]
+
+    activation = prepare_mm_lora_activation(model, lora_manager, inputs)
+
+    assert activation is not None
+    assert activation.requires_per_item
+    assert activation.num_items == 2
+    lora_manager.set_active_adapters.assert_not_called()
+
+    activation.activate((1,))
+
+    assert lora_manager.set_active_adapters.call_count == 2
+    tower_requests, tower_mapping = lora_manager.set_active_adapters.call_args_list[
+        0
+    ].args
+    assert tower_requests == set(lora_requests)
+    assert tower_mapping.prompt_mapping == (9,)
+    assert tower_mapping.index_mapping == (9,) * 8
+    _, connector_mapping = lora_manager.set_active_adapters.call_args_list[1].args
+    assert connector_mapping.prompt_mapping == (9,)
+    assert connector_mapping.index_mapping == (9,) * 4
+
+
+def test_prepare_mm_lora_activation_uses_independent_module_prefix_mappings():
+    model = Mock()
+    model.requires_mm_lora_per_item_mapping = True
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+    model.get_mm_lora_token_counts.side_effect = [
+        (
+            {"encoder": 5, "encoder.attn": 8},
+            {"projector": 3, "projector.cross_attn": 5},
+        ),
+        (
+            {"encoder": 7, "encoder.attn": 12},
+            {"projector": 4, "projector.cross_attn": 10},
+        ),
+    ]
+    lora_manager = Mock()
+    lora_requests = [
+        LoRARequest("audio-lora-1", 7, "/tmp/audio-lora-1"),
+        LoRARequest("audio-lora-2", 9, "/tmp/audio-lora-2"),
+    ]
+    inputs = [
+        MMEncoderLoraInput(
+            lora_id=lora_request.lora_int_id,
+            lora_request=lora_request,
+            modality="audio",
+            mm_kwargs=MultiModalKwargsItem.dummy(),
+            num_mm_embeds=num_mm_embeds,
+        )
+        for lora_request, num_mm_embeds in zip(lora_requests, (2, 3))
+    ]
+
+    activation = prepare_mm_lora_activation(model, lora_manager, inputs)
+
+    assert activation is not None
+    activation.activate((1,))
+
+    mappings = [
+        call.args[1] for call in lora_manager.set_active_adapters.call_args_list
+    ]
+    assert [mapping.target_prefix for mapping in mappings] == [
+        "encoder",
+        "encoder.attn",
+        "projector",
+        "projector.cross_attn",
+    ]
+    assert [len(mapping.index_mapping) for mapping in mappings] == [7, 12, 4, 10]
+    assert all(mapping.prompt_mapping == (9,) for mapping in mappings)
+    assert all(
+        call.args[0] == set(lora_requests)
+        for call in lora_manager.set_active_adapters.call_args_list
+    )
 
 
 def test_encoder_timing_stats_registry():

@@ -79,6 +79,15 @@ The output embeddings must be one of the following formats:
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
 
+MultiModalLoRATokenCount: TypeAlias = int | Mapping[str, int]
+"""
+The token count for one multimodal LoRA component.
+
+An integer applies one mapping to the whole tower or connector. A mapping
+associates model module prefixes with independent token counts, allowing
+modules whose flattened input lengths differ to use separate Punica metadata.
+"""
+
 MambaStateShapes: TypeAlias = (
     tuple[tuple[int, int]]
     | tuple[tuple[int, int, int]]
@@ -192,6 +201,15 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
     """
     A flag that indicates whether this model supports
     `lora_config.enable_tower_connector_lora`.
+    """
+
+    requires_mm_lora_per_item_mapping: ClassVar[bool] = False
+    """
+    A flag that indicates tower and connector LoRA mappings must be updated
+    before encoding each multimodal item.
+
+    This is needed when batching changes the number or layout of tokens seen
+    by LoRA-enabled modules, for example by padding variable-length inputs.
     """
 
     requires_raw_input_tokens: ClassVar[bool] = False
@@ -443,13 +461,20 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
         modality: str,
         mm_kwargs: "MultiModalKwargsItem | None",
         num_mm_embeds: int,
-    ) -> tuple[int, int | None]:
+    ) -> tuple[
+        MultiModalLoRATokenCount,
+        MultiModalLoRATokenCount | None,
+    ]:
         """
         Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
 
         MM LoRA uses these counts to build adapter mappings for the tower and
         connector forwards. Models with multiple modalities can override this
         when each modality has different encoder padding or pooling behavior.
+        A component count can instead be a mapping from model module prefixes
+        to token counts. Each prefix receives independent Punica metadata;
+        this is required when LoRA-enabled modules in the same component see
+        different flattened input lengths.
         """
         del modality, mm_kwargs
         num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)

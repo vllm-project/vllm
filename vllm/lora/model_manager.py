@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TypeVar
 
 import torch
@@ -256,45 +256,87 @@ class LoRAModelManager:
             )
             for modality in mm_budget.mm_max_toks_per_item
         ]
-        num_encoder_tokens = max(
-            tower_tokens for tower_tokens, _ in lora_token_counts_by_modality
-        )
+        max_batches = self.max_num_seqs * limit_per_prompt
 
-        # Tower wrappers
-        tower_punica_wrapper = get_punica_wrapper(
-            num_encoder_tokens,
-            max_batches=self.max_num_seqs * limit_per_prompt,
-            device=self.device,
-            lora_config=self.lora_config,
+        self._init_mm_component_punica_wrappers(
+            component_name="tower",
+            component_prefixes=self.mm_mapping.tower_model,
+            token_counts=[counts[0] for counts in lora_token_counts_by_modality],
+            max_batches=max_batches,
         )
-        for prefix in self.mm_mapping.tower_model:
-            self.punica_wrapper_mapping[prefix] = tower_punica_wrapper
 
         # Use wrapper for connector if present.
-        if self.mm_mapping.connector:
-            connector_tokens = max(
-                (
-                    connector_tokens
-                    for _, connector_tokens in lora_token_counts_by_modality
-                    if connector_tokens is not None
-                ),
-                default=None,
+        if self.mm_mapping.connector and not self._init_mm_component_punica_wrappers(
+            component_name="connector",
+            component_prefixes=self.mm_mapping.connector,
+            token_counts=[counts[1] for counts in lora_token_counts_by_modality],
+            max_batches=max_batches,
+        ):
+            logger.warning_once(
+                "Connector LoRA support disabled: model does not implement "
+                "get_num_mm_connector_tokens(). This method is required to "
+                "determine the connector's token budget for LoRA operations."
             )
-            if connector_tokens is not None:
-                connector_punica_wrapper = get_punica_wrapper(
-                    connector_tokens,
-                    max_batches=self.max_num_seqs * limit_per_prompt,
-                    device=self.device,
-                    lora_config=self.lora_config,
+
+    def _init_mm_component_punica_wrappers(
+        self,
+        *,
+        component_name: str,
+        component_prefixes: list[str],
+        token_counts: list[int | Mapping[str, int] | None],
+        max_batches: int,
+    ) -> bool:
+        present_counts = [count for count in token_counts if count is not None]
+        if not present_counts:
+            return False
+
+        scalar_counts = [count for count in present_counts if isinstance(count, int)]
+        if len(scalar_counts) == len(present_counts):
+            wrapper = get_punica_wrapper(
+                max(scalar_counts),
+                max_batches=max_batches,
+                device=self.device,
+                lora_config=self.lora_config,
+            )
+            for prefix in component_prefixes:
+                self.punica_wrapper_mapping[prefix] = wrapper
+            return True
+
+        mapped_counts = [
+            count for count in present_counts if isinstance(count, Mapping)
+        ]
+        if len(mapped_counts) != len(present_counts):
+            raise TypeError(
+                f"{component_name} MM LoRA token counts must be all integers "
+                "or all prefix mappings"
+            )
+
+        max_tokens_by_prefix: dict[str, int] = {}
+        for counts_by_prefix in mapped_counts:
+            for prefix, count in counts_by_prefix.items():
+                if not any(
+                    prefix == component_prefix.rstrip(".")
+                    or prefix.startswith(component_prefix)
+                    for component_prefix in component_prefixes
+                ):
+                    raise ValueError(
+                        f"MM LoRA {component_name} prefix {prefix!r} is outside "
+                        f"the configured component prefixes {component_prefixes!r}"
+                    )
+                if count < 0:
+                    raise ValueError("MM LoRA token counts must be non-negative")
+                max_tokens_by_prefix[prefix] = max(
+                    count, max_tokens_by_prefix.get(prefix, 0)
                 )
-                for prefix in self.mm_mapping.connector:
-                    self.punica_wrapper_mapping[prefix] = connector_punica_wrapper
-            else:
-                logger.warning_once(
-                    "Connector LoRA support disabled: model does not implement "
-                    "get_num_mm_connector_tokens(). This method is required to "
-                    "determine the connector's token budget for LoRA operations."
-                )
+
+        for prefix, max_tokens in max_tokens_by_prefix.items():
+            self.punica_wrapper_mapping[prefix] = get_punica_wrapper(
+                max_tokens,
+                max_batches=max_batches,
+                device=self.device,
+                lora_config=self.lora_config,
+            )
+        return True
 
     def __len__(self) -> int:
         return len(self._registered_adapters)
@@ -373,7 +415,14 @@ class LoRAModelManager:
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
         # Default to the main language model wrapper
-        if not (self.supports_mm and self.supports_tower_connector_lora):
+        if mapping.target_prefix is not None:
+            if mapping.target_prefix not in self.punica_wrapper_mapping:
+                raise ValueError(
+                    "No Punica wrapper registered for MM LoRA prefix "
+                    f"{mapping.target_prefix!r}"
+                )
+            target_prefix = mapping.target_prefix
+        elif not (self.supports_mm and self.supports_tower_connector_lora):
             target_prefix = (
                 self.mm_mapping.language_model[0]
                 if self.supports_mm
