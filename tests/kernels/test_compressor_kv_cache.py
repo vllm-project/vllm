@@ -39,7 +39,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     indexer_k_quant_and_cache_triton,
 )
 
-from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+from .test_fused_indexer_q_rope_quant import _hadamard_rotate, quantize_to_mxfp4
 
 
 def _on_gfx950() -> bool:
@@ -741,11 +741,14 @@ def _reference_kv_compress_norm_rope(
     rms_eps: float = 1e-6,
     fp8_max: float = 448.0,
     return_full_cache: bool = False,
+    rotate: bool = False,
 ):
     """Compress → RMSNorm → GPT-J RoPE → quantize.
 
     Gathers (1+overlap)*compress_ratio state entries per output token, applies
     per-element softmax over the scores, and computes the weighted kv sum.
+    With ``rotate=True``, the RoPE output is Hadamard-rotated (scaled by
+    head_dim**-0.5) before quantization, mirroring the indexer kernels.
     Returns (quantized_values, scale) matching the kernel's output layout.
     """
     device = state_cache.device
@@ -785,14 +788,23 @@ def _reference_kv_compress_norm_rope(
         var = (compressed * compressed).mean()
         normed = compressed * torch.rsqrt(var + rms_eps) * rms_weight.float()
         compressed_pos = (pos // compress_ratio) * compress_ratio
-        cos, sin = cos_sin_cache[compressed_pos].float().chunk(2)
+        cos, sin = cos_sin_cache[compressed_pos].double().chunk(2)
         nope, rope = normed.split([nope_dim, rope_dim])
+        # Emulate the kernels' pinned FMA contraction in fp64 (fp32 products
+        # are exact in fp64; rounding once reproduces tl.fma bit-exactly).
+        ev, od = rope[0::2].double(), rope[1::2].double()
         rope = torch.stack(
-            [rope[0::2] * cos - rope[1::2] * sin, rope[1::2] * cos + rope[0::2] * sin],
+            [
+                (ev * cos - (od * sin).float().double()).float(),
+                (od * cos + (ev * sin).float().double()).float(),
+            ],
             dim=-1,
         ).reshape(rope_dim)
         results.append(torch.cat([nope, rope]).to(state_cache.dtype))
     result = torch.stack(results)
+
+    if rotate:
+        result = _hadamard_rotate(result)
 
     if return_full_cache:
         # Contiguous 512-wide bf16 row (nope unrotated + rope rotated), matching
@@ -912,7 +924,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         TOKEN_STRIDE=TOKEN_STRIDE,
         SCALE_DIM=SCALE_DIM,
         KV_BLOCK_STRIDE=kv_cache.stride(0),
-        num_warps=1,
+        num_warps=4,
     )
 
     k_quant, scale = _reference_kv_compress_norm_rope(
@@ -926,6 +938,7 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
         use_fp4,
         rms_eps=RMS_EPS,
         fp8_max=FP8_MAX,
+        rotate=True,
     )
 
     if use_fp4:
