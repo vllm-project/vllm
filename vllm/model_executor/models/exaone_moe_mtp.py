@@ -21,7 +21,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.exaone_moe import ExaoneMoeDecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .interfaces import SupportsPP
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -132,7 +138,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class ExaoneMoeMTP(nn.Module):
+class ExaoneMoeMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -140,6 +146,11 @@ class ExaoneMoeMTP(nn.Module):
 
         super().__init__()
         self.config = config
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
         self.model = ExaoneMoeMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
@@ -160,7 +171,7 @@ class ExaoneMoeMTP(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

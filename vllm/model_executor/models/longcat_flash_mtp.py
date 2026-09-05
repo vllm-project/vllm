@@ -24,7 +24,8 @@ from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import DeepseekV2DecoderLayer
-from .utils import maybe_prefix
+from .interfaces import SupportsPP
+from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
 
 
 class LongCatMultiTokenPredictorLayer(nn.Module):
@@ -123,7 +124,7 @@ class LongCatMultiTokenPredictor(nn.Module):
         )
 
 
-class LongCatFlashMTP(nn.Module):
+class LongCatFlashMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         # LongCat MTP has no MoE layers: clear n_routed_experts so the predictor
@@ -149,8 +150,13 @@ class LongCatFlashMTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

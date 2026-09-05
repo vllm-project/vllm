@@ -33,8 +33,14 @@ from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModalEmbeddings
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModalEmbeddings,
+    SupportsPP,
+)
+from vllm.model_executor.models.utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 from vllm.sequence import IntermediateTensors
 
 from ..configs import InklingModelConfig
@@ -243,7 +249,7 @@ class InklingMultiTokenPredictor(nn.Module):
         return hidden
 
 
-class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
+class InklingMTP(nn.Module, SupportsPP, SupportsMultiModalEmbeddings):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -262,6 +268,11 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
             org_vocab_size=config.vocab_size,
             soft_cap=config.final_logit_softcapping,
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
         self._logits_zero: torch.Tensor | None = None
 
     def embed_input_ids(
@@ -275,7 +286,7 @@ class InklingMTP(nn.Module, SupportsMultiModalEmbeddings):
             input_ids, multimodal_embeddings, is_multimodal=is_multimodal
         )
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
