@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
 )
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
 from .utils import create_request, create_vllm_config, make_kv_cache_config
@@ -393,6 +394,360 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+#  test_build_transfer_params_filters_null_blocks
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+    ".mooncake_connector.TransferEngine",
+    FakeMooncakeWrapper,
+)
+async def test_build_transfer_params_filters_null_blocks(monkeypatch):
+    """_build_transfer_params filters NULL_BLOCK_ID from local and remote blocks."""
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+
+        block_len = 4096
+        # Call _build_transfer_params directly (avoids send_kv_to_decode
+        # async event loop complexity).
+        transfer_id = "xfer-hma-null-blk"
+        send_meta = SendBlockMeta(
+            p_req_id="p-null-blk",
+            transfer_id=transfer_id,
+            # FA: 4 blocks, SW: 3 blocks (producer has more)
+            local_block_ids=[
+                [10, 11, 12, 13],
+                [50, 51, NULL_BLOCK_ID, NULL_BLOCK_ID, 60, 61],
+            ],
+            ready=asyncio.Event(),
+        )
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={
+                "d-null-blk": (
+                    transfer_id,
+                    # FA: 2 blocks, SW: 2 blocks (consumer needs fewer)
+                    [[30, 31], [70, 71, NULL_BLOCK_ID, 80, 81]],
+                )
+            },
+            kv_caches_base_addr=[0x2000],
+            block_lens=[block_len],
+            kv_block_lens=[block_len],
+        )
+
+        local_regions = [
+            TransferRegion(  # group 0: FA
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(  # group 1: SW
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x3000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+        remote_regions = [
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x4000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+
+        ready_reqs = [("d-null-blk", send_meta)]
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            ready_reqs, xfer_meta, local_regions, remote_regions
+        )
+
+        fa_src = 0x1000 + 12 * block_len
+        fa_dst = 0x2000 + 30 * block_len
+        sw_src_1 = 0x3000 + 50 * block_len
+        sw_dst_1 = 0x4000 + 70 * block_len
+        sw_src_2 = 0x3000 + 60 * block_len
+        sw_dst_2 = 0x4000 + 80 * block_len
+
+        assert src_ptrs == [fa_src, sw_src_1, sw_src_2]
+        assert dst_ptrs == [fa_dst, sw_dst_1, sw_dst_2]
+        assert lengths == [block_len * 2, block_len * 2, block_len * 2]
+
+        # No errors
+        assert err_reqs == []
+        assert err_msg is None
+
+        worker.shutdown()
+
+
+# ---------------------------------------------------------------------------
+#  test_build_transfer_params_skips_null_group
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+    ".mooncake_connector.TransferEngine",
+    FakeMooncakeWrapper,
+)
+async def test_build_transfer_params_skips_null_group(monkeypatch):
+    """_build_transfer_params skips a group that is entirely NULL_BLOCK_ID."""
+    # Only the SW group is fully null here; FA still has real content. This
+    # exercises the per-group `if not local_block_ids: continue` skip inside
+    # the region loop — one empty group must not affect the others. Kept
+    # separate from test_build_transfer_params_skips_request_when_all_groups_null,
+    # which exercises the request-level short-circuit instead (see below).
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+
+        block_len = 4096
+        # Call _build_transfer_params directly (avoids send_kv_to_decode
+        # async event loop complexity).
+        transfer_id = "xfer-hma-null-blk"
+        send_meta = SendBlockMeta(
+            p_req_id="p-null-blk",
+            transfer_id=transfer_id,
+            # FA: 4 blocks, SW: 3 blocks (producer has more)
+            local_block_ids=[[10, 11, 12, 13], [NULL_BLOCK_ID] * 3],
+            ready=asyncio.Event(),
+        )
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={
+                "d-null-blk": (
+                    transfer_id,
+                    # FA: 2 blocks, SW: 2 blocks (consumer needs fewer)
+                    [[30, 31], [NULL_BLOCK_ID] * 2],
+                )
+            },
+            kv_caches_base_addr=[0x2000],
+            block_lens=[block_len],
+            kv_block_lens=[block_len],
+        )
+
+        local_regions = [
+            TransferRegion(  # group 0: FA
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(  # group 1: SW
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x3000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+        remote_regions = [
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x4000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+
+        ready_reqs = [("d-null-blk", send_meta)]
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            ready_reqs, xfer_meta, local_regions, remote_regions
+        )
+
+        fa_src = 0x1000 + 12 * block_len
+        fa_dst = 0x2000 + 30 * block_len
+
+        assert src_ptrs == [fa_src]
+        assert dst_ptrs == [fa_dst]
+        assert lengths == [block_len * 2]
+
+        # No errors
+        assert err_reqs == []
+        assert err_msg is None
+
+        worker.shutdown()
+
+
+# ---------------------------------------------------------------------------
+#  test_build_transfer_params_skips_request_when_all_groups_null
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+    ".mooncake_connector.TransferEngine",
+    FakeMooncakeWrapper,
+)
+async def test_build_transfer_params_skips_request_when_all_groups_null(monkeypatch):
+    """_build_transfer_params skips a request whose groups are all NULL_BLOCK_ID."""
+    # Every group (FA and SW) is fully null here, so none survive filtering.
+    # This exercises the request-level `if not any(local_block_ids_by_group):
+    # continue` short-circuit — the whole request is skipped before the
+    # region loop ever runs. Kept separate from
+    # test_build_transfer_params_skips_null_group, which exercises the
+    # per-group skip when at least one other group still has content.
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    kv_cache_config = make_kv_cache_config(
+        block_size=vllm_config.cache_config.block_size, swa_enabled=True
+    )
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        worker = connector.connector_worker
+
+        block_len = 4096
+        # Call _build_transfer_params directly (avoids send_kv_to_decode
+        # async event loop complexity).
+        transfer_id = "xfer-hma-null-blk"
+        send_meta = SendBlockMeta(
+            p_req_id="p-null-blk",
+            transfer_id=transfer_id,
+            # FA: 4 blocks, SW: 3 blocks (producer has more)
+            local_block_ids=[[NULL_BLOCK_ID] * 4, [NULL_BLOCK_ID] * 3],
+            ready=asyncio.Event(),
+        )
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={
+                "d-null-blk": (
+                    transfer_id,
+                    # FA: 2 blocks, SW: 2 blocks (consumer needs fewer)
+                    [[NULL_BLOCK_ID] * 2, [NULL_BLOCK_ID] * 2],
+                )
+            },
+            kv_caches_base_addr=[0x2000],
+            block_lens=[block_len],
+            kv_block_lens=[block_len],
+        )
+
+        local_regions = [
+            TransferRegion(  # group 0: FA
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x1000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(  # group 1: SW
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x3000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+        remote_regions = [
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x2000,
+                block_len=block_len,
+                kv_block_len=block_len,
+            ),
+            TransferRegion(
+                layer_name="model.layers.0.self_attn",
+                layer_index=0,
+                base_addr=0x4000,
+                block_len=block_len,
+                kv_block_len=block_len,
+                group_index=1,
+            ),
+        ]
+
+        ready_reqs = [("d-null-blk", send_meta)]
+        (
+            src_ptrs,
+            dst_ptrs,
+            lengths,
+            err_reqs,
+            err_msg,
+        ) = await worker._build_transfer_params(
+            ready_reqs, xfer_meta, local_regions, remote_regions
+        )
+
+        assert src_ptrs == []
+        assert dst_ptrs == []
+        assert lengths == []
+
+        # No errors
+        assert err_reqs == []
+        assert err_msg is None
+
+        worker.shutdown()
+
+
+# ---------------------------------------------------------------------------
 #  test_request_finished_with_hma_groups
 # ---------------------------------------------------------------------------
 @pytest.mark.cpu_test
@@ -436,3 +791,94 @@ def test_request_finished_with_hma_groups():
     assert stored_blocks[0] == fa_blocks
     # SW: clipped to last 9 blocks (sw_size=128, block_size=16 → 8+1=9)
     assert stored_blocks[1] == sw_blocks[-9:]
+
+
+# ---------------------------------------------------------------------------
+#  test_request_finished_delays_free_with_one_real_block
+# ---------------------------------------------------------------------------
+@pytest.mark.cpu_test
+def test_request_finished_delays_free_with_one_real_block():
+    """delay_free_blocks stays True when only a single block (among many
+    NULL_BLOCK_ID placeholders, across both groups) is real."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        block_size=block_size,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size, swa_enabled=True, sw_size=128
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+
+    request = create_request(request_id=1, do_remote_decode=True)
+    request.kv_transfer_params["transfer_id"] = request.request_id
+
+    from vllm.v1.request import RequestStatus
+
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+
+    # FA: entirely null. SW: null except the last block (111) — the only
+    # real content across both groups, and it still must be detected.
+    fa_blocks = [NULL_BLOCK_ID] * 10
+    sw_blocks = [NULL_BLOCK_ID] * 19 + [111]
+    block_ids = (fa_blocks, sw_blocks)
+
+    delay_free, _ = scheduler.request_finished(request, block_ids)
+    assert delay_free is True
+    assert request.request_id in scheduler._reqs_need_send
+
+    _, stored_blocks = scheduler._reqs_need_send[request.request_id]
+    # FA: untouched
+    assert stored_blocks[0] == fa_blocks
+    # SW: clipped to last 9 blocks (sw_size=128, block_size=16 → 8+1=9)
+    assert stored_blocks[1] == sw_blocks[-9:]
+
+
+# ---------------------------------------------------------------------------
+#  test_request_finished_frees_immediately_when_all_null
+# ---------------------------------------------------------------------------
+@pytest.mark.cpu_test
+def test_request_finished_frees_immediately_when_all_null():
+    """delay_free_blocks is False when every group is entirely
+    NULL_BLOCK_ID — nothing real is left to transfer, so blocks should be
+    freed right away instead of registered for an async send."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_producer",
+        block_size=block_size,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    kv_cache_config = make_kv_cache_config(
+        block_size=block_size, swa_enabled=True, sw_size=128
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+
+    request = create_request(request_id=1, do_remote_decode=True)
+    request.kv_transfer_params["transfer_id"] = request.request_id
+
+    from vllm.v1.request import RequestStatus
+
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+
+    # Both groups entirely NULL_BLOCK_ID — no real content anywhere.
+    fa_blocks = [NULL_BLOCK_ID] * 10
+    sw_blocks = [NULL_BLOCK_ID] * 20
+
+    block_ids = (fa_blocks, sw_blocks)
+
+    delay_free, _ = scheduler.request_finished(request, block_ids)
+    assert delay_free is False
+    assert request.request_id not in scheduler._reqs_need_send
