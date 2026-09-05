@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
@@ -640,3 +641,94 @@ def make_nvfp4_moe_kernel(
     )
 
     return kernel
+
+
+class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
+    """Class-based view of the NVFP4 MoE kernel oracle."""
+
+    def backend_enum_cls(self) -> type[NvFp4MoeBackend]:
+        return NvFp4MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[NvFp4MoeBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: NvFp4MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> NvFp4MoeBackend:
+        return map_nvfp4_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = None,
+        activation_key: QuantKey | None = None,
+    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_nvfp4_moe_backend(
+            moe_config, weight_key=weight_key, activation_key=activation_key
+        )
+
+    def convert_to_kernel_format(
+        self,
+        backend: NvFp4MoeBackend,
+        moe_config: FusedMoEConfig,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        layer: torch.nn.Module | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return convert_to_nvfp4_moe_kernel_format(
+            backend, moe_config, w13, w2, layer=layer
+        )
+
+    def make_quant_config(
+        self,
+        backend: NvFp4MoeBackend,
+        w1_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w1_global_scale: torch.Tensor | None = None,
+        w2_global_scale: torch.Tensor | None = None,
+        a1_scale: torch.Tensor | None = None,
+        a2_scale: torch.Tensor | None = None,
+        a1_global_scale: torch.Tensor | None = None,
+        a2_global_scale: torch.Tensor | None = None,
+        w1_bias: torch.Tensor | None = None,
+        w2_bias: torch.Tensor | None = None,
+        layer: torch.nn.Module | None = None,
+    ) -> FusedMoEQuantConfig:
+        return make_nvfp4_moe_quant_config(
+            backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_global_scale=w1_global_scale,
+            w2_global_scale=w2_global_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            a1_global_scale=a1_global_scale,
+            a2_global_scale=a2_global_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            layer=layer,
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: NvFp4MoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        per_token_activation: bool = False,
+    ) -> mk.FusedMoEKernel:
+        return make_nvfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            backend,
+            routing_tables=routing_tables,
+            per_token_activation=per_token_activation,
+        )
+
