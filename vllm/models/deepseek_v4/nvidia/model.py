@@ -81,7 +81,10 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v4.nvidia.flashmla import (
+    DeepseekV4FlashMLAAttention,
+    DeepseekV4TritonMLAAttention,
+)
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -1075,10 +1078,14 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         AttentionBackendEnum.FLASHMLA_SPARSE,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
     ):
+        if device_capability is not None and device_capability.major < 9:
+            return DeepseekV4TritonMLAAttention
         return DeepseekV4FlashMLAAttention
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    if device_capability is not None and device_capability.major < 9:
+        return DeepseekV4TritonMLAAttention
     return DeepseekV4FlashMLAAttention
 
 

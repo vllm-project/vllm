@@ -31,6 +31,20 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.attention.ops.fp8e4nv import (
+    FP8E4NV_EXTERN_LIBS,
+    convert_from_fp8e4m3,
+)
+
+
+def _can_use_cutedsl() -> bool:
+    capability = current_platform.get_device_capability()
+    return (
+        current_platform.is_cuda()
+        and has_cutedsl()
+        and capability is not None
+        and capability.major >= 9
+    )
 
 
 @triton.jit
@@ -233,10 +247,10 @@ def _dequantize_and_gather_k_kernel(
     k_cache_ptr,
     seq_lens_ptr,
     block_table_ptr,
+    block_table_stride,
     offset,
     gather_lens_ptr,
     # Constants
-    max_blocks_per_seq: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
     bf16_dim: tl.constexpr,  # 64
     scale_dim: tl.constexpr,  # 8
@@ -247,6 +261,7 @@ def _dequantize_and_gather_k_kernel(
     output_dim: tl.constexpr,  # 512
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 7 real blocks
+    fp8_software_conv: tl.constexpr = False,
     use_fnuz: tl.constexpr = False,
 ):
     batch_idx = tl.program_id(0)
@@ -270,7 +285,7 @@ def _dequantize_and_gather_k_kernel(
         pos_in_block = pos % cache_block_size
 
         # Get physical block index from block table
-        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        block_table_row_ptr = block_table_ptr + batch_idx * block_table_stride
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
@@ -308,11 +323,12 @@ def _dequantize_and_gather_k_kernel(
                 # Bitcast uint8 back to fp8 (FNUZ on gfx942, OCP elsewhere).
                 if use_fnuz:
                     x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
+                    x_float = x_fp8.to(tl.float32)
+                elif fp8_software_conv:
+                    x_float = convert_from_fp8e4m3(x_uint8, tl.float32)
                 else:
                     x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
-
-                # Convert fp8 to float32 for computation
-                x_float = x_fp8.to(tl.float32)
+                    x_float = x_fp8.to(tl.float32)
 
                 # Load and decode UE8M0 scale
                 # UE8M0: scale = 2^(stored_value - 127)
@@ -363,6 +379,11 @@ def dequantize_and_gather_k_cache_triton(
 
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
+    fp8_software_conv = (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(75)
+        and not current_platform.has_device_capability(89)
+    )
     _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
         out,
         out.stride(0),
@@ -370,9 +391,9 @@ def dequantize_and_gather_k_cache_triton(
         k_cache,
         seq_lens,
         block_table,
+        block_table.stride(0),
         offset,
         gather_lens,
-        max_blocks_per_seq=block_table.shape[-1],
         fp8_dim=TOKEN_FP8_DIM,
         bf16_dim=TOKEN_BF16_DIM,
         scale_dim=TOKEN_SCALE_DIM,
@@ -383,7 +404,9 @@ def dequantize_and_gather_k_cache_triton(
         output_dim=512,
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
+        fp8_software_conv=fp8_software_conv,
         use_fnuz=use_fnuz,
+        **({"extern_libs": FP8E4NV_EXTERN_LIBS} if fp8_software_conv else {}),
     )
 
 
@@ -409,7 +432,7 @@ def dequantize_and_gather_k_cache(
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
-    if has_cutedsl():
+    if _can_use_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             dequantize_and_gather_k_cache_cutedsl,

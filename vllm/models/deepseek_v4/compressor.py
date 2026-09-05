@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -399,14 +400,18 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        if (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(90)
+            and self.head_dim == 512
+            and has_cutedsl()
+        ):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
             )
 
-            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
-            # layout and the plain full-cache layout. The full-cache flags
-            # are consumed only here.
+            # CuTeDSL's sparse compressor requires SM90+. It handles both
+            # the fp8_ds_mla layout and the plain full-cache layout.
             compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
@@ -423,7 +428,13 @@ class DeepseekCompressor(nn.Module):
                 "compress_scratch": self._compress_scratch,
             }
         else:
-            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
+            # Indexer path, non-CUDA GPUs, or pre-SM90 CUDA. The latter uses
+            # the portable Triton sparse compressor for fp8_ds_mla.
+            if current_platform.is_cuda() and self.head_dim == 512 and store_full_kv:
+                raise NotImplementedError(
+                    "DeepSeek V4 full-row KV cache on CUDA requires the CuTeDSL "
+                    "sparse compressor; install cutlass or use fp8_ds_mla KV cache"
+                )
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 
