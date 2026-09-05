@@ -236,6 +236,12 @@ STRING_SUPPORTED_FORMATS = {
 }
 
 
+def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
+    return ("pattern" in schema or "format" in schema) and (
+        "minLength" in schema or "maxLength" in schema
+    )
+
+
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
     """Check if JSON schema contains features unsupported by xgrammar."""
 
@@ -269,16 +275,30 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         # the compiled EBNF: pattern/format grammars come out byte-identical
         # with and without the length keywords, while maxLength alone lowers
         # to {0, N} correctly.
+        if obj.get("type") == "string" and _has_pattern_and_length_bounds(obj):
+            return True
+
+        # propertyNames validates names, so it is a string schema even when it
+        # omits "type", which is the form that escapes the check above.
         if (
-            obj.get("type") == "string"
-            and ("pattern" in obj or "format" in obj)
-            and ("minLength" in obj or "maxLength" in obj)
+            obj.get("type") == "object"
+            and isinstance(obj.get("propertyNames"), dict)
+            and _has_pattern_and_length_bounds(obj["propertyNames"])
         ):
             return True
 
-        # Unsupported keywords for objects
-        if obj.get("type") == "object" and any(
-            key in obj for key in ("patternProperties", "propertyNames")
+        # FIXME: xgrammar drops propertyNames whenever patternProperties is
+        # present, and beside an additionalProperties value schema it discards
+        # that schema instead, so either way a constraint is lost without an
+        # error. Remove once these are fixed:
+        # https://github.com/mlc-ai/xgrammar/issues/826
+        if (
+            obj.get("type") == "object"
+            and "propertyNames" in obj
+            and (
+                "patternProperties" in obj
+                or isinstance(obj.get("additionalProperties"), dict)
+            )
         ):
             return True
 
