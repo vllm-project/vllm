@@ -127,8 +127,8 @@ mkdocs serve                           # with API ref (~10 minutes)
 API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
 ```
 
-Once you see `Serving on http://127.0.0.1:8000/` in the logs, the live preview is ready!
-Open <http://127.0.0.1:8000/> in your browser to see it.
+Once you see a `Serving on http://<address>/` line in the logs, the live preview is ready!
+Open that address in your browser to see it — `http://127.0.0.1:8000/` by default, or whatever host/port you passed to `-a`.
 
 For additional features and advanced configurations, refer to the:
 
