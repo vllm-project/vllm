@@ -1106,6 +1106,128 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
         )
 
 
+def test_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
+    """Dynamic SD may pass runtime K below init max; sync parallel-drafting slots."""
+    _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+        method="draft_model",
+        expected_net_num_new_slots=7,
+        expanded_total_tokens=8 + 2 * 7,
+    )
+
+
+def test_propose_eagle_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
+    """P-Eagle path: net_num_new_slots_per_request is runtime K - 1."""
+    _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+        method="eagle",
+        expected_net_num_new_slots=6,
+        expanded_total_tokens=8 + 2 * 6,
+    )
+
+
+def _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+    *,
+    method: str,
+    expected_net_num_new_slots: int,
+    expanded_total_tokens: int,
+) -> None:
+    device = torch.device(DEVICE_TYPE)
+    batch_size = 2
+    seq_lens = [5, 3]
+    total_tokens = sum(seq_lens)
+    max_speculative_tokens = 11
+    runtime_speculative_tokens = 7
+    vocab_size = 100
+
+    proposer = _create_proposer(
+        method,
+        max_speculative_tokens,
+        parallel_drafting=True,
+    )
+    assert proposer.extra_slots_per_request == max_speculative_tokens
+
+    hidden_size = proposer.hidden_size
+
+    model_mock = mock.MagicMock()
+    forward_hidden_states = torch.zeros(
+        expanded_total_tokens, hidden_size, device=device
+    )
+    if proposer.model_returns_tuple():
+        model_mock.return_value = (forward_hidden_states, forward_hidden_states)
+    else:
+        model_mock.return_value = forward_hidden_states
+
+    logits = torch.full(
+        (batch_size * runtime_speculative_tokens, vocab_size),
+        -100.0,
+        device=device,
+    )
+    base_token_ids = [42, 60]
+    for req_idx in range(batch_size):
+        for slot_idx in range(runtime_speculative_tokens):
+            row = req_idx * runtime_speculative_tokens + slot_idx
+            logits[row, base_token_ids[req_idx] + slot_idx] = 100.0
+    model_mock.compute_logits.return_value = logits
+
+    proposer.model = model_mock
+    proposer._draft_attn_layer_names = {"layer.0"}
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+
+    attn_metadata_builder_cls, _ = try_get_attention_backend(
+        AttentionBackendEnum.FLASH_ATTN
+    )
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer._draft_attn_layer_names,
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+    proposer.runner = mock.MagicMock()
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
+    mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
+    mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
+    proposer.draft_attn_groups = [mock_attn_group]
+
+    sampling_metadata = mock.MagicMock()
+    sampling_metadata.all_greedy = True
+
+    result = proposer.propose(
+        num_speculative_tokens=runtime_speculative_tokens,
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat(
+            [
+                torch.arange(seq_lens[0], device=device),
+                torch.arange(seq_lens[1], device=device),
+            ]
+        ),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
+        token_indices_to_sample=None,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata,
+    )
+
+    assert proposer.extra_slots_per_request == runtime_speculative_tokens
+    assert proposer.net_num_new_slots_per_request == expected_net_num_new_slots
+    assert result.shape == (batch_size, runtime_speculative_tokens)
+
+    expected_tokens = torch.zeros(
+        (batch_size, runtime_speculative_tokens), dtype=torch.int64, device=device
+    )
+    for req_idx in range(batch_size):
+        for slot_idx in range(runtime_speculative_tokens):
+            expected_tokens[req_idx, slot_idx] = base_token_ids[req_idx] + slot_idx
+    assert torch.equal(result, expected_tokens)
+
+
 def test_set_inputs_first_pass_dflash():
     """
     Test for DFlash set_inputs_first_pass.

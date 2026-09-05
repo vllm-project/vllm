@@ -5,6 +5,7 @@ import pytest
 
 from tests.utils import (
     get_attn_backend_list_based_on_platform,
+    large_gpu_mark,
     single_gpu_only,
 )
 from vllm import SamplingParams
@@ -169,4 +170,34 @@ def test_eagle_correctness_medium(
         model_impl,
         attn_backend,
         vllm_runner,
+    )
+
+
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+@pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
+def test_eagle_parallel_drafting_dynamic_sd(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    attn_backend: str,
+    vllm_runner,
+):
+    """P-Eagle output stays correct when Dynamic SD lowers runtime K."""
+    _run_eagle_correctness(
+        monkeypatch,
+        sampling_config,
+        (
+            "eagle",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            1,
+        ),
+        False,
+        0.0,
+        False,
+        "auto",
+        attn_backend,
+        vllm_runner,
+        parallel_drafting=True,
+        num_speculative_tokens_per_batch_size=[(1, 32, 3), (33, 100, 1)],
     )
