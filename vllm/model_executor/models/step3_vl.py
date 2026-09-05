@@ -927,7 +927,10 @@ class Step3VLForConditionalGeneration(
                 parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
             parts.append(global_part[i].reshape(-1, hidden))
-            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+            if len(parts) > 1:
+                merged[idx] = torch.cat(parts, dim=0)
+            else:
+                merged[idx] = parts[0].clone() if clone else parts[0]
 
         out = [merged[i] for i in indices]
         for i, idx in enumerate(indices):
