@@ -11,6 +11,7 @@ from vllm.entrypoints.launchers.cli_args import (
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.exceptions import VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 LORA_MODULE = {
@@ -204,7 +205,7 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
 def test_chat_template_validation_for_sad_paths(serve_parser):
     """Ensure validation fails if the chat template doesn't exist"""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
-    with pytest.raises(ValueError):
+    with pytest.raises(VLLMValidationError):
         validate_parsed_serve_args(args)
 
 
