@@ -518,8 +518,15 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         slot_size_bytes = 4096
         self.slot_size_per_layer = [slot_size_bytes]
         self.block_len_per_layer = [slot_size_bytes * self.block_size]
-        self.num_blocks = 1
+        self.num_regions = 1
+        self.block_stride_per_layer = list(self.block_len_per_layer)
+        self.region_num_blocks = [self.num_blocks]
+        self.region_group_ids = [0]
+        self.region_mem_types = [self.nixl_memory_type]
         self.dst_num_blocks[self.engine_id] = self.num_blocks
+        self.dst_region_num_blocks[self.engine_id] = self.region_num_blocks
+        self.dst_region_group_ids[self.engine_id] = self.region_group_ids
+        self.dst_region_mem_types[self.engine_id] = self.region_mem_types
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
 
@@ -548,7 +555,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                     kv_caches_base_addr=[0],
                     device_id=remote_tp_rank,
-                    num_blocks=1,
+                    num_blocks=self.num_blocks,
                     block_lens=remote_block_lens,
                     block_strides=remote_block_lens,
                     kv_cache_layout="LBHNC",
@@ -556,6 +563,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
                     physical_blocks_per_logical_kv_block=1,
+                    region_num_blocks=self.region_num_blocks,
+                    region_group_ids=self.region_group_ids,
+                    region_mem_types=self.region_mem_types,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
@@ -640,7 +650,7 @@ class TestNixlHandshake:
         request_id = "req_id"
 
         # Test worker role in decode server.
-        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config,
@@ -1167,12 +1177,19 @@ class TestNixlHandshake:
             source_ranks_per_group=((0,), (0,)),
             rank_offset_factor=1,
         )
-        meta = MagicMock(
+        meta = NixlAgentMetadata(
+            engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
             kv_caches_base_addr=[0x1000],
             device_id=0,
             num_blocks=1,
             block_lens=[remote_block_len],
             block_strides=[remote_block_len],
+            kv_cache_layout="HND",
+            block_size=worker.block_size,
+            ssm_sizes=(0, 0),
+            attn_backend_name=worker.backend_name,
+            physical_blocks_per_logical_kv_block=1,
         )
 
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
@@ -1844,6 +1861,92 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     assert req0_id not in req_to_blocks
     # Need to shutdown the background thread to release NIXL side channel port
     llm.llm_engine.engine_core.shutdown()
+
+
+def test_mixed_memory_local_descriptors_split_by_memory_type():
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = MagicMock()
+    worker.block_size = 16
+    worker.engine_id = "local"
+    worker.tp_rank = 0
+    worker.device_id = 3
+    worker.kv_caches_base_addr = {"local": {0: [100, 200]}}
+    worker._has_mamba = False
+    worker._mixed_mem_types = True
+    worker.region_mem_types = ["DRAM", "VRAM"]
+    worker.region_num_blocks = [2, 2]
+    worker._desc_is_dram_by_block_size = {}
+    worker._desc_pos_by_block_size = {}
+    worker._dram_src_handles_by_block_size = {}
+    worker.nixl_memory_type = "VRAM"
+    worker._build_fa_local = MagicMock(  # type: ignore[method-assign]
+        return_value=np.array(
+            [
+                [100, 10, 3],
+                [110, 10, 3],
+                [200, 10, 3],
+                [210, 10, 3],
+            ]
+        )
+    )
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.get_xfer_descs.side_effect = lambda blocks, memory_type: (
+        memory_type,
+        blocks,
+    )
+    worker.nixl_wrapper.prep_xfer_dlist.side_effect = [11, 22]
+
+    handle, blocks = worker.register_local_xfer_handler(worker.block_size)
+
+    assert handle == 22
+    assert worker._dram_src_handles_by_block_size[worker.block_size] == 11
+    assert [block[2] for block in blocks] == [0, 0, 3, 3]
+    assert [
+        call.args[1] for call in worker.nixl_wrapper.get_xfer_descs.call_args_list
+    ] == ["DRAM", "VRAM"]
+
+
+def test_mixed_memory_read_notifies_after_both_transfers_finish():
+    worker = object.__new__(NixlConnectorWorker)
+    worker._desc_is_dram_by_block_size = {16: np.array([True, True, False, False])}
+    worker._desc_pos_by_block_size = {16: np.array([0, 1, 0, 1])}
+    worker._dram_src_handles_by_block_size = {16: 10}
+    worker._recving_transfers = defaultdict(list)
+    worker._pending_recv_notifs = {}
+    worker._failed_recv_pending = set()
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    worker._read_blocks_mixed(
+        request_id="request",
+        local_block_size_key=16,
+        local_device_handle=20,
+        remote_xfer_side_handle=30,
+        local_block_descs_ids=np.array([0, 2]),
+        remote_block_descs_ids=np.array([5, 7]),
+        notif_agent="prefill",
+        notif_id=b"request:1",
+    )
+
+    dram_read, device_read = worker.nixl_wrapper.make_prepped_xfer.call_args_list
+    assert dram_read.args[:2] == ("READ", 10)
+    assert dram_read.args[3] == 30
+    np.testing.assert_array_equal(dram_read.args[2], [0])
+    np.testing.assert_array_equal(dram_read.args[4], [5])
+    assert device_read.args[:2] == ("READ", 20)
+    assert device_read.args[3] == 30
+    np.testing.assert_array_equal(device_read.args[2], [0])
+    np.testing.assert_array_equal(device_read.args[4], [7])
+    worker.nixl_wrapper.send_notif.assert_not_called()
+
+    assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
+        "request"
+    }
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
 
 
 def element_byte_addrs(view: torch.Tensor) -> list[int]:
@@ -2881,18 +2984,11 @@ def test_failed_request_skips_kv_postprocessing(
 def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     default_vllm_config, dist_init
 ):
-    """A request whose handles fail in different polls must not crash the engine.
+    """Report a split READ failure only after every handle has stopped.
 
-    One transfer handle is created per remote rank, and when a peer goes away
-    they do not all fail in the same poll: one errors while another is still
-    PROC. The first failure reports the request via _failed_recv_reqs and
-    get_finished() pops its metadata; when the remaining handles fail in a
-    later poll, the request must be cleaned up without being reported again.
-
-    Reporting twice kills the EngineCore: the scheduler's assert in
-    _update_from_kv_xfer_finished only expects a finished recv for a request
-    still waiting for KVs, having moved this one out of
-    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
+    Reporting while another READ is live lets the scheduler reuse destination
+    blocks that NIXL may still write. The request must be reported exactly once,
+    after all of its handles reach a terminal state.
     """
     vllm_config = create_vllm_config()
     connector = NixlConnector(
@@ -2939,20 +3035,21 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     ):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id in done_recving
-    assert request_id not in worker._recving_metadata
+    assert request_id not in done_recving
+    assert request_id in worker._recving_metadata
     assert worker._recving_transfers[request_id] == [second]
 
-    # Poll 2: the second handle fails too. The request was already reported,
-    # so it must not be reported a second time: the scheduler has since moved
-    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
-    # finished recv for a request in that state. Its remaining handles are
-    # still released and the transfer entry removed.
+    # Poll 2: once the second handle fails, report and clean up the request.
     with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id not in done_recving
+    assert request_id in done_recving
+    assert request_id not in worker._recving_metadata
     assert request_id not in worker._recving_transfers
+
+    # Subsequent polls must not report it again.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert request_id not in done_recving
 
 
 def _set_test_speculative_config(
