@@ -7,6 +7,8 @@ Owns the mmap region and the embedding cache, and handles the producer
 for the ECCPUConnector.
 """
 
+from collections import deque
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -33,6 +35,28 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+# How long a transient condition (a settling DMA, a full pool) may hold a
+# request back before it is failed rather than deferred indefinitely.
+_ADMIT_DEFER_TIMEOUT_S = 60.0
+
+
+@dataclass
+class _AnnounceHold:
+    """Leases kept for consumers that were told where to read an encoding.
+
+    One lease per announcement, not one per encoding: two requests routed to
+    two consumers each need the entry to survive until their own read lands,
+    and each waits out its own window. A later announcement must not extend
+    an earlier one, or an encoding announced faster than the lease to
+    consumers that never read would stay pinned indefinitely.
+    """
+
+    # Deadlines of the announcements holding a pin, oldest first.
+    holds: deque[float] = field(default_factory=deque)
+    # Deadlines of announcements made before the save landed. A not-ready
+    # entry cannot be evicted, so these take their pins at mark_ready.
+    pending: deque[float] = field(default_factory=deque)
 
 
 class ECCPUScheduler:
@@ -91,6 +115,21 @@ class ECCPUScheduler:
         self._in_flight: set[str] = set()
         self._tombstones: set[str] = set()
         self._step_completed: set[str] = set()
+        # (request_id, mm_hash) -> when a transient condition first held this
+        # request back, so one that never clears fails the request instead of
+        # deferring it forever. Per request: a shared mm_hash must not make a
+        # newly arrived request inherit an older one's clock. Cleared as soon
+        # as the encoding lands.
+        self._deferred_since: dict[tuple[str, str], float] = {}
+        # Requests needing a remote encoding that will not arrive. Drained by
+        # get_unrecoverable_requests(); the scheduler aborts them.
+        self._unrecoverable: set[str] = set()
+        # Announcing an encoding publishes an address a consumer will use on a
+        # later step, by which time the orchestrator has rewritten the media
+        # off the request. These hold the encoding across that window: FIFO
+        # eviction inside it leaves the consumer nothing to fall back on.
+        self._announce: dict[str, _AnnounceHold] = {}
+        self._announce_lease_s: float = 0.0
         self._peer_host: str | None = None
         self._peer_port: int | None = None
         # Model shape for size checks + compat hash; only set by
@@ -116,6 +155,7 @@ class ECCPUScheduler:
             compute_ec_compatibility_hash,
         )
         from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+            PRODUCER_PIN_LEASE_S,
             ProducerSession,
         )
         from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -134,8 +174,22 @@ class ECCPUScheduler:
         # How long a consumer waits for an XferAck. The producer answers from
         # its scheduler step, so its reply latency scales with the encoder's
         # batch size: a deployment whose steps run longer must raise this.
+        # The default is the producer's own pin lease, the only value that
+        # cannot strand a grant: giving up earlier leaves the producer
+        # pinning blocks for a consumer that has already left.
         self._ack_timeout_s = float(
-            self._ec_config.get_from_extra_config("consumer_ack_timeout_s", 2.0)
+            self._ec_config.get_from_extra_config(
+                "consumer_ack_timeout_s", PRODUCER_PIN_LEASE_S
+            )
+        )
+        # How long a producer holds an announced encoding for a consumer that
+        # has not asked for it yet. It must cover the orchestrator's forward
+        # plus the consumer's queueing delay; the pin is released as soon as
+        # the read completes, so the steady-state cost is the work in flight.
+        self._announce_lease_s = float(
+            self._ec_config.get_from_extra_config(
+                "producer_announce_lease_s", PRODUCER_PIN_LEASE_S
+            )
         )
         self._compat_hash = compute_ec_compatibility_hash(
             vllm_version=VLLM_VERSION,
@@ -201,66 +255,134 @@ class ECCPUScheduler:
     ) -> bool:
         """Admit a request only once all its remote encodings are cached.
 
-        Returns True when every encoding the request needs is either already
-        ready in the local cache or has no remote source. Any encoding whose
-        NIXL READ is still in flight (or was just started this step) defers
-        the request, which the scheduler re-presents on a later step.
+        An item announced with a producer address lives only on that producer.
+        Unlike KV, it cannot be recomputed from the request: the media never
+        reached this instance. Scheduling a request whose remote item is
+        missing therefore hands the model an empty multimodal batch, so such
+        an item defers the request while it may still arrive, and fails the
+        request once it cannot.
         """
+        import time
+
         params: dict[str, dict[str, Any]] = (
             getattr(request, "ec_transfer_params", None) or {}
         )
         if not params:
             return True
+        now = time.monotonic()
         pending = False
         for feature in request.mm_features:
             pos = feature.mm_position
             if pos.offset + pos.length <= num_computed_tokens:
                 continue
             mm_hash = feature.identifier
+            announced = params.get(mm_hash)
+            # Without a producer address there is nothing to fetch: the request
+            # carries what the model needs and the encoder runs locally.
+            # `ec_transfer_params` reaches us from the request, so its shape is
+            # checked rather than assumed.
+            remote: dict[str, Any] | None = (
+                announced
+                if isinstance(announced, dict) and "peer_host" in announced
+                else None
+            )
+
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:
                 # Local hit: upstream's update_state_after_alloc pins and
                 # loads it through the same path as a natively cached entry.
+                self._deferred_since.pop((request.request_id, mm_hash), None)
                 continue
-            if mm_hash in self._in_flight:
+            if mm_hash in self._in_flight or mm_hash in self._step_completed:
                 pending = True
                 continue
-            if mm_hash in self._step_completed:
-                pending = True
-                continue
+
             if mm_hash in self._tombstones:
                 self._tombstones.discard(mm_hash)
-                continue
+                if remote is None:
+                    continue
+                self._fail(request, mm_hash, "the remote read failed")
+                return False
+
             if entry is not None:
                 # Present but not ready and not being fetched: its blocks are
                 # held by a quarantined/settling DMA and cannot be reused.
-                # Fall back to local compute this step; never re-alloc a
-                # mm_hash already in the cache.
+                if remote is None:
+                    continue
+                if not self._defer(request, mm_hash, now, "a DMA was settling"):
+                    return False
+                pending = True
                 continue
-            info = params.get(mm_hash)
-            # Absent entirely, or present with only placeholder metadata (no
-            # cache entry existed on the producer side at request_finished
-            # time): nothing to fetch, fall back to local compute.
-            if not info or "peer_host" not in info:
+
+            if remote is None:
                 continue
+
             expected = pos.length * self._hidden_dim * self._element_size
-            if int(info.get("size_bytes", -1)) != expected:
-                logger.warning(
-                    "EC consumer: size mismatch mm_hash=%s; local encode", mm_hash
-                )
-                continue
             try:
-                started = self._start_xfer(mm_hash, info, expected)
+                size = int(remote["size_bytes"])
+            except (KeyError, TypeError, ValueError):
+                self._fail(request, mm_hash, "the announced size was unusable")
+                return False
+            if size != expected:
+                logger.warning(
+                    "EC consumer: size mismatch mm_hash=%s announced=%d expected=%d",
+                    mm_hash,
+                    size,
+                    expected,
+                )
+                self._fail(request, mm_hash, "the announced size was wrong")
+                return False
+
+            try:
+                started = self._start_xfer(mm_hash, remote, expected)
             except Exception:
                 logger.exception(
                     "EC consumer: failed to start NIXL xfer mm_hash=%s", mm_hash
                 )
-                continue
+                self._fail(request, mm_hash, "the read could not be started")
+                return False
             if not started:
+                # The local pool is full; it drains as other reads complete.
+                if not self._defer(request, mm_hash, now, "the pool was full"):
+                    return False
+                pending = True
                 continue
             self._in_flight.add(mm_hash)
+            self._deferred_since.pop((request.request_id, mm_hash), None)
             pending = True
         return not pending
+
+    def _defer(self, request: "Request", mm_hash: str, now: float, why: str) -> bool:
+        """Hold a request back while a transient condition clears.
+
+        Returns False once the condition has outlived its budget, having
+        marked the request unschedulable.
+        """
+        since = self._deferred_since.setdefault((request.request_id, mm_hash), now)
+        waited = now - since
+        if waited <= _ADMIT_DEFER_TIMEOUT_S:
+            return True
+        self._fail(request, mm_hash, f"{why} for {waited:.0f}s")
+        return False
+
+    def _fail(self, request: "Request", mm_hash: str, why: str) -> None:
+        self._deferred_since.pop((request.request_id, mm_hash), None)
+        self._unrecoverable.add(request.request_id)
+        logger.error(
+            "EC consumer: request %s needs remote encoding mm_hash=%s but %s. "
+            "The media never reached this instance, so it cannot be encoded "
+            "locally; failing the request.",
+            request.request_id,
+            mm_hash,
+            why,
+        )
+
+    def get_unrecoverable_requests(self) -> set[str]:
+        if not self._unrecoverable:
+            return set()
+        failed = self._unrecoverable
+        self._unrecoverable = set()
+        return failed
 
     def _start_xfer(
         self, mm_hash: str, info: "dict[str, Any]", size_bytes: int
@@ -314,6 +436,70 @@ class ECCPUScheduler:
         )
         return True
 
+    def _hold_announced(self, mm_hash: str, entry: Any) -> None:
+        """Hold an announced encoding until its consumer has read it.
+
+        One lease per announcement: the same encoding announced to two
+        consumers must survive until both reads land, so re-announcing takes
+        its own pin and its own window rather than extending an earlier one.
+        """
+        import time
+
+        hold = self._announce.setdefault(mm_hash, _AnnounceHold())
+        deadline = time.monotonic() + self._announce_lease_s
+        if entry.ready:
+            self._cache.pin(mm_hash)
+            hold.holds.append(deadline)
+        else:
+            hold.pending.append(deadline)
+
+    def _release_announce_pins(self) -> None:
+        """Release one lease per landed read, and sweep lapsed leases."""
+        import time
+
+        assert self._producer_session is not None
+        for mm_hash in self._producer_session.take_served():
+            hold = self._announce.get(mm_hash)
+            if hold is None:
+                # Already swept by a lapsed lease; nothing left to release.
+                continue
+            # A read names only the encoding, so it retires the oldest lease
+            # on it; every lease is the same length, so which one it was does
+            # not change when the others expire.
+            if hold.holds:
+                hold.holds.popleft()
+                self._unpin_announced(mm_hash)
+            elif hold.pending:
+                hold.pending.popleft()
+            if not hold.holds and not hold.pending:
+                del self._announce[mm_hash]
+        now = time.monotonic()
+        for mm_hash, hold in list(self._announce.items()):
+            lapsed = 0
+            while hold.holds and hold.holds[0] < now:
+                hold.holds.popleft()
+                self._unpin_announced(mm_hash)
+                lapsed += 1
+            while hold.pending and hold.pending[0] < now:
+                hold.pending.popleft()
+                lapsed += 1
+            if not hold.holds and not hold.pending:
+                del self._announce[mm_hash]
+            if lapsed:
+                logger.debug(
+                    "EC producer: %d hold(s) on mm_hash=%s lapsed; releasing",
+                    lapsed,
+                    mm_hash,
+                )
+
+    def _unpin_announced(self, mm_hash: str) -> None:
+        # A pinned entry cannot be evicted or discarded, so it is normally
+        # still here; tolerate its absence rather than assert on a shutdown
+        # race.
+        if self._cache.get(mm_hash) is None:
+            return
+        self._cache.unpin(mm_hash)
+
     def _poll_step(self) -> None:
         import time
 
@@ -325,6 +511,18 @@ class ECCPUScheduler:
             self._on_peer_down(addr)
         for session in self._sessions.values():
             self._process_session_results(session)
+        self._sweep_deferrals(now)
+
+    def _sweep_deferrals(self, now: float) -> None:
+        """Drop deferral clocks left behind by requests that went away.
+
+        A request still being scheduled is failed, and its clock removed, as
+        soon as it passes the budget; anything older belongs to a request the
+        scheduler has since dropped.
+        """
+        for key, since in list(self._deferred_since.items()):
+            if now - since > 2 * _ADMIT_DEFER_TIMEOUT_S:
+                del self._deferred_since[key]
 
     def _process_session_results(self, session: Any) -> None:
         r = session.take_results()
@@ -407,6 +605,7 @@ class ECCPUScheduler:
         if self._is_producer:
             if self._nixl_enabled and self._producer_session is not None:
                 self._producer_session.poll_step()
+                self._release_announce_pins()
             meta.saves = self._pending_saves
             self._pending_saves = {}
         if self._is_consumer:
@@ -439,6 +638,14 @@ class ECCPUScheduler:
                 )
             elif not entry.ready:
                 self._cache.mark_ready(mm_hash)
+                # It has just become evictable, so announcements made while
+                # the save was in flight take their pins now.
+                hold = self._announce.get(mm_hash)
+                if hold is not None and hold.pending:
+                    for _ in range(len(hold.pending)):
+                        self._cache.pin(mm_hash)
+                    hold.holds.extend(hold.pending)
+                    hold.pending.clear()
                 logger.debug("EC producer: mm_hash=%s marked ready", mm_hash)
         for transfer_id in meta.completed_loads:
             pending = self._load_acks.get(transfer_id)
@@ -505,6 +712,7 @@ class ECCPUScheduler:
                 peer_port=self._peer_port,
                 size_bytes=size_bytes,
             )
+            self._hold_announced(mm_hash, entry)
         logger.debug(
             "EC producer: announcing NIXL-readable encodings req_id=%s items=%s",
             request.request_id,

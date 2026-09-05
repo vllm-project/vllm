@@ -2136,6 +2136,12 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+        if self.ec_connector is not None:
+            # A remote encoding has no local fallback: unlike KV, it cannot be
+            # recomputed from the request, because the media only ever reached
+            # the producer. Error the request rather than schedule it without
+            # its encoder outputs.
+            error_req_ids.update(self.ec_connector.get_unrecoverable_requests())
 
         if error_req_ids:
             error_reqs = self.finish_requests(
