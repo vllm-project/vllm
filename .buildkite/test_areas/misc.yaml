@@ -168,6 +168,35 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'distributed' tests/v1/kv_connector/extract_hidden_states_integration
+  mirror:
+    amd:
+      label: ":amd: (MI355) Extract Hidden States Integration"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/config/speculative.py
+      - vllm/distributed/kv_transfer/kv_connector/
+      - vllm/model_executor/layers/attention/
+      - vllm/model_executor/layers/mamba/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/models/extract_hidden_states.py
+      - vllm/model_executor/models/llama.py
+      - vllm/model_executor/models/qwen3_5.py
+      - vllm/model_executor/models/qwen3_next.py
+      - vllm/model_executor/models/registry.py
+      - vllm/transformers_utils/configs/extract_hidden_states.py
+      - vllm/transformers_utils/configs/qwen3_5.py
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/v1/kv_cache_interface.py
+      - vllm/v1/spec_decode/extract_hidden_states.py
+      - vllm/v1/worker/gpu_model_runner.py
+      - vllm/_aiter_ops.py
+      - tests/v1/kv_connector/extract_hidden_states_integration/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Regression"
   key: regression
@@ -427,6 +456,24 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+  mirror:
+    amd:
+      label: ":amd: (MI250) Batch Invariance"
+      device: mi250_1
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention
+      - vllm/model_executor/layers
+      - tests/v1/determinism/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pip install pytest-timeout pytest-forked
+      - pytest -v -s v1/determinism/test_batch_invariance.py
+      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: ":nvidia: (B200) Batch Invariance"
   key: batch-invariance-b200

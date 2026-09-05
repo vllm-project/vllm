@@ -98,6 +98,15 @@ steps:
   commands:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
+  mirror:
+    amd:
+      label: ":amd: (MI250) Multimodal Processor Shard %N"
+      device: mi250_1
+      no_gpu: true
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
   key: multi-modal-processor
