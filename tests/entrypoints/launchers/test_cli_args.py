@@ -67,6 +67,12 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     assert args.port == 9000
 
 
+def test_omit_unset_chat_completion_fields_flag(serve_parser):
+    assert not serve_parser.parse_args([]).omit_unset_chat_completion_fields
+    args = serve_parser.parse_args(["--omit-unset-chat-completion-fields"])
+    assert args.omit_unset_chat_completion_fields
+
+
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path

@@ -3,6 +3,7 @@
 
 
 from http import HTTPStatus
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -28,6 +29,36 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
+# When adding a new vLLM-specific field to ChatCompletionResponse,
+# add it here as well.
+_VLLM_CHAT_COMPLETION_FIELDS = frozenset(
+    {
+        "prompt_logprobs",
+        "prompt_token_ids",
+        "prompt_text",
+        "kv_transfer_params",
+        "ec_transfer_params",
+        "metrics",
+    }
+)
+
+
+def _serialize_chat_completion_response(
+    response: ChatCompletionResponse,
+    *,
+    omit_unset_fields: bool,
+) -> dict[str, Any]:
+    content = response.model_dump()
+    if omit_unset_fields:
+        for field in _VLLM_CHAT_COMPLETION_FIELDS:
+            if content.get(field) is None:
+                content.pop(field, None)
+    return content
+
+
+def _omit_unset_fields(raw_request: Request) -> bool:
+    args = getattr(raw_request.app.state, "args", None)
+    return bool(getattr(args, "omit_unset_chat_completion_fields", False))
 
 
 def chat(request: Request) -> OpenAIServingChat | None:
@@ -68,7 +99,10 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
-            content=generator.model_dump(),
+            content=_serialize_chat_completion_response(
+                generator,
+                omit_unset_fields=_omit_unset_fields(raw_request),
+            ),
             headers=metrics_header(metrics_header_format),
         )
 
@@ -105,7 +139,12 @@ async def create_batch_chat_completion(
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result.model_dump())
+    return JSONResponse(
+        content=_serialize_chat_completion_response(
+            result,
+            omit_unset_fields=_omit_unset_fields(raw_request),
+        )
+    )
 
 
 def attach_router(app: FastAPI):

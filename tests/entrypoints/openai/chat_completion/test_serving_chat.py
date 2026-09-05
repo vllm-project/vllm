@@ -22,12 +22,18 @@ from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import MultiModalConfig
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
+    PerRequestMetrics,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
+from vllm.entrypoints.openai.chat_completion.api_router import (
+    _serialize_chat_completion_response,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
@@ -41,7 +47,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.exceptions import QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.inputs import PlaceholderRange
@@ -65,6 +71,65 @@ _PER_REQUEST_STATS = RequestStateStats(
     last_token_ts=3.0,
     num_generation_tokens=2,
 )
+_VLLM_EXTENSION_FIELDS = {
+    "prompt_logprobs",
+    "prompt_token_ids",
+    "prompt_text",
+    "kv_transfer_params",
+    "ec_transfer_params",
+    "metrics",
+}
+
+
+def _make_serialization_test_response(**kwargs) -> ChatCompletionResponse:
+    return ChatCompletionResponse(
+        model="test-model",
+        choices=[
+            ChatCompletionResponseChoice(
+                index=0,
+                message=ChatMessage(role="assistant", content="hello"),
+            )
+        ],
+        usage=UsageInfo(),
+        **kwargs,
+    )
+
+
+def test_unset_vllm_fields_are_preserved_by_default():
+    response = _make_serialization_test_response()
+
+    payload = _serialize_chat_completion_response(response, omit_unset_fields=False)
+
+    assert payload.keys() >= _VLLM_EXTENSION_FIELDS
+    assert all(payload[field] is None for field in _VLLM_EXTENSION_FIELDS)
+
+
+def test_unset_vllm_fields_can_be_omitted_without_dropping_spec_fields():
+    response = _make_serialization_test_response()
+
+    payload = _serialize_chat_completion_response(response, omit_unset_fields=True)
+
+    assert _VLLM_EXTENSION_FIELDS.isdisjoint(payload)
+    assert "service_tier" in payload
+    assert payload["service_tier"] is None
+    assert "system_fingerprint" in payload
+    assert payload["system_fingerprint"] is None
+    assert payload["choices"][0]["logprobs"] is None
+
+
+def test_populated_vllm_fields_are_preserved_when_omission_is_enabled():
+    response = _make_serialization_test_response(
+        prompt_logprobs=[],
+        prompt_token_ids=[1, 2],
+        prompt_text="prompt",
+        kv_transfer_params={},
+        ec_transfer_params={},
+        metrics=PerRequestMetrics(time_to_first_token_ms=1.0),
+    )
+
+    payload = _serialize_chat_completion_response(response, omit_unset_fields=True)
+
+    assert payload.keys() >= _VLLM_EXTENSION_FIELDS
 
 
 @pytest.fixture(scope="module")
