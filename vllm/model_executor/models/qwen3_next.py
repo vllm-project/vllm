@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.model_executor.layers.attention import Attention
@@ -86,7 +87,6 @@ def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     return (
         parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
         and getattr(config, "num_experts", 0) > 0
         and not getattr(config, "mlp_only_layers", [])
         and getattr(config, "decoder_sparse_step", 1) == 1
@@ -582,17 +582,30 @@ class Qwen3NextDecoderLayer(nn.Module):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        if self.use_attn_reduce_scatter_for_moe:
+        # Runtime downgrade: with fewer tokens than TP ranks (decode
+        # steps), SP pads rows to the TP size; the pad rows go through
+        # norm/experts and can produce NaN. Fall back to the allreduce path.
+        sp_this_step = (
+            self.use_attn_reduce_scatter_for_moe
+            and hidden_states.shape[0] >= get_tensor_model_parallel_world_size()
+        )
+        if sp_this_step:
             tp_world_size = get_tensor_model_parallel_world_size()
             # small trick using minus, eg. -17 % 8 = 7
             sp_pad = (-hidden_states.shape[0]) % tp_world_size
             # pad if not divisible by world size
             hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            if not input_is_sequence_parallel:
+                residual = sequence_parallel_chunk(residual)
+        elif self.use_attn_reduce_scatter_for_moe:
+            # downgraded step: o_proj was built with reduce_results=False, so
+            # the partial sums must still be reduced explicitly.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_attn_reduce_scatter_for_moe:
+        if sp_this_step:
             hidden_states = self.mlp(
                 hidden_states,
                 already_sequence_parallel=True,
@@ -721,6 +734,19 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
+            if any(
+                getattr(l, "use_attn_reduce_scatter_for_moe", False)
+                for l in self.layers
+            ):
+                # SP keeps the residual stream sequence-sharded (padded to the
+                # TP size, so a shard can equal full_num_tokens on decode
+                # steps); the PP boundary protocol expects full-token tensors.
+                hidden_states, residual = _all_gather_hidden_and_residual(
+                    hidden_states,
+                    residual,
+                    full_num_tokens,
+                    self.config.hidden_size,
+                )
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
