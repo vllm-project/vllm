@@ -831,9 +831,13 @@ class MessageQueue:
             if len(raw_buf) < 1024 * 1024:
                 # In-line buffers smaller than 1MiB.
                 return True
-            all_buffers.append(raw_buf)
+            # raw_buf aliases the live tensor's memory, which could be
+            # mutated after enqueue() returns. Copy it so the async ZMQ
+            # send cannot race the mutation and deliver truncated data.
+            oob_buf = bytes(raw_buf)
+            all_buffers.append(oob_buf)
             nonlocal total_bytes
-            total_bytes += len(raw_buf) + 4
+            total_bytes += len(oob_buf) + 4
             return False
 
         # CPU tensors are routed through `_reduce_tensor` so that their
