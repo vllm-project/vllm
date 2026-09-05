@@ -42,6 +42,7 @@ class MambaConvSplitInfo:
     local_proj_dims: tuple[int, ...]
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
+    mamba2_state_size: int | None = None
 
     @property
     def local_conv_dim(self) -> int:
@@ -68,8 +69,48 @@ class MambaConvSplitInfo:
             offset += size
         return offsets
 
+    def remote_conv_layout(
+        self, remote_conv_bytes: int, tp_ratio: int
+    ) -> tuple[tuple[int, ...], bool]:
+        """Recover remote projection sizes and whether B/C are replicated."""
+        if tp_ratio == 0:
+            raise ValueError("TP ratio must be nonzero")
+
+        def scale(size: int) -> int:
+            if tp_ratio > 0:
+                return size * tp_ratio
+            if size % -tp_ratio:
+                raise ValueError("Sharded projection is not divisible by TP ratio")
+            return size // -tp_ratio
+
+        local_sizes = self.proj_bytes
+        replicated = False
+        if self.mamba2_state_size is None:
+            remote_sizes = tuple(scale(size) for size in local_sizes)
+        else:
+            x_size = scale(local_sizes[0])
+            remainder = remote_conv_bytes - x_size
+            if remainder <= 0 or remainder % 2:
+                raise ValueError("Remote Mamba2 convolution has invalid B/C sizes")
+            group_size = remainder // 2
+            remote_sizes = (x_size, group_size, group_size)
+            if (
+                group_size == local_sizes[1]
+                and self.local_proj_dims[1] == self.mamba2_state_size
+            ):
+                replicated = abs(tp_ratio) != 1
+            elif group_size != scale(local_sizes[1]):
+                raise ValueError("Remote Mamba2 group layout is incompatible")
+
+        row_bytes = self.conv_rows * self.conv_dtype_size
+        if sum(remote_sizes) != remote_conv_bytes or any(
+            size <= 0 or size % row_bytes for size in remote_sizes
+        ):
+            raise ValueError("Remote convolution sizes do not match its projections")
+        return remote_sizes, replicated
+
     def remote_conv_offsets(
-        self, local_rank_offset: int, tp_ratio: int
+        self, local_rank_offset: int, tp_ratio: int, remote_conv_bytes: int
     ) -> list[tuple[int, int]]:
         """(byte_offset, byte_size) of this D rank's sub-projection slices
         within one P page.
@@ -81,25 +122,24 @@ class MambaConvSplitInfo:
             tp_ratio: signed TP ratio.
                 >= 1:  D_TP >= P_TP — P page is larger, D reads its slice.
                 < 0:   P_TP > D_TP — P pages are smaller, D reads entire
-                       P page.  Local dims are scaled down by |tp_ratio|
-                       to get P-sized offsets.
+                       P projection.
+            remote_conv_bytes: actual remote convolution size from the handshake.
         """
+        remote_sizes, replicated = self.remote_conv_layout(remote_conv_bytes, tp_ratio)
         offsets: list[tuple[int, int]] = []
-        if tp_ratio >= 1:
-            remote_base = 0
-            for size in self.proj_bytes:
-                offsets.append((remote_base + local_rank_offset * size, size))
-                remote_base += size * tp_ratio
-        else:
-            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
-            # are smaller than D's. Local dims are D-sized, but we need
-            # P-sized offsets. Scale down by |tp_ratio|.
-            abs_ratio = -tp_ratio
-            remote_base = 0
-            for size in self.proj_bytes:
-                remote_size = size // abs_ratio
-                offsets.append((remote_base, remote_size))
-                remote_base += remote_size
+        remote_base = 0
+        for i, (local_size, remote_size) in enumerate(
+            zip(self.proj_bytes, remote_sizes)
+        ):
+            if tp_ratio > 0:
+                size = local_size
+                offset = 0 if replicated and i in (1, 2) else local_rank_offset * size
+            else:
+                size, offset = remote_size, 0
+            if offset < 0 or offset + size > remote_size:
+                raise ValueError("Convolution read exceeds its remote projection")
+            offsets.append((remote_base + offset, size))
+            remote_base += remote_size
         return offsets
 
 
@@ -214,6 +254,11 @@ def derive_mamba_conv_split(
         local_proj_dims=local_proj_dims,
         conv_dtype_size=conv_dtype_size,
         ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        mamba2_state_size=(
+            mamba_spec.shapes[1][2]
+            if mamba_spec.mamba_type == MambaAttentionBackendEnum.MAMBA2
+            else None
+        ),
     )
 
 

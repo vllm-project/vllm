@@ -154,6 +154,7 @@ class NixlBaseConnectorWorker:
         dst_num_blocks: int,
         block_size_ratio: float | None,
         physical_blocks_per_logical: int,
+        skip_replicated_conv: bool = False,
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_ssm_regions = 0
@@ -222,6 +223,10 @@ class NixlBaseConnectorWorker:
                     if i == self._ple_group_index
                     else np.arange(num_ssm_regions, dtype=np.int32)
                 )[:, None]
+                if skip_replicated_conv and i != self._ple_group_index:
+                    ssm_region_ids = ssm_region_ids[
+                        ~np.isin(ssm_region_ids[:, 0] % ssm_regions_per_layer, (1, 2))
+                    ]
                 all_descs.append(
                     (
                         ssm_region_ids * logical_blocks
@@ -242,6 +247,7 @@ class NixlBaseConnectorWorker:
         src_blocks_data: np.ndarray,
         num_fa_descs: int,
         block_size_ratio: int = 1,
+        replicated_conv: bool = False,
     ) -> Iterator[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario.
 
@@ -293,8 +299,20 @@ class NixlBaseConnectorWorker:
                         chunk = local_len // fa_num_splits
                         handle.append((addr + fa_slot * chunk, chunk, dev))
                 elif j < sharded_desc_end:
-                    chunk = local_len // ssm_num_splits
-                    handle.append((addr + p_idx * chunk, chunk, dev))
+                    projection = (
+                        (j - num_fa_descs) // self._logical_num_blocks % 4
+                        if replicated_conv
+                        else -1
+                    )
+                    if projection in (1, 2):
+                        handle.append((addr, local_len, dev))
+                    else:
+                        if local_len % ssm_num_splits:
+                            raise ValueError(
+                                "SSM region is not divisible by source count"
+                            )
+                        chunk = local_len // ssm_num_splits
+                        handle.append((addr + p_idx * chunk, chunk, dev))
                 else:
                     handle.append((addr, local_len, dev))
             yield handle
@@ -689,6 +707,7 @@ class NixlBaseConnectorWorker:
 
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
+        self._mamba_conv_replicated: dict[EngineId, bool] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -1567,12 +1586,23 @@ class NixlBaseConnectorWorker:
         )
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
-        # Mamba conv state is always TP-sharded, even when attention KV
-        # is replicated (num_kv_heads < tp_size).
+        # x and temporal state are head-sharded; Mamba2 B/C may be replicated.
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
-        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
+        conv_offsets = self._conv_decomp.remote_conv_offsets(
+            local_offset, tp_ratio, conv_size_remote
+        )
+        expected_ssm_size = (
+            self._mamba_ssm_size[1] * tp_ratio
+            if tp_ratio > 0
+            else nixl_agent_meta.ssm_sizes[1] * -tp_ratio
+        )
+        actual_ssm_size = (
+            nixl_agent_meta.ssm_sizes[1] if tp_ratio > 0 else self._mamba_ssm_size[1]
+        )
+        if expected_ssm_size != actual_ssm_size:
+            raise ValueError("Remote temporal state does not match the TP ratio")
         if tp_ratio >= 1:
             ssm_read_size = self._mamba_ssm_size[1]
         else:
@@ -1869,6 +1899,14 @@ class NixlBaseConnectorWorker:
         # this is the ratio between the two sizes.
         tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
 
+        replicated_conv = False
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            _, replicated_conv = self._conv_decomp.remote_conv_layout(
+                nixl_agent_meta.ssm_sizes[0], tp_ratio
+            )
+            self._mamba_conv_replicated[engine_id] = replicated_conv
+
         logger.debug(
             "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
             engine_id,
@@ -1908,6 +1946,7 @@ class NixlBaseConnectorWorker:
                 src_blocks_data,
                 self.num_descs * block_size_ratio,
                 block_size_ratio,
+                replicated_conv=replicated_conv,
             ):
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
@@ -1950,6 +1989,22 @@ class NixlBaseConnectorWorker:
         )
 
         return remote_agent_name
+
+    def _skip_replicated_mamba_conv(
+        self, remote_engine_id: EngineId, remote_rank: int
+    ) -> bool:
+        """Select one writer for replicated B/C when gathering head shards."""
+        if not self._has_mamba or not self._mamba_conv_replicated.get(
+            remote_engine_id, False
+        ):
+            return False
+        assert self.transfer_topo is not None
+        info = self.transfer_topo.get_engine_info(remote_engine_id)
+        ratio = self.transfer_topo.tp_ratio(info.remote_tp_size)
+        if self._TRANSFER_MODE == "push":
+            return ratio > 1 and self.tp_rank % ratio != 0
+        plan = self.tp_mappings[remote_engine_id]
+        return ratio < 0 and remote_rank != plan.all_source_ranks[0]
 
     def _validate_remote_agent_handshake(
         self,
@@ -2894,6 +2949,7 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
         self.tp_mappings.pop(engine_id, None)
+        self._mamba_conv_replicated.pop(engine_id, None)
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
