@@ -36,15 +36,19 @@ We recommend leveraging `uv` to [automatically select the appropriate PyTorch in
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. Some releases also provide additional CUDA variants, such as CUDA 13.0. Variant availability can differ by release, so install these wheels from the vLLM wheel index instead of constructing a direct GitHub release asset URL:
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 13.0).
+# Install vLLM from a specific CUDA variant index (e.g., CUDA 13.0).
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=130 # or other
-export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+export VLLM_VARIANT=cu130 # check https://wheels.vllm.ai/${VLLM_VERSION}/ for available variants
+uv pip install "vllm==${VLLM_VERSION}+${VLLM_VARIANT}" \
+    --torch-backend=${VLLM_VARIANT} \
+    --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/${VLLM_VARIANT} \
+    --index-strategy first-index
 ```
+
+If the variant index returns 404 or does not list a compatible wheel, that release did not publish the requested CUDA variant. Choose another available variant or build vLLM from source.
 
 #### Install the latest code
 
