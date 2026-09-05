@@ -6339,3 +6339,98 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
 
     assert output.num_scheduled_tokens[req_id] > 0
     assert not output.scheduled_encoder_inputs.get(req_id)
+
+
+# ==============================================================================
+# Regression tests for #53130: requests parked in skipped_waiting must be
+# promotable (and failed grammar compiles detectable) even on steps where the
+# token budget or the request capacity is fully consumed by running requests.
+# ==============================================================================
+
+
+def _add_budget_saturating_hog(scheduler) -> Request:
+    """Put a long-prompt request mid-chunked-prefill so that every subsequent
+    schedule() call spends the entire token budget on it."""
+    budget = scheduler.max_num_scheduled_tokens
+    (hog,) = create_requests(num_requests=1, num_tokens=budget * 4, req_ids=["hog"])
+    scheduler.add_request(hog)
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[hog.request_id] == budget
+    model_output = ModelRunnerOutput(
+        req_ids=[hog.request_id],
+        req_id_to_index={hog.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+    return hog
+
+
+def _parked_grammar_request(scheduler, req_id: str, grammar) -> Request:
+    (req,) = create_requests(num_requests=1, req_ids=[req_id])
+    req.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    req.structured_output_request = Mock(grammar=grammar)
+    scheduler.add_request(req)
+    assert req in list(scheduler.skipped_waiting)
+    return req
+
+
+def test_parked_grammar_promotion_when_token_budget_saturated():
+    """A grammar-ready parked request must be promoted even on steps where
+    running prefills consume the entire token budget (#53130)."""
+    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=1024)
+    hog = _add_budget_saturating_hog(scheduler)
+    req = _parked_grammar_request(scheduler, "grammar", grammar=object())
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {hog.request_id: 64}
+    assert req.status == RequestStatus.WAITING
+
+
+def test_grammar_compile_failure_detected_when_token_budget_saturated():
+    """A failed grammar compile must terminate the request even on steps where
+    running prefills consume the entire token budget (#53130)."""
+    scheduler = create_scheduler(max_num_batched_tokens=64, max_model_len=1024)
+    hog = _add_budget_saturating_hog(scheduler)
+    req = _parked_grammar_request(
+        scheduler, "grammar-err", grammar=ValueError("compile failed")
+    )
+
+    output = scheduler.schedule()
+    model_output = ModelRunnerOutput(
+        req_ids=[hog.request_id],
+        req_id_to_index={hog.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    assert req.status == RequestStatus.FINISHED_ERROR
+
+
+def test_parked_grammar_promotion_when_capacity_saturated():
+    """A grammar-ready parked request must be promoted even when running
+    requests occupy every max_num_seqs slot (#53130)."""
+    scheduler = create_scheduler(max_num_seqs=1)
+    (occupant,) = create_requests(num_requests=1, num_tokens=4, req_ids=["occupant"])
+    scheduler.add_request(occupant)
+    output = scheduler.schedule()
+    model_output = ModelRunnerOutput(
+        req_ids=[occupant.request_id],
+        req_id_to_index={occupant.request_id: 0},
+        sampled_token_ids=[[1000]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+    req = _parked_grammar_request(scheduler, "grammar", grammar=object())
+
+    scheduler.schedule()
+
+    assert req.status == RequestStatus.WAITING
