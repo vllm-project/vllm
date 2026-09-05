@@ -841,13 +841,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output, _ = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out.flatten(-2))
         return output
 
     def forward_hip(
@@ -1003,15 +998,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        return self._output_projection(core_attn_out, z)
 
     def forward_cpu(
         self,
@@ -1054,14 +1041,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             _encode_layer_name(self.prefix),
         )
 
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        out, _ = self.out_proj(core_attn_out)
-        return out
+        return self._output_projection(core_attn_out, z)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
