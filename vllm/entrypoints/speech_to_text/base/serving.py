@@ -8,7 +8,7 @@ import zlib
 from collections.abc import AsyncGenerator, Callable, Set
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
-from typing import Final, Literal, TypeAlias, TypeVar, cast
+from typing import Any, Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -24,7 +24,10 @@ from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import (
+    get_max_tokens,
+    resolve_kv_cache_report_mode,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
@@ -211,6 +214,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self,
         audio_chunk: np.ndarray,
         request_id: str,
+        extra_args: dict[str, Any] | None = None,
     ) -> str:
         """Auto-detect the spoken language from an audio chunk.
 
@@ -229,6 +233,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
             max_tokens=1,
             temperature=0.0,
             allowed_token_ids=allowed_token_ids,
+            extra_args=extra_args,
         )
 
         result_generator = self.engine_client.generate(
@@ -287,7 +292,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         ):
             # Auto-detect language from the first chunk.
             request.language = await self._detect_language(
-                chunks[0], f"{request_id}-lang_detect"
+                chunks[0], f"{request_id}-lang_detect", extra_args=request.vllm_xargs
             )
 
         parsed_prompts: list[DictPrompt] = []
@@ -428,6 +433,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
+        request.vllm_xargs = resolve_kv_cache_report_mode(
+            request.vllm_xargs, raw_request
+        )
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -555,6 +563,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                         request_id=request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
+                        extra_args=request.vllm_xargs,
                     )
                 else:
                     generator = self.engine_client.generate(

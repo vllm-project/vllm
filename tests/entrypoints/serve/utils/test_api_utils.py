@@ -4,6 +4,7 @@
 from argparse import Namespace
 
 import pytest
+from starlette.requests import Request
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
@@ -12,6 +13,67 @@ from vllm.entrypoints.serve.utils.api_utils import (
     redact_sensitive_args,
     should_include_usage,
 )
+from vllm.exceptions import VLLMValidationError
+
+
+@pytest.mark.parametrize("mode", ["full", "incremental"])
+def test_kv_cache_report_header_preserves_other_extra_args(mode):
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-kv-cache-report-mode", mode.encode()),
+            ],
+        }
+    )
+    extra_args = {"custom": 1}
+
+    result = api_utils.resolve_kv_cache_report_mode(extra_args, request)
+
+    assert result == {"custom": 1, "kv_cache_report_mode": mode}
+    assert extra_args == {"custom": 1}
+
+
+@pytest.mark.parametrize("mode", [None, "full", "incremental"])
+def test_kv_cache_report_body_takes_precedence(mode):
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-kv-cache-report-mode", b"full"),
+            ],
+        }
+    )
+    extra_args = {} if mode is None else {"kv_cache_report_mode": mode}
+
+    result = api_utils.resolve_kv_cache_report_mode(extra_args, request)
+
+    assert result == {"kv_cache_report_mode": mode or "full"}
+
+
+@pytest.mark.parametrize(
+    "raw_request", [None, Request({"type": "http", "headers": []})]
+)
+@pytest.mark.parametrize("extra_args", [None, {}, {"kv_cache_report_mode": "full"}])
+def test_kv_cache_report_without_header_preserves_body(raw_request, extra_args):
+    assert api_utils.resolve_kv_cache_report_mode(extra_args, raw_request) == extra_args
+
+
+@pytest.mark.parametrize("mode", ["", "FULL", "invalid", "full,incremental"])
+def test_kv_cache_report_rejects_invalid_header_even_with_body(mode):
+    request = Request(
+        {
+            "type": "http",
+            "headers": [
+                (b"x-kv-cache-report-mode", mode.encode()),
+            ],
+        }
+    )
+
+    with pytest.raises(VLLMValidationError, match="X-KV-Cache-Report-Mode"):
+        api_utils.resolve_kv_cache_report_mode(
+            {"kv_cache_report_mode": "incremental"}, request
+        )
 
 
 @pytest.mark.parametrize(

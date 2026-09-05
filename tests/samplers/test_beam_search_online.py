@@ -72,3 +72,26 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
     assert outputs[0].outputs[0].finish_reason == "stop"
     assert outputs[0].outputs[0].token_ids == []
     assert outputs[0].outputs[0].cumulative_logprob == pytest.approx(-0.1)
+
+
+@pytest.mark.asyncio
+async def test_beam_search_preserves_kv_cache_report_mode(monkeypatch):
+    observed = []
+    generate = _EngineClient.generate
+
+    async def capture(self, prompt, params, *args, **kwargs):
+        observed.append(params.extra_args)
+        async for output in generate(self, prompt, params, *args, **kwargs):
+            yield output
+
+    monkeypatch.setattr(_EngineClient, "generate", capture)
+    async for _ in _Serving().beam_search(
+        {"type": "token", "prompt_token_ids": [1]},
+        "request",
+        BeamSearchParams(beam_width=2, max_tokens=2),
+        extra_args={"kv_cache_report_mode": "full"},
+    ):
+        pass
+
+    assert len(observed) > 1
+    assert all(args == {"kv_cache_report_mode": "full"} for args in observed)

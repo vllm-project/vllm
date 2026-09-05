@@ -66,11 +66,15 @@ pub(super) struct ResponseOptions {
 /// `lora_resolution.model_names` must be non-empty; the first entry is used as
 /// the base `model` field in responses when no LoRA adapter is selected.
 pub(super) fn prepare_chat_request(
-    request: ChatCompletionRequest,
+    mut request: ChatCompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+    request.vllm_xargs = crate::utils::merge_kv_cache_report_mode(
+        request.vllm_xargs,
+        ctx.kv_cache_report_mode.as_deref(),
+    )?;
 
     let prompt_truncation = resolve_generation_prompt_truncation(
         request.truncate_prompt_tokens,
@@ -1421,6 +1425,28 @@ mod tests {
             prepared.chat_request.session_id.as_deref(),
             Some("header-session")
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_kv_cache_report_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-kv-cache-report-mode", "full".parse().unwrap());
+        let request = base_request();
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("prepare");
+
+        expect_test::expect![[r#"
+            Some(
+                {
+                    "kv_cache_report_mode": String("full"),
+                },
+            )
+        "#]]
+        .assert_debug_eq(&prepared.chat_request.sampling_params.vllm_xargs);
     }
 
     #[test]
