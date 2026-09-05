@@ -38,6 +38,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
     )
     runner.model_state = SimpleNamespace(
+        set_kv_cache_config=lambda _kv_cache_config: None,
         get_additional_cg_support=lambda: (),
         num_new_sampled_tokens_per_step=1,
     )
