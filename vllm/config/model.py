@@ -2031,6 +2031,25 @@ class ModelConfig:
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
+    def metrics_info(self) -> dict[str, str]:
+        # Convert a curated subset of ModelConfig to dict(key: str, value: str)
+        # for the prometheus metrics info gauge. We intentionally expose only
+        # a stable, low-cardinality subset of fields (rather than the full
+        # __dict__) to avoid leaking large objects (e.g. hf_config) and to keep
+        # the metric label set predictable. This makes it possible to observe
+        # values such as the auto-configured max_model_len via /metrics instead
+        # of scraping startup logs.
+        return {
+            "model": str(self.model),
+            "served_model_name": str(self.served_model_name),
+            "tokenizer": str(self.tokenizer),
+            "tokenizer_mode": str(self.tokenizer_mode),
+            "dtype": str(self.dtype),
+            "max_model_len": str(self.max_model_len),
+            "quantization": str(self.quantization),
+            "enforce_eager": str(self.enforce_eager),
+        }
+
     @property
     def attn_type(self) -> AttnTypeStr:
         """Determine the attention type based on model configuration."""

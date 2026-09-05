@@ -1091,6 +1091,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
+        elif type == "model_config":
+            name = "vllm:model_config_info"
+            documentation = "Information of the LLMEngine ModelConfig"
         assert name is not None, f"Unknown metrics info type {type}"
 
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
@@ -1292,6 +1295,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
+        self.log_metrics_info("model_config", self.vllm_config.model_config)
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
