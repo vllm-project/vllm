@@ -76,6 +76,13 @@ impl ToolSchemas {
         Self { tools }
     }
 
+    /// Return whether one named parameter has a normalized schema.
+    pub(super) fn has_param_schema(&self, function_name: &str, name: &str) -> bool {
+        self.tools
+            .get(function_name)
+            .is_some_and(|tool_schema| tool_schema.params.contains_key(name))
+    }
+
     /// Convert parameter values for one named tool.
     ///
     /// Unknown tool names use an empty schema, so all parameters fall back to

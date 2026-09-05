@@ -107,12 +107,15 @@ impl DeepSeekDsmlToolParser {
                 for param in raw_params {
                     let value = if param.is_string {
                         serde_json::Value::String(param.value)
-                    } else {
+                    } else if self.tool_parameters.has_param_schema(&name, &param.name) {
                         self.tool_parameters.convert_param_with_schema(
                             &name,
                             &param.name,
                             param.value,
                         )
+                    } else {
+                        serde_json::from_str(&param.value)
+                            .unwrap_or_else(|_| serde_json::Value::String(param.value))
                     };
                     arguments.insert(param.name, value);
                 }

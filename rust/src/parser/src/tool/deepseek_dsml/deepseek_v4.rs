@@ -75,12 +75,12 @@ mod tests {
     use crate::tool::test_utils::{collect_stream, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
-    fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
+    fn build_tool_call(function_name: &str, params: &[(&str, &str)], is_string: bool) -> String {
         let params = params
             .iter()
             .map(|(name, value)| {
                 format!(
-                    r#"<｜DSML｜parameter name="{name}" string="true">{value}</｜DSML｜parameter>"#
+                    r#"<｜DSML｜parameter name="{name}" string="{is_string}">{value}</｜DSML｜parameter>"#
                 )
             })
             .collect::<Vec<_>>()
@@ -88,6 +88,14 @@ mod tests {
         format!(
             "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"{function_name}\">\n{params}\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
         )
+    }
+
+    fn parse_arguments(function_name: &str, params: &[(&str, &str)], is_string: bool) -> Value {
+        let mut parser = DeepSeekV4ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(&build_tool_call(function_name, params, is_string))
+            .unwrap();
+        serde_json::from_str(&output.calls()[0].arguments).unwrap()
     }
 
     #[test]
@@ -104,6 +112,7 @@ mod tests {
             .parse_complete(&build_tool_call(
                 "get_weather",
                 &[("location", "SF"), ("date", "2024-01-16")],
+                true,
             ))
             .unwrap();
 
@@ -116,6 +125,44 @@ mod tests {
                 "location": "SF",
                 "date": "2024-01-16"
             })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_parse_complete_uses_json_types_for_unknown_tool_params() {
+        assert_eq!(
+            parse_arguments(
+                "unknown",
+                &[
+                    ("count", "5"),
+                    ("enabled", "false"),
+                    ("config", r#"{"a":1}"#),
+                    ("flags", "[true,false]"),
+                ],
+                false,
+            ),
+            json!({
+                "count": 5,
+                "enabled": false,
+                "config": { "a": 1 },
+                "flags": [true, false],
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_parse_complete_uses_json_types_without_property_schema() {
+        assert_eq!(
+            parse_arguments("get_weather", &[("extra_opts", r#"{"b":2}"#)], false),
+            json!({ "extra_opts": { "b": 2 } })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_parse_complete_preserves_invalid_json_without_schema() {
+        assert_eq!(
+            parse_arguments("unknown", &[("data", "[broken")], false),
+            json!({ "data": "[broken" })
         );
     }
 
