@@ -453,7 +453,7 @@ class HTTPConnection:
 
             return await r.text()
 
-    def get_json(self, url: str, *, timeout: float | None = None) -> str:
+    def get_json(self, url: str, *, timeout: float | None = None) -> Any:
         with self.get_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
@@ -464,7 +464,7 @@ class HTTPConnection:
         url: str,
         *,
         timeout: float | None = None,
-    ) -> str:
+    ) -> Any:
         async with await self.get_async_response(url, timeout=timeout) as r:
             r.raise_for_status()
 
