@@ -302,6 +302,8 @@ class DeepseekV32Attention(MLAAttention):
         )
         forward_context = get_forward_context()
         slot_mapping = forward_context.slot_mapping
+        if isinstance(slot_mapping, list):
+            slot_mapping = slot_mapping[0]  # spec decode: [0] is the base model
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
 
