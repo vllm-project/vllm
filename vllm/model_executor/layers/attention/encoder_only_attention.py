@@ -64,15 +64,12 @@ class EncoderOnlyAttention(Attention):
     ):
         dtype = torch.get_default_dtype()
 
-        if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
-        else:
-            kv_cache_dtype = "auto"
-
+        # Encoder-only attention does not allocate a KV cache, so a global
+        # cache_dtype must not disqualify an otherwise valid backend.
         underlying_attn_backend = get_attn_backend(
             head_size,
             dtype,
-            kv_cache_dtype,
+            "auto",
             attn_type=AttentionType.ENCODER_ONLY,
         )
 
