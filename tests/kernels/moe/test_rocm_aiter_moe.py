@@ -565,6 +565,49 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
+def test_aiter_moe_situv2_syncs_aiter_a4w4_env(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SiTUv2 MoE should route to AITER a4w4 and clear legacy a8w4 overrides."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.delenv("AITER_SITUV2_A8W4", raising=False)
+        mp.delenv("AITER_SITUV2_A4W4", raising=False)
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        import os
+
+        assert os.environ.get("AITER_SITUV2_A4W4") == "1"
+        assert "AITER_SITUV2_A8W4" not in os.environ
+
+
+def test_aiter_moe_situv2_clears_aiter_env_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.setenv("AITER_SITUV2_A4W4", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0")
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        import os
+
+        assert "AITER_SITUV2_A4W4" not in os.environ
+
+
 @pytest.mark.parametrize("moe_padding", [True, False])
 def test_aiter_moe_padding_env_var(
     moe_padding: bool,
