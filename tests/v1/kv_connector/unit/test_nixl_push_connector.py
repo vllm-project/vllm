@@ -341,6 +341,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._pending_completion_notifs = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
         w._deferred_push_inbox = queue.Queue()
+        w._abandoned_push_lock = threading.Lock()
+        w._abandoned_push_ids = {}
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
@@ -603,6 +605,96 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.request_id == "req-hs"
 
 
+def test_do_start_push_kv_drops_deferred_write_after_request_ends():
+    """If the producer lease ends while the P→D handshake is still
+    in flight, the completion callback must not queue a WRITE: those
+    source blocks may already have been reused by another request."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+
+    fut: Future = Future()
+    w._ensure_handshake = lambda *a, **k: fut
+
+    rd = _registration_data("req-stale")
+    _real_do_start_push_kv(w, "req-stale", ([1, 2, 3],), rd)
+    w._abandon_push("req-stale")
+    fut.set_result(({(0, 0): "agent"}, 0.0))
+
+    assert w._deferred_push_inbox.qsize() == 0
+    assert xfer_calls == []
+    assert not w._push_writer_wake.is_set()
+
+
+def test_do_start_push_kv_skips_ready_write_after_request_ends():
+    """Handshake already ready: an expired/finished request must not
+    submit a WRITE from leftover logical block ids."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    w._ensure_handshake = lambda *a, **k: None
+    w._abandon_push("req-done")
+
+    _real_do_start_push_kv(w, "req-done", ([4, 5],), _registration_data("req-done"))
+
+    assert xfer_calls == []
+
+
+def test_push_reg_match_skips_write_after_request_ends():
+    """A PUSH_REG that matches leftover finished blocks must not WRITE
+    once the producer request has been abandoned."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    w._ensure_handshake = lambda *a, **k: None
+    w._push_finished_blocks["req-A"] = ([200, 201],)
+    w._abandon_push("req-A")
+    w._do_start_push_kv = (
+        lambda rid, blocks, rd: NixlPushConnectorWorker._do_start_push_kv(
+            w, rid, blocks, rd
+        )
+    )
+
+    notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data("req-A"))
+    w._handle_push_reg_notif(notif)
+
+    assert xfer_calls == []
+    assert w.start_push_calls == []
+
+
+def test_writer_loop_skips_abandoned_deferred_push():
+    """A deferred inbox entry for an abandoned request is dropped and
+    does not re-enter ``_do_start_push_kv``."""
+    w = _StubWriterWorker.fresh()
+    w.nixl_wrapper = MagicMock()
+    w.nixl_wrapper.get_new_notifs.return_value = {}
+    w._abandon_push("req-dead")
+
+    processed = threading.Event()
+
+    def _tracked(rid, blocks, rd):
+        w.start_push_calls.append((rid, blocks, rd))
+        processed.set()
+
+    w._do_start_push_kv = _tracked  # type: ignore[method-assign]
+    w._deferred_push_inbox.put(("req-dead", ([1, 2],), _registration_data("req-dead")))
+    w._push_writer_wake.set()
+
+    t = threading.Thread(target=w._push_writer_loop, daemon=True)
+    t.start()
+    try:
+        assert not processed.wait(timeout=1.0)
+    finally:
+        w._push_writer_stop.set()
+        w._push_writer_wake.set()
+        t.join(timeout=2)
+
+    assert w.start_push_calls == []
+
+
 def test_do_start_push_kv_drops_request_on_handshake_failure():
     """Handshake raises: the request is dropped (not re-queued, no WRITE) and
     the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
@@ -759,6 +851,7 @@ class TestPushWriterNotifs:
             except queue.Empty:
                 break
         assert evicted == ["req-done"]
+        assert w._is_push_abandoned("req-done")
         assert w._push_writer_wake.is_set()
 
 
