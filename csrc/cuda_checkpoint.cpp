@@ -197,8 +197,7 @@ static PyObject* python_is_available(PyObject* self, PyObject* args) {
 static PyMethodDef module_methods[] = {
     {"process_lock", (PyCFunction)python_process_lock, METH_VARARGS,
      "Lock the CUDA process (RUNNING -> LOCKED). Takes a pid."},
-    {"process_checkpoint", (PyCFunction)python_process_checkpoint,
-     METH_VARARGS,
+    {"process_checkpoint", (PyCFunction)python_process_checkpoint, METH_VARARGS,
      "Checkpoint a locked CUDA process (LOCKED -> CHECKPOINTED). Takes a "
      "pid."},
     {"process_restore", (PyCFunction)python_process_restore, METH_VARARGS,
