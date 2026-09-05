@@ -902,6 +902,15 @@ def _try_load_fp8_indexer_wk(
     return True
 
 
+def _maybe_remap_fp8_block_scale_name(name: str, params_dict: dict) -> str:
+    """Map Quark checkpoint .weight_scale tensors to vLLM block-FP8 params."""
+    if name in params_dict or not name.endswith(".weight_scale"):
+        return name
+    scale_inv_name = name[: -len(".weight_scale")] + ".weight_scale_inv"
+    if scale_inv_name in params_dict:
+        return scale_inv_name
+    return name
+
 def _min_latency_fused_qkv_a_proj_impl(
     input_: torch.Tensor,
     weight: torch.Tensor,
@@ -1661,6 +1670,9 @@ class DeepseekV2Model(nn.Module):
                 if is_fusion_moe_shared_experts_layer:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
+                name_mapped = _maybe_remap_fp8_block_scale_name(
+                    name_mapped, params_dict
+                )
 
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
@@ -1675,6 +1687,7 @@ class DeepseekV2Model(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                name = _maybe_remap_fp8_block_scale_name(name, params_dict)
                 if is_pp_missing_parameter(name, self):
                     continue
 
@@ -1787,6 +1800,7 @@ class DeepseekV2Model(nn.Module):
                             continue
                         name = remapped_name
 
+                        name = _maybe_remap_fp8_block_scale_name(name, params_dict)
                         if is_pp_missing_parameter(name, self):
                             continue
 
