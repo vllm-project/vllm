@@ -2,6 +2,24 @@ group: Entrypoints
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (H200) Initialized Snapshot E2E"
+  key: initialized-snapshot-e2e
+  device: h200
+  num_devices: 1
+  no_plugin: true
+  optional: true
+  timeout_in_minutes: 60
+  working_dir: "."
+  source_file_dependencies:
+  - .buildkite/scripts/initialized-snapshot-e2e.sh
+  - .buildkite/test_areas/entrypoints.yaml
+  - docker/Dockerfile
+  - tools/install_snapshot_runtime.sh
+  - vllm/entrypoints/cli/
+  - vllm/snapshot/
+  commands:
+  - bash .buildkite/scripts/initialized-snapshot-e2e.sh "$IMAGE_TAG" "$BUILDKITE_COMMIT"
+
 - label: ":nvidia: (H200 MIG 35GB) Entrypoints Unit"
   device: h200_35gb
   key: entrypoints-unit-tests

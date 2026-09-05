@@ -21,6 +21,7 @@ def main():
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
+    import vllm.entrypoints.cli.snapshot
     from vllm.entrypoints.serve.utils.api_utils import (
         VLLM_SUBCMD_PARSER_EPILOG,
         cli_env_setup,
@@ -34,9 +35,11 @@ def main():
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.snapshot,
     ]
 
-    cli_env_setup()
+    if sys.argv[1:2] != ["snapshot"]:
+        cli_env_setup()
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:
@@ -85,7 +88,12 @@ def main():
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
         for cmd_module in CMD_MODULES:
-            new_cmds = cmd_module.cmd_init()
+            if cmd_module is vllm.entrypoints.cli.snapshot:
+                new_cmds = cmd_module.cmd_init(
+                    create_requested=sys.argv[1:3] == ["snapshot", "create"]
+                )
+            else:
+                new_cmds = cmd_module.cmd_init()
             for cmd in new_cmds:
                 cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
                 cmds[cmd.name] = cmd
