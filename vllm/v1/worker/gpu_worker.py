@@ -304,6 +304,83 @@ class Worker(WorkerBase):
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
 
+    def suspend(self) -> dict:
+        """Suspend GPU state using CUDA checkpoint APIs.
+
+        Preserves compiled kernels, CUDA graphs, and torch.compile
+        artifacts for near-zero resume time. Requires driver >= 570.
+
+        Returns:
+            Metadata dict with checkpoint handle.
+        """
+        from vllm.device_allocator.cuda_checkpoint import CudaCheckpointer
+
+        checkpointer = CudaCheckpointer.get_instance()
+
+        # Destroy NCCL communicators before suspend
+        self._destroy_nccl_communicators()
+
+        try:
+            handle = checkpointer.suspend()
+        except BaseException:
+            # Restore CUDA state before recreating communicators, and keep
+            # the original suspension error even if either cleanup fails.
+            try:
+                checkpointer.recover()
+            except BaseException:
+                logger.exception("CUDA state recovery after suspension failure failed.")
+            try:
+                self._reinit_nccl_communicators()
+            except BaseException:
+                logger.exception("NCCL recovery after suspension failure failed.")
+            raise
+        return {"checkpoint_handle": handle}
+
+    def resume(self, checkpoint_handle: int | None = None) -> None:
+        """Resume GPU state from a CUDA checkpoint.
+
+        Args:
+            checkpoint_handle: Handle from a prior suspend(). If None,
+                uses the handle from the last suspend() call.
+        """
+        from vllm.device_allocator.cuda_checkpoint import CudaCheckpointer
+
+        checkpointer = CudaCheckpointer.get_instance()
+        checkpointer.resume(handle=checkpoint_handle)
+
+        # Reinitialize NCCL communicators after resume
+        self._reinit_nccl_communicators()
+
+    def _destroy_nccl_communicators(self) -> None:
+        """Destroy NCCL communicators before CUDA checkpoint suspend."""
+        if self.parallel_config.world_size <= 1:
+            return
+
+        tp_group = get_tp_group()
+        if hasattr(tp_group, "pynccl_comm") and tp_group.pynccl_comm:
+            tp_group.pynccl_comm.destroy()
+            logger.info("Destroyed TP NCCL communicator.")
+
+        pp_group = get_pp_group()
+        if hasattr(pp_group, "pynccl_comm") and pp_group.pynccl_comm:
+            pp_group.pynccl_comm.destroy()
+            logger.info("Destroyed PP NCCL communicator.")
+
+    def _reinit_nccl_communicators(self) -> None:
+        """Reinitialize NCCL communicators after CUDA checkpoint resume."""
+        if self.parallel_config.world_size <= 1:
+            return
+
+        tp_group = get_tp_group()
+        if hasattr(tp_group, "pynccl_comm") and tp_group.pynccl_comm:
+            tp_group.pynccl_comm.reinit()
+            logger.info("Reinitialized TP NCCL communicator.")
+
+        pp_group = get_pp_group()
+        if hasattr(pp_group, "pynccl_comm") and pp_group.pynccl_comm:
+            pp_group.pynccl_comm.reinit()
+            logger.info("Reinitialized PP NCCL communicator.")
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()
