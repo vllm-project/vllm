@@ -73,13 +73,16 @@ def distributed_run(fn, world_size, *args):
 def set_env_vars_and_device(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
-    device = torch.device(f"cuda:{local_rank}")
+    accelerator_type = torch.accelerator.current_accelerator().type
+    device = torch.device(f"{accelerator_type}:{local_rank}")
     torch.accelerator.set_device_index(device)
+
+    backend = "xccl" if torch.xpu.is_available() else "nccl"
 
     # Create a minimal vllm config for init_distributed_environment
     vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):
-        init_distributed_environment()
+        init_distributed_environment(backend=backend)
     atexit.register(_destroy_process_group_if_initialized)
     # Ensure each worker process has the same random seed
     random.seed(42)

@@ -263,11 +263,13 @@ def test_global_load_balance_fallback():
     assert torch.sum(logcnt) == num_replicas
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cpu", "cuda", "xpu"])
 def test_device_compatibility(device):
     """Test device compatibility"""
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+    if device == "xpu" and not torch.xpu.is_available():
+        pytest.skip("XPU not available")
 
     weight = torch.tensor([[10, 20, 30, 40]], device=device)
     num_replicas = 6
