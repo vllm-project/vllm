@@ -6,8 +6,12 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import (
+    get_dcp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -224,6 +228,82 @@ def split_indexer_prefill_chunks(
             chunks.append((req_slice, slice(q_off, q_off + sub_m)))
 
     return chunks
+
+
+# Conservative floor for amortizing the exchange latency. TP=4 profiling just
+# above this boundary is net-positive; the exact crossover is hardware-specific.
+MIN_TP_SHARD_ROWS_PER_RANK = 1024
+
+
+def balanced_prefill_row_shard(
+    seq_lens_cpu: torch.Tensor,
+    query_lens_cpu: torch.Tensor,
+    compress_ratio: int,
+    tp_size: int,
+) -> list[int] | None:
+    """Contiguous per-rank row counts that equalise scored keys across TP.
+
+    Row ``j`` of a prefill request scores
+    ``(seq_len - query_len + 1 + j) // compress_ratio`` compressed keys, the
+    same value ``BuildPrefillChunkMetadataKernel`` writes as
+    ``cu_seqlen_ke - cu_seqlen_ks``, so the cost profile is reproducible from
+    CPU scheduler metadata with no device sync.
+
+    Returns:
+        Per-rank row counts, or None to keep the replicated path.
+    """
+    num_rows = int(query_lens_cpu.sum())
+    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+        return None
+
+    query_lens = query_lens_cpu.to(torch.int64)
+    first_key = torch.repeat_interleave(
+        seq_lens_cpu.to(torch.int64) - query_lens + 1, query_lens
+    )
+    row_in_request = torch.arange(num_rows) - torch.repeat_interleave(
+        torch.cumsum(query_lens, 0) - query_lens, query_lens
+    )
+    cost = torch.cumsum((first_key + row_in_request) // compress_ratio, 0)
+    total = int(cost[-1])
+    if total <= 0:
+        return None
+
+    targets = torch.arange(1, tp_size) * total // tp_size
+    bounds = [0, *torch.searchsorted(cost, targets).tolist(), num_rows]
+    # Force strictly increasing boundaries so every rank owns at least one row.
+    # The floor above guarantees there is room. A rank whose share is small is
+    # also cheap, so it is not on the critical path.
+    for i in range(1, tp_size):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 1)
+    for i in range(tp_size - 1, 0, -1):
+        bounds[i] = min(bounds[i], bounds[i + 1] - 1)
+    return [bounds[i + 1] - bounds[i] for i in range(tp_size)]
+
+
+def tp_prefill_row_sharding_supported(
+    vllm_config: VllmConfig,
+    dcp_world_size: int,
+    use_pcp: bool,
+    tp_size: int,
+) -> bool:
+    """Whether the prefill row-shard exchange may run at all.
+
+    ``row_shard_sizes`` doubles as the collective's consensus bit, so this may
+    only depend on state that is identical on every TP rank. In particular, do
+    not consult the lazily-mutated symmetric-memory compiler state or
+    per-forward capture state.
+    """
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        current_platform.is_cuda()
+        and dcp_world_size == 1
+        and not use_pcp
+        and tp_size > 1
+        and not envs.VLLM_DISABLE_PYNCCL
+        and not envs.VLLM_USE_NCCL_SYMM_MEM
+        and not envs.VLLM_BATCH_INVARIANT
+        and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+    )
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -516,6 +596,9 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
+    # Contiguous per-TP-rank row counts for the replicated indexer prefill, or
+    # None to keep the replicated path. See balanced_prefill_row_shard.
+    row_shard_sizes: list[int] | None = None
 
 
 @dataclass
@@ -734,6 +817,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else 0
         )
         self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
+
+        self.enable_tp_prefill_row_sharding = tp_prefill_row_sharding_supported(
+            self.vllm_config,
+            self.dcp_world_size,
+            self.use_pcp,
+            get_tensor_model_parallel_world_size(),
+        )
+        if self.enable_tp_prefill_row_sharding:
+            logger.info_once(
+                "DSA indexer TP prefill row sharding enabled "
+                "(engages at >= %d prefill rows per rank)",
+                MIN_TP_SHARD_ROWS_PER_RANK,
+            )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1126,13 +1222,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
+            row_shard_sizes = None
+            # Sparse MLA skips the prefill Top-K entirely when every prefill
+            # request is short enough for dense MHA, so sharding those rows
+            # would only add an exchange. Mirrors SparseMLAAttention's
+            # `use_dense_mha`; both read hf_config.index_topk.
+            prefill_max_seq_len = int(
+                seq_lens_cpu[num_decodes : num_decodes + num_prefills].max()
+            )
+            prefill_uses_mqa = (
+                prefill_max_seq_len > self.vllm_config.model_config.hf_config.index_topk
+                or self.vllm_config.attention_config.sparse_mla_force_mqa
+            )
+            if self.enable_tp_prefill_row_sharding and prefill_uses_mqa:
+                row_shard_sizes = balanced_prefill_row_shard(
+                    seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    prefill_query_lens_cpu,
+                    self.compress_ratio,
+                    get_tensor_model_parallel_world_size(),
+                )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
-                max_prefill_seq_len=(
-                    int(seq_lens_cpu[num_decodes:].max().item())
-                    if num_prefills > 0
-                    else 0
-                ),
+                max_prefill_seq_len=prefill_max_seq_len,
+                row_shard_sizes=row_shard_sizes,
             )
 
         decode_metadata = None
