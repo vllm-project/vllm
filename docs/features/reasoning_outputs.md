@@ -79,6 +79,38 @@ Next, make a request to the model that should return the reasoning content in th
 
 The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
 
+### Reasoning-effort history
+
+Chat Completions assistant messages include optional `reasoning_effort` metadata. It records the configured string value from the effective chat-template kwargs, with precedence: top-level request `reasoning_effort`, then request `chat_template_kwargs["reasoning_effort"]`, then server defaults. It does not measure actual reasoning depth or infer a template's private default. A null or absent value means unknown; vLLM does not silently assign `"medium"`.
+
+For a deployed model and template that support `"low"` and `"high"` effort, append the full serialized assistant message to retain its historical setting when changing effort on the next request:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+model = client.models.list().data[0].id
+messages = [{"role": "user", "content": "What is 15 * 37?"}]
+
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    reasoning_effort="low",
+)
+messages.append(response.choices[0].message.model_dump())
+messages.append({"role": "user", "content": "Explain how to check that answer."})
+
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    reasoning_effort="high",
+)
+```
+
+The earlier assistant message retains `"low"` independently of the current request's `"high"`. Historical messages without a known effort are not filled from the current request. vLLM passes this assistant metadata into the chat-template context, but a template must explicitly consume it to change per-turn rendering. This metadata transport alone does not change existing templates or KV-cache behavior.
+
+For streaming responses, a known `reasoning_effort` is emitted once per choice in its initial role delta. Manual stream accumulators must preserve it when assembling the assistant message for replay.
+
 ## Streaming chat completions
 
 Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).

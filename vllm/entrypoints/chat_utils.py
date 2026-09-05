@@ -375,6 +375,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    reasoning_effort: str | None
+    """The configured reasoning effort for this assistant message."""
+
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
 
@@ -411,6 +414,9 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    reasoning_effort: str | None
+    """The configured reasoning effort for this assistant message."""
 
     tools: list[ChatCompletionFunctionToolParam] | None
     """The tools for developer role."""
@@ -1973,6 +1979,7 @@ def _parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning")
+    reasoning_effort = message.get("reasoning_effort")
 
     if content is None:
         content = []
@@ -2002,6 +2009,8 @@ def _parse_chat_message_content(
                 result_msg["reasoning_content"] = cast(
                     str, reasoning
                 )  # keep compatibility
+            if reasoning_effort is not None:
+                result_msg["reasoning_effort"] = cast(str, reasoning_effort)
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:

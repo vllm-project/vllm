@@ -69,6 +69,7 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
+    reasoning_effort: str | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):

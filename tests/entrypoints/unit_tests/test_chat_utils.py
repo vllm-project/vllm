@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import warnings
 from collections.abc import Mapping
 from typing import Literal
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from jinja2 import Template
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -21,6 +23,10 @@ from vllm.entrypoints.chat_utils import (
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatMessage,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -718,6 +724,66 @@ def test_parse_chat_messages_empty_system(
         {"role": "system", "content": [{"type": "text", "text": ""}]},
         {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("content_format", ["string", "openai"])
+async def test_parse_chat_messages_replays_historical_reasoning_effort(
+    is_async, content_format
+):
+    """Replaying a response must not apply the next turn's effort to history."""
+    previous_message = ChatMessage(
+        role="assistant", content="Previous answer", reasoning_effort="low"
+    )
+    request = ChatCompletionRequest.model_validate_json(
+        json.dumps(
+            {
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Question", "reasoning_effort": "low"},
+                    previous_message.model_dump(),
+                    {"role": "assistant", "content": "Older answer"},
+                    {
+                        "role": "assistant",
+                        "content": "Unknown effort",
+                        "reasoning_effort": None,
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_1",
+                        "content": "Tool result",
+                        "reasoning_effort": "low",
+                    },
+                    {"role": "user", "content": "Follow-up"},
+                ],
+                "reasoning_effort": "high",
+            }
+        )
+    )
+    model_config = MagicMock(spec=ModelConfig, multimodal_config=None)
+    if is_async:
+        conversation, _, _ = await parse_chat_messages_async(
+            request.messages, model_config, content_format=content_format
+        )
+    else:
+        conversation, _, _ = parse_chat_messages(
+            request.messages, model_config, content_format=content_format
+        )
+
+    params = request.build_chat_params(None, content_format)
+    template = Template(
+        "{% for message in messages %}"
+        "{{ message.role }}:{{ message.reasoning_effort | default('missing') }};"
+        "{% endfor %}"
+        "current:{{ reasoning_effort }}"
+    )
+    assert template.render(
+        messages=conversation, **params.get_apply_chat_template_kwargs()
+    ) == (
+        "user:missing;assistant:low;assistant:missing;assistant:missing;"
+        "tool:missing;user:missing;current:high"
+    )
 
 
 @pytest.mark.asyncio
