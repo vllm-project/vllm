@@ -1896,6 +1896,11 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
+            # Guard: KV-connector disagg paths (e.g. MoRIIO WideEP) may schedule
+            # synthetic health-probe requests whose compound req_ids are not
+            # included in model_runner_output.req_id_to_index. Skip them.
+            if req_id not in model_runner_output.req_id_to_index:
+                continue
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
                 continue
