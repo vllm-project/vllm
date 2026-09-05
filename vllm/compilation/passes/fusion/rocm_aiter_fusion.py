@@ -32,6 +32,7 @@ from ..vllm_inductor_pass import (
     fold_consecutive_reshapes,
 )
 from .matcher_utils import (
+    MatcherGeluAndMul,
     MatcherQuantFP8,
     MatcherRMSNormGated,
     MatcherSiluAndMul,
@@ -721,6 +722,51 @@ class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
         return _replacement
 
 
+class AiterGeluMulFp8GroupQuantPattern(VllmPatternReplacement):
+    """
+    This pattern fuses aiter gelu_and_mul (GeGLU) & group fp8 quant custom
+    ops into an aiter act_mul_and_fp8_group_quant op with the gelu_tanh
+    activation. The gelu_tanh sibling of AiterSiluMulFp8GroupQuantPattern for
+    models with a GeGLU MLP (e.g. Gemma).
+    """
+
+    FUSED_ACT_MUL_QUANT_OP = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
+
+    def __init__(self, match_aiter_quant_op: bool = True) -> None:
+        self.gelu_and_mul_matcher = MatcherGeluAndMul()
+        self.quant_matcher = MatcherQuantFP8(
+            quant_key=kFp8Dynamic128Sym, match_rocm_aiter=match_aiter_quant_op
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [
+            self.gelu_and_mul_matcher.inputs()[0],
+        ]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at1 = self.gelu_and_mul_matcher(input)
+            at2 = self.quant_matcher(at1)
+            return at2[0], at2[1]
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at = self.FUSED_ACT_MUL_QUANT_OP(
+                x=input, group_size=128, activation="gelu_tanh"
+            )
+            return at[0], at[1]
+
+        return _replacement
+
+
 class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
@@ -738,6 +784,9 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
 
         self.register(
             AiterSiluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
+        )
+        self.register(
+            AiterGeluMulFp8GroupQuantPattern(match_aiter_quant_op=match_aiter_quant_op)
         )
 
         self.dump_patterns(config, self.pm_pass)
