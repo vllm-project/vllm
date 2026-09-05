@@ -43,6 +43,27 @@ class _RecordingMoE(nn.Module):
         return hidden_states
 
 
+class _RecordingDecoderLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hidden_shape: tuple[int, ...] | None = None
+        self.residual_shape: tuple[int, ...] | None = None
+
+    def forward(
+        self,
+        *,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        prefix_sum: torch.Tensor | None,
+        residual: torch.Tensor,
+    ):
+        assert positions.shape[0] == 3
+        assert prefix_sum is None
+        self.hidden_shape = tuple(hidden_states.shape)
+        self.residual_shape = tuple(residual.shape)
+        return hidden_states, None, residual
+
+
 class _Projection(nn.Module):
     def __init__(self, hidden_size: int = 2) -> None:
         super().__init__()
@@ -132,6 +153,101 @@ def test_moe_sequence_parallel_requires_data_parallel(
     )
 
     assert parallel_config.use_sequence_parallel_moe is expected
+
+
+@pytest.mark.parametrize(
+    (
+        "moe_backend",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "enable_expert_parallel",
+        "expected",
+    ),
+    [
+        ("deep_gemm_mega_moe", 1, 1, True, True),
+        ("deep_gemm_mega_moe", 2, 1, True, True),
+        ("deep_gemm_mega_moe", 2, 1, False, False),
+        ("flashinfer_cutlass", 1, 1, True, False),
+        ("flashinfer_cutlass", 1, 2, True, True),
+        ("flashinfer_cutlass", 2, 2, True, False),
+    ],
+)
+def test_kimi_sequence_parallel_selection(
+    moe_backend: str,
+    pipeline_parallel_size: int,
+    data_parallel_size: int,
+    enable_expert_parallel: bool,
+    expected: bool,
+):
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend=moe_backend),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+            enable_expert_parallel=enable_expert_parallel,
+        ),
+    )
+
+    assert kimi_model.use_kimi_k3_sequence_parallel(vllm_config) is expected
+
+
+@pytest.mark.parametrize("buffer_num_tokens", [2, 8])
+def test_kimi_pipeline_stage_keeps_received_sequence_shard(
+    monkeypatch,
+    buffer_num_tokens: int,
+):
+    model = object.__new__(kimi_model.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.use_sequence_parallel = True
+    model.use_attn_res = False
+    model.start_layer = 0
+    model.end_layer = 1
+    model.aux_hidden_state_layers = ()
+    layer = _RecordingDecoderLayer()
+    model.layers = nn.ModuleList([layer])
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=False),
+    )
+    monkeypatch.setattr(kimi_model, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(
+        kimi_model,
+        "sp_shard",
+        Mock(side_effect=AssertionError("downstream PP stage must not shard twice")),
+    )
+    monkeypatch.setattr(kimi_model.envs, "VLLM_MOE_SKIP_PADDING", False)
+
+    intermediate_tensors = kimi_model.IntermediateTensors(
+        {
+            "hidden_states": torch.arange(
+                buffer_num_tokens * 2, dtype=torch.float32
+            ).view(buffer_num_tokens, 2),
+            "residual": torch.ones(buffer_num_tokens, 2),
+        }
+    )
+    output = model(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=intermediate_tensors,
+    )
+
+    assert isinstance(output, kimi_model.IntermediateTensors)
+    assert layer.hidden_shape == layer.residual_shape == (2, 2)
+    assert output["hidden_states"].shape == output["residual"].shape == (2, 2)
+
+
+def test_kimi_sp_pipeline_transport_disables_tp_all_gather():
+    causal_lm = object.__new__(kimi_model.KimiLinearForCausalLM)
+    nn.Module.__init__(causal_lm)
+    causal_lm.model = SimpleNamespace(use_sequence_parallel=True)
+
+    assert causal_lm.get_pp_intermediate_tensor_all_gather_overrides() == {
+        "hidden_states": False,
+        "residual": False,
+    }
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
