@@ -38,6 +38,32 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+def reachable_hit_positions(
+    boundary_tokens: int,
+    alignment_tokens: int,
+    use_eagle: bool,
+) -> tuple[int, ...]:
+    """Token positions a cache hit can land on for one reachable boundary.
+
+    A lookup floors the boundary to ``alignment_tokens``. Under EAGLE the
+    full-attention finder additionally subtracts ``min(alignment_tokens,
+    its own block_size)`` and re-floors to the alignment, which lands on
+    exactly one alignment unit below the boundary either way. That lower
+    position is the ONLY one this group can be asked for until the request
+    decodes past the next boundary, so sparse-retention masks must treat both
+    as reachable: retaining only the boundary leaves every kept state above
+    every candidate a lookup can produce, and the reconciled hit is always 0.
+
+    Expressing the back-off in tokens rather than blocks is what makes this
+    correct when a group's block size differs from the alignment: one block is
+    the right step only when they are equal.
+    """
+    aligned = boundary_tokens // alignment_tokens * alignment_tokens
+    if not use_eagle:
+        return (aligned,)
+    return (aligned, max(aligned - alignment_tokens, 0))
+
+
 class SingleTypeKVCacheManager(ABC):
     """
     An abstract base class for a manager that handle the kv cache management
@@ -112,11 +138,16 @@ class SingleTypeKVCacheManager(ABC):
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
 
-        # Whether this group's prefix-cache hits drop the EAGLE/MTP lookahead
-        # block. Only consulted by managers whose hit logic is sparse within an
-        # aligned segment (SWA). Initialized lazily by the coordinator after
+        # Whether THIS group's own prefix-cache lookup drops the EAGLE/MTP
+        # lookahead block. Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+
+        # Whether ANY group's lookup applies that drop, which is what sparse
+        # retention must key off: the coordinator reconciles every group to one
+        # hit length, so a drop anywhere shortens the candidate offered here.
+        # See ``reachable_hit_positions``. Set by the coordinator.
+        self.lookup_drops_eagle_block = False
 
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -478,7 +509,8 @@ class SingleTypeKVCacheManager(ABC):
             end_block=num_full_blocks,
             alignment_tokens=self.cache_hit_alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            # Retention, unlike lookup, cares whether the drop happens anywhere.
+            use_eagle=self.use_eagle or self.lookup_drops_eagle_block,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
             dcp_world_size=self.dcp_world_size,
@@ -1526,9 +1558,11 @@ class MambaManager(SingleTypeKVCacheManager):
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
-        # state block ending on the boundary (no window, and draft models have
-        # no mamba layers, so no eagle shift). Block ``i`` ends at token
-        # ``(i + 1) * block_size``.
+        # state block ending on the boundary (no window). Segment tails get no
+        # EAGLE shift: under the EAGLE drop the fixed point settles on the next
+        # lower tail, costing at most one segment of hit length, unlike the
+        # reachable boundaries below where the unshifted state is the only one.
+        # Block ``i`` ends at token ``(i + 1) * block_size``.
         segment_tokens = None if retention_interval == 0 else retention_interval
         if segment_tokens is not None:
             per_segment = segment_tokens // block_size
@@ -1544,12 +1578,15 @@ class MambaManager(SingleTypeKVCacheManager):
         # (2) Reachable-boundary states: the replay boundary (``num_prompt - 1``,
         # capped by ``get_computed_blocks``) and any shared-prefix junction, both
         # of which segments would otherwise skip under sparse retention. A Mamba
-        # hit needs exactly the single state block ending on the boundary.
+        # hit needs exactly the single state block ending on the reachable
+        # position, so retain one block per position rather than a run.
         for boundary_tokens in reachable_boundaries:
-            aligned = boundary_tokens // alignment_tokens * alignment_tokens
-            boundary_block = aligned // block_size - 1
-            if start_block <= boundary_block < end_block:
-                mask[boundary_block - start_block] = True
+            for position in reachable_hit_positions(
+                boundary_tokens, alignment_tokens, use_eagle
+            ):
+                boundary_block = position // block_size - 1
+                if start_block <= boundary_block < end_block:
+                    mask[boundary_block - start_block] = True
 
         return mask
 
