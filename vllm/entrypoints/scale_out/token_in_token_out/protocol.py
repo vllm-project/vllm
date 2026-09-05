@@ -48,8 +48,17 @@ class MultiModalFeatures(BaseModel):
     """Lightweight multimodal metadata produced by the render step.
 
     Carries hashes (for cache lookup / identification) and placeholder
-    positions so the downstream `/generate` service knows *where* in
+    positions so the downstream ``/generate`` service knows *where* in
     the token sequence each multimodal item lives.
+
+    ``kwargs_data`` is optional.  When it is ``None`` the request is
+    metadata-only and items are resolved by hash at generate time — from
+    the receiver's multimodal cache on a hit, or via out-of-band
+    transfer (``kv_transfer_params`` / ``ec_transfer_params``) in
+    disaggregated-prefill deployments.  Whether a metadata-only request
+    can be served is a runtime property (cache residency), not something
+    the protocol layer can know or enforce; a cache miss raises
+    ``MultiModalCacheMissError`` and the caller retries with full data.
     """
 
     mm_hashes: dict[str, list[str]]
