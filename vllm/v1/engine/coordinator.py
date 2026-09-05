@@ -20,6 +20,15 @@ from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 logger = init_logger(__name__)
 
 
+def _is_stale_engine_stats(
+    last_stats: tuple[int, int] | None,
+    stats_wave: int,
+    stats_step: int,
+) -> bool:
+    """Return whether stats move backwards for the same engine."""
+    return last_stats is not None and (stats_wave, stats_step) < last_stats
+
+
 class DPCoordinator:
     """Coordinator process used for data-parallel deployments (DP>1).
 
@@ -203,6 +212,7 @@ class DPCoordinatorProc:
         stats_changed = False
         last_stats_step = -1
         last_stats_wave = -1
+        last_engine_stats: list[tuple[int, int] | None] = [None for _ in self.engines]
         last_step_counts: list[list[int | float]] | None = None
 
         with (
@@ -320,6 +330,7 @@ class DPCoordinatorProc:
                         if new_engine_count > current_count:
                             for _ in range(new_engine_count - current_count):
                                 self.engines.append(EngineState())
+                                last_engine_stats.append(None)
                             # NOTE(yongji): handle the case
                             # where newly started engines have current_wave = 0
                             # if existing engines just finished a wave
@@ -337,6 +348,7 @@ class DPCoordinatorProc:
                             )
                         else:
                             self.engines = self.engines[:new_engine_count]
+                            last_engine_stats = last_engine_stats[:new_engine_count]
                             logger.info(
                                 "DPCoordinator scaled down from %s to %s engines",
                                 current_count,
@@ -384,39 +396,45 @@ class DPCoordinatorProc:
                         # 1. Updated request load stats - update our local
                         # state with these.
                         stats = self.engines[eng_index].request_counts
+                        accept_stats = True
                         if self.enable_wave_coordination:
                             # Steps are synchronized across lockstep (MoE) DP
                             # ranks; snapshot counts at step boundaries.
                             stats_step = scheduler_stats.step_counter
                             stats_wave = scheduler_stats.current_wave
-                            if (
-                                stats_wave > last_stats_wave
-                                or stats_wave == last_stats_wave
-                                and stats_step > last_stats_step
+                            stats_key = (stats_wave, stats_step)
+                            previous_engine_key = last_engine_stats[eng_index]
+                            if _is_stale_engine_stats(
+                                previous_engine_key,
+                                stats_wave,
+                                stats_step,
                             ):
-                                if stats_changed:
-                                    last_step_counts = self._get_engine_counts(
-                                        do_copy=True
-                                    )
-                                last_stats_step = stats_step
-                                last_stats_wave = stats_wave
-                            elif stats_wave != last_stats_wave or (
-                                stats_step != last_stats_step
-                            ):
+                                assert previous_engine_key is not None
                                 logger.warning(
-                                    "Received stats for out-of-order "
-                                    "step (%d, %d) from engine %d (expected "
-                                    "> (%d, %d))",
+                                    "Received stale stats step (%d, %d) from "
+                                    "engine %d; last engine step is (%d, %d). "
+                                    "Ignoring.",
                                     stats_wave,
                                     stats_step,
                                     eng_index,
-                                    last_stats_wave,
-                                    last_stats_step,
+                                    previous_engine_key[0],
+                                    previous_engine_key[1],
                                 )
-                        stats[0] = scheduler_stats.num_waiting_reqs
-                        stats[1] = scheduler_stats.num_running_reqs
-                        stats[2] = scheduler_stats.kv_cache_usage
-                        stats_changed = True
+                                accept_stats = False
+                            else:
+                                last_engine_stats[eng_index] = stats_key
+                                if stats_key > (last_stats_wave, last_stats_step):
+                                    if stats_changed:
+                                        last_step_counts = self._get_engine_counts(
+                                            do_copy=True
+                                        )
+                                    last_stats_step = stats_step
+                                    last_stats_wave = stats_wave
+                        if accept_stats:
+                            stats[0] = scheduler_stats.num_waiting_reqs
+                            stats[1] = scheduler_stats.num_running_reqs
+                            stats[2] = scheduler_stats.kv_cache_usage
+                            stats_changed = True
 
                     # Wave coordination: handle wave completion and start notifications
                     # Only process these when wave coordination is enabled
