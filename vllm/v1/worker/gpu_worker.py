@@ -1276,6 +1276,16 @@ class Worker(WorkerBase):
                     self.profiler = None
 
     def execute_dummy_batch(self) -> None:
+        # WideEP MoE DP lockstep: execute_model(0-token) already ran _dummy_run(1)
+        # on this step (#53578). A second dummy from run_busy_loop causes EP
+        # deadlock. Headless idle ranks only see execute_dummy_batch, so run
+        # _dummy_run(1) when the zero-token path has not already done so.
+        if self.parallel_config.data_parallel_size > 1:
+            if getattr(self.model_runner, "_dp_zero_token_dummy_ran", False):
+                self.model_runner._dp_zero_token_dummy_ran = False
+                return
+            self.model_runner._dummy_run(1)
+            return
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
