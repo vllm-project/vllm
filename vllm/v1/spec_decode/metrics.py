@@ -110,7 +110,11 @@ class SpecDecodingLogging:
             else float("nan")
         )
 
-        # Conventionally, mean acceptance length includes the bonus token
+        # Conventionally, mean acceptance length includes the bonus token.
+        # This is a *pooled* mean (weighted by drafts): it is equivalent to
+        # total_generated / total_verify_calls, not the unweighted mean of
+        # per-request means that some external benchmarks report (see #42508
+        # for a reproduction against SpecForge on variable-length workloads).
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
         pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
@@ -188,6 +192,13 @@ class SpecDecodingProm:
       1 + (
       rate(vllm:spec_decode_num_accepted_tokens_total[$interval]) /
       rate(vllm:spec_decode_num_drafts[$interval]))
+
+    Both the log line and this PromQL formula compute a *pooled* mean,
+    weighted by draft count. External benchmarks that instead report an
+    unweighted mean of per-request means (e.g., SpecForge's
+    ``average_acceptance_length``, which is ``statistics.fmean`` over
+    per-request lengths) are not directly comparable on variable-length
+    workloads. See #42508.
 
     A per-position acceptance rate vector can be computed using
 
