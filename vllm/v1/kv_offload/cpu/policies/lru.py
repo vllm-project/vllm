@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Sequence
 
 from typing_extensions import override
 
@@ -46,6 +46,15 @@ class LRUCachePolicy(CachePolicy):
                 self.evictable_blocks.move_to_end(key)
             # active blocks are untouched as they are non-evictable now. They
             # will eventually reach the end of evictable_blocks when they finish.
+
+    @override
+    def restore_order_after_transfer(
+        self,
+        key_groups: Sequence[Collection[OffloadKey]],
+        req_context: ReqContext,
+    ) -> None:
+        for keys in key_groups:
+            self.touch(keys, req_context)
 
     @override
     def clear(self) -> None:
