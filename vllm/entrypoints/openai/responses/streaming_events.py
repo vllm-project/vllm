@@ -567,6 +567,8 @@ def emit_content_delta_events(
     segment: Segment,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    *,
+    has_declared_tools: bool = True,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
@@ -578,7 +580,7 @@ def emit_content_delta_events(
         return []
 
     channel = segment.channel
-    recipient = segment.recipient
+    recipient = segment.recipient if has_declared_tools else None
 
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
@@ -605,6 +607,8 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    *,
+    has_declared_tools: bool = True,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -618,19 +622,20 @@ def emit_previous_item_done_events(
         return []
 
     text = previous_item.content[0].text
-    if previous_item.recipient is not None:
+    recipient = previous_item.recipient if has_declared_tools else None
+    if recipient is not None:
         # Deal with tool call
-        if is_function_recipient(previous_item.recipient, function_tool_names):
-            function_name = extract_function_from_recipient(previous_item.recipient)
+        if is_function_recipient(recipient, function_tool_names):
+            function_name = extract_function_from_recipient(recipient)
             return emit_function_call_done_events(function_name, text, state)
-        elif previous_item.recipient == "python":
+        elif recipient == "python":
             return emit_code_interpreter_completion_events(previous_item, state)
         elif (
-            is_mcp_tool_by_namespace(previous_item.recipient, function_tool_names)
+            is_mcp_tool_by_namespace(recipient, function_tool_names)
             and state.current_item_id is not None
             and state.current_item_id.startswith("mcp_")
         ):
-            return emit_mcp_completion_events(previous_item.recipient, text, state)
+            return emit_mcp_completion_events(recipient, text, state)
     elif previous_item.channel == "analysis":
         return emit_reasoning_done_events(text, state)
     elif previous_item.channel in ("commentary", "final"):
@@ -785,8 +790,13 @@ def emit_tool_action_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     tool_server: ToolServer | None,
+    *,
+    has_declared_tools: bool = True,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for a completed assistant action turn."""
+    if not has_declared_tools:
+        return []
+
     # Handle browser tool
     if (
         previous_item.author.role == "assistant"
