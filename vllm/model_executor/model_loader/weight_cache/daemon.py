@@ -19,6 +19,28 @@ Engines then load from the daemons with:
 
 Only tensor parallelism is supported; pipeline, data, and expert parallelism
 are rejected at launch.
+
+For multi-node tensor parallelism, run one launcher per node with a shared
+rendezvous so the global TP group forms across nodes (CUDA IPC handles are
+node-local, so each node serves only its local GPUs' shards). Reuse the same
+``--nnodes``/``--node-rank``/``--master-addr`` flags you pass the engine, plus a
+``--weight-cache-master-port`` distinct from the engine's ``--master-port``:
+
+    # node 0 (8 local GPUs)
+    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+        --model /path/to/model --tensor-parallel-size 16 \\
+        --nnodes 2 --node-rank 0 --master-addr 10.0.0.1 \\
+        --weight-cache-master-port 29600
+    # node 1 (8 local GPUs)
+    python -m vllm.model_executor.model_loader.weight_cache.daemon \\
+        --model /path/to/model --tensor-parallel-size 16 \\
+        --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
+        --weight-cache-master-port 29600
+
+The global TP rank of local GPU ``i`` on node ``r`` is
+``r * (tp_size // nnodes) + i``, matching vLLM's contiguous per-node rank
+assignment, so each engine worker maps its shard from the daemon on its own
+node.
 """
 
 import contextlib
@@ -120,11 +142,13 @@ class WeightCacheDaemon:
         self,
         vllm_config: VllmConfig,
         tp_rank: int,
+        local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
     ):
         self.vllm_config = vllm_config
         self.tp_rank = tp_rank
+        self.local_rank = local_rank
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
         self.model: torch.nn.Module | None = None
@@ -142,12 +166,12 @@ class WeightCacheDaemon:
         from vllm.model_executor.model_loader import get_model
 
         tp_size = self.cache_config.tp_size
-        torch.accelerator.set_device_index(self.tp_rank)
+        torch.accelerator.set_device_index(self.local_rank)
         init_distributed_environment(
             world_size=tp_size,
             rank=self.tp_rank,
             distributed_init_method=self.distributed_init_method,
-            local_rank=self.tp_rank,
+            local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
         with set_current_vllm_config(self.vllm_config):
@@ -292,13 +316,14 @@ class WeightCacheDaemon:
 
 def _run_daemon(
     tp_rank: int,
+    local_rank: int,
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[int]",
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, distributed_init_method, socket_dir
+        vllm_config, tp_rank, local_rank, distributed_init_method, socket_dir
     )
     daemon.load_model()
     daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
@@ -334,6 +359,15 @@ def main() -> None:
         default=None,
         help="Directory for the daemon Unix sockets (default: tempdir).",
     )
+    parser.add_argument(
+        "--weight-cache-master-port",
+        type=int,
+        default=None,
+        help="Rendezvous port for the daemon's own TP group. Must differ from "
+        "the engine's --master-port (the daemon holds its group open while "
+        "serving) and match across nodes. Required when --nnodes > 1; defaults "
+        "to a free port for single-node.",
+    )
     args = parser.parse_args()
     engine_args = EngineArgs.from_cli_args(args)
     vllm_config = engine_args.create_engine_config()
@@ -349,22 +383,50 @@ def main() -> None:
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
 
-    distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
+    nnodes = parallel_config.nnodes
+    node_rank = parallel_config.node_rank
+    if not 0 <= node_rank < nnodes:
+        raise ValueError(f"--node-rank must be in [0, {nnodes}), got {node_rank}")
+    if tp_size % nnodes != 0:
+        raise ValueError(
+            f"tensor-parallel-size ({tp_size}) must be divisible by --nnodes ({nnodes})"
+        )
+    local_world_size = tp_size // nnodes
+
+    # The daemon forms its own TP group and holds it open while serving, so it
+    # needs a rendezvous port distinct from the engine's --master-port. All
+    # nodes must agree on it; single-node can auto-pick a free port. The master
+    # address is reused from the engine's --master-addr (node_rank 0).
+    master_addr = parallel_config.master_addr
+    if nnodes > 1:
+        if args.weight_cache_master_port is None:
+            raise ValueError("--weight-cache-master-port is required when --nnodes > 1")
+        master_port = args.weight_cache_master_port
+    else:
+        master_port = args.weight_cache_master_port or get_open_port()
+    distributed_init_method = get_distributed_init_method(master_addr, master_port)
+
     ctx = multiprocessing.get_context("spawn")
     ready_queue: multiprocessing.Queue[int] = ctx.Queue()
+    # Global TP rank of local GPU i on this node; local index == device index.
+    global_ranks = [
+        node_rank * local_world_size + local_rank
+        for local_rank in range(local_world_size)
+    ]
     procs = [
         ctx.Process(
             target=_run_daemon,
             args=(
-                rank,
+                global_rank,
+                local_rank,
                 vllm_config,
                 distributed_init_method,
                 args.weight_cache_socket_dir,
                 ready_queue,
             ),
-            name=f"vllm-weight-cache-daemon-{rank}",
+            name=f"vllm-weight-cache-daemon-{global_rank}",
         )
-        for rank in range(tp_size)
+        for local_rank, global_rank in enumerate(global_ranks)
     ]
     for proc in procs:
         proc.start()
@@ -377,7 +439,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     ready_ranks: set[int] = set()
-    while len(ready_ranks) < tp_size:
+    while len(ready_ranks) < local_world_size:
         try:
             ready_ranks.add(ready_queue.get(timeout=1.0))
         except queue.Empty:
@@ -393,14 +455,18 @@ def main() -> None:
                 for proc in procs:
                     proc.join()
                 sys.exit(max((p.exitcode or 0) for p in procs))
+    socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
     logger.info_once(
-        "===== Weight cache daemon READY: all %d ranks serving in %s =====",
-        tp_size,
-        args.weight_cache_socket_dir or "the default socket dir",
+        "===== Weight cache daemon READY: node %d/%d serving %d local rank(s) "
+        "in %s =====",
+        node_rank,
+        nnodes,
+        local_world_size,
+        socket_dir_msg,
     )
     _report_ready(
-        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
-        f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
+        f"===== Weight cache daemon READY: node {node_rank}/{nnodes} serving "
+        f"{local_world_size} local rank(s) in {socket_dir_msg} ====="
     )
 
     for proc in procs:
