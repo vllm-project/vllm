@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 
 if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -38,6 +39,44 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     output_dir = root / flashinfer_autotune_cache_hash(runner)
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / "autotune_configs.json"
+
+
+def sync_flashinfer_autotune_cache(
+    runner: "GPUModelRunner",
+    group: "GroupCoordinator",
+) -> None:
+    cache: bytes | str | None = None
+    if (
+        group.rank_in_group == 0
+        and runner.vllm_config.kernel_config.enable_flashinfer_autotune
+    ):
+        try:
+            from vllm.platforms import current_platform
+            from vllm.utils.flashinfer import has_flashinfer
+
+            if has_flashinfer() and current_platform.has_device_capability(90):
+                from flashinfer.autotuner import AutoTuner
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    path = Path(temp_dir) / "autotune_configs.json"
+                    AutoTuner.get().save_configs(str(path))
+                    cache = path.read_bytes()
+        except Exception as exc:
+            cache = f"{type(exc).__name__}: {exc}"
+
+    cache = group.broadcast_object(cache)
+    if isinstance(cache, str):
+        raise RuntimeError(f"Failed to serialize FlashInfer autotune state: {cache}")
+    if cache is None or group.rank_in_group == 0:
+        return
+
+    from flashinfer.autotuner import AutoTuner
+
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(cache)
+        f.flush()
+        if not AutoTuner.get().load_configs(f.name):
+            raise RuntimeError("FlashInfer autotune cache is incompatible")
 
 
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:

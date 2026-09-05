@@ -121,6 +121,8 @@ class EplbModelState:
      [0, 2, 0, 1, 0, 3]]
     ```
     """
+    physical_to_logical_map_storage: torch.Tensor
+    """Maximum-capacity storage backing ``physical_to_logical_map``."""
     logical_to_physical_map: torch.Tensor
     """
     Mapping from logical experts to physical experts.
@@ -168,6 +170,8 @@ class EplbModelState:
 
     Shape: (num_moe_layers, num_physical_experts)
     """
+    expert_load_pass_storage: torch.Tensor
+    """Maximum-capacity storage backing ``expert_load_pass``."""
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
@@ -373,6 +377,19 @@ class EplbState:
             physical_to_logical_map_list,
             device=self.device,
         )
+        physical_expert_capacity = model.num_physical_experts
+        if self.parallel_config.enable_elastic_ep:
+            physical_expert_capacity = (
+                model.num_local_physical_experts
+                * self.parallel_config.elastic_ep_max_dp_size
+                * get_ep_group().world_size
+                // self.parallel_config.data_parallel_size
+            )
+            physical_to_logical_map = torch.nn.functional.pad(
+                physical_to_logical_map,
+                (0, physical_expert_capacity - model.num_physical_experts),
+                value=-1,
+            )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
@@ -407,6 +424,10 @@ class EplbState:
             )
             .contiguous()
         )
+        physical_to_logical_map_storage = physical_to_logical_map
+        physical_to_logical_map = physical_to_logical_map_storage[
+            :, : model.num_physical_experts
+        ]
         logical_to_physical_map = (
             logical_to_physical_map.unsqueeze(0)
             .expand(
@@ -425,11 +446,12 @@ class EplbState:
             .contiguous()
         )
 
-        expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_physical_experts),
+        expert_load_pass_storage = torch.zeros(
+            (model.num_moe_layers, physical_expert_capacity),
             dtype=torch.int32,
             device=self.device,
         )
+        expert_load_pass = expert_load_pass_storage[:, : model.num_physical_experts]
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
@@ -460,7 +482,7 @@ class EplbState:
         ]
 
         model.set_eplb_state(
-            expert_load_pass,
+            expert_load_pass_storage,
             logical_to_physical_map,
             logical_replica_count,
         )
@@ -479,9 +501,11 @@ class EplbState:
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
+            physical_to_logical_map_storage=physical_to_logical_map_storage,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
             expert_load_pass=expert_load_pass,
+            expert_load_pass_storage=expert_load_pass_storage,
             expert_load_window=expert_load_window,
             model_name=model_config.model,
             model=model,
@@ -1075,10 +1099,14 @@ class EplbState:
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
         eplb_model_state = self.model_states[model_config.compute_hash()]
-        eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
+        eplb_model_state.physical_to_logical_map_storage.copy_(
+            expanded_physical_to_logical
+        )
+        eplb_model_state.expert_load_pass.zero_()
+        physical_to_logical_map = eplb_model_state.physical_to_logical_map
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
-            expanded_physical_to_logical.cpu(),
+            physical_to_logical_map.cpu(),
             eplb_model_state.model.num_logical_experts,
         )
 
@@ -1096,6 +1124,32 @@ class EplbState:
 
         eplb_model_state.logical_to_physical_map.copy_(logical_to_physical_map)
         eplb_model_state.logical_replica_count.copy_(logical_replica_count)
+
+    def reconfigure_physical_expert_slots(
+        self,
+        model_config: ModelConfig,
+        num_physical_experts: int,
+    ) -> None:
+        model_state = self.model_states[model_config.compute_hash()]
+        old_num_physical_experts = model_state.model.num_physical_experts
+        first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
+        physical_to_logical_map_storage = model_state.physical_to_logical_map_storage
+        expert_load_pass_storage = model_state.expert_load_pass_storage
+        assert last_slot <= physical_to_logical_map_storage.shape[1]
+        expert_slots = slice(first_slot, last_slot)
+        physical_to_logical_map_storage[:, expert_slots].fill_(-1)
+        expert_load_pass_storage[:, expert_slots].zero_()
+        model_state.physical_to_logical_map = physical_to_logical_map_storage[
+            :, :num_physical_experts
+        ]
+        model_state.expert_load_pass = expert_load_pass_storage[
+            :, :num_physical_experts
+        ]
+
+        pad_size = num_physical_experts - model_state.expert_load_window.shape[-1]
+        model_state.expert_load_window = torch.nn.functional.pad(
+            model_state.expert_load_window, (0, pad_size)
+        )
 
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
@@ -1333,14 +1387,11 @@ def _commit_eplb_maps(
 
     if PIN_MEMORY and src.is_cpu:
         src = src.new_empty(src.shape, pin_memory=True).copy_(src)
-    # Rare Case: When the number of physical experts has changed, discard the old
-    # physical to logical expert map and use the new one. This only happens when the
-    # number of GPUs available to vLLM changes while vLLM is running. Otherwise copy the
-    # new map into the old one.
     if src.shape[1] != dst.shape[1]:
-        model_state.physical_to_logical_map = src.to(dst.device, non_blocking=True)
-    else:
-        dst.copy_(src, non_blocking=True)
+        dst = model_state.physical_to_logical_map_storage[:, : src.shape[1]]
+        assert dst.shape == src.shape
+        model_state.physical_to_logical_map = dst
+    dst.copy_(src, non_blocking=True)
 
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
