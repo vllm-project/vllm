@@ -141,6 +141,11 @@ QUANT_ALGOS = [*LINEAR_ALGOS, "MIXED_PRECISION"]
 # ModelOpt records the block size as group_size; this is the fallback.
 _DEFAULT_FP8_BLOCK_SIZE = 128
 
+# Algos whose weights are block-scaled, and which therefore must turn on
+# "+quant_fp8" via has_blocked_weights(): without it QuantFP8 falls back to
+# forward_native and emits unpacked fp32 group scales that DeepGEMM rejects.
+_BLOCK_SCALED_ALGOS = frozenset({"FP8_PB_WO", "FP8_BLOCK_SCALES"})
+
 
 def algos_owned_by(config_name: str) -> tuple[str, ...]:
     """The linear algos a given config accepts, for its quant_algo validation."""
@@ -1501,7 +1506,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         # Same gate as ModelOptFp8Config.has_blocked_weights, resolved per
         # layer: "+quant_fp8" must be on as soon as any layer is block-scaled.
         return any(
-            info.get("quant_algo", "").upper() == "FP8_PB_WO"
+            info.get("quant_algo", "").upper() in _BLOCK_SCALED_ALGOS
             for info in self.quantized_layers.values()
         )
 
@@ -1627,6 +1632,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                         break
             if info is not None and info.get("group_size"):
                 return int(info["group_size"])
+
+        # Mirror _resolve_quant_algo's final RoutedExperts fallback: the layer
+        # is "...moe.experts" while ModelOpt lists "...moe.gate_proj" etc. The
+        # algo resolves through that path, so the block size must too, or a
+        # non-128 checkpoint silently gets 128 and its weight_scale_inv shapes
+        # will not match.
+        if prefix.endswith(".experts"):
+            parent_dot = prefix.rsplit(".experts", 1)[0] + "."
+            for key, entry in self.quantized_layers.items():
+                if key.startswith(parent_dot) and entry.get("group_size"):
+                    return int(entry["group_size"])
+
         return _DEFAULT_FP8_BLOCK_SIZE
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
