@@ -239,8 +239,8 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
+    """ROCm keeps DeepSeek V3.2/V4 on their compiled MRV1 paths and keeps the
+    DSA models off breakable cudagraphs by default."""
     from vllm.config.vllm import (
         ROCM_DEFAULT_MRV1_ARCHITECTURES,
         default_breakable_cudagraph_architectures,
@@ -253,7 +253,9 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     try:
         assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
         assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
+        # GLM-5.3 (GlmMoeDsaForCausalLM) produces corrupted output on MRV1,
+        # so it must stay on MRV2 by default.
+        assert "GlmMoeDsaForCausalLM" not in ROCM_DEFAULT_MRV1_ARCHITECTURES
 
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
@@ -269,6 +271,23 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
+
+
+def test_rocm_keeps_glm_dsa_on_mrv2(monkeypatch):
+    """GLM-5.3 generates corrupted output on MRV1, so ROCm must not opt it
+    out of MRV2 by default."""
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"])
+    )
+    config._get_v2_model_runner_unsupported_features = lambda: []
+
+    assert VllmConfig.use_v2_model_runner.fget(config) is True
 
 
 @pytest.mark.parametrize(
