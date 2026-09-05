@@ -1151,6 +1151,8 @@ class NixlBaseConnectorWorker:
             self.backend_name,
             transfer_mode=self._TRANSFER_MODE,
         )
+        assert self.vllm_config.kv_transfer_config is not None
+        self.vllm_config.kv_transfer_config.compatibility_hash = self.compat_hash
 
         if self._is_csa_linear and self.use_host_buffer:
             raise NotImplementedError(

@@ -237,6 +237,33 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_kv_expired_reqs, self.per_engine_labelvalues
         )
 
+        config_labelnames = [
+            *labelnames,
+            "kv_connector",
+            "kv_role",
+            "compatibility_hash",
+        ]
+        self.gauge_nixl_config_info = self._gauge_cls(
+            name="vllm:nixl_config_info",
+            documentation="NIXL KV transfer configuration and compatibility hash.",
+            multiprocess_mode="mostrecent",
+            labelnames=config_labelnames,
+        )
+
+    def record_config_info(self, vllm_config: VllmConfig, engine_idx: int = 0) -> None:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        label_values = list(self.per_engine_labelvalues[engine_idx])
+        label_values.extend(
+            [
+                kv_transfer_config.kv_connector if kv_transfer_config else "none",
+                kv_transfer_config.kv_role if kv_transfer_config else "none",
+                (kv_transfer_config.compatibility_hash or "unknown")
+                if kv_transfer_config
+                else "unknown",
+            ]
+        )
+        self.gauge_nixl_config_info.labels(*label_values).set(1)
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
