@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.forward_context import get_forward_context
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static128Bf16,
     kInt8DynamicTokenSym,
     kInt8Static,
     kInt8StaticChannelSym,
@@ -213,6 +215,23 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         quanted_input: torch.Tensor | None,
         input_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        static_input_scale = (
+            self.quant_config.a1_scale
+            if sublayer_name == "w13"
+            else self.quant_config.a2_scale
+        )
+        if static_input_scale is not None:
+            quanted, scale = ops.scaled_fp8_quant(
+                inputs,
+                scale=static_input_scale,
+                output=quanted_input,
+            )
+            if scale.numel() == 1:
+                scale = scale.reshape(1, 1).expand(inputs.size(0), 1).contiguous()
+            elif scale.ndim == 1:
+                scale = scale.reshape(-1, 1).contiguous()
+            return quanted, scale
+
         from vllm.utils.humming import may_quant_input
 
         # input_scale is set for block-FP8 (group-128) activations that were
@@ -325,6 +344,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kFp8Static128BlockSym, kFp8DynamicTokenSym),
             (kInt4Static, None),
             (kInt4Static, kFp8DynamicTokenSym),
+            (kInt4Static128Bf16, kFp8StaticTensorSym),
             (kInt8Static, None),
             (kInt8Static, kFp8DynamicTokenSym),
             # Checkpoint-driven (weight, activation) pairs the dense/MoE oracles

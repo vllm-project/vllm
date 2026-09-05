@@ -706,11 +706,14 @@ class RoutedExperts(PluggableLayer):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
-            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
+            # Some formats store w13 input scales as two logical shards.
             # The generic assignment below would broadcast w1/w3 into the
             # whole expert row, so the second shard would overwrite the first.
             if (
-                "ModelOpt" in quant_method_name
+                (
+                    getattr(param, "is_split_input_scale", False)
+                    or "ModelOpt" in quant_method_name
+                )
                 and param.data.ndim == 2
                 and shard_id in ("w1", "w3")
             ):
@@ -1019,6 +1022,10 @@ class RoutedExperts(PluggableLayer):
         has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
         prefix = "base_layer." if has_base_layer else ""
         # These loaders index ``params_dict[full_name]``, so both sides get it.
+        has_w4afp8_input_scales = any(
+            getattr(param, "is_w4afp8_input_scale", False)
+            for _, param in model.named_parameters()
+        )
         return RoutedExperts.build_expert_params_mapping(
             ckpt_gate_proj_name,
             ckpt_down_proj_name,
@@ -1028,6 +1035,7 @@ class RoutedExperts(PluggableLayer):
             routed_experts_prefix,
             lora_base_layer_prefix=prefix,
             lora_base_layer_prefix_on_param_name=prefix,
+            add_w4afp8_input_scale_mapping=has_w4afp8_input_scales,
         )
 
     @staticmethod
@@ -1041,6 +1049,7 @@ class RoutedExperts(PluggableLayer):
         lora_base_layer_prefix: str = "",
         lora_base_layer_prefix_on_param_name: str = "",
         include_fused: bool = False,
+        add_w4afp8_input_scale_mapping: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         """
         Create expert parameter mapping for weight loading with redundant experts.
@@ -1063,6 +1072,8 @@ class RoutedExperts(PluggableLayer):
                 ``make_expert_params_mapping`` indexes the model-wide
                 ``params_dict`` (prefix included).
             include_fused: Prepend the fused pre-fused-checkpoint entries
+            add_w4afp8_input_scale_mapping: Add mappings for checkpoint w1/w2/w3
+                activation scales.
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -1143,7 +1154,28 @@ class RoutedExperts(PluggableLayer):
             ]
         ]
 
-        return fused_mapping + per_expert_mapping
+        if not add_w4afp8_input_scale_mapping:
+            return fused_mapping + per_expert_mapping
+
+        w4afp8_input_scale_mapping = [
+            (
+                w13 if shard_id in ("w1", "w3") else w2,
+                (
+                    "experts."
+                    f"{physical_to_logical_map[expert_id]}.{weight_name}."
+                    f"{lora_base_layer_prefix}"
+                ),
+                expert_id,
+                shard_id,
+            )
+            for expert_id in range(num_physical_experts)
+            for shard_id, weight_name in (
+                ("w1", "w1"),
+                ("w2", "w2"),
+                ("w3", "w3"),
+            )
+        ]
+        return fused_mapping + per_expert_mapping + w4afp8_input_scale_mapping
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         def _maybe_make_contiguous(
