@@ -62,3 +62,7 @@ __all__ = [
     "SingletonInput",
     "EngineInput",
 ]
+
+# Subpackage for integrations (e.g. Ray Data LLM) that expect
+# `vllm.inputs.data.{TextPrompt,TokensPrompt}`.
+from . import data  # noqa: F401
