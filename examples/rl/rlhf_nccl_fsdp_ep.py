@@ -54,6 +54,15 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
+import transformers
+from packaging.version import Version
+
+def _dtype_kwargs(dtype):
+    """`dtype` keyword of `from_pretrained` exists since transformers 4.56 (PR #39782);
+    older versions use `torch_dtype`."""
+    if Version(transformers.__version__) >= Version("4.56"):
+        return {"dtype": dtype}
+    return {"torch_dtype": dtype}
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 SERVED_MODEL_NAME = "policy"
@@ -97,7 +106,7 @@ class FSDPTrainWorker:
         torch.accelerator.set_device_index(0)
 
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16
+            model_name, **_dtype_kwargs(torch.bfloat16),
         )
 
         for layer in model.model.layers:
