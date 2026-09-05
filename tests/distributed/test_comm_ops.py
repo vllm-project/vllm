@@ -641,3 +641,98 @@ def test_multi_process_tensor_parallel_pipeline_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ):
     multi_process_parallel(monkeypatch, tp_size, pp_size, test_target)
+
+
+def test_force_fp32_reduction_all_reduce(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_group = Mock()
+    called_dtypes: list[torch.dtype] = []
+
+    def fake_all_reduce(x: torch.Tensor) -> torch.Tensor:
+        called_dtypes.append(x.dtype)
+        return x
+
+    mock_group.all_reduce = fake_all_reduce
+    monkeypatch.setattr(
+        "vllm.distributed.communication_op.get_tp_group", lambda: mock_group
+    )
+
+    # 1. Flag disabled: preserves original dtype without casting
+    monkeypatch.setattr("vllm.envs.VLLM_FORCE_FP32_ALL_REDUCE", False)
+    t_bf16 = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+    out = tensor_model_parallel_all_reduce(t_bf16)
+    assert out.dtype == torch.bfloat16
+    assert called_dtypes[-1] == torch.bfloat16
+
+    # 2. Flag enabled with bfloat16: reduced in float32, output in bfloat16
+    monkeypatch.setattr("vllm.envs.VLLM_FORCE_FP32_ALL_REDUCE", True)
+    out_bf16 = tensor_model_parallel_all_reduce(t_bf16)
+    assert out_bf16.dtype == torch.bfloat16
+    assert called_dtypes[-1] == torch.float32
+
+    # 3. Flag enabled with float16: reduced in float32, output in float16
+    t_fp16 = torch.tensor([1.0, 2.0], dtype=torch.float16)
+    out_fp16 = tensor_model_parallel_all_reduce(t_fp16)
+    assert out_fp16.dtype == torch.float16
+    assert called_dtypes[-1] == torch.float32
+
+    # 4. Flag enabled with float32: already float32, no unnecessary cast
+    t_fp32 = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    out_fp32 = tensor_model_parallel_all_reduce(t_fp32)
+    assert out_fp32.dtype == torch.float32
+    assert called_dtypes[-1] == torch.float32
+
+    # 5. Flag enabled with non-floating (int64): not converted
+    t_int = torch.tensor([1, 2], dtype=torch.int64)
+    out_int = tensor_model_parallel_all_reduce(t_int)
+    assert out_int.dtype == torch.int64
+    assert called_dtypes[-1] == torch.int64
+
+
+def test_force_fp32_reduction_reduce_scatter(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_group = Mock()
+    called_dtypes: list[torch.dtype] = []
+    called_dims: list[int] = []
+
+    def fake_reduce_scatter(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        called_dtypes.append(x.dtype)
+        called_dims.append(dim)
+        return x[:1]
+
+    mock_group.reduce_scatter = fake_reduce_scatter
+    monkeypatch.setattr(
+        "vllm.distributed.communication_op.get_tp_group", lambda: mock_group
+    )
+
+    # 1. Flag disabled: preserves original dtype without casting
+    monkeypatch.setattr("vllm.envs.VLLM_FORCE_FP32_ALL_REDUCE", False)
+    t_bf16 = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+    out = tensor_model_parallel_reduce_scatter(t_bf16, dim=0)
+    assert out.dtype == torch.bfloat16
+    assert called_dtypes[-1] == torch.bfloat16
+    assert called_dims[-1] == 0
+
+    # 2. Flag enabled with bfloat16: reduced in float32, output in bfloat16
+    monkeypatch.setattr("vllm.envs.VLLM_FORCE_FP32_ALL_REDUCE", True)
+    out_bf16 = tensor_model_parallel_reduce_scatter(t_bf16, dim=0)
+    assert out_bf16.dtype == torch.bfloat16
+    assert called_dtypes[-1] == torch.float32
+    assert called_dims[-1] == 0
+
+    # 3. Flag enabled with float16: reduced in float32, output in float16
+    t_fp16 = torch.tensor([1.0, 2.0], dtype=torch.float16)
+    out_fp16 = tensor_model_parallel_reduce_scatter(t_fp16, dim=-1)
+    assert out_fp16.dtype == torch.float16
+    assert called_dtypes[-1] == torch.float32
+    assert called_dims[-1] == -1
+
+    # 4. Flag enabled with float32: already float32, no unnecessary cast
+    t_fp32 = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    out_fp32 = tensor_model_parallel_reduce_scatter(t_fp32, dim=0)
+    assert out_fp32.dtype == torch.float32
+    assert called_dtypes[-1] == torch.float32
+
+    # 5. Flag enabled with non-floating (int64): not converted
+    t_int = torch.tensor([1, 2], dtype=torch.int64)
+    out_int = tensor_model_parallel_reduce_scatter(t_int, dim=0)
+    assert out_int.dtype == torch.int64
+    assert called_dtypes[-1] == torch.int64
