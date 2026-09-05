@@ -98,6 +98,17 @@ class TrtLlmFp8ExpertsBase:
         )
         if not supported:
             return supported, reason
+        parallel_config = moe_config.moe_parallel_config
+        if (
+            (weight_key, activation_key) == (kFp8StaticChannelSym, kFp8DynamicTokenSym)
+            and parallel_config.use_all2all_kernels
+            and not parallel_config.use_ag_rs_all2all_kernels
+        ):
+            return False, (
+                "FlashInfer TRTLLM FP8 PTPC requires allgather_reducescatter "
+                "for all-to-all communication, but got "
+                f"{parallel_config.all2all_backend}"
+            )
         if (
             moe_config.swiglu_limit is not None
             or moe_config.swiglu_alpha is not None
@@ -344,7 +355,8 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             use_routing_scales_on_input=False,
-            routing_method_type=int(self.routing_method_type),
+            # Routing is already computed; vLLM-specific enums are unsupported.
+            routing_method_type=int(RoutingMethodType.TopK),
             activation_type=activation_to_flashinfer_int(activation),
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
         )

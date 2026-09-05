@@ -3,12 +3,14 @@
 
 import sys
 import types
+from dataclasses import replace
 from enum import IntEnum
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe as fi_trtllm_moe
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -26,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     _get_priority_backends,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_quant_config,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     prepare_fp8_moe_layer_for_fi,
@@ -35,6 +38,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 
 
@@ -123,6 +128,74 @@ def test_flashinfer_trtllm_claims_ptpc_quant_scheme(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "all2all_backend",
+    [
+        None,
+        "allgather_reducescatter",
+        "deepep_v2",
+        "flashinfer_nvlink_one_sided",
+        "flashinfer_nvlink_two_sided",
+        "flashinfer_all2allv",
+    ],
+    ids=["tp", "ag_rs", "deepep_v2", "fi_one_sided", "fi_two_sided", "fi_all2allv"],
+)
+@pytest.mark.parametrize(
+    "weight_key,activation_key",
+    [
+        (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        (kMxfp8Static, kMxfp8Dynamic),
+    ],
+    ids=["ptpc", "block_fp8", "mxfp8"],
+)
+def test_flashinfer_trtllm_selection_checks_quant_and_parallel_config(
+    monkeypatch, all2all_backend, weight_key, activation_key
+):
+    monkeypatch.setattr(
+        fi_trtllm_moe.TrtLlmFp8ExpertsBase,
+        "_supports_current_device",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(fi_trtllm_moe, "has_flashinfer_trtllm_fused_moe", lambda: True)
+    monkeypatch.setattr(
+        fi_trtllm_moe,
+        "has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe",
+        lambda: True,
+    )
+    config = make_dummy_moe_config(num_experts=4, hidden_dim=128, intermediate_size=128)
+    parallel_config = (
+        replace(config.moe_parallel_config, tp_size=2)
+        if all2all_backend is None
+        else replace(
+            config.moe_parallel_config,
+            dp_size=2,
+            ep_size=2,
+            use_ep=True,
+            all2all_backend=all2all_backend,
+        )
+    )
+    config = replace(
+        config,
+        moe_backend="flashinfer_trtllm",
+        moe_parallel_config=parallel_config,
+        num_local_experts=4 // parallel_config.ep_size,
+        routing_method=RoutingMethodType.Custom,
+    )
+
+    if weight_key == kFp8StaticChannelSym and all2all_backend not in (
+        None,
+        "allgather_reducescatter",
+    ):
+        with pytest.raises(ValueError, match="PTPC.*allgather_reducescatter"):
+            select_fp8_moe_backend(config, weight_key, activation_key)
+    else:
+        assert select_fp8_moe_backend(config, weight_key, activation_key) == (
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmFp8ExpertsModular,
+        )
+
+
 def test_pack_topk_ids_weights_roundtrips_expert_ids_and_bf16_weights():
     topk_ids = torch.tensor([[3, 17], [0, 2047]], dtype=torch.int64)
     topk_weights = torch.tensor([[0.25, 0.75], [1.0, -0.5]], dtype=torch.float32)
@@ -137,8 +210,9 @@ def test_pack_topk_ids_weights_roundtrips_expert_ids_and_bf16_weights():
 
 
 @pytest.mark.parametrize("apply_router_weight_on_input", [False, True])
+@pytest.mark.parametrize("routing_method", list(RoutingMethodType))
 def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
-    monkeypatch, apply_router_weight_on_input
+    monkeypatch, apply_router_weight_on_input, routing_method
 ):
     class ActivationType(IntEnum):
         Gelu = 0
@@ -181,7 +255,7 @@ def test_flashinfer_trtllm_ptpc_apply_uses_trtllm_routed_moe(
     experts.local_num_experts = 2
     experts.topk = 1
     experts.intermediate_size_per_partition = 3
-    experts.routing_method_type = RoutingMethodType.TopK
+    experts.routing_method_type = routing_method
     experts.moe_config = types.SimpleNamespace(max_num_tokens=16, dp_size=1)
 
     hidden_states = torch.ones((3, 5), dtype=torch.bfloat16)
