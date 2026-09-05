@@ -6,6 +6,9 @@ Unit tests for the breakable cudagraph primitives.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
 from contextlib import nullcontext
 from unittest.mock import patch
@@ -485,3 +488,47 @@ def test_nested_decorated_op_runs_inline(cuda_capture_stream):
     # 0 -> +2 -> +1 (inner) -> +10 (outer) -> +100 = 113
     assert torch.equal(x, torch.full((4,), 113.0, device="cuda"))
     assert inner_calls == 2  # replay invokes the outer's lambda again
+
+
+def test_qwen_gdn_custom_ops_are_eager_breaks():
+    """Both Qwen GDN registrations must use the breakable graph wrapper."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    env = os.environ.copy()
+    env["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+    script = (
+        "from tests.v1.cudagraph.test_breakable_cudagraph import "
+        "_assert_qwen_gdn_custom_ops_are_eager_breaks; "
+        "_assert_qwen_gdn_custom_ops_are_eager_breaks()"
+    )
+    subprocess.run([sys.executable, "-c", script], check=True, env=env)
+
+
+def _assert_qwen_gdn_custom_ops_are_eager_breaks() -> None:
+    from importlib import import_module
+
+    from vllm.utils import torch_utils
+
+    op_names = (
+        "qwen_gdn_attention_core",
+        "qwen_gdn_attention_core_fused_norm_packed",
+    )
+    registered_ops = {}
+    original_register = torch_utils.direct_register_custom_op
+
+    def record_qwen_gdn_op(op_name, op_func, *args, **kwargs):
+        if op_name in op_names:
+            registered_ops[op_name] = op_func
+            return
+        original_register(op_name, op_func, *args, **kwargs)
+
+    with patch.object(torch_utils, "direct_register_custom_op", record_qwen_gdn_op):
+        qwen_gdn_linear_attn = import_module(
+            "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn"
+        )
+
+    for op_name in op_names:
+        assert registered_ops[op_name].__wrapped__ is getattr(
+            qwen_gdn_linear_attn, op_name
+        )
