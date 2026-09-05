@@ -182,6 +182,8 @@ class KVCacheBlock:
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
+    # Whether the block has been hit since its latest allocation.
+    is_hit: bool = False
 
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
@@ -206,6 +208,7 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
         self._block_hash_num_tokens = None
+        self.is_hit = False
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -218,7 +221,8 @@ class KVCacheBlock:
             f"_block_hash={self._block_hash!r}, "
             f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
             f"prev_free_block={prev_block_id}, "
-            f"next_free_block={next_block_id})"
+            f"next_free_block={next_block_id}, "
+            f"is_hit={self.is_hit})"
         )
 
 
