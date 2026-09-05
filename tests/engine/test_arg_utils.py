@@ -4,7 +4,8 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
-from typing import Annotated, Literal
+from types import SimpleNamespace
+from typing import Annotated, Literal, cast
 
 import pytest
 from pydantic import Field
@@ -505,6 +506,27 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
+
+
+def test_unsupported_pooling_prefix_caching():
+    model_config = cast(
+        ModelConfig,
+        SimpleNamespace(
+            is_chunked_prefill_supported=False,
+            is_prefix_caching_supported=False,
+            runner_type="pooling",
+        ),
+    )
+
+    engine_args = EngineArgs()
+    engine_args._set_default_chunked_prefill_and_prefix_caching_args(model_config)
+    assert engine_args.enable_prefix_caching is False
+
+    engine_args = EngineArgs(enable_prefix_caching=True)
+    with pytest.raises(
+        ValueError, match="Prefix caching is not supported for this pooling model"
+    ):
+        engine_args._set_default_chunked_prefill_and_prefix_caching_args(model_config)
 
 
 def test_prefix_cache_retention_interval_from_deprecated_env(
