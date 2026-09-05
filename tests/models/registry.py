@@ -472,6 +472,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
     ),
+    "OrthrusForCausalLM": _HfExamplesInfo("chiennv/Orthrus-Qwen3-1.7B"),
+    "OrthrusLM": _HfExamplesInfo("chiennv/Orthrus-Qwen3-1.7B"),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Embedded-7B-V1.1", trust_remote_code=True
     ),
