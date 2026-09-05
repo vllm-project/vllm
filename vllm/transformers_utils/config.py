@@ -12,6 +12,7 @@ from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
+import yaml
 from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -705,6 +706,67 @@ def maybe_override_with_speculators(
     return model, tokenizer, speculative_config
 
 
+def _get_hf_yaml_file_to_dict(
+    file_name: str, model: str, revision: str | None
+) -> dict[str, Any] | None:
+    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
+    if file_path is None:
+        file_path = huggingface_hub.hf_hub_download(model, file_name, revision=revision)
+    if isinstance(file_path, Path) and file_path.is_file():
+        with open(file_path) as f:
+            return yaml.safe_load(f)
+    return None
+
+
+def _recipe_to_quantization_config(
+    recipe: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Map an llmcompressor recipe.yaml to a compressed-tensors config dict.
+
+    Only the schemes vLLM can serve are mapped; anything else returns None so
+    the loader falls back to its previous behavior rather than guessing.
+    """
+    if not isinstance(recipe, dict):
+        return None
+    stage = recipe.get("default_stage")
+    if not isinstance(stage, dict):
+        return None
+    modifiers = stage.get("default_modifiers")
+    if not isinstance(modifiers, dict):
+        return None
+    quant = modifiers.get("QuantizationModifier")
+    if not isinstance(quant, dict):
+        return None
+    targets = quant.get("targets") or []
+    ignore = quant.get("ignore") or []
+    if quant.get("scheme") != "FP8_DYNAMIC" or not targets:
+        return None
+    return {
+        "quant_method": "compressed-tensors",
+        "format": "naive-quantized",
+        "config_groups": {
+            "group_0": {
+                "targets": targets,
+                "weights": {
+                    "num_bits": 8,
+                    "type": "float",
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "dynamic": False,
+                },
+                "input_activations": {
+                    "num_bits": 8,
+                    "type": "float",
+                    "strategy": "token",
+                    "symmetric": True,
+                    "dynamic": True,
+                },
+            }
+        },
+        "ignore": ignore,
+    }
+
+
 def get_config(
     model: str | Path,
     trust_remote_code: bool,
@@ -789,6 +851,15 @@ def get_config(
         quantization_config = get_hf_file_to_dict(
             "hf_quant_config.json", model, revision
         )
+
+    # llmcompressor keeps the recipe in recipe.yaml instead of config.json
+    # (e.g. granite-4.2 FP8); a checkpoint with weight_scale tensors and no
+    # quantization_config otherwise loads unquantized and dies on the scale.
+    if quantization_config is None and file_or_path_exists(
+        model, "recipe.yaml", revision
+    ):
+        recipe = _get_hf_yaml_file_to_dict("recipe.yaml", str(model), revision)
+        quantization_config = _recipe_to_quantization_config(recipe)
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
