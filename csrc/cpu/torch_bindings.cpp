@@ -404,6 +404,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " -> ()");
   ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
 
+  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
+  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
+           &causal_conv1d_weight_pack);
+
+  ops.def(
+      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
+      "conv_states, Tensor? query_start_loc,"
+      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
+      "int pad_slot_id, bool is_vnni) -> "
+      "Tensor");
+  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+
+  ops.def(
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "weight, Tensor? bias, bool silu_activation,"
+      "Tensor? num_accepted_tokens, Tensor? conv_state_indices, int "
+      "pad_slot_id, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 #endif  // (defined(__aarch64__) && !defined(__APPLE__))
 
   // Layernorm
