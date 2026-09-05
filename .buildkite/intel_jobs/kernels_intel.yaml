@@ -24,3 +24,27 @@ steps:
       'cd tests &&
       pytest -v -s ir &&
       pytest -v -s kernels/ir'
+
+- label: MoE WNA16 Tensor-Descriptor Tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/model_executor/layers/fused_moe/fused_moe.py
+    - vllm/model_executor/layers/fused_moe/utils.py
+    - vllm/model_executor/layers/fused_moe/experts/triton_moe.py
+    - tests/kernels/moe/test_fused_moe_kernel_gptq_awq.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s kernels/moe/test_fused_moe_kernel_gptq_awq.py'
