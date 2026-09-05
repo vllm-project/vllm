@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS: int = 0
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1097,6 +1098,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Number of context segments the sparse MLA indexer reserves for structural
+    # topology witnesses, replacing that many slots at the end of each learned
+    # top-k row. Sparse top-k concentrates wherever indexer scores are high and
+    # cannot guarantee any given stretch of context is represented; a witness per
+    # uncovered segment bounds the uncovered run at seq_len / segments tokens.
+    # 0 disables the pass and leaves the learned indices untouched.
+    # Default: 0 (off), maximum 64
+    "VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS": lambda: int(
+        os.getenv("VLLM_SPARSE_MLA_TOPOLOGY_SEGMENTS", "0")
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
