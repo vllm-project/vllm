@@ -523,6 +523,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
         validate_cache_salt(data.get("cache_salt"))
         return data
 
