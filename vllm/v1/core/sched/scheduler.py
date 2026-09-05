@@ -2405,7 +2405,11 @@ class Scheduler(SchedulerInterface):
                 existing.streaming_queue.append(update)
             elif update is not None:
                 # Commence next input chunk.
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    self.skipped_waiting.remove_request(existing)
                 self._update_request_as_session(existing, update)
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    self.skipped_waiting.add_request(existing)
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
