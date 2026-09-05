@@ -1382,6 +1382,8 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
 class MuseGlimmerForCausalLM(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsEagle3
 ):
+    supports_encoder_tp_data = True
+
     # Weight-name normalization. Two checkpoint conventions are supported:
     #
     #   * HF MuseGlimmer export (``convert_muse_glimmer_weights_to_hf.py``): the

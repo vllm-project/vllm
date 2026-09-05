@@ -472,6 +472,7 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
+    supports_encoder_tp_data = True
 
     hf_to_vllm_mapper = (
         Qwen3VLForConditionalGeneration.hf_to_vllm_mapper

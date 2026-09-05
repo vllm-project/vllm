@@ -512,6 +512,8 @@ class KeyeVL1_5DummyInputsBuilder(
 class KeyeVL1_5ForConditionalGeneration(
     BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    supports_encoder_tp_data = True
+
     def _build_projector(
         self,
         text_config: PretrainedConfig,

@@ -248,6 +248,8 @@ class Phi4SiglipImagePixelInputs(TensorSchema):
     dummy_inputs=Phi4SiglipDummyInputsBuilder,
 )
 class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_encoder_tp_data = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.vision_tower.vision_model.head.": None,

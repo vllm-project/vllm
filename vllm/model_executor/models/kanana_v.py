@@ -579,6 +579,8 @@ class KananaVMultiModalProcessor(BaseMultiModalProcessor[KananaVProcessingInfo])
     dummy_inputs=KananaVDummyInputsBuilder,
 )
 class KananaVForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
