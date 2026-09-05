@@ -23,10 +23,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 
-def _kv_scale_format_for_model(model_type: str | None) -> str:
-    if model_type is not None and model_type.startswith("glm"):
-        return "arbitrary_fp32"
-    return "pow2_fp32"
+_KV_SCALE_FORMAT = "arbitrary_fp32"
 
 
 class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]):
@@ -74,15 +71,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        model_type = None
-        if vllm_config.model_config is not None:
-            model_type = getattr(
-                vllm_config.model_config.hf_text_config, "model_type", None
-            )
-        self.kv_scale_format = _kv_scale_format_for_model(model_type)
+        self.kv_scale_format = _KV_SCALE_FORMAT
 
         # Skip-topk layers are built with indexer=None and get the shared
         # buffer via mla_args instead (cf. FLASHMLA_SPARSE).
