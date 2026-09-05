@@ -43,7 +43,10 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
+from vllm.models.deepseek_v32.common.kernels import (
+    _FUSED_EH_NORM_KERNEL,
+    fused_eh_norm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -87,6 +90,15 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             config=config,
             topk_indices_buffer=topk_indices_buffer,
         )
+
+        # Self-register the MTP embed/hidden RMSNorm-fusion Triton owner with the
+        # model-load warmup registry (no-op unless a registry is active). The
+        # owner derives its single compile key (draft hidden size) from
+        # vllm_config, so register with no kwargs to use the registry's
+        # auto-inject. fused_embed_eh_norm (replicated-table path) is a shared
+        # vllm layer kernel with its own warmup ownership, out of scope here.
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _FUSED_EH_NORM_KERNEL.register_warmup()
 
     def forward(
         self,

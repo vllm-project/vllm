@@ -5412,7 +5412,12 @@ class GPUModelRunner(
             eplb_models = 0
 
         try:
-            with DeviceMemoryProfiler() as m:
+            # Activate the JIT-warmup registry so kernel owners constructed
+            # during model (and drafter) load self-register their warmup keys.
+            with (
+                DeviceMemoryProfiler() as m,
+                self.jit_warmup_registry.activate(),
+            ):
                 time_before_load = time.perf_counter()
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"

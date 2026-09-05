@@ -32,7 +32,12 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
+from vllm.models.deepseek_v32.common.kernels import (
+    _FUSED_NORM_ROPE_KERNEL,
+    _FUSED_Q_TRITON_KERNEL,
+    fused_norm_rope,
+    fused_q,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.ops.pcp import (
@@ -274,6 +279,115 @@ class DeepseekV32Attention(MLAAttention):
             rope_parameters=config.rope_parameters,
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
+
+        self._register_jit_warmup(vllm_config, config, cache_config)
+
+    def _register_jit_warmup(
+        self,
+        vllm_config: VllmConfig,
+        config: DeepseekV2Config | DeepseekV3Config,
+        cache_config: CacheConfig,
+    ) -> None:
+        """Self-register the fused norm+RoPE and fused-Q kernel owners.
+
+        Runs at model-load time so their compile-key space is warmed at startup
+        (see JitWarmupRegistry.activate around load_model) instead of on the
+        first request. Geometry is snapshotted here because ``num_local_heads``
+        and ``indexer.n_head`` are TP-sharded and the cache/RoPE dtypes only
+        exist post-construction; passing kwargs skips the registry's
+        ``vllm_config`` auto-inject. No-op unless a warmup registry is active,
+        so this is a cheap metadata call on every path.
+
+        ``fused_q`` has two backends: the Triton ``_FUSED_Q_TRITON_KERNEL``
+        (ROCm and unsupported CUDA) and, on a supported Blackwell build, the
+        CuTeDSL ``_FUSED_Q_CUTEDSL_KERNEL``. Both owners are registered; the
+        CuTeDSL one is gated by the tensor-free support check so it is only
+        warmed on the layers/platforms where it is the runtime path. On CUDA the
+        Triton owner then over-warms harmlessly (compiles a variant that will not
+        run), matching how the wrapper picks a backend at runtime.
+        """
+        if not vllm_config.kernel_config.enable_jit_warmup:
+            return
+        # A layer whose forward runs always has a topk_indices_buffer (the
+        # kernel dereferences it unconditionally); skip layers that cannot run.
+        if self.topk_indices_buffer is None:
+            return
+
+        has_indexer = self.indexer is not None
+        index_head_dim = self.indexer.head_dim if has_indexer else 1
+        index_n_head = self.indexer.n_head if has_indexer else 1
+        act_dtype = self.q_a_layernorm.weight.dtype
+        cos_sin_dtype = self.rotary_emb.cos_sin_cache.dtype
+        use_pdl = current_platform.is_arch_support_pdl()
+
+        _FUSED_NORM_ROPE_KERNEL.register_warmup(
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            index_head_dim=index_head_dim,
+            topk=self.topk_indices_buffer.shape[-1],
+            use_pcp=self.use_pcp,
+            has_indexer=has_indexer,
+            index_rope_interleave=self._index_rope_interleave,
+            use_pdl=use_pdl,
+            mla_kv_cache_dtype=self.kv_cache_dtype,
+            block_size=cache_config.block_size,
+            act_dtype=act_dtype,
+            cos_sin_dtype=cos_sin_dtype,
+            topk_dtype=self.topk_indices_buffer.dtype,
+        )
+        _FUSED_Q_TRITON_KERNEL.register_warmup(
+            num_q_heads=self.num_local_heads,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            kv_lora_rank=self.kv_lora_rank,
+            index_n_head=index_n_head,
+            index_head_dim=index_head_dim,
+            has_indexer=has_indexer,
+            index_rope_interleave=self._index_rope_interleave,
+            quantize_mqa=self._fp8_query,
+            use_pdl=use_pdl,
+            act_dtype=act_dtype,
+            cos_sin_dtype=cos_sin_dtype,
+        )
+
+        # On CUDA with a supported Blackwell build, ``fused_q`` routes to the
+        # CuTeDSL kernel instead of the Triton one; register its warmup owner so
+        # that path is compiled at startup too. Gated by the tensor-free twin of
+        # the runtime support check, so we only warm it when it will actually run
+        # (otherwise the Triton owner above covers the layer). Imported lazily
+        # and only on CUDA because the module imports cutlass at module scope.
+        if current_platform.is_cuda():
+            from vllm.models.deepseek_v32.nvidia.ops.fused_q_cutedsl import (
+                _FUSED_Q_CUTEDSL_KERNEL,
+                is_fused_q_cutedsl_geometry_supported,
+            )
+
+            if is_fused_q_cutedsl_geometry_supported(
+                num_q_heads=self.num_local_heads,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                index_n_head=index_n_head,
+                index_head_dim=index_head_dim,
+                has_indexer=has_indexer,
+                quantize_mqa=self._fp8_query,
+                act_dtype=act_dtype,
+            ):
+                _FUSED_Q_CUTEDSL_KERNEL.register_warmup(
+                    num_q_heads=self.num_local_heads,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    kv_lora_rank=self.kv_lora_rank,
+                    index_n_head=index_n_head,
+                    index_head_dim=index_head_dim,
+                    has_indexer=has_indexer,
+                    index_rope_interleave=self._index_rope_interleave,
+                    rope_cache_dtype=cos_sin_dtype,
+                    idx_rope_cache_dtype=(
+                        self.indexer_rope_emb.cos_sin_cache.dtype
+                        if has_indexer
+                        else cos_sin_dtype
+                    ),
+                    idx_weights_dtype=act_dtype,
+                )
 
     def forward(  # type: ignore[override]
         self,
