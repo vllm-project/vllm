@@ -489,3 +489,377 @@ def test_deepgemm_fp4_vs_triton(
             f"DeepGEMM FP4 path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# FP4 psum-layout tests (DeepEP v2 decode/cudagraph path)
+# ---------------------------------------------------------------------------
+#
+# The psum layout is what lets the SM100 grouped GEMM *skip* the worst-case
+# row padding DeepEP v2 emits in its cudagraph/decode dispatch, instead of
+# computing over it (non-psum m_indices path). It is selected at runtime by
+# DeepGemmFP4Experts whenever expert_tokens_meta carries psum_recv_per_rank.
+# The standalone (non-EP) harness never sets that field, so these tests drive
+# DeepGemmFP4Experts.apply directly with a crafted decode-style metadata.
+
+
+def _psum_supported() -> bool:
+    from vllm.platforms import current_platform
+
+    # psum block-skipping is the SM100 scheduler behaviour; that is also the
+    # only SM the nvfp4 grouped GEMM runs on in practice.
+    return is_deep_gemm_supported() and current_platform.is_device_capability_family(
+        100
+    )
+
+
+def _make_decode_meta(m: int, device: torch.device) -> mk.ExpertTokensMetadata:
+    """A DeepEP v2 cudagraph/decode carrier.
+
+    Only psum_recv_per_rank is populated (exact per-expert counts are not
+    synced in that mode), so M_sum falls back to the worst-case bound and
+    DeepGemmFP4Experts._use_psum_layout() turns on. Its value is never read on
+    the FP4 path — only its presence gates psum — so any device int32 works.
+    """
+    return mk.ExpertTokensMetadata(
+        expert_num_tokens=None,
+        expert_num_tokens_cpu=None,
+        psum_recv_per_rank=torch.tensor([m], dtype=torch.int32, device=device),
+    )
+
+
+def _build_fp4_kernel(m, n, k, topk, num_experts):
+    """Build a DeepGemmFP4Experts kernel plus quantized-ready inputs."""
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmFP4Experts,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.platforms import current_platform
+
+    tokens_bf16 = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) * (k**-0.5)
+    w1, w2, w1_s, w2_s, w1_bf16, w2_bf16 = make_mxfp4_weights(num_experts, n, k)
+
+    router_logits = torch.randn(m, num_experts, device="cuda", dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+
+    _fp8_dtype = current_platform.fp8_dtype()
+    _block_shape = GroupShape(128, 128)
+    quant_config = FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
+        _a2=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_s, None, None, None),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_s, None, None, None),
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = mk.FusedMoEKernel(
+        prepare_finalize=maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
+        fused_experts=DeepGemmFP4Experts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        ),
+    )
+    return kernel, tokens_bf16, topk_weights, topk_ids, (w1, w2), (w1_bf16, w2_bf16)
+
+
+def _fp4_apply(kernel, tokens_bf16, topk_weights, topk_ids, w1, w2, num_experts, meta):
+    """Run prepare -> DeepGemmFP4Experts.apply with an explicit metadata.
+
+    Returns the final (M, K) output. The metadata drives the psum gate: a
+    decode-style meta forces the psum layout, real prepare metadata (no
+    psum_recv_per_rank) leaves it on the non-psum m_indices path.
+    """
+    impl = kernel.impl
+    experts = kernel.fused_experts
+
+    a1q, a1q_scale, _real_meta, tk_ids, tk_w = impl._prepare(
+        hidden_states=tokens_bf16,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        global_num_experts=num_experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+    )
+    if meta == "real":
+        meta = _real_meta
+
+    _, m_full, n_dim, k_dim, top_k = experts.moe_problem_size(a1q, w1, w2, tk_ids)
+    ws13, ws2, out = impl._allocate_buffers(
+        tokens_bf16.dtype,
+        a1q.device,
+        m_full,
+        m_full,
+        n_dim,
+        k_dim,
+        top_k,
+        num_experts,
+        num_experts,
+        meta,
+        MoEActivation.SILU,
+    )
+    experts.apply(
+        output=out,
+        hidden_states=a1q,
+        w1=w1,
+        w2=w2,
+        topk_weights=tk_w,
+        topk_ids=tk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=num_experts,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=experts.a2_scale,
+        workspace13=ws13,
+        workspace2=ws2,
+        expert_tokens_meta=meta,
+        apply_router_weight_on_input=False,
+    )
+    return out.clone()
+
+
+@pytest.mark.parametrize(("m", "n", "k"), FP4_MNKs)
+@pytest.mark.parametrize("topk", FP4_TOPKS)
+@pytest.mark.parametrize("num_experts", FP4_NUM_EXPERTS)
+@pytest.mark.skipif(not _psum_supported(), reason="Requires SM100 deep_gemm kernels")
+def test_deepgemm_fp4_psum_layout_numeric(
+    m, n, k, topk, num_experts, monkeypatch, workspace_init
+):
+    """psum layout must match both the BF16 reference and the non-psum path.
+
+    Skipping padding blocks (psum) versus computing and discarding them
+    (non-psum) is an efficiency difference only; the reduced (M, K) output
+    must be numerically identical up to fp8/fp4 accumulation noise.
+    """
+    pytest.importorskip("deep_gemm.utils.math")
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_USE_DEEP_GEMM", "1")
+
+        kernel, tokens, tw, ti, (w1, w2), (w1_bf16, w2_bf16) = _build_fp4_kernel(
+            m, n, k, topk, num_experts
+        )
+        experts = kernel.fused_experts
+
+        decode_meta = _make_decode_meta(m, tokens.device)
+        assert experts._use_psum_layout(decode_meta) is True
+
+        out_psum = _fp4_apply(kernel, tokens, tw, ti, w1, w2, num_experts, decode_meta)
+        out_nonpsum = _fp4_apply(kernel, tokens, tw, ti, w1, w2, num_experts, "real")
+        out_ref = _bf16_moe_reference(tokens, w1_bf16, w2_bf16, tw, ti)
+
+        diff_ref = calc_diff(out_psum, out_ref)
+        diff_layout = calc_diff(out_psum, out_nonpsum)
+        assert diff_ref < 0.05, f"psum vs BF16 ref diff too high: {diff_ref}"
+        assert diff_layout < 0.02, f"psum vs non-psum diff too high: {diff_layout}"
+
+
+def _fp4_apply_poison_padding(
+    kernel, tokens_bf16, topk_weights, topk_ids, w1, w2, num_experts, poison
+):
+    """Like _fp4_apply (psum path) but optionally NaN-fills the padding.
+
+    In decode mode the permuted activation buffer is sized to the worst-case
+    M_sum and only the real-token prefix of each expert slot is written by the
+    scatter; the alignment gaps and worst-case tail are left uninitialized. We
+    pre-fill the whole buffer with NaN so those padding rows carry garbage,
+    reproducing the real runtime condition deterministically.
+    """
+    impl = kernel.impl
+    experts = kernel.fused_experts
+
+    a1q, a1q_scale, _real_meta, tk_ids, tk_w = impl._prepare(
+        hidden_states=tokens_bf16,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        global_num_experts=num_experts,
+        expert_map=None,
+        apply_router_weight_on_input=False,
+    )
+    meta = _make_decode_meta(tokens_bf16.size(0), tokens_bf16.device)
+
+    _, m_full, n_dim, k_dim, top_k = experts.moe_problem_size(a1q, w1, w2, tk_ids)
+    ws13, ws2, out = impl._allocate_buffers(
+        tokens_bf16.dtype,
+        a1q.device,
+        m_full,
+        m_full,
+        n_dim,
+        k_dim,
+        top_k,
+        num_experts,
+        num_experts,
+        meta,
+        MoEActivation.SILU,
+    )
+    if poison:
+        # ws13 becomes the permuted-activation buffer (aq_out); NaN-fill so any
+        # padding row the scatter leaves untouched holds garbage.
+        ws13.fill_(float("nan"))
+        ws2.fill_(float("nan"))
+    else:
+        ws13.zero_()
+        ws2.zero_()
+
+    experts.apply(
+        output=out,
+        hidden_states=a1q,
+        w1=w1,
+        w2=w2,
+        topk_weights=tk_w,
+        topk_ids=tk_ids,
+        activation=MoEActivation.SILU,
+        global_num_experts=num_experts,
+        expert_map=None,
+        a1q_scale=a1q_scale,
+        a2_scale=experts.a2_scale,
+        workspace13=ws13,
+        workspace2=ws2,
+        expert_tokens_meta=meta,
+        apply_router_weight_on_input=False,
+    )
+    return out.clone()
+
+
+@pytest.mark.parametrize(("m", "n", "k"), [(128, 4096, 4096)])
+@pytest.mark.parametrize("topk", FP4_TOPKS)
+@pytest.mark.parametrize("num_experts", FP4_NUM_EXPERTS)
+@pytest.mark.skipif(not _psum_supported(), reason="Requires SM100 deep_gemm kernels")
+def test_deepgemm_fp4_psum_layout_padding_robust(
+    m, n, k, topk, num_experts, monkeypatch, workspace_init
+):
+    """psum output must be unaffected by garbage in the padding rows.
+
+    The decode-mode permuted buffer has a large uninitialized tail (worst-case
+    M_sum). This poisons that padding with NaN and asserts the reduced output
+    is finite and matches the clean-padding run bit-for-bit. Note this proves
+    robustness/correctness under garbage padding, not physical block-skipping:
+    MoE rows are independent and the unpermute reads only valid rows, so
+    skipping and compute-then-discard yield identical outputs (skipping is a
+    compute-savings property, covered by source review + a kernel microbench).
+    """
+    pytest.importorskip("deep_gemm.utils.math")
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_USE_DEEP_GEMM", "1")
+
+        kernel, tokens, tw, ti, (w1, w2), _ = _build_fp4_kernel(
+            m, n, k, topk, num_experts
+        )
+
+        out_clean = _fp4_apply_poison_padding(
+            kernel, tokens, tw, ti, w1, w2, num_experts, poison=False
+        )
+        out_poison = _fp4_apply_poison_padding(
+            kernel, tokens, tw, ti, w1, w2, num_experts, poison=True
+        )
+
+        assert torch.isfinite(out_poison).all(), "padding garbage leaked into output"
+        torch.testing.assert_close(out_poison, out_clean, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not _psum_supported(), reason="Requires SM100 deep_gemm kernels")
+def test_deepgemm_fp4_psum_layout_cudagraph(monkeypatch, workspace_init):
+    """psum layout is CUDA-graph safe with varying on-device group boundaries.
+
+    expected_m_for_psum_layout=M_sum fixes the launch grid at capture time
+    (M_sum is a host-side worst-case bound in decode mode), while the per-group
+    prefix-sum boundaries are read on device. Replaying the same graph after
+    changing the routing in place must recompute correct results for the new
+    boundaries without re-capturing.
+    """
+    pytest.importorskip("deep_gemm.utils.math")
+    m, n, k, topk, num_experts = 128, 4096, 4096, 2, 8
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_USE_DEEP_GEMM", "1")
+
+        kernel, tokens, tw, ti, (w1, w2), (w1_bf16, w2_bf16) = _build_fp4_kernel(
+            m, n, k, topk, num_experts
+        )
+        impl = kernel.impl
+        experts = kernel.fused_experts
+
+        # Quantize once; capture with fixed tensor handles so replays after an
+        # in-place routing update re-read the new topk on device.
+        a1q, a1q_scale, _meta, tk_ids, tk_w = impl._prepare(
+            hidden_states=tokens,
+            topk_weights=tw,
+            topk_ids=ti,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+        meta = _make_decode_meta(m, tokens.device)
+        assert experts._use_psum_layout(meta) is True
+
+        _, m_full, n_dim, k_dim, top_k = experts.moe_problem_size(a1q, w1, w2, tk_ids)
+        ws13, ws2, out = impl._allocate_buffers(
+            tokens.dtype,
+            a1q.device,
+            m_full,
+            m_full,
+            n_dim,
+            k_dim,
+            top_k,
+            num_experts,
+            num_experts,
+            meta,
+            MoEActivation.SILU,
+        )
+
+        def run():
+            experts.apply(
+                output=out,
+                hidden_states=a1q,
+                w1=w1,
+                w2=w2,
+                topk_weights=tk_w,
+                topk_ids=tk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                a1q_scale=a1q_scale,
+                a2_scale=experts.a2_scale,
+                workspace13=ws13,
+                workspace2=ws2,
+                expert_tokens_meta=meta,
+                apply_router_weight_on_input=False,
+            )
+
+        # Warm up (JIT + allocator) on a side stream before capture.
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                run()
+        torch.cuda.current_stream().wait_stream(s)
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            run()
+
+        # Replay with the captured routing.
+        g.replay()
+        torch.accelerator.synchronize()
+        out1 = out.clone()
+        ref1 = _bf16_moe_reference(tokens, w1_bf16, w2_bf16, tw, ti)
+        assert calc_diff(out1, ref1) < 0.05
+
+        # Change routing in place -> different per-group boundaries on device.
+        new_logits = torch.randn(m, num_experts, device="cuda", dtype=torch.float32)
+        new_tw, new_ti = torch.topk(new_logits, k=topk, dim=-1)
+        new_tw = torch.nn.functional.softmax(new_tw, dim=-1)
+        tk_ids.copy_(new_ti.to(tk_ids.dtype))
+        tk_w.copy_(new_tw.to(tk_w.dtype))
+
+        g.replay()
+        torch.accelerator.synchronize()
+        out2 = out.clone()
+        ref2 = _bf16_moe_reference(tokens, w1_bf16, w2_bf16, new_tw, new_ti)
+        assert calc_diff(out2, ref2) < 0.05
+
+        # The routing change must actually move the result (boundaries varied).
+        assert calc_diff(out1, out2) > 1e-3
