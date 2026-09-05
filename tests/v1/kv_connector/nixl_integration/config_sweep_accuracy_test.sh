@@ -55,6 +55,32 @@ else
   configs=("${tp_configs[@]}")
 fi
 
+# Opt-in CI sharding; unset means run every config for existing callers.
+if [[ -n "${CONFIG_SHARD_ID:-}" || -n "${CONFIG_NUM_SHARDS:-}" ]]; then
+  if [[ ! "${CONFIG_SHARD_ID:-}" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    [[ ! "${CONFIG_NUM_SHARDS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "CONFIG_SHARD_ID and CONFIG_NUM_SHARDS must be non-negative and positive integers, respectively."
+    exit 1
+  fi
+  if (( CONFIG_SHARD_ID >= CONFIG_NUM_SHARDS )); then
+    echo "CONFIG_SHARD_ID=${CONFIG_SHARD_ID} must be less than CONFIG_NUM_SHARDS=${CONFIG_NUM_SHARDS}."
+    exit 1
+  fi
+
+  shard_configs=()
+  for idx in "${!configs[@]}"; do
+    if (( idx % CONFIG_NUM_SHARDS == CONFIG_SHARD_ID )); then
+      shard_configs+=("${configs[$idx]}")
+    fi
+  done
+  if (( ${#shard_configs[@]} == 0 )); then
+    echo "Shard ${CONFIG_SHARD_ID}/${CONFIG_NUM_SHARDS} selected no configs."
+    exit 1
+  fi
+  configs=("${shard_configs[@]}")
+  echo "Shard ${CONFIG_SHARD_ID}/${CONFIG_NUM_SHARDS}: running ${#configs[@]} configs"
+fi
+
 run_tests() {
   local label=$1
   local extra_args=$2

@@ -115,21 +115,23 @@ steps:
 
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD accuracy"
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   device: l4
   num_devices: 4
+  parallelism: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-    - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - HYBRID_SSM=1 CONFIG_SHARD_ID=$$BUILDKITE_PARALLEL_JOB CONFIG_NUM_SHARDS=$$BUILDKITE_PARALLEL_JOB_COUNT bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
       label: ":amd: (MI300) Hybrid SSM NixlConnector PD accuracy"
       dind: false
       device: mi300_4
+      parallelism: 1
       timeout_in_minutes: 55
       depends_on:
         - image-build-amd
