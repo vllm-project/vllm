@@ -182,7 +182,7 @@ class Mixer2RMSNormGated(CustomOp):
 
 
 def mamba_v2_sharded_weight_loader(
-    shard_spec: list[tuple[int, int, float]],
+    shard_spec: list[tuple[int, int, int]],
     tp_size: int,
     tp_rank: int,
 ) -> LoaderFunction:
@@ -197,23 +197,20 @@ def mamba_v2_sharded_weight_loader(
         boundary, loaded_boundary = 0, 0
 
         # - iterate over the shard specs
-        for full_dim, extra, duplicate_groups in shard_spec:
+        for full_dim, extra, replication_factor in shard_spec:
             # - full dim is the model dim (before TP).
             # - extra > 0, means there is expected overall increase
             #   of dimensions. This is so because of replication.
-            # - ratio is used map the tp_rank to the actual shard
-            #   rank. This is useful when there is replication of
-            #   groups to accompany head shards.
+            # - replication_factor maps adjacent TP ranks to the same
+            #   group shard.
 
             # - size of the loaded shard
             shard_size = full_dim // tp_size
 
             # - compute the rank into the loaded shard.
-            # - if there is replication, different TP shards will
-            #   take from the same rank.
-            # NOTE: currently we only support duplication
-            # in the case where num_groups == 1
-            rank = 0 if duplicate_groups else tp_rank
+            # - if there is replication, adjacent TP shards take
+            #   from the same rank.
+            rank = tp_rank // replication_factor
 
             # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
@@ -290,8 +287,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # - HOWEVER IF, world_size DOES NOT divide groups, then we need
         #   to allocate extra space in the shard, such that groups
         #   may be replicated to follow the head shard.
-        # - NOTE: currently for the world size DOES NOT divide groups
-        #   case, we only support the case when n_groups == 1
+        # - If world_size is a multiple of groups, replicate each group
+        #   across the adjacent head shards that consume it.
         self.tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
@@ -299,9 +296,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             "Tensor parallel world size must divide num heads."
         )
 
-        assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
-            "If tensor parallel world size does not divide num_groups, "
-            "then num_groups must equal 1."
+        assert (n_groups % self.tp_size) == 0 or (self.tp_size % n_groups) == 0, (
+            "Tensor parallel world size and num_groups must divide one another."
         )
 
         self.ssm_state_size = ssm_state_size
@@ -352,8 +348,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 prefix=f"{prefix}.in_proj",
             )
         else:
-            # This is the n_groups == 1 case,
-            # where we need to duplicate groups if TP>1.
+            # TP is a multiple of n_groups, so each group is replicated
+            # across the adjacent head shards that consume it.
 
             self.conv1d = ColumnParallelLinear(
                 input_size=conv_kernel_size,
@@ -380,10 +376,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             group_shard_settings = (
                 self.groups_ssm_state_size,  # expected model size
                 (self.n_groups - n_groups) * self.ssm_state_size,  # extra dims assigned
-                n_groups == 1,  # if there was only one group
+                self.tp_size // n_groups,
             )
-            intermediate_settings = (intermediate_size, 0, False)
-            head_settings = (self.num_heads, 0, False)
+            intermediate_settings = (intermediate_size, 0, 1)
+            head_settings = (self.num_heads, 0, 1)
 
             # - the weight already has a "weight_loader" attribute
             #   which set_weight_attrs will raise if we do not
