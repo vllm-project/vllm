@@ -7,6 +7,7 @@ from typing import cast
 
 import torch
 
+from vllm import envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -39,6 +40,27 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def _wo_a_block_scale_to_e8m0(scale: torch.Tensor) -> torch.Tensor | None:
+    """Return raw E8M0 exponent bytes for a WO_A block-scale tensor."""
+    if scale.dtype == torch.float8_e8m0fnu:
+        return scale.view(torch.uint8).contiguous()
+    if scale.dtype == torch.uint8:
+        return scale.contiguous()
+    if not scale.dtype.is_floating_point:
+        return None
+
+    scale_f32 = scale.detach().float()
+    if not bool(torch.isfinite(scale_f32).all()) or bool((scale_f32 <= 0).any()):
+        return None
+    exponent = torch.round(torch.log2(scale_f32))
+    if not torch.equal(torch.exp2(exponent), scale_f32):
+        return None
+    biased = exponent.to(torch.int32) + 127
+    if int(biased.min()) < 0 or int(biased.max()) > 255:
+        return None
+    return biased.to(torch.uint8).contiguous()
 
 
 def _trust_dsv4_extra_cache_nan_free(
@@ -520,6 +542,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        self._wo_a_fp8_weight: torch.Tensor | None = None
+        self._wo_a_e8m0_scale: torch.Tensor | None = None
+        self._wo_a_cos_cache: torch.Tensor | None = None
+        self._wo_a_sin_cache: torch.Tensor | None = None
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
@@ -561,6 +587,61 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
         self._wo_b_scale = _prep(self.wo_b)
+        if _ON_GFX950 and envs.VLLM_ROCM_USE_AITER_FP8BMM:
+            self._prepare_fp8_wo_a()
+
+    def _prepare_fp8_wo_a(self) -> None:
+        try:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale as mxscale_op,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant as inverse_quant_op,
+            )
+        except ImportError:
+            logger.warning_once(
+                "The DeepSeek V4 FP8 WO_A path requires AITER >= 0.1.20; "
+                "falling back to BF16 WO_A."
+            )
+            return
+        del mxscale_op, inverse_quant_op
+
+        weight = getattr(self.wo_a, "weight", None)
+        scale = getattr(self.wo_a, "weight_scale_inv", None)
+        if (
+            weight is None
+            or scale is None
+            or weight.dim() != 2
+            or scale.dim() != 2
+            or weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+        ):
+            return
+
+        groups = self.n_local_groups
+        out_per_group = self.o_lora_rank
+        out_features, in_features = weight.shape
+        if (
+            out_features != groups * out_per_group
+            or out_per_group % 128 != 0
+            or in_features % 128 != 0
+            or scale.shape != (out_features // 128, in_features // 128)
+        ):
+            return
+
+        e8m0_scale = _wo_a_block_scale_to_e8m0(scale)
+        if e8m0_scale is None:
+            return
+
+        self._wo_a_fp8_weight = weight.view(groups, out_per_group, in_features)
+        self._wo_a_e8m0_scale = e8m0_scale.view(
+            groups, out_per_group // 128, in_features // 128
+        )
+        cache = getattr(self.rotary_emb, "cos_sin_cache_bf16", None)
+        if cache is None:
+            cache = self.rotary_emb.cos_sin_cache.to(dtype=torch.bfloat16)
+        cos_cache, sin_cache = cache.chunk(2, dim=-1)
+        self._wo_a_cos_cache = cos_cache.contiguous()
+        self._wo_a_sin_cache = sin_cache.contiguous()
 
     def prepare_compressor_gemm_fusion(self) -> bool:
         if self._fused_compressor_weight is not None:
@@ -719,17 +800,44 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
-            o,
-            positions,
-            self.rope_head_dim,
-            self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
-        )
-        zf = z.flatten(1)
+        if self._wo_a_fp8_weight is not None:
+            from aiter.ops.batched_gemm_op_a8w8 import (
+                batched_gemm_a8w8_mxscale,
+            )
+            from aiter.ops.inverse_rope_group_quant import (
+                inverse_rope_group_quant,
+            )
+
+            assert self._wo_a_cos_cache is not None
+            assert self._wo_a_sin_cache is not None
+            o_fp8, o_scale = inverse_rope_group_quant(
+                o.view(o.shape[0], self.n_local_heads, self.head_dim),
+                positions.to(torch.int64),
+                self._wo_a_cos_cache,
+                self._wo_a_sin_cache,
+                num_groups=self.n_local_groups,
+                quant_group_size=128,
+            )
+            assert self._wo_a_e8m0_scale is not None
+            zf = batched_gemm_a8w8_mxscale(
+                o_fp8,
+                self._wo_a_fp8_weight,
+                o_scale,
+                self._wo_a_e8m0_scale,
+                dtype=o.dtype,
+            ).flatten(1)
+        else:
+            # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+            z = rocm_inv_rope_einsum(
+                self.rotary_emb,
+                o,
+                positions,
+                self.rope_head_dim,
+                self.n_local_groups,
+                self.o_lora_rank,
+                self.wo_a,
+            )
+            zf = z.flatten(1)
         if self._wo_b_scale is not None and zf.dim() == 2:
             return self._bpre_attn_gemm(self.wo_b.weight, self._wo_b_scale, zf, True)
         return self.wo_b(zf)
