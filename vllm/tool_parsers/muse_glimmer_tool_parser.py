@@ -171,6 +171,21 @@ def _trailing_partial_marker_len(text: str) -> int:
 # text mentioning the format is never held back.
 _ATEM_TAIL_RE = re.compile(r"</?atem:(?:[A-Za-z0-9_.\-]+(?: [A-Za-z0-9_.\-\":=]*)?)?$")
 
+# The tag openers. A chunk boundary can also fall before "atem:" completes
+# ("<ate", "</atem"), so proper prefixes of these are just as structural.
+_ATEM_TAG_OPENERS = ("<atem:", "</atem:")
+_MAX_ATEM_OPENER_LEN = max(len(m) for m in _ATEM_TAG_OPENERS)
+
+
+def _trailing_atem_prefix_len(text: str) -> int:
+    """Length of the longest suffix of *text* that prefixes an ATEM tag opener."""
+    max_overlap = min(len(text), _MAX_ATEM_OPENER_LEN - 1)
+    for overlap in range(max_overlap, 0, -1):
+        suffix = text[-overlap:]
+        if any(opener.startswith(suffix) for opener in _ATEM_TAG_OPENERS):
+            return overlap
+    return 0
+
 
 def _strip_trailing_partial_atem(body: str) -> str:
     """Drop a trailing fragment that could still grow into an ATEM marker.
@@ -178,9 +193,17 @@ def _strip_trailing_partial_atem(body: str) -> str:
     ATEM framing is protocol control data, not user-visible content: an
     incomplete marker at the tail of an open body must wait for its closing
     ``>`` instead of leaking as content, and at truncation it is dropped
-    rather than emitted.
+    rather than emitted. Loops because cutting one fragment can expose
+    another right before it.
     """
-    return _ATEM_TAIL_RE.sub("", body)
+    while True:
+        stripped = _ATEM_TAIL_RE.sub("", body)
+        prefix = _trailing_atem_prefix_len(stripped)
+        if prefix:
+            stripped = stripped[: len(stripped) - prefix]
+        if stripped == body:
+            return body
+        body = stripped
 
 
 def _safe_open_body(body: str) -> str:
@@ -192,11 +215,15 @@ def _safe_open_body(body: str) -> str:
     """
     tail_to = _OPEN_TAIL_TO_RE.search(body)
     if tail_to is not None:
-        return body[: tail_to.start()]
-    partial = _trailing_partial_marker_len(body)
-    if partial:
-        body = body[: len(body) - partial]
-    return _strip_trailing_partial_atem(body)
+        body = body[: tail_to.start()]
+    while True:
+        partial = _trailing_partial_marker_len(body)
+        if partial:
+            body = body[: len(body) - partial]
+        trimmed = _strip_trailing_partial_atem(body)
+        if trimmed == body:
+            return body
+        body = trimmed
 
 
 class MuseGlimmerToolParser(ToolParser):
