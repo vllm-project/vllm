@@ -696,7 +696,6 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
-        self._failed_inflight_recvs: set[ReqId] = set()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
         self._failed_recv_pending: set[ReqId] = set()
         self._failed_recv_reported: set[ReqId] = set()
@@ -2822,25 +2821,42 @@ class NixlBaseConnectorWorker:
 
     def _maybe_init_host_stager(self, remote_host: str) -> HostWriteStager | None:
         """Enable device staging for same-host host-buffer reads."""
-        if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
+        if not self.use_host_buffer:
             return None
-        if self._host_stager is not None or self._host_stager_init_attempted:
-            return self._host_stager
-        stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
-        if stage_bytes <= 0 or not self.use_host_buffer:
-            return None
-        self._host_stager_init_attempted = True
         desc_lens = np.array(
             [int(entry[1]) for entry in self.src_blocks_data], dtype=np.int64
         )
         host_addrs = np.array(
             [int(entry[0]) for entry in self.src_blocks_data], dtype=np.uint64
         )
+        return self._maybe_init_host_stager_for_buffers(
+            remote_host,
+            desc_lens,
+            host_addrs,
+            list(self.host_xfer_buffers.values()),
+        )
+
+    def _maybe_init_host_stager_for_buffers(
+        self,
+        remote_host: str,
+        desc_lens: np.ndarray,
+        host_addrs: np.ndarray,
+        host_buffers: list[torch.Tensor],
+    ) -> HostWriteStager | None:
+        """Enable device staging for same-host reads into host buffers."""
+        if remote_host != envs.VLLM_NIXL_SIDE_CHANNEL_HOST:
+            return None
+        if self._host_stager is not None or self._host_stager_init_attempted:
+            return self._host_stager
+        stage_bytes = envs.VLLM_NIXL_HOST_STAGE_BYTES
+        if stage_bytes <= 0:
+            return None
+        self._host_stager_init_attempted = True
         try:
             self._host_stager = HostWriteStager(
                 desc_lens=desc_lens,
                 host_addrs=host_addrs,
-                host_buffers=list(self.host_xfer_buffers.values()),
+                host_buffers=host_buffers,
                 device=torch.device(f"cuda:{self.device_id}"),
                 nixl_wrapper=self.nixl_wrapper,
                 memory_type=self.nixl_memory_type,
@@ -2861,8 +2877,7 @@ class NixlBaseConnectorWorker:
         if self._host_stager is None:
             return set()
         done, failed = self._host_stager.get_finished()
-        for req_id in done:
-            self._send_pending_recv_notifs(req_id)
+        done = {req_id for req_id in done if self._finish_recv_component(req_id)}
         for req_id in failed:
             self._log_failure(
                 failure_type="transfer_failed",
@@ -2871,7 +2886,37 @@ class NixlBaseConnectorWorker:
             )
             self._pending_recv_notifs.pop(req_id, None)
             self._handle_failed_transfer(req_id, None)
+        with self._failed_recv_lock:
+            drained_failures = {
+                req_id
+                for req_id in self._failed_recv_pending
+                if not self._recving_transfers.get(req_id)
+                and not self._host_staging_active(req_id)
+            }
+        for req_id in drained_failures:
+            self._finish_recv_component(req_id)
         return done
+
+    def _host_staging_active(self, req_id: str) -> bool:
+        return (
+            self._host_stager is not None and req_id in self._host_stager.active_req_ids
+        )
+
+    def _finish_recv_component(self, req_id: str) -> bool:
+        """Complete a receive once its direct and staged parts are terminal."""
+        if self._recving_transfers.get(req_id) or self._host_staging_active(req_id):
+            return False
+        with self._failed_recv_lock:
+            failed = req_id in self._failed_recv_pending
+            if failed:
+                self._failed_recv_pending.discard(req_id)
+        if failed:
+            self._report_failed_recv(req_id)
+            return False
+        if req_id not in self._recving_metadata:
+            return False
+        self._send_pending_recv_notifs(req_id)
+        return True
 
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]], *, is_recv: bool
@@ -2886,6 +2931,7 @@ class NixlBaseConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = []
+            failed = req_id in self._failed_recv_pending
             for handle in handles:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
@@ -2904,7 +2950,11 @@ class NixlBaseConnectorWorker:
                             req_id=req_id,
                             xfer_state=xfer_state,
                         )
-                        self._handle_failed_transfer(req_id, handle)
+                        # ERR is terminal; PROC handles remain in_progress.
+                        with contextlib.suppress(Exception):
+                            self.nixl_wrapper.release_xfer_handle(handle)
+                        self.xfer_stats.record_failed_transfer()
+                        failed = True
                 except Exception as e:
                     self._log_failure(
                         failure_type="transfer_exception",
@@ -2912,18 +2962,22 @@ class NixlBaseConnectorWorker:
                         req_id=req_id,
                         error=e,
                     )
-                    self._handle_failed_transfer(req_id, handle)
+                    self.xfer_stats.record_failed_transfer()
+                    with contextlib.suppress(Exception):
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    failed = True
 
-            if not in_progress:
-                del transfers[req_id]
-                done_req_ids.add(req_id)
-                if req_id in self._failed_inflight_recvs:
-                    self._failed_inflight_recvs.remove(req_id)
-                    self._report_failed_recv(req_id)
-                else:
-                    self._send_pending_recv_notifs(req_id)
-            else:
+            if in_progress:
                 transfers[req_id] = in_progress
+                if is_recv and failed:
+                    self._failed_recv_pending.add(req_id)
+                continue
+            del transfers[req_id]
+            if is_recv and failed:
+                self._failed_recv_pending.add(req_id)
+            if is_recv and not self._finish_recv_component(req_id):
+                continue
+            done_req_ids.add(req_id)
         return done_req_ids
 
 
@@ -2951,7 +3005,7 @@ class NixlBaseConnectorWorker:
         self.xfer_stats.record_failed_transfer()
         if self._host_stager is not None:
             self._host_stager.abort(req_id)
-            if req_id in self._host_stager.active_req_ids:
+            if self._host_staging_active(req_id):
                 with self._failed_recv_lock:
                     self._failed_recv_pending.add(req_id)
                 return
