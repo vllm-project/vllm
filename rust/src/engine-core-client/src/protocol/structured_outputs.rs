@@ -7,19 +7,32 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
-/// Structured-output backend selected for EngineCore grammar compilation.
-///
-/// Python vLLM stores this in `StructuredOutputsParams._backend` after request
-/// validation. The Rust frontend currently always lowers structured-output
-/// requests to guidance, while ignoring any user-supplied `_backend` value.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StructuredOutputBackend {
-    Xgrammar,
-    #[default]
-    Guidance,
-    Outlines,
-    LmFormatEnforcer,
+/// The only structured-output backend supported by the Rust frontend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct XGrammarBackend;
+
+impl Serialize for XGrammarBackend {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str("xgrammar")
+    }
+}
+
+impl<'de> Deserialize<'de> for XGrammarBackend {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "auto" | "xgrammar" => Ok(Self),
+            backend => Err(serde::de::Error::unknown_variant(
+                backend,
+                &["auto", "xgrammar"],
+            )),
+        }
+    }
 }
 
 /// The single structured-output constraint selected for a request.
@@ -44,10 +57,6 @@ pub enum StructuredOutputConstraint {
 pub struct StructuredOutputOptions {
     /// Disable any additional whitespace in guided JSON output.
     pub disable_any_whitespace: bool,
-    /// Disable `additionalProperties` in JSON schema output.
-    pub disable_additional_properties: bool,
-    /// Custom whitespace pattern for guided JSON output.
-    pub whitespace_pattern: Option<String>,
 }
 
 /// Parameters for configuring structured outputs (guided decoding).
@@ -62,12 +71,6 @@ pub struct StructuredOutputOptions {
 pub struct StructuredOutputsParams {
     pub constraint: StructuredOutputConstraint,
     pub options: StructuredOutputOptions,
-    /// Structured-output backend, mirroring Python's internal `_backend`.
-    ///
-    /// User-supplied values are ignored during deserialization. This matches
-    /// Python's request boundary, where `_backend` is set by validation rather
-    /// than accepted as a request-level backend selector.
-    pub backend: StructuredOutputBackend,
 }
 
 impl StructuredOutputsParams {
@@ -101,7 +104,6 @@ impl StructuredOutputsParams {
         Self {
             constraint,
             options: StructuredOutputOptions::default(),
-            backend: StructuredOutputBackend::default(),
         }
     }
 }
@@ -127,12 +129,8 @@ struct WireStructuredOutputsParams {
     disable_additional_properties: bool,
     whitespace_pattern: Option<String>,
     structural_tag: Option<String>,
-    #[serde(
-        default,
-        rename = "_backend",
-        deserialize_with = "serde_with::rust::deserialize_ignore_any"
-    )]
-    backend: StructuredOutputBackend,
+    #[serde(default, rename = "_backend")]
+    backend: XGrammarBackend,
 }
 
 impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
@@ -140,6 +138,18 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
 
     fn try_from(raw: WireStructuredOutputsParams) -> Result<Self> {
         use StructuredOutputConstraint::*;
+
+        if raw.disable_additional_properties {
+            return Err(Error::InvalidStructuredOutputsParams {
+                message: "structured_outputs.disable_additional_properties is not supported in Rust frontend".to_string(),
+            });
+        }
+        if raw.whitespace_pattern.is_some() {
+            return Err(Error::InvalidStructuredOutputsParams {
+                message: "structured_outputs.whitespace_pattern is not supported in Rust frontend"
+                    .to_string(),
+            });
+        }
 
         let mut constraint = None;
 
@@ -184,10 +194,7 @@ impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
             })?,
             options: StructuredOutputOptions {
                 disable_any_whitespace: raw.disable_any_whitespace,
-                disable_additional_properties: raw.disable_additional_properties,
-                whitespace_pattern: raw.whitespace_pattern,
             },
-            backend: raw.backend,
         })
     }
 }
@@ -196,9 +203,7 @@ impl From<StructuredOutputsParams> for WireStructuredOutputsParams {
     fn from(params: StructuredOutputsParams) -> Self {
         let mut raw = Self {
             disable_any_whitespace: params.options.disable_any_whitespace,
-            disable_additional_properties: params.options.disable_additional_properties,
-            whitespace_pattern: params.options.whitespace_pattern,
-            backend: params.backend,
+            backend: XGrammarBackend,
             ..Self::default()
         };
 
@@ -242,18 +247,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structured_outputs_backend_ignores_deserialized_value() {
+    fn xgrammar_backend_normalizes_auto_and_xgrammar() {
+        for input in ["auto", "xgrammar"] {
+            let backend: XGrammarBackend = serde_json::from_value(input.into()).unwrap();
+            assert_eq!(serde_json::to_value(backend).unwrap(), "xgrammar");
+        }
+    }
+
+    #[test]
+    fn xgrammar_backend_rejects_other_backends() {
+        let error = serde_json::from_value::<XGrammarBackend>("guidance".into()).unwrap_err();
+        assert!(error.to_string().contains("expected `auto` or `xgrammar`"));
+    }
+
+    #[test]
+    fn structured_outputs_normalizes_input_backend_to_xgrammar() {
         let params: StructuredOutputsParams = serde_json::from_value(serde_json::json!({
             "json_object": true,
-            "_backend": "xgrammar",
+            "_backend": "auto",
         }))
         .unwrap();
 
-        assert_eq!(params.backend, StructuredOutputBackend::Guidance);
         assert_eq!(params.constraint, StructuredOutputConstraint::JsonObject);
 
         let value = serde_json::to_value(params).unwrap();
-        assert_eq!(value["_backend"], "guidance");
+        assert_eq!(value["_backend"], "xgrammar");
+    }
+
+    #[test]
+    fn structured_outputs_rejects_non_xgrammar_input_backend() {
+        let error = serde_json::from_value::<StructuredOutputsParams>(serde_json::json!({
+            "json_object": true,
+            "_backend": "guidance",
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected `auto` or `xgrammar`"));
     }
 
     #[test]
@@ -290,13 +319,29 @@ mod tests {
     }
 
     #[test]
+    fn structured_outputs_rejects_guidance_only_options() {
+        for option in [
+            serde_json::json!({
+                "json_object": true,
+                "disable_additional_properties": true,
+            }),
+            serde_json::json!({
+                "json_object": true,
+                "whitespace_pattern": "\\s*",
+            }),
+        ] {
+            let error = serde_json::from_value::<StructuredOutputsParams>(option).unwrap_err();
+            assert!(error.to_string().contains("is not supported in Rust frontend"));
+        }
+    }
+
+    #[test]
     fn structured_outputs_serializes_through_raw_shape() {
         let params = StructuredOutputsParams {
             constraint: StructuredOutputConstraint::StructuralTag(
                 r#"{"type":"structural_tag"}"#.to_string(),
             ),
             options: StructuredOutputOptions::default(),
-            backend: StructuredOutputBackend::Xgrammar,
         };
 
         let value = serde_json::to_value(params).unwrap();

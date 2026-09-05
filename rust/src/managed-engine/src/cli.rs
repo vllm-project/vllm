@@ -92,6 +92,7 @@ impl ManagedEngineArgs {
         shutdown_timeout: u64,
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
+        structured_outputs_config: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
@@ -130,6 +131,10 @@ impl ManagedEngineArgs {
         if let Some(limit_mm_per_prompt) = limit_mm_per_prompt {
             python_args.push("--limit-mm-per-prompt".to_string());
             python_args.push(limit_mm_per_prompt);
+        }
+        if let Some(structured_outputs_config) = structured_outputs_config {
+            python_args.push("--structured-outputs-config".to_string());
+            python_args.push(structured_outputs_config);
         }
 
         ManagedEngineConfig {

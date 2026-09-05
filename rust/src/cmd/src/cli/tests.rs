@@ -205,6 +205,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             ssl_ciphers: None,
                         },
                         profiler_config: None,
+                        structured_outputs_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -349,6 +350,48 @@ fn serve_args_forward_profiler_config_to_managed_engine() {
             "torch_profiler_dir": "/tmp/profile",
         })
     );
+}
+
+#[test]
+fn serve_args_normalize_and_forward_structured_outputs_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--structured-outputs-config",
+        r#"{"backend":"auto","disable_any_whitespace":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_managed_engine_config(5555);
+    let flag_index = config
+        .python_args
+        .iter()
+        .position(|arg| arg == "--structured-outputs-config")
+        .expect("structured outputs config flag");
+    let structured_outputs_config: serde_json::Value =
+        serde_json::from_str(&config.python_args[flag_index + 1])
+            .expect("structured outputs config json");
+
+    assert_eq!(structured_outputs_config["backend"], "xgrammar");
+    assert_eq!(structured_outputs_config["disable_any_whitespace"], true);
+}
+
+#[test]
+fn serve_args_reject_non_xgrammar_structured_outputs_backend() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--structured-outputs-config",
+        r#"{"backend":"guidance"}"#,
+    ])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("expected `auto` or `xgrammar`"));
 }
 
 #[test]
@@ -1024,6 +1067,7 @@ fn frontend_args_accept_json() {
                             ssl_ciphers: None,
                         },
                         profiler_config: None,
+                        structured_outputs_config: None,
                     },
                 },
             ),
@@ -1621,6 +1665,7 @@ fn serve_args_accept_handshake_aliases() {
                             ssl_ciphers: None,
                         },
                         profiler_config: None,
+                        structured_outputs_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",

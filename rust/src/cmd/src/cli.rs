@@ -19,13 +19,14 @@ use clap::{Args, Parser, Subcommand};
 use educe::Educe;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::XGrammarBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
@@ -382,6 +383,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub profiler_config: Option<ProfilerConfig>,
 
+    /// Structured outputs configuration.
+    #[arg(long, value_parser = parse_json::<StructuredOutputsConfig>, value_name = "JSON")]
+    #[serde(default)]
+    structured_outputs_config: Option<StructuredOutputsConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -421,6 +427,16 @@ impl SharedRuntimeArgs {
             .map(serde_json::to_string)
             .transpose()
             .expect("profiler config serialization should not fail")
+    }
+
+    /// Return the structured outputs config for managed Python engine
+    /// forwarding.
+    pub fn structured_outputs_config_json(&self) -> Option<String> {
+        self.structured_outputs_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .expect("structured outputs config serialization should not fail")
     }
 
     /// Return the per-modality limits as JSON for managed Python engine
@@ -607,6 +623,15 @@ pub struct ProfilerConfig {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Structured-output configuration forwarded to the managed Python engine.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+struct StructuredOutputsConfig {
+    backend: XGrammarBackend,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
@@ -739,6 +764,7 @@ impl ServeArgs {
         let reasoning_parser =
             effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
         let profiler_config = self.runtime.profiler_config_json();
+        let structured_outputs_config = self.runtime.structured_outputs_config_json();
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
@@ -750,6 +776,7 @@ impl ServeArgs {
             self.runtime.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
+            structured_outputs_config,
         )
     }
 }
