@@ -610,7 +610,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         config = get_current_vllm_config_or_none()
         if (
             config is None
-            or config.kernel_config.lm_head_backend == "torch"
+            or config.kernel_config.lm_head_backend != "lossless_packed"
             or not current_platform.is_cuda()
             or self.params_dtype != torch.bfloat16
             or self.bias is not None
