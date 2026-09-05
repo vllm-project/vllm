@@ -26,9 +26,11 @@ event-driven: the engine main thread sets ``_push_writer_wake`` from
 the handshake-completion callback sets the same event after a deferred
 PUSH_REG send or a deferred push WRITE has been queued. When a request's
 lease expires (the base worker reports it via ``done_sending``) or the WRITE completes,
-``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
-the writer drops any leftover ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stops self-polling.
+``get_finished`` marks the request abandoned and enqueues an eviction onto
+``_evict_finished_inbox`` so the writer drops leftover
+``_push_finished_blocks`` / ``_pending_d_registrations`` and so a late
+P→D handshake callback cannot WRITE from blocks the scheduler has
+already freed.
 """
 
 import queue
@@ -72,6 +74,10 @@ logger = init_logger(__name__)
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
+
+# How long a finished/expired request id stays abandoned so a late
+# handshake callback cannot WRITE after the producer lease ended.
+_ABANDONED_PUSH_TTL_S = 300.0
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -119,6 +125,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
         # Handshakes that have just completed and are ready for the WRITE on wthread
         self._deferred_push_inbox = queue.Queue[tuple[str, BlockIds, dict[str, Any]]]()
+        # Request ids whose producer lease ended or whose WRITE finished.
+        # Checked on the handshake callback and again at WRITE submit so
+        # a late callback cannot transfer from reused source blocks.
+        self._abandoned_push_lock = threading.Lock()
+        self._abandoned_push_ids: dict[str, float] = {}
 
         # Wake signal from engine main thread (start_load_kv / get_finished).
         # Writer self-polls at _PUSH_WRITER_POLL_INTERVAL_MS while it has
@@ -154,6 +165,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
         super().shutdown()
+
+    def _abandon_push(self, req_id: str) -> None:
+        """Remember that *req_id* must not start a WRITE.
+
+        Called from the engine main thread when the producer lease expires
+        or the WRITE has already completed. A late handshake callback on
+        another thread consults this before queueing a deferred WRITE.
+        """
+        now = time.perf_counter()
+        cutoff = now - _ABANDONED_PUSH_TTL_S
+        with self._abandoned_push_lock:
+            self._abandoned_push_ids[req_id] = now
+            stale = [rid for rid, ts in self._abandoned_push_ids.items() if ts < cutoff]
+            for rid in stale:
+                del self._abandoned_push_ids[rid]
+
+    def _is_push_abandoned(self, req_id: str) -> bool:
+        with self._abandoned_push_lock:
+            return req_id in self._abandoned_push_ids
 
     # --- Engine-main-thread entry point -------------------------------- #
 
@@ -232,7 +262,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         rid, blocks, rd = self._deferred_push_inbox.get_nowait()
                     except queue.Empty:
                         break
-                    self._do_start_push_kv(rid, blocks, rd)
+                    if not self._is_push_abandoned(rid):
+                        self._do_start_push_kv(rid, blocks, rd)
 
                 # 3. P-side finished blocks; match against pending regs.
                 while True:
@@ -423,6 +454,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if not local_block_ids:
             logger.warning("No local blocks to push for request %s", request_id)
             return
+        if self._is_push_abandoned(request_id):
+            logger.debug("Skipping push WRITE for abandoned request %s", request_id)
+            return
 
         # ``local_block_ids`` are P's logical block IDs; ``remote_block_ids``
         # (D's, from the PUSH_REG notif) are also logical.
@@ -451,11 +485,21 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         failure_type="push_handshake_failed", req_id=rid, error=e
                     )
                     return
+                if self._is_push_abandoned(rid):
+                    logger.debug("Dropping deferred push for abandoned request %s", rid)
+                    return
                 self._deferred_push_inbox.put((rid, blocks, rd))
                 self._push_writer_wake.set()
 
             fut.add_done_callback(_on_handshake)
             return
+        # Re-check after the handshake is ready: the lease may have
+        # expired while we waited, and those source blocks may already
+        # belong to another request.
+        if self._is_push_abandoned(request_id):
+            logger.debug("Skipping push WRITE for abandoned request %s", request_id)
+            return
+
         # Keep the engine alive while it is actively receiving pushes, mirroring
         # how pull-mode transfers touch _engine_last_active in start_load_kv.
         self._engine_last_active[decode_engine_id] = time.perf_counter()
@@ -788,7 +832,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Tell the writer to drop any state it still holds for any
         # request that just finished (push completed) or expired
         # (lease ran out without a D registration ever arriving).
+        # Mark abandoned on this thread first so a handshake callback
+        # that completes after eviction cannot queue a stale WRITE.
         for req_id in done_sending:
+            self._abandon_push(req_id)
             self._evict_finished_inbox.put(req_id)
         if done_sending:
             self._push_writer_wake.set()
