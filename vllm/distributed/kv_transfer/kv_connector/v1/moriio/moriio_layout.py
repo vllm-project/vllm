@@ -304,13 +304,18 @@ def compute_block_transfer_offsets(
     # free the prefill blocks" case (full-prefix-hit / aborted-before-scheduled):
     # decode pulls fewer blocks than the prefill holds. The zip loop below pairs
     # local[i]<->remote[i] and sizes by len(local), so a short local transfers
-    # only what decode allocated and an empty local is a no-op. A longer local
-    # list is a genuine bug and still fails loudly.
+    # only what decode allocated and an empty local is a no-op.
+    #
+    # A longer local list is legitimate under speculative decoding (e.g. MTP):
+    # with block_size=1 the producer (prefill) KV-cache manager reserves
+    # num_speculative_tokens lookahead slots that the consumer (decode) does not
+    # allocate, so local exceeds remote by exactly the spec-token count. Block
+    # order is positional, so the real prompt KV is the prefix; transfer only
+    # local[:len(remote)] and drop the trailing lookahead scratch (same handling
+    # as the shorter-local case above). Without this, MTP over MoRIIO PD-disagg
+    # crashes on the first KV write (e.g. local 8003 vs remote 8000 at n=3).
     if len(local_block_ids) > len(remote_block_ids):
-        raise ValueError(
-            "local_block_ids longer than remote_block_ids: "
-            f"{len(local_block_ids)} > {len(remote_block_ids)}"
-        )
+        local_block_ids = local_block_ids[: len(remote_block_ids)]
     geometry = get_layer_transfer_geometry(
         layer_name, kv_cache, layer_to_spec, remote_num_blocks
     )

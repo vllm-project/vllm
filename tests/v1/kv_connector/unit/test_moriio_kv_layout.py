@@ -663,14 +663,85 @@ def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
         wrapper._handle_message(payload)
 
 
-def test_local_block_ids_longer_than_remote_raises_value_error():
+def test_local_block_ids_longer_than_remote_clamps_to_prompt_prefix():
+    # Under speculative decoding (e.g. MTP) with block_size=1, the producer
+    # (prefill) reserves num_speculative_tokens lookahead blocks that the
+    # consumer (decode) never allocates, so local_block_ids can exceed
+    # remote_block_ids by exactly the spec-token count. Block order is
+    # positional, so the real prompt KV is the prefix; the transfer must clamp
+    # to len(remote) (drop the trailing lookahead scratch) instead of raising.
+    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)  # interleaved
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    remote = [4, 5]
+    longer_local = [1, 3, 6, 7]  # two trailing lookahead blocks beyond remote
+
+    clamped = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        cache,
+        worker.layer_to_spec,
+        longer_local,
+        remote,
+        _remote_meta().num_blocks,
+    )
+
+    # Must not raise, and must be identical to transferring only the prompt
+    # prefix local[:len(remote)] paired with remote.
+    prefix_only = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        cache,
+        worker.layer_to_spec,
+        longer_local[: len(remote)],
+        remote,
+        _remote_meta().num_blocks,
+    )
+    assert clamped == prefix_only
+    # interleaved layout => transfers_per_block == 1 (one triple per remote block)
+    assert len(clamped[0]) == len(remote)
+    assert len(clamped[1]) == len(remote)
+    assert len(clamped[2]) == len(remote)
+
+
+def test_local_longer_than_remote_clamps_with_split_kv_regions():
+    # Same clamp must hold for the separated (split-KV) layout, where each block
+    # contributes two transfers (transfers_per_block == 2).
+    cache = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)  # separated
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    remote = [4, 5]
+    longer_local = [1, 3, 6, 7]
+
+    clamped = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        cache,
+        worker.layer_to_spec,
+        longer_local,
+        remote,
+        _remote_meta().num_blocks,
+    )
+    prefix_only = moriio_layout.compute_block_transfer_offsets(
+        "layer",
+        cache,
+        worker.layer_to_spec,
+        longer_local[: len(remote)],
+        remote,
+        _remote_meta().num_blocks,
+    )
+    assert clamped == prefix_only
+    # separated layout => transfers_per_block == 2
+    assert len(clamped[0]) == 2 * len(remote)
+
+
+def test_shorter_local_block_ids_still_transfers_only_what_decode_allocated():
+    # Regression guard: the pre-existing shorter-local behavior (READ-mode
+    # partial transfer) is unchanged by the longer-local clamp.
     cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
-    with pytest.raises(ValueError, match="longer than remote_block_ids"):
-        moriio_layout.compute_block_transfer_offsets(
-            "layer", cache, worker.layer_to_spec, [1, 3], [4], _remote_meta().num_blocks
-        )
+    short = moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1], [4, 5], _remote_meta().num_blocks
+    )
+    assert len(short[0]) == 1
 
 
 def test_empty_local_block_ids_is_free_only_noop():
