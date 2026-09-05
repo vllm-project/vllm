@@ -97,6 +97,15 @@ token's KV cache is 352 Bytes, structured as:
     FlashMLA dequant thread needs are contiguous. See the layout comment in
     `csrc/libtorch_stable/cache_kernels.cu`.
 
+NOTE: rope-free NoPE models (kv_lora_rank=512, qk_rope_head_dim=0, e.g.
+GLM-5.3-Flash) are served through the same fixed 576/656B geometry via a
+zero-padded envelope: the model attention layer emits zero `q_pe [T, H, 64]`
+and zero `k_pe [T, 64]` (bf16) so the RoPE bytes [640:768] of every 656B
+row are bf16 zeros. RoPE is baked at cache-write time, so `q_pe . 0 = 0`
+exactly contributes nothing to the attention scores. This path is only
+accepted for quantized DS-MLA cache formats (fp8_ds_mla/nvfp4_ds_mla);
+bf16 NoPE-512 continues to be served by other backends.
+
 """
 
 # Quantized DS-MLA cache formats served by the FP8/NVFP4 sparse decode kernel
@@ -136,7 +145,10 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        return [576]
+        # NoPE-512 (rope-free models, e.g. GLM-5.3-Flash) is served via the
+        # zero-padded 576/656B envelope -- see supports_combination and the
+        # module docstring.
+        return [576, 512]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -167,6 +179,15 @@ class FlashMLASparseBackend(AttentionBackend):
             return (
                 f"FLASHMLA_SPARSE only supports the {kv_cache_dtype} kv-cache "
                 "dtype on SM100 (Blackwell)"
+            )
+        if head_size == 512 and kv_cache_dtype not in QUANTIZED_DS_MLA_CACHE_FORMATS:
+            # NoPE-512 rides the zero-padded 576/656B envelope, which only
+            # exists for the quantized DS-MLA packed formats. bf16/auto
+            # NoPE-512 must keep flowing to the FlashInfer/TRITON backends.
+            return (
+                "FLASHMLA_SPARSE only supports head_size=512 with a quantized "
+                f"DS-MLA kv-cache dtype ({sorted(QUANTIZED_DS_MLA_CACHE_FORMATS)}), "
+                f"got kv_cache_dtype={kv_cache_dtype}"
             )
         return None
 
