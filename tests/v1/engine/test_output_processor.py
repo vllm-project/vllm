@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -1411,6 +1412,136 @@ async def test_cumulative_output_collector_n():
     third = [k for k in result.outputs if k.index == 2]
     assert len(third) == 1
     assert third[0].text == "c"
+
+
+def _make_boundary_output(
+    token_id: int, finish_reason: str | None, finished: bool = False
+) -> RequestOutput:
+    return RequestOutput(
+        request_id="my-request-id",
+        prompt=None,
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[
+            CompletionOutput(
+                index=0,
+                text="a",
+                token_ids=[token_id],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=finish_reason,
+            )
+        ],
+        finished=finished,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collector_does_not_merge_across_finish_reason_boundary():
+    """A pending chunk-boundary marker (finish_reason on a non-finished
+    output) must not be erased by merging the next chunk's output into it."""
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id="my-request-id-int"
+    )
+
+    collector.put(_make_boundary_output(0, "stop"))
+    collector.put(_make_boundary_output(1, None))
+    collector.put(_make_boundary_output(2, None))
+
+    boundary = await collector.get()
+    assert boundary.outputs[0].finish_reason == "stop"
+    assert boundary.outputs[0].token_ids == [0]
+
+    following = await collector.get()
+    assert following.outputs[0].finish_reason is None
+    assert following.outputs[0].token_ids == [1, 2]
+
+    assert collector.output is None
+    assert not collector.ready.is_set()
+
+
+def _make_streaming_input_request(
+    request_id: str, prompt_token_ids: list[int]
+) -> EngineCoreRequest:
+    """One chunk of a streaming-input (resumable) request."""
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=SamplingParams(
+            detokenize=False, output_kind=RequestOutputKind.DELTA
+        ),
+        pooling_params=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        resumable=True,
+        external_req_id=f"{request_id}-ext",
+    )
+
+
+def _add_streaming_request_with_queued_chunk(
+    processor: OutputProcessor, request_id: str
+) -> RequestOutputCollector:
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request_id=request_id)
+    processor.add_request(
+        _make_streaming_input_request(request_id, [1, 2, 3]), None, queue=queue
+    )
+    processor.add_request(_make_streaming_input_request(request_id, [7, 8]), None)
+    return queue
+
+
+def test_streaming_input_stop_is_chunk_boundary():
+    """STOP is a per-chunk boundary: finished is forced False, the queued
+    chunk is applied, and the request state stays alive."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[4],
+                finish_reason=FinishReason.STOP,
+            )
+        ]
+    )
+
+    assert processed.reqs_to_abort == []
+    assert processor.get_num_unfinished_requests() == 1
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is False
+    assert output.outputs[0].finish_reason == "stop"
+    req_state = processor.request_states["stream-req"]
+    assert req_state.prompt_token_ids is not None
+    assert req_state.prompt_token_ids[-2:] == [7, 8]
+
+
+@pytest.mark.parametrize("finish_reason", [FinishReason.ABORT, FinishReason.ERROR])
+def test_streaming_input_abort_error_is_terminal(finish_reason: FinishReason):
+    """ABORT/ERROR is terminal, not a chunk boundary: finished stays True,
+    the state is freed, and an abort is routed back to the engine core."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "stream-req")
+
+    processed = processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="stream-req",
+                new_token_ids=[],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+    assert processor.get_num_unfinished_requests() == 0
+    assert processed.reqs_to_abort == ["stream-req"]
+    output = queue.get_nowait()
+    assert output is not None
+    assert output.finished is True
+    assert output.outputs[0].finish_reason == str(finish_reason)
 
 
 @pytest.mark.parametrize("runner", ["generate", "pooling"])

@@ -65,6 +65,9 @@ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.streaming.eviction import maybe_evict_old_segments
+from vllm.v1.streaming.reprefill import should_trigger_reprefill
+from vllm.v1.streaming.retention import HistorySegment, SegmentType
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -124,6 +127,15 @@ class Scheduler(SchedulerInterface):
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
+        # Model's trained position range; streaming re-prefill compares
+        # request.max_cached_position against a fraction of this.
+        self._model_max_position = int(
+            getattr(
+                vllm_config.model_config.hf_text_config,
+                "max_position_embeddings",
+                self.max_model_len,
+            )
+        )
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
@@ -1100,10 +1112,21 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
 
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
-                    if request.has_encoder_inputs:
+                    # Free the request's encoder-cache entries on a failed
+                    # alloc. Skip persistent-encoder-cache streaming sessions:
+                    # their retained frame embeddings must survive a transient
+                    # allocate-fail to avoid a full vision re-encode at
+                    # re-prefill.
+                    if (
+                        request.has_encoder_inputs
+                        and not request.uses_persistent_encoder_cache()
+                    ):
                         self.encoder_cache_manager.free(request)
+
+                    if request.resumable:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -1411,6 +1434,64 @@ class Scheduler(SchedulerInterface):
 
         return new_block_ids_to_zero or None
 
+    def _reset_streaming_position_state(self, request: Request) -> None:
+        """Reset the scheduler-side position-watermark state shared by
+        re-prefill and preemption-resume."""
+        request._mrope_positions = []
+        request.max_cached_position = -1
+        request.position_offset = 0
+        request.pending_evicted_token_ranges.clear()
+
+    def _reprefill_streaming_session(
+        self, request: Request, discard_next_sample: bool
+    ) -> None:
+        """Self-preempt for re-prefill: free the KV cache + reset position
+        state, prepend to waiting, and let the next step re-prefill the
+        surviving `_all_token_ids` at fresh dense-from-0 positions.
+
+        `discard_next_sample` must be True only when the re-prefilled prompt
+        ends with already-answered content (idle trigger), so the one forced
+        sample is a phantom. When a queued chunk was just folded, the prompt
+        ends with that unanswered chunk and the first sample is a genuine
+        reply token that must be kept.
+        """
+        prior_max_position = request.max_cached_position  # for the log line
+        prior_num_tokens = request.num_tokens
+
+        # Gather block IDs BEFORE freeing, then evict their prefix-cache
+        # entries so the stale content cannot be served to anyone.
+        reprefill_block_ids: set[int] = set()
+        for per_group_ids in self.kv_cache_manager.get_block_ids(request.request_id):
+            reprefill_block_ids.update(per_group_ids)
+
+        self.kv_cache_manager.free(request)
+        if reprefill_block_ids:
+            self.kv_cache_manager.evict_blocks(reprefill_block_ids)
+
+        request.num_computed_tokens = 0
+        self._reset_streaming_position_state(request)
+        if request.spec_token_ids:
+            request.spec_token_ids = []
+
+        request.status = RequestStatus.WAITING
+
+        self.prev_step_scheduled_req_ids.discard(request.request_id)
+        request.reprefill_count += 1
+
+        request.reprefill_discard_next_sample = discard_next_sample
+
+        request.pending_reprefill = True
+        logger.info(
+            "streaming re-prefill triggered: req=%s "
+            "prior_max_position=%d surviving_tokens=%d count=%d",
+            request.request_id,
+            prior_max_position,
+            prior_num_tokens,
+            request.reprefill_count,
+        )
+
+        self.waiting.prepend_request(request)
+
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
     ) -> None:
@@ -1428,7 +1509,8 @@ class Scheduler(SchedulerInterface):
             "Only running requests can be preempted"
         )
         self._free_request_blocks(request)
-        self.encoder_cache_manager.free(request)
+        if not request.uses_persistent_encoder_cache():
+            self.encoder_cache_manager.free(request)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
@@ -1447,6 +1529,9 @@ class Scheduler(SchedulerInterface):
         request.num_stale_output_tokens = request.num_in_flight_tokens
         request.num_output_placeholders = 0
         request.num_preemptions += 1
+
+        if request.streaming_retention is not None:
+            self._reset_streaming_position_state(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
@@ -1519,11 +1604,17 @@ class Scheduler(SchedulerInterface):
         kept_output_tokens = session._all_token_ids[
             session.num_prompt_tokens : num_computed_tokens
         ]
+
+        prior_response_start = session.num_prompt_tokens
+
         del session._all_token_ids[num_computed_tokens:]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
+
         # Extend prompt with kept output tokens.
         session.prompt_token_ids.extend(kept_output_tokens)
+
+        segment_start_idx = prior_response_start + len(kept_output_tokens)
 
         if update.mm_features:
             base = session.num_tokens
@@ -1535,6 +1626,17 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
+
+        # Drop hashes covering the discarded sampled token (if it completed a
+        # block) so the chain is rebuilt from the new content; a stale hash
+        # would publish the block under the wrong prefix-cache key. Must run
+        # for retention-less sessions too, and at the HASH block granularity
+        # (single_type_managers[0].block_size need not match it on hybrid
+        # models, which non-retention resumable sessions may run on).
+        if session.block_hashes:
+            hash_block_size = self.kv_cache_manager.block_pool.hash_block_size
+            del session.block_hashes[num_computed_tokens // hash_block_size :]
+
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
@@ -1544,8 +1646,154 @@ class Scheduler(SchedulerInterface):
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
 
+        if (
+            session.structured_output_request is not None
+            and session.structured_output_request.grammar is not None
+        ):
+            session.structured_output_request.grammar.reset()
+
+        if session.streaming_retention is not None:
+            self._record_streaming_segment(
+                session, update, prior_response_start, segment_start_idx
+            )
+            maybe_evict_old_segments(
+                session,
+                session.streaming_retention,
+                self.kv_cache_manager,
+                self.encoder_cache_manager,
+            )
+
+        if session.num_tokens >= self.max_model_len:
+            # Cumulative context-length guard: even after eviction the
+            # session prompt no longer fits the context window. Worker
+            # per-request buffers are max_model_len-sized, so scheduling it
+            # would crash the engine. Finish the session cleanly instead.
+            logger.error(
+                "Streaming session %s reached max_model_len (%d tokens >= "
+                "%d) after chunk append; finishing session.",
+                session.request_id,
+                session.num_tokens,
+                self.max_model_len,
+            )
+            self.finish_requests(
+                session.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+            )
+            return
+
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+    def _fold_kept_output(self, session: Request) -> None:
+        """Fold the current chunk's generated output into the prompt,
+        discarding the final sampled token."""
+        num_computed_tokens = session.num_computed_tokens
+        kept_output_tokens = session._all_token_ids[
+            session.num_prompt_tokens : num_computed_tokens
+        ]
+        del session._all_token_ids[num_computed_tokens:]
+        session._output_token_ids.clear()
+        assert session.prompt_token_ids is not None
+        session.prompt_token_ids.extend(kept_output_tokens)
+
+        # See _update_request_as_session: trim stale hashes unconditionally,
+        # at the hash block granularity.
+        if session.block_hashes:
+            hash_block_size = self.kv_cache_manager.block_pool.hash_block_size
+            del session.block_hashes[num_computed_tokens // hash_block_size :]
+        session.update_block_hashes()
+        session.num_prompt_tokens = len(session.prompt_token_ids)
+
+    def _record_folded_output_segment(
+        self, session: Request, prior_response_start: int
+    ) -> None:
+        """Record the just-folded last reply as an evictable assistant_text
+        segment."""
+        end = session.num_prompt_tokens
+        if end <= prior_response_start:
+            return  # the folded chunk generated no kept output.
+        session.session_history.append(
+            HistorySegment(
+                segment_type="assistant_text",
+                token_range=(prior_response_start, end),
+                age_chunks=0,
+            )
+        )
+
+    def _record_streaming_segment(
+        self,
+        session: Request,
+        update: StreamingUpdate,
+        prior_response_start: int,
+        segment_start_idx: int,
+    ) -> None:
+        """Append HistorySegment(s) for the just-appended chunk and age
+        all prior segments by one chunk.
+
+        This function creates up to three segments:
+
+          1. **Pinned anchor** — on the very first call only (when
+             `session_history` is empty). Covers `[0, prior_response_start)`,
+             i.e., chunk 1's prompt only. Chunk 1's reply is split out
+             as a separate unpinned `assistant_text` segment. The
+             anchor is pinned and represents the attention sink (system
+             prompt + first user turn + first chunk content).
+
+          2. **assistant_text for the prior chunk's response** — if
+             `segment_start_idx > prior_response_start`. Unpinned, evictable
+             by retention phase 2, so replies are retained independently of
+             the content they describe.
+
+          3. **New chunk's content segment** — typed `"video"` if the
+             chunk added `mm_features`, else `"user_text"`. Its
+             corresponding response segment will be created on the NEXT
+             chunk's call.
+
+        Aging order: synthesize the anchor first (so it gets aged like
+        any existing segment), then age all existing segments, then
+        append the two new segments (which start at age 0).
+        """
+        # 1. Synthesize the pinned anchor on the very first call.
+        if not session.session_history and prior_response_start > 0:
+            session.session_history.append(
+                HistorySegment(
+                    segment_type="user_text",
+                    token_range=(0, prior_response_start),
+                    pinned=True,
+                )
+            )
+
+        # Age existing segments by one chunk boundary. Anything we
+        # append below will start at age 0.
+        for seg in session.session_history:
+            seg.age_chunks += 1
+
+        # 2. assistant_text segment for the prior chunk's response.
+        if segment_start_idx > prior_response_start:
+            session.session_history.append(
+                HistorySegment(
+                    segment_type="assistant_text",
+                    token_range=(prior_response_start, segment_start_idx),
+                )
+            )
+
+        # 3. New chunk's content segment.
+        new_num_tokens = session.num_tokens
+        if new_num_tokens <= segment_start_idx:
+            return  # chunk added no new tokens.
+        segment_type: SegmentType
+        mm_item_id: str | None = None
+        if update.mm_features:
+            segment_type = "video"
+            mm_item_id = update.mm_features[0].identifier
+        else:
+            segment_type = "user_text"
+        session.session_history.append(
+            HistorySegment(
+                segment_type=segment_type,
+                token_range=(segment_start_idx, new_num_tokens),
+                mm_item_id=mm_item_id,
+            )
+        )
 
     def _make_cached_request_data(
         self,
@@ -1820,6 +2068,11 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+
+        for req_id, pos in model_runner_output.max_cached_positions.items():
+            req = self.requests.get(req_id)
+            if req is not None and pos > req.max_cached_position:
+                req.max_cached_position = pos
         ec_connector_output = model_runner_output.ec_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -1961,6 +2214,26 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
+            if request.reprefill_discard_next_sample and new_token_ids:
+                # The one forced sample completing an idle-triggered
+                # re-prefill is a phantom reply: drop it instead of
+                # delivering it (it would shift every later reply off by
+                # one chunk), then park/fold the session as usual.
+                request.reprefill_discard_next_sample = False
+                finished = self._handle_stopped_request(request)
+                if finished:
+                    # The finish sentinel was popped without check_stop ever
+                    # setting a finished status (the request is still
+                    # RUNNING); set one before _free_request, which asserts
+                    # is_finished().
+                    request.status = RequestStatus.FINISHED_ABORTED
+                    self._free_request(request)
+                if status_before_stop == RequestStatus.RUNNING:
+                    stopped_running_reqs.add(request)
+                else:
+                    stopped_preempted_reqs.add(request)
+                continue
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -2000,15 +2273,29 @@ class Scheduler(SchedulerInterface):
                 if advance_token_ids and not grammar.accept_tokens(
                     req_id, advance_token_ids
                 ):
-                    logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
-                        advance_token_ids,
-                        req_id,
-                    )
-                    request.status = RequestStatus.FINISHED_ERROR
-                    request.resumable = False
-                    stopped = True
+                    if request.resumable:
+                        # Streaming session soft stop: cut this chunk's
+                        # response short but keep the session alive; its
+                        # context is still valid. _update_request_as_session
+                        # resets the grammar FSM when the next chunk arrives.
+                        logger.warning(
+                            "Grammar rejected tokens %s for streaming request "
+                            "%s; cutting chunk short, session continues.",
+                            advance_token_ids,
+                            req_id,
+                        )
+                        request.status = RequestStatus.FINISHED_STOPPED
+                        stopped = True
+                    else:
+                        logger.error(
+                            "Unexpected: grammar rejected tokens %s for "
+                            "request %s. Terminating request.",
+                            advance_token_ids,
+                            req_id,
+                        )
+                        request.status = RequestStatus.FINISHED_ERROR
+                        request.resumable = False
+                        stopped = True
 
             routed_experts = None
             if (
@@ -2263,15 +2550,59 @@ class Scheduler(SchedulerInterface):
         if not request.resumable:
             return True
 
+        if (
+            request.streaming_retention is None
+            and request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        ):
+            # Without retention nothing bounds the session prompt; keeping
+            # the session alive would let the next chunk push num_tokens past
+            # max_model_len and overflow max_model_len-sized worker buffers.
+            return True
+
+        output_folded = False
         if request.streaming_queue:
             update = request.streaming_queue.popleft()
             if update is None:
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
+            if request.is_finished():
+                # The fold hit the cumulative context-length guard and the
+                # session was finished (and freed) inside
+                # _update_request_as_session. Return False so the caller
+                # does not free it a second time.
+                return False
+            output_folded = True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
+
+        # Streaming re-prefill: if the session's positions have approached
+        # the model's trained range, self-preempt and re-queue for a fresh
+        # full prefill at positions starting from 0.
+        if request.streaming_retention is not None and should_trigger_reprefill(
+            request,
+            request.streaming_retention,
+            self._model_max_position,
+            # mRoPE models report the watermark from the worker; 1D-RoPE
+            # (text) sessions derive it exactly: index + cumulative offset.
+            highest_position=max(
+                request.max_cached_position,
+                request.num_tokens - 1 + request.position_offset,
+            ),
+        ):
+            if not output_folded:
+                prior_response_start = request.num_prompt_tokens
+                self._fold_kept_output(request)
+                self._record_folded_output_segment(request, prior_response_start)
+
+            if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                self.num_waiting_for_streaming_input -= 1
+            self._reprefill_streaming_session(
+                request, discard_next_sample=not output_folded
+            )
+            # The helper already prepended to the waiting queue.
+            return False
 
         self._enqueue_waiting_request(request)
         return False
@@ -2296,6 +2627,8 @@ class Scheduler(SchedulerInterface):
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
+        if request.uses_persistent_encoder_cache():
+            return
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
             request
         )
@@ -2410,6 +2743,53 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.streaming_retention is not None:
+                if len(self.kv_cache_config.kv_cache_groups) != 1:
+                    raise ValueError(
+                        "Streaming retention (intra-session KV eviction) "
+                        "requires exactly one KV cache group, but this model "
+                        f"has {len(self.kv_cache_config.kv_cache_groups)}. "
+                        "Hybrid / attention-free models are not supported."
+                    )
+                retention = request.streaming_retention
+                if (
+                    retention.max_session_tokens
+                    >= retention.reprefill_threshold * self._model_max_position
+                ):
+                    raise ValueError(
+                        "Streaming retention max_session_tokens "
+                        f"({retention.max_session_tokens}) must stay below "
+                        "reprefill_threshold * model_max_position "
+                        f"({retention.reprefill_threshold} * "
+                        f"{self._model_max_position}); otherwise a re-prefill "
+                        "would re-trigger immediately and loop."
+                    )
+                if self.scheduler_config.async_scheduling:
+                    raise ValueError(
+                        "Streaming retention is incompatible with async "
+                        "scheduling. Launch with --no-async-scheduling."
+                    )
+                if self.use_pp:
+                    raise ValueError(
+                        "Streaming retention is incompatible with pipeline "
+                        "parallelism (step overlap). Use pipeline_parallel_"
+                        "size=1."
+                    )
+                if self.vllm_config.parallel_config.data_parallel_size > 1:
+                    raise ValueError(
+                        "Streaming retention currently requires "
+                        "data_parallel_size == 1."
+                    )
+            if request.resumable and not request.first_chunk:
+                # A non-first chunk for an unknown id: its session is gone.
+                # Admitting it would resurrect the session as an unabortable
+                # request that pins its KV blocks until restart.
+                logger.warning(
+                    "Dropping streaming request %s: its session already "
+                    "finished (stale post-abort chunk).",
+                    request.request_id,
+                )
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
@@ -2503,7 +2883,10 @@ class Scheduler(SchedulerInterface):
             ec_delay_free, ec_xfer_params = self.ec_connector.request_finished(request)
             connector_delay_free_blocks |= ec_delay_free
 
-        self.encoder_cache_manager.free(request)
+        if request.uses_persistent_encoder_cache():
+            self.encoder_cache_manager.free_and_evict(request)
+        else:
+            self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

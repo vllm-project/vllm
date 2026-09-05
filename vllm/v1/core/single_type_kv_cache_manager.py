@@ -546,6 +546,61 @@ class SingleTypeKVCacheManager(ABC):
         # Free blocks in reverse order so that the tail blocks are freed first.
         self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
 
+    def evict_blocks_for_request(self, request_id: str, block_ids: list[int]) -> int:
+        """Free a subset of the request's blocks while the request stays alive.
+
+        Used for intra-session eviction in long-running streaming
+        sessions (StreamingLLM-style sink+window for text, sliding-window
+        video, or any policy that retires a token range of a live
+        request). The primitive is modality-agnostic: it operates on
+        blocks and token ranges only.
+
+        `num_cached_block` is decremented by the count of evicted blocks
+        that had a hash (i.e., were prefix-cacheable).
+
+        Args:
+            request_id: The request to evict from.
+            block_ids: Physical block IDs to free. Need not be in any
+                particular order; the function looks them up in
+                `req_to_blocks`. Caller is responsible for selecting a
+                contiguous range that corresponds to a session segment.
+
+        Returns:
+            Number of blocks whose memory was actually reclaimed, i.e.
+            blocks that reached `ref_cnt == 0` and were returned to the
+            free queue. Blocks still shared with another request
+            (`ref_cnt > 0` after the dereference) are dropped from this
+            request's table but NOT counted, since their memory is not
+            reclaimed.
+        """
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks or not block_ids:
+            return 0
+        block_id_set = set(block_ids)
+        surviving: list[KVCacheBlock] = []
+        blocks_to_free: list[KVCacheBlock] = []
+        for block in req_blocks:
+            if block.block_id in block_id_set and not block.is_null:
+                blocks_to_free.append(block)
+            else:
+                surviving.append(block)
+        if not blocks_to_free:
+            return 0
+        self.req_to_blocks[request_id] = surviving
+        # Free in reverse order so the tail blocks (most recently allocated)
+        # are evicted first — matches the LRU convention in `free`.
+        self.block_pool.free_blocks(reversed(blocks_to_free))
+        if self.enable_caching:
+            # Count cached blocks BEFORE evict_blocks clears their hashes.
+            cached_freed = sum(1 for b in blocks_to_free if b.block_hash is not None)
+            self.block_pool.evict_blocks({b.block_id for b in blocks_to_free})
+            if cached_freed and request_id in self.num_cached_block:
+                self.num_cached_block[request_id] = max(
+                    0, self.num_cached_block[request_id] - cached_freed
+                )
+
+        return sum(1 for b in blocks_to_free if b.ref_cnt == 0)
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

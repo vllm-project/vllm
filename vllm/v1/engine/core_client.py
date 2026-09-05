@@ -1544,6 +1544,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         ) // client_count
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
+        # Route all chunks of an in-flight (streaming) request to its engine.
+        if (engine := self.reqs_in_flight.get(request.request_id)) is not None:
+            return engine
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
             eng_index := get_late_interaction_engine_index(

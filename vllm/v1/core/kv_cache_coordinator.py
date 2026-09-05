@@ -354,6 +354,16 @@ class KVCacheCoordinator(ABC):
             blocks.extend(manager.pop_blocks_for_free(request_id))
         return blocks
 
+    def evict_blocks_for_request(self, request_id: str, block_ids: list[int]) -> int:
+        """Free a subset of the request's blocks; request stays alive.
+
+        Used by streaming-video intra-session eviction.
+        """
+        total_freed = 0
+        for manager in self.single_type_managers:
+            total_freed += manager.evict_blocks_for_request(request_id, block_ids)
+        return total_freed
+
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
         Get the number of common prefix blocks for all requests with allocated

@@ -212,6 +212,10 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm.v1.streaming.mrope import (
+    compute_chunk_mrope_positions,
+    make_chunk_relative_mm_features,
+)
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
@@ -579,6 +583,24 @@ class GPUModelRunner(
         self.uses_xdrope_dim = model_config.uses_xdrope_dim
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
+        )
+        # Multimodal placeholder ids (image + video) used to neutralize
+        # orphan markers left by streaming eviction; None if the model
+        # defines neither. Precomputed once (int32 matches input_ids).
+        _mm_placeholder_ids = sorted(
+            {
+                t
+                for t in (
+                    getattr(model_config.hf_config, "image_token_id", None),
+                    getattr(model_config.hf_config, "video_token_id", None),
+                )
+                if t is not None
+            }
+        )
+        self.mm_placeholder_ids_cpu: torch.Tensor | None = (
+            torch.tensor(_mm_placeholder_ids, dtype=torch.int32, device="cpu")
+            if _mm_placeholder_ids
+            else None
         )
 
         if self.model_config.is_encoder_decoder:
@@ -1462,15 +1484,37 @@ class GPUModelRunner(
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
+                # A re-prefill resumes here at num_computed_tokens==0 with its
+                # outputs folded into the prompt; reset the stale position /
+                # prompt state (else the discard mask uses wrong values).
+                # Gated on num_output_tokens==0 so a mid-decode resume
+                # (outputs kept) is left to the restore path below.
+                if num_computed_tokens == 0 and num_output_tokens == 0:
+                    req_state.output_token_ids.clear()
+                    req_state.num_prompt_tokens = (
+                        length_from_prompt_token_ids_or_embeds(
+                            req_state.prompt_token_ids,
+                            req_state.prompt_embeds,
+                        )
+                    )
+                    req_state.position_offset = 0
+                    if self.uses_mrope:
+                        req_state.mrope_positions = None
+                        req_state.max_cached_position = None
+                        self._init_mrope_positions(req_state)
 
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
 
-                if self.use_async_scheduling and num_output_tokens > 0:
-                    # We must recover the output token ids for resumed requests in the
-                    # async scheduling case, so that correct input_ids are obtained.
+                if num_output_tokens > 0 and (
+                    self.use_async_scheduling or resumed_from_preemption
+                ):
+                    # Rebuild output_token_ids from the scheduler's
+                    # authoritative all_token_ids — the worker's copy is stale
+                    # under async scheduling and untrusted for a
+                    # preempt-resumed request.
                     resumed_token_ids = req_data.all_token_ids[req_id]
                     req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
 
@@ -1649,6 +1693,16 @@ class GPUModelRunner(
         self.input_batch.remove_request(req_id)
         req_state = self.requests[req_id]
 
+        # Re-prefill: the scheduler's explicit signal to recompute positions
+        # from 0.
+        if new_req_data.is_reprefill and self.uses_mrope:
+            req_state.mrope_positions = None
+            req_state.max_cached_position = None
+
+        # 1D-RoPE (text) sessions: index -> RoPE position offset, refreshed
+        # every streaming resume (grows on eviction, resets on re-prefill).
+        req_state.position_offset = new_req_data.position_offset
+
         req_state.prompt_token_ids = new_req_data.prompt_token_ids
         req_state.mm_features = new_req_data.mm_features
         req_state.prompt_embeds = new_req_data.prompt_embeds
@@ -1666,9 +1720,94 @@ class GPUModelRunner(
         req_state.output_token_ids.clear()
 
         if self.uses_mrope:
-            self._init_mrope_positions(req_state)
+            if new_req_data.evicted_token_ranges:
+                self._slice_mrope_positions_for_evicted_ranges(
+                    req_state, new_req_data.evicted_token_ranges
+                )
+            self._extend_mrope_positions_for_streaming_chunk(req_state)
 
         return req_state
+
+    @staticmethod
+    def _slice_mrope_positions_for_evicted_ranges(
+        req_state: CachedRequestState,
+        evicted_ranges: list[tuple[int, int]],
+    ) -> None:
+        """Drop the columns for evicted token ranges from
+        `req_state.mrope_positions`, mirroring the scheduler-side compaction.
+
+        Ranges apply in order, each in the tensor's index space at its own
+        eviction time (later ranges already reflect earlier shrinks); ranges
+        past the current width are clipped. Surviving positions keep their
+        values and `max_cached_position` is untouched, so the position space
+        has gaps but cached K/V rotation stays consistent.
+        """
+        if req_state.mrope_positions is None:
+            return
+        positions = req_state.mrope_positions
+        for start, end in evicted_ranges:
+            width = positions.shape[1]
+            end_clipped = min(end, width)
+            if start >= end_clipped:
+                continue
+            if start == 0 and end_clipped >= width:
+                positions = positions[:, :0]
+            elif start == 0:
+                positions = positions[:, end_clipped:]
+            elif end_clipped >= width:
+                positions = positions[:, :start]
+            else:
+                positions = torch.cat(
+                    [positions[:, :start], positions[:, end_clipped:]],
+                    dim=1,
+                )
+        req_state.mrope_positions = positions
+
+    def _extend_mrope_positions_for_streaming_chunk(
+        self, req_state: CachedRequestState
+    ) -> None:
+        """Append positions for the new chunk only (tokens past the prior
+        chunk's end), starting at `max_cached_position + 1` so they sit
+        strictly above any cached position — preserving cached K/V's rotation.
+        """
+        assert req_state.prompt_token_ids is not None
+        if req_state.mrope_positions is None or req_state.max_cached_position is None:
+            self._init_mrope_positions(req_state)
+            return
+
+        prev_num_tokens = req_state.mrope_positions.shape[1]
+        new_num_tokens = req_state.num_prompt_tokens
+        if new_num_tokens == prev_num_tokens:
+            return
+        assert new_num_tokens > prev_num_tokens, (
+            f"streaming chunk shrank prompt from {prev_num_tokens} to "
+            f"{new_num_tokens}; eviction must use the slice path, not this one."
+        )
+
+        chunk_tokens = req_state.prompt_token_ids[prev_num_tokens:new_num_tokens]
+        cumulative_features = [
+            f for f in req_state.mm_features if f.modality != "prompt_embeds"
+        ]
+        chunk_features = make_chunk_relative_mm_features(
+            cumulative_features, prev_num_tokens
+        )
+
+        model = self.get_model()
+        mrope_model = cast(SupportsMRoPE, model)
+        chunk_positions, new_max_position = compute_chunk_mrope_positions(
+            mrope_model,
+            chunk_tokens,
+            chunk_features,
+            base_position=req_state.max_cached_position + 1,
+        )
+
+        req_state.mrope_positions = torch.cat(
+            [req_state.mrope_positions, chunk_positions.to(req_state.mrope_positions)],
+            dim=1,
+        )
+        req_state.max_cached_position = new_max_position
+        # Decode-time positions: linear continuation from new max.
+        req_state.mrope_position_delta = new_max_position + 1 - new_num_tokens
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1701,6 +1840,12 @@ class GPUModelRunner(
                 mrope_features,
             )
         )
+        # Track the highest position number for streaming continuation.
+        # Empty prompts (only possible with prompt_embeds) leave it at -1.
+        if req_state.mrope_positions.numel() > 0:
+            req_state.max_cached_position = int(req_state.mrope_positions.max().item())
+        else:
+            req_state.max_cached_position = -1
 
     def _init_xdrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -2217,6 +2362,23 @@ class GPUModelRunner(
             self.query_start_loc.gpu[: num_reqs + 1],
             self.positions[:total_num_scheduled_tokens],
         )
+
+        # 1D-RoPE (text) streaming sessions: shift the RoPE positions of this
+        # step's scheduled tokens by the session's cumulative evicted width,
+        # so new tokens continue past the evicted range and cached K keeps a
+        # consistent rotation. MUST run after compute_slot_mapping (physical
+        # slots are index-based). mRoPE models are untouched (their RoPE reads
+        # mrope_positions, not this buffer). NOTE(draft): attention backends
+        # that read CommonAttentionMetadata.positions for masking see the
+        # shifted values; audited for the default FA path, others pending.
+        if not self.uses_mrope:
+            for idx, req_id in enumerate(self.input_batch.req_ids):
+                req_state = self.requests.get(req_id)
+                if req_state is None or not req_state.position_offset:
+                    continue
+                start = int(cu_num_tokens[idx - 1]) if idx > 0 else 0
+                end = int(cu_num_tokens[idx])
+                self.positions[start:end] += req_state.position_offset
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -3402,6 +3564,87 @@ class GPUModelRunner(
 
         return mm_embeds, is_mm_embed
 
+    @staticmethod
+    def _req_uses_streaming_retention(req_state: CachedRequestState) -> bool:
+        """Worker-side mirror of `Request.uses_persistent_encoder_cache()`,
+        re-derived from `sampling_params` (which `CachedRequestState` carries,
+        unlike `streaming_retention`). True iff a `streaming_retention` in
+        `extra_args` (dataclass or dict) has `reprefill_threshold < 1.0`.
+        """
+        sampling_params = req_state.sampling_params
+        if sampling_params is None:
+            return False
+        extra_args = sampling_params.extra_args
+        if not extra_args:
+            return False
+        retention = extra_args.get("streaming_retention")
+        if retention is None:
+            return False
+        if isinstance(retention, dict):
+            threshold = retention.get("reprefill_threshold", 1.0)
+        else:
+            threshold = getattr(retention, "reprefill_threshold", 1.0)
+        try:
+            return float(threshold) < 1.0
+        except (TypeError, ValueError):
+            return False
+
+    def _neutralize_orphan_mm_placeholders(
+        self,
+        scheduler_output: "SchedulerOutput",
+        inputs_embeds: torch.Tensor,
+        is_mm_embed: torch.Tensor,
+        num_scheduled_tokens: int,
+    ) -> None:
+        """Zero the embedding rows of orphan image/video placeholder markers
+        (e.g. `<|image_pad|>` / `<|video_pad|>`) left by block-aligned
+        streaming eviction.
+
+        Eviction frees an mm feature at its raw range but compacts tokens at
+        the narrower block-aligned range, so up to `block_size - 1` markers
+        survive with no `mm_feature`; at re-prefill they miss
+        `_gather_mm_embeddings` and would get their raw (OOD) text embedding.
+        Quality-only — touches no KV-feeding state. No-op unless the model has
+        `image_token_id`/`video_token_id` and a streaming request has such an
+        orphan.
+        """
+        placeholder_ids = self.mm_placeholder_ids_cpu
+        if placeholder_ids is None:
+            return
+
+        eligible = torch.zeros(num_scheduled_tokens, dtype=torch.bool, device="cpu")
+        any_streaming = False
+        req_start_idx = 0
+        for req_id in self.input_batch.req_ids:
+            n = scheduler_output.num_scheduled_tokens[req_id]
+            if self._req_uses_streaming_retention(self.requests[req_id]):
+                eligible[req_start_idx : req_start_idx + n] = True
+                any_streaming = True
+            req_start_idx += n
+        if not any_streaming:
+            return
+
+        # Orphan mask (host-side): placeholder id, no backing feature,
+        # streaming.
+        token_ids_cpu = self.input_ids.gpu[:num_scheduled_tokens].to(
+            "cpu", non_blocking=False
+        )
+        orphan_mask = (
+            torch.isin(token_ids_cpu, placeholder_ids)
+            & (~is_mm_embed.to("cpu"))
+            & eligible
+        )
+        if not bool(orphan_mask.any()):
+            return
+
+        orphan_idx = (
+            orphan_mask.nonzero(as_tuple=False)
+            .squeeze(1)
+            .to(inputs_embeds.device, non_blocking=True)
+        )
+        # Zero only the orphan rows, removing their OOD text-embedding signal.
+        inputs_embeds[orphan_idx] = 0
+
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
@@ -3661,6 +3904,16 @@ class GPUModelRunner(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
+                )
+
+                # Neutralize orphan image/video placeholder markers left by
+                # streaming eviction (see method); no-op for non-mm /
+                # non-streaming.
+                self._neutralize_orphan_mm_placeholders(
+                    scheduler_output,
+                    inputs_embeds_scheduled,
+                    is_mm_embed,
+                    num_scheduled_tokens,
                 )
 
                 # TODO(woosuk): Avoid the copy. Optimize.
@@ -4865,6 +5118,19 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            # Streaming: report each req's `max_cached_position` back to the
+            # scheduler so the re-prefill trigger sees the true watermark
+            # (else it stays -1 and never fires). Skip unset (None / -1).
+            max_cached_positions: dict[str, int] = {}
+            if self.uses_mrope:
+                for req_id in self.input_batch.req_ids:
+                    req_state = self.requests.get(req_id)
+                    if req_state is None:
+                        continue
+                    pos = req_state.max_cached_position
+                    if pos is not None and pos >= 0:
+                        max_cached_positions[req_id] = pos
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -4878,6 +5144,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                max_cached_positions=max_cached_positions,
             )
 
         if not self.use_async_scheduling:

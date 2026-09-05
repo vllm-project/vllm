@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import bisect
 import copy
 import hashlib
 import math
@@ -813,12 +814,16 @@ def get_request_block_hasher(
             return []
 
         curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
+        if start_token_idx > 0 and request.mm_features:
+            # Streaming extends mm_features past the prompt, so the feature
+            # overlapping a freshly-completed block isn't necessarily the last
+            # one. Bisect (features are sorted by offset) to the first feature
+            # whose span still reaches past start_token_idx.
+            mm_end_positions = [
+                f.mm_position.offset + f.mm_position.length for f in request.mm_features
+            ]
+            curr_mm_idx = bisect.bisect_right(mm_end_positions, start_token_idx)
+            curr_mm_idx = min(curr_mm_idx, len(request.mm_features))
 
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
