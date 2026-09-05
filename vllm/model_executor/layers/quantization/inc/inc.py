@@ -79,6 +79,7 @@ class INCConfig(QuantizationConfig):
         extra_config: dict[str, Any] | None = None,
         data_type: str = "int",
         backend: str = "auto",
+        rotation_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
 
@@ -121,6 +122,7 @@ class INCConfig(QuantizationConfig):
         self.extra_config = extra_config
         self.data_type = data_type
         self.backend = backend
+        self.rotation_config = rotation_config
         self.pack_factor = Fraction(32, weight_bits)
         self.config_parser = INCConfigParser(self)
 
@@ -157,6 +159,36 @@ class INCConfig(QuantizationConfig):
                 f"{field_name}={expected_value!r}, "
                 f"but found {field_name}={actual_value!r}."
             )
+
+    def _validate_rotation_config(self) -> None:
+        if self.rotation_config is not None:
+            if not isinstance(self.rotation_config, dict):
+                raise ValueError("rotation_config must be an object")
+            if not (self.is_mxfp and self.weight_bits == 4):
+                raise ValueError(
+                    "AutoRound Hadamard rotation is only supported with INC MXFP4"
+                )
+            if self.rotation_config.get("backend") != "transform":
+                raise ValueError(
+                    "INC only supports AutoRound rotation backend='transform'"
+                )
+            if self.rotation_config.get("hadamard_type") != "hadamard":
+                raise ValueError(
+                    "INC only supports deterministic hadamard_type='hadamard'"
+                )
+            block_size = self.rotation_config.get("block_size", 32)
+            if (
+                not isinstance(block_size, int)
+                or isinstance(block_size, bool)
+                or block_size <= 0
+                or block_size & (block_size - 1)
+                or block_size > (1 << 15)
+            ):
+                raise ValueError(
+                    "AutoRound rotation block_size must be a positive power of two "
+                    "no greater than 32768"
+                )
+            self.rotation_config = {**self.rotation_config, "block_size": block_size}
 
     def _validate_int_quantization(self) -> None:
         int_packing_formats = {
@@ -214,6 +246,7 @@ class INCConfig(QuantizationConfig):
         )
 
     def _validate_supported_quantization(self) -> None:
+        self._validate_rotation_config()
         if self.data_type == "int":
             self._validate_int_quantization()
         elif self.data_type == self.FP8_BLOCK_DATA_TYPE:
@@ -305,6 +338,7 @@ class INCConfig(QuantizationConfig):
             extra_config=cls.get_from_keys_or(config, ["extra_config"], None),
             data_type=data_type,
             backend=cls.get_from_keys_or(config, ["backend", "vllm_backend"], "auto"),
+            rotation_config=cls.get_from_keys_or(config, ["rotation_config"], None),
         )
         quant_config._validate_raw_config(config)
         return quant_config
