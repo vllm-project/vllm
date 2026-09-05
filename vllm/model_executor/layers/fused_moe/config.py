@@ -519,8 +519,7 @@ class FusedMoEQuantConfig:
           "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
           for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
-        - per_out_ch_quant: Outputs have per channel quantization. (only
-          for cutlass).
+        - per_out_ch_quant: Outputs have per channel quantization.
         - block_shape: Optional block size for block-wise quantization.
           Incompatible with per_act_token and per_out_ch quant.
         - w1_scale: Optional scale to be used for w1.
