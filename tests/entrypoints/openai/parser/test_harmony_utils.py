@@ -445,6 +445,56 @@ class TestCommonParseInputToHarmonyMessage:
         assert messages[0].content[0].text == ""
         assert messages[0].content[1].text == "actual text"
 
+    def test_assistant_message_with_refusal_content(self, parse_function):
+        """Refusal content parts must be mapped to Harmony text, not dropped."""
+        chat_msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = parse_function(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.ASSISTANT
+        assert len(messages[0].content) == 1
+        assert messages[0].content[0].text == "I can't help with that"
+
+    def test_assistant_message_with_mixed_text_and_refusal_content(
+        self, parse_function
+    ):
+        """Text and refusal parts should both become Harmony TextContent."""
+        chat_msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Sorry, "},
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = parse_function(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.ASSISTANT
+        assert len(messages[0].content) == 2
+        assert messages[0].content[0].text == "Sorry, "
+        assert messages[0].content[1].text == "I can't help with that"
+
+    def test_refusal_content_falls_back_to_text_field(self, parse_function):
+        """A refusal part may carry the string in ``text`` instead of ``refusal``."""
+        chat_msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "refusal", "text": "I can't help with that"},
+            ],
+        }
+
+        messages = parse_function(chat_msg)
+
+        assert len(messages) == 1
+        assert messages[0].content[0].text == "I can't help with that"
+
 
 class TestParseChatInputToHarmonyMessage:
     """
@@ -497,6 +547,27 @@ class TestParseChatInputToHarmonyMessage:
         messages = parse_chat_input_to_harmony_message(chat_msg)
 
         assert len(messages) == 0
+
+    def test_assistant_refusal_content_uses_final_channel(self):
+        chat_msg = {
+            "role": "assistant",
+            "content": [
+                {"type": "refusal", "refusal": "I can't help with that"},
+            ],
+        }
+
+        messages = parse_chat_input_to_harmony_message(chat_msg)
+
+        verify_harmony_messages(
+            messages,
+            [
+                {
+                    "role": "assistant",
+                    "channel": "final",
+                    "content": "I can't help with that",
+                },
+            ],
+        )
 
     def test_assistant_message_with_none_content(self):
         chat_msg = {
