@@ -34,6 +34,7 @@ vLLM currently supports the following reasoning models:
     Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+    DeepSeek-V4 reasoning is enabled by default, with an implicit `reasoning_effort` of `high`. To disable it, pass `thinking=False` or `enable_thinking=False` in your `chat_template_kwargs`, or set `reasoning_effort="none"`. To keep thinking on without an effort prompt prefix, pass `reasoning_effort="low"` explicitly — omitting the field is not equivalent.
 
 ## Quickstart
 
@@ -319,7 +320,7 @@ for output in outputs:
 
 ## Automatic `enable_thinking` Activation
 
-Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
+Some models (such as Gemma 4 and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
 
 When you set `reasoning_effort` in a Chat Completions request (or `reasoning.effort` in a Responses API request), vLLM automatically injects `enable_thinking` into the chat template kwargs:
 
@@ -333,6 +334,25 @@ This means you no longer need to manually pass `chat_template_kwargs: {"enable_t
     If you explicitly set `enable_thinking` in `chat_template_kwargs`, your value takes priority over the automatic injection. This allows you to override the behavior if needed.
 
     For models whose templates don't declare `enable_thinking` (e.g., DeepSeek R1), the injected kwarg is harmlessly filtered out by `resolve_chat_template_kwargs`.
+
+### DeepSeek-V4 Effort Normalization
+
+DeepSeek-V4 does not follow the generic injection above. Its tokenizer wrapper normalizes `reasoning_effort` to the three levels the checkpoint's encoder defines (`low`, `high`, `max`) and selects the thinking mode itself:
+
+| Requested `reasoning_effort` | Mode | Effort applied | Prompt prefix |
+| ---------------------------- | -------- | -------------- | ------------------- |
+| not set | thinking | `high` | "Absolute maximum..." |
+| `minimal`, `low`, `medium` | thinking | `low` | none |
+| `high`, `xhigh`, unrecognized | thinking | `high` | "Absolute maximum..." |
+| `max` | thinking | `max` | "Beyond maximum..." |
+| `none` | chat | -- | none |
+
+Two consequences differ from the other reasoning models documented above:
+
+- Thinking is on by default. Omitting both `thinking` and `enable_thinking` enables it rather than disabling it.
+- Omitting `reasoning_effort` is not neutral: it applies `high`, which prepends an effort prompt prefix. A client that wants thinking without that prefix must pass `reasoning_effort="low"` explicitly.
+
+This normalization is shared by every DeepSeek-V4 checkpoint; the effort prompt texts themselves live in the checkpoint's own `encoding/encoding_dsv4.py`.
 
 ### Example
 
