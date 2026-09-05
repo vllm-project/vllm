@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
+from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.passes.fusion.rope_kvcache_fusion import (
     RopeKVCacheFusionPass,
 )
@@ -29,6 +30,7 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.models.llama import LlamaAttention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.attention.backend import AttentionType
@@ -36,6 +38,66 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheLayout
 
 _LAYER_NAME = "model.layers.0.self_attn.attn"
+
+
+class _IdentityProjection(torch.nn.Module):
+    def forward(self, hidden_states: torch.Tensor):
+        return hidden_states, None
+
+
+class _IdentityRotary(torch.nn.Module):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return query, key
+
+
+class _ManualPathMarker(Attention):
+    rope_kvcache_fusion_max_token_num = 256
+
+    def __init__(self) -> None:
+        torch.nn.Module.__init__(self)
+
+    def forward_with_fused_rope_kvcache(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        rotary_emb: torch.nn.Module,
+    ) -> torch.Tensor:
+        return query + 1
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        return query - 1
+
+
+@support_torch_compile(
+    dynamic_arg_dims={
+        "positions": {0: "num_tokens"},
+        "hidden_states": {0: "num_tokens"},
+    }
+)
+class _CompiledLlamaAttentionCallSite(torch.nn.Module):
+    forward = LlamaAttention.forward
+
+    def __init__(self, vllm_config: VllmConfig | None = None) -> None:
+        super().__init__()
+        self.q_size = 1
+        self.kv_size = 1
+        self.qkv_proj = _IdentityProjection()
+        self.rotary_emb = _IdentityRotary()
+        self.attn = _ManualPathMarker()
+        self.o_proj = _IdentityProjection()
+        self._use_fused_rope_kvcache = True
 
 
 def test_manual_fusion_requires_matching_activation_and_cache_dtype(
@@ -110,6 +172,73 @@ def test_missing_slot_mapping_rotates_query_without_materializing_key(
     torch.testing.assert_close(query_out, query)
     assert query_out.data_ptr() != query.data_ptr()
     assert calls == [(None, 64)]
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [(256, 1.0), (257, -1.0)],
+)
+def test_llama_manual_rope_eager_call_site_keeps_token_threshold(
+    num_tokens: int,
+    expected: float,
+) -> None:
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE)
+    )
+    model = _CompiledLlamaAttentionCallSite(vllm_config=vllm_config)
+    positions = torch.arange(num_tokens)
+    hidden_states = torch.zeros(num_tokens, 3)
+
+    output = LlamaAttention.forward(model, positions, hidden_states)
+
+    torch.testing.assert_close(output, torch.full_like(output, expected))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA.")
+@pytest.mark.parametrize(
+    "token_counts",
+    [
+        (512, 2),
+        (2, 512),
+        (257, 256),
+        (256, 257),
+    ],
+)
+def test_llama_manual_rope_call_site_is_stable_when_guards_are_dropped(
+    token_counts: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
+    disable_vllm_compile_cache,
+) -> None:
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "0")
+    vllm_config = VllmConfig(
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_batched_tokens=512,
+            max_num_seqs=1,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            pass_config=PassConfig(
+                fuse_rope_kvcache=True,
+                rope_kvcache_fusion_max_token_num=256,
+            ),
+            inductor_compile_config={"force_disable_caches": True},
+        ),
+    )
+    assert vllm_config.compilation_config.compile_ranges_endpoints == [256, 512]
+
+    with (
+        torch.no_grad(),
+        vllm.config.set_current_vllm_config(vllm_config),
+        set_forward_context({}, vllm_config),
+    ):
+        model = _CompiledLlamaAttentionCallSite(vllm_config=vllm_config).cuda()
+        for num_tokens in token_counts:
+            positions = torch.arange(num_tokens, device="cuda")
+            hidden_states = torch.zeros(num_tokens, 3, device="cuda")
+            output = model(positions, hidden_states)
+            torch.testing.assert_close(output, torch.ones_like(output))
 
 
 class _FunctionalRoPEAttention(torch.nn.Module):
@@ -281,3 +410,113 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
     torch.testing.assert_close(incumbent_output, fused_output, atol=2e-3, rtol=2e-3)
     assert torch.count_nonzero(fused_cache).item() > 0
     torch.testing.assert_close(incumbent_cache, fused_cache, atol=2e-3, rtol=2e-3)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA.")
+@pytest.mark.parametrize("token_counts", [(3, 2), (2, 3)])
+def test_compiled_manual_rope_runtime_threshold_tracks_dynamic_tokens(
+    token_counts: tuple[int, int],
+    mocker,
+    disable_vllm_compile_cache,
+    tmp_path,
+) -> None:
+    from vllm.compilation.backends import VllmBackend
+
+    dtype = torch.float16
+    device = torch.device("cuda")
+    threshold = 2
+    block_size = 16
+    model_dir = tmp_path / "model"
+    Qwen3Config(architectures=["Qwen3ForCausalLM"]).save_pretrained(model_dir)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_dir), tokenizer=str(model_dir), dtype=dtype
+        ),
+        cache_config=CacheConfig(block_size=block_size, cache_dtype="auto"),
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_batched_tokens=max(token_counts),
+            max_num_seqs=max(token_counts),
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            use_inductor_graph_partition=False,
+            inductor_compile_config={"force_disable_caches": True},
+            pass_config=PassConfig(
+                fuse_rope_kvcache=True,
+                fuse_attn_quant=False,
+                rope_kvcache_fusion_max_token_num=threshold,
+            ),
+        ),
+    )
+    vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
+
+    with (
+        torch.device(device),
+        set_default_torch_dtype(dtype),
+        vllm.config.set_current_vllm_config(vllm_config),
+    ):
+        torch.manual_seed(0)
+        model = _FunctionalRoPEAttention(vllm_config, device)
+        cache_spec = model.attn.get_kv_cache_spec(vllm_config)
+        assert cache_spec is not None
+        builder = model.backend.get_builder_cls()(
+            cache_spec,
+            [_LAYER_NAME],
+            vllm_config,
+            device,
+        )
+        fused_update = mocker.spy(model.attn.impl, "do_rope_and_kv_cache_update_q_out")
+        fallback_update = mocker.spy(model.attn.impl, "do_kv_cache_update")
+        backend = VllmBackend(vllm_config)
+        compiled = torch.compile(model, backend=backend, fullgraph=True)
+
+        def run(call, qkv: torch.Tensor, positions: torch.Tensor):
+            num_tokens = qkv.shape[0]
+            common_metadata = create_common_attn_metadata(
+                BatchSpec([num_tokens], [num_tokens]),
+                block_size=block_size,
+                device=device,
+                arange_block_indices=True,
+            )
+            metadata = builder.build(0, common_metadata)
+            num_blocks = (num_tokens + block_size - 1) // block_size
+            cache_storage = torch.zeros(
+                num_blocks * cache_spec.page_size_bytes,
+                dtype=torch.int8,
+                device=device,
+            )
+            model.attn.kv_cache = dense_kv_cache_views(
+                cache_storage,
+                cache_spec,
+                num_blocks=num_blocks,
+                num_layers=1,
+                layout=KVCacheLayout.LBNHC,
+            )[0]
+            with set_forward_context(
+                metadata,
+                vllm_config,
+                slot_mapping={_LAYER_NAME: metadata.slot_mapping},
+            ):
+                output = call(qkv, positions)
+            return output, model.attn.kv_cache.clone()
+
+        for index, num_tokens in enumerate(token_counts):
+            qkv = torch.randn(num_tokens, model.qkv_size, dtype=dtype, device=device)
+            positions = torch.arange(num_tokens, dtype=torch.long, device=device)
+            expected_output, expected_cache = run(model.incumbent, qkv, positions)
+            fused_update.reset_mock()
+            fallback_update.reset_mock()
+            if index == 0:
+                torch._dynamo.mark_dynamic(qkv, 0)
+                torch._dynamo.mark_dynamic(positions, 0)
+            actual_output, actual_cache = run(compiled, qkv, positions)
+
+            assert fused_update.call_count == int(num_tokens <= threshold)
+            assert fallback_update.call_count == int(num_tokens > threshold)
+            torch.testing.assert_close(
+                actual_output, expected_output, atol=2e-3, rtol=2e-3
+            )
+            torch.testing.assert_close(
+                actual_cache, expected_cache, atol=2e-3, rtol=2e-3
+            )

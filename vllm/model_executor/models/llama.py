@@ -232,10 +232,15 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Keep compiled call graphs independent of token-count guards. Attention
+        # applies the fusion threshold at runtime inside the custom op.
         if (
             self._use_fused_rope_kvcache
             and positions.dim() == 1
-            and q.shape[0] <= self.attn.rope_kvcache_fusion_max_token_num
+            and (
+                torch.compiler.is_compiling()
+                or q.shape[0] <= self.attn.rope_kvcache_fusion_max_token_num
+            )
         ):
             assert isinstance(self.attn, Attention)
             attn_output = self.attn.forward_with_fused_rope_kvcache(

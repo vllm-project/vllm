@@ -682,8 +682,9 @@ class Attention(nn.Module, AttentionLayerBase):
         assert impl.fused_rope_kvcache_q_out_supported(), (
             "The attention backend does not support cache-only fused RoPE."
         )
-        # This is the final dynamic guard before native mutation; callers other
-        # than Llama's model-side fast path must retain the token threshold.
+        # vLLM drops Dynamo shape guards, so a compiled model call site cannot
+        # own this dynamic threshold. Keep the compiled path stable and select
+        # the native kernel or incumbent fallback here at runtime.
         if (
             layer_slot_mapping is not None
             and query.shape[0] <= self.rope_kvcache_fusion_max_token_num
