@@ -601,6 +601,31 @@ class ParallelLMHead(VocabParallelEmbedding):
             self._register_bias()
         else:
             self.register_parameter("bias", None)
+        self._maybe_enable_lossless_packed_backend()
+
+    def _maybe_enable_lossless_packed_backend(self) -> None:
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+        config = get_current_vllm_config_or_none()
+        if (
+            config is None
+            or config.kernel_config.lm_head_backend != "lossless_packed"
+            or not current_platform.is_cuda()
+            or self.params_dtype != torch.bfloat16
+            or self.bias is not None
+        ):
+            return
+        if not isinstance(
+            self.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        ):
+            return
+
+        from vllm.model_executor.kernels.linear.unquantized.packed_bf16_lm_head import (
+            LosslessPackedLMHeadMethod,
+        )
+
+        self.quant_method = LosslessPackedLMHeadMethod(self.quant_method)
 
     def _register_bias(self):
         data = torch.empty(self.num_embeddings_per_partition, dtype=self.params_dtype)
