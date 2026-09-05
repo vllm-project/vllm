@@ -2753,6 +2753,11 @@ class EngineArgs:
             and self.enable_prefix_caching
             and not default_prefix_caching
         ):
+            if model_config.attn_type == "encoder_only":
+                raise ValueError(
+                    "Prefix caching is not supported for pooling models with "
+                    "encoder-only attention. Remove --enable-prefix-caching."
+                )
             logger.warning_once(
                 "This model does not officially support prefix caching. "
                 "Enabling this manually may cause the engine to crash "

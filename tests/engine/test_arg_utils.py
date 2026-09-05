@@ -4,12 +4,14 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from types import SimpleNamespace
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
-
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -23,7 +25,6 @@ from vllm.engine.arg_utils import (
     optional_type,
     parse_type,
 )
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(
@@ -339,9 +340,11 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "--compilation-config="
-            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-            '"backend": "inductor"}',
+            (
+                "--compilation-config="
+                '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+                '"backend": "inductor"}'
+            ),
         ]
     )
     assert (
@@ -403,11 +406,13 @@ def test_attention_config():
     # set to string form of a dict with all fields
     args = parser.parse_args(
         [
-            "--attention-config="
-            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
-            '"use_trtllm_attention": false, '
-            '"disable_flashinfer_q_quantization": false}',
+            (
+                "--attention-config="
+                '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+                '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+                '"use_trtllm_attention": false, '
+                '"disable_flashinfer_q_quantization": false}'
+            ),
         ]
     )
     assert args is not None
@@ -505,6 +510,35 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
+
+
+@pytest.mark.parametrize(
+    ("enable_prefix_caching", "attn_type", "is_supported", "raises"),
+    [
+        (True, "encoder_only", False, True),
+        (None, "encoder_only", False, False),
+        (True, "decoder", False, False),
+        (True, "decoder", True, False),
+    ],
+)
+def test_prefix_cache_pooling_model_validation(
+    enable_prefix_caching, attn_type, is_supported, raises
+):
+    engine_args = EngineArgs(enable_prefix_caching=enable_prefix_caching)
+    model_config = SimpleNamespace(
+        runner_type="pooling",
+        attn_type=attn_type,
+        is_chunked_prefill_supported=True,
+        is_prefix_caching_supported=is_supported,
+    )
+
+    context = (
+        pytest.raises(ValueError, match="not supported for pooling models")
+        if raises
+        else nullcontext()
+    )
+    with context:
+        engine_args._set_default_chunked_prefill_and_prefix_caching_args(model_config)
 
 
 def test_prefix_cache_retention_interval_from_deprecated_env(
