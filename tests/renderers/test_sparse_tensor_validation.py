@@ -117,8 +117,10 @@ class TestPromptEmbedsValidation:
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
 
-        # Should raise RuntimeError due to invalid sparse tensor
-        with pytest.raises((RuntimeError, ValueError)) as exc_info:
+        # The invariant check raises RuntimeError from inside torch.load;
+        # safe_load_prompt_embeds now reports that as a client error so the
+        # caller gets a 400 rather than the 500 a bare RuntimeError produced.
+        with pytest.raises(VLLMValidationError) as exc_info:
             safe_load_prompt_embeds(model_config, encoded)
 
         # Error should indicate sparse tensor validation failure
@@ -137,7 +139,7 @@ class TestPromptEmbedsValidation:
         )
         encoded = _encode_tensor(malicious_tensor)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_negative_indices_rejected(self, model_config):
@@ -152,7 +154,7 @@ class TestPromptEmbedsValidation:
         )
         encoded = _encode_tensor(malicious_tensor)
 
-        with pytest.raises((RuntimeError, ValueError)):
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, encoded)
 
     def test_hidden_size_mismatch_rejected(self, model_config):
@@ -379,8 +381,8 @@ class TestSparseTensorValidationIntegration:
         # Step 1-2: Attacker creates malicious payload
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
 
-        # Step 3-4: Server processes and should reject
-        with pytest.raises((RuntimeError, ValueError)):
+        # Step 3-4: Server processes and should reject, as a client error
+        with pytest.raises(VLLMValidationError):
             safe_load_prompt_embeds(model_config, attack_payload)
 
     def test_attack_scenario_chat_api_image(self):
