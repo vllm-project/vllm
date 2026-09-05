@@ -102,7 +102,8 @@ os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
 # see https://github.com/vllm-project/vllm/issues/10480 and
 # https://github.com/vllm-project/vllm/issues/10619.
-os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+# Default to 1 for the reasons above; an explicit environment setting wins.
+os.environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", "1")
 
 # Enable Triton autotuning result caching to disk by default.
 # Without this, Triton re-runs autotuning on every process restart,
