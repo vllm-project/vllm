@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
+from queue import Queue
 
 import msgspec
 import pytest
@@ -10,6 +11,7 @@ from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
     NullEventPublisher,
+    ZmqEventPublisher,
 )
 
 DP_RANK = 0
@@ -72,6 +74,30 @@ def test_multiple_events(publisher, subscriber):
     assert len(received) == 10, "Number of messages mismatch"
     seqs = [seq for seq, _ in received]
     assert seqs == list(range(10)), "Sequence numbers mismatch"
+
+
+def test_publish_does_not_block_when_event_queue_is_full():
+    publisher = object.__new__(ZmqEventPublisher)
+    publisher._running = True
+    publisher._data_parallel_rank = DP_RANK
+    publisher._event_queue = Queue(maxsize=1)
+    queued_events = create_test_events(1)
+    publisher._event_queue.put_nowait(queued_events)
+
+    publish_thread = threading.Thread(
+        target=publisher.publish, args=(create_test_events(1),), daemon=True
+    )
+    publish_thread.start()
+    try:
+        publish_thread.join(timeout=1.0)
+        assert not publish_thread.is_alive(), (
+            "publish must not block inference when the event queue is full"
+        )
+        assert publisher._event_queue.get_nowait() is queued_events
+    finally:
+        if not publisher._event_queue.empty():
+            publisher._event_queue.get_nowait()
+        publish_thread.join(timeout=1.0)
 
 
 def test_replay_mechanism(publisher, subscriber):

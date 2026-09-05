@@ -278,8 +278,8 @@ class EventPublisher(ABC):
     def publish(self, events: EventBatch) -> None:
         """Emit events in order.
 
-        Implementations should guarantee at-least-once delivery and
-        monotonic ordering (e.g., via sequence numbers).
+        Implementations must not block inference indefinitely and should
+        preserve monotonic ordering for delivered events.
         """
 
     @abstractmethod
@@ -388,7 +388,14 @@ class ZmqEventPublisher(EventPublisher):
             raise RuntimeError("Publisher is closed")
         if events.data_parallel_rank is None:
             events.data_parallel_rank = self._data_parallel_rank
-        self._event_queue.put(events)
+        try:
+            self._event_queue.put_nowait(events)
+        except queue.Full:
+            logger.warning_once(
+                "KV event queue is full (%d items); dropping event batch "
+                "to avoid blocking inference",
+                self._event_queue.maxsize,
+            )
 
     def shutdown(self) -> None:
         """Stop the publisher thread and clean up resources."""
