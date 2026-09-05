@@ -223,6 +223,36 @@ def test_full_cudagraph_spec_metadata_uses_request_count():
     assert meta.num_accepted_tokens.shape == (batch.batch_size,)
 
 
+@pytest.mark.parametrize("num_decodes,batch_size", [(1, 4), (3, 8), (4, 4)])
+def test_full_cudagraph_regular_decode_accepted_counts(num_decodes, batch_size):
+    """Zero-token graph padding remains request-aligned in regular decode."""
+    builder = _create_gdn_builder(num_speculative_tokens=2, full_cuda_graph=True)
+    builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    batch = BatchSpec(
+        seq_lens=[65] * num_decodes + [0] * (batch_size - num_decodes),
+        query_lens=[1] * num_decodes + [0] * (batch_size - num_decodes),
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE)
+    common.num_actual_tokens = batch_size
+    common.block_table_tensor[num_decodes:].zero_()
+    counts = torch.ones(batch_size, dtype=torch.int32, device=DEVICE)
+    counts[:num_decodes] = 3
+    meta = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        num_accepted_tokens=counts,
+    )
+    assert meta.num_decodes == batch_size
+    assert meta.num_accepted_tokens.shape == meta.non_spec_state_indices_tensor.shape
+    torch.testing.assert_close(meta.num_accepted_tokens, counts)
+    assert meta.num_accepted_tokens[num_decodes:].tolist() == [1] * (
+        batch_size - num_decodes
+    )
+    assert meta.spec_decode_src_indices[num_decodes:].tolist() == [0] * (
+        batch_size - num_decodes
+    )
+
+
 def test_regular_decode_restores_previous_spec_state():
     builder = _create_gdn_builder(num_speculative_tokens=2)
     builder.vllm_config.cache_config.mamba_cache_mode = "none"
