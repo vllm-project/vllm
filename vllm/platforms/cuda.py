@@ -703,7 +703,13 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """Currently, only Hopper and Blackwell GPUs are supported."""
+        """Return whether the current GPU is supported by DeepGEMM.
+
+        DeepGEMM does not currently support SM 12.1, even though it belongs
+        to the SM 12.x capability family.
+        """
+        if cls.is_device_capability(121):
+            return False
         return (
             cls.is_device_capability(90)
             or cls.is_device_capability_family(100)
