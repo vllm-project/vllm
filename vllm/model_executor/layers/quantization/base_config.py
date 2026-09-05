@@ -238,6 +238,13 @@ class QuantizationConfig(ABC):
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
+    @staticmethod
+    def get_checkpoint_weight_mapper() -> "WeightsMapper":
+        """Map or discard quantization-specific checkpoint tensors."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper()
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):

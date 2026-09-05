@@ -432,8 +432,9 @@ class AutoWeightsLoader:
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
         if quant_config := next(iterator, None):
-            # Get mappings and ignore prefixes for KV cache quantization scales
+            # Apply mappings for quantization-specific checkpoint tensors.
             mapper |= quant_config.get_cache_scale_mapper()
+            mapper |= quant_config.get_checkpoint_weight_mapper()
             ignore_unexpected_suffixes = quant_config._ignore_unexpected_suffixes
             self.ignore_unexpected_suffixes.extend(ignore_unexpected_suffixes)
         mapper |= self.REMOVE_UNUSED_ROTARY_EMBEDS_MAPPER

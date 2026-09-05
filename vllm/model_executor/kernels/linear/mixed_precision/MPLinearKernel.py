@@ -19,7 +19,6 @@ class MPLinearLayerConfig:
     act_type: torch.dtype
     group_size: int
     zero_points: bool
-    has_g_idx: bool
     out_type: torch.dtype | None = None
 
 
@@ -40,7 +39,6 @@ class MPLinearKernel(ABC):
         w_q_param_name: str,
         w_s_param_name: str,
         w_zp_param_name: str | None = None,
-        w_gidx_param_name: str | None = None,
     ) -> None:
         assert self.can_implement(c)
         self.config = c
@@ -48,10 +46,7 @@ class MPLinearKernel(ABC):
         self.w_s_name = w_s_param_name
         if c.zero_points:
             assert w_zp_param_name is not None
-        if c.has_g_idx:
-            assert w_gidx_param_name is not None
         self.w_zp_name: str | None = w_zp_param_name
-        self.w_gidx_name: str | None = w_gidx_param_name
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -83,12 +78,10 @@ class MPLinearKernel(ABC):
     ) -> tuple[
         torch.Tensor,  # w_q
         torch.Tensor,  # w_s
-        torch.Tensor | None,  # w_zp,
-        torch.Tensor | None,  # w_gidx
+        torch.Tensor | None,  # w_zp
     ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),
             getattr(layer, self.w_zp_name or "", None),
-            getattr(layer, self.w_gidx_name or "", None),
         )

@@ -64,7 +64,6 @@ def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points)
         weight_type=weight_type,
         group_size=group_size,
         zero_points=zero_points,
-        has_g_idx=False,
     )
     kernel = choose_mp_linear_kernel(config)
     assert kernel is MacheteLinearKernel, (
@@ -73,23 +72,21 @@ def test_machete_kernel_selected(act_type, weight_type, group_size, zero_points)
 
 
 @pytest.mark.parametrize(
-    "full_shape,part_shape,weight_type,group_size,has_g_idx,expected_reason",
+    "full_shape,part_shape,weight_type,group_size,expected_reason",
     [
-        ((4096, 4096), (2048, 4096), scalar_types.uint4b8, 128, True, "Act reordering"),
         (
             (4096, 4096),
             (4096, 4096),
             scalar_types.float6_e3m2f,
             128,
-            False,
             "Quant type",
         ),
-        ((4096, 4096), (4096, 4096), scalar_types.uint4b8, 32, False, "Group size"),
+        ((4096, 4096), (4096, 4096), scalar_types.uint4b8, 32, "Group size"),
     ],
-    ids=["partitioned-g_idx", "unsupported-quant-type", "unsupported-group-size"],
+    ids=["unsupported-quant-type", "unsupported-group-size"],
 )
 def test_machete_rejects_invalid_config(
-    full_shape, part_shape, weight_type, group_size, has_g_idx, expected_reason
+    full_shape, part_shape, weight_type, group_size, expected_reason
 ):
     """Verify Machete rejects unsupported configurations."""
     config = MPLinearLayerConfig(
@@ -99,7 +96,6 @@ def test_machete_rejects_invalid_config(
         weight_type=weight_type,
         group_size=group_size,
         zero_points=False,
-        has_g_idx=has_g_idx,
     )
     can_impl, reason = MacheteLinearKernel.can_implement(config)
     assert not can_impl
@@ -117,7 +113,6 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
         weight_type=scalar_types.uint4b8,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     kernel = choose_mp_linear_kernel(config)
     assert kernel is not MacheteLinearKernel, "MacheteLinearKernel should be disabled"
@@ -127,7 +122,6 @@ def test_kernel_selection_with_disabled_machete(monkeypatch):
     "model_name",
     [
         "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
-        "nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
     ],
 )
 def test_w4a16_machete_e2e(vllm_runner, model_name):

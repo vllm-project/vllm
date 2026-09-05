@@ -463,8 +463,7 @@ class VocabParallelEmbedding(PluggableLayer):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
-        # If parameter does not have output dim, then it should
-        # be copied onto all gpus (e.g. g_idx for act_order gptq).
+        # Parameters without an output dimension are copied onto all GPUs.
         if output_dim is None:
             if (
                 loaded_weight.ndim == 0
