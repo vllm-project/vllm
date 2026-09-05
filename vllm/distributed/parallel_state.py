@@ -41,6 +41,7 @@ import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup, Store
+from torch.distributed.constants import default_pg_timeout
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -48,6 +49,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    create_tcp_store,
     get_cached_tcp_store_client,
 )
 from vllm.logger import init_logger
@@ -1763,6 +1765,7 @@ def init_distributed_environment(
 
     config = get_current_vllm_config_or_none()
     enable_elastic_ep = config is not None and config.parallel_config.enable_elastic_ep
+    world_pg_store: Store | None = None
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1786,7 +1789,44 @@ def init_distributed_environment(
             distributed_init_method = get_distributed_init_method(ip, port)
         else:
             ip = parallel_config.data_parallel_master_ip
-            port = parallel_config.get_next_dp_init_port()
+            if (
+                parallel_config._coord_store_port
+                and not torch.distributed.is_initialized()
+            ):
+                # Group rank 0 lets the world-group TCPStore bind port 0
+                # and publishes the kernel-assigned port via the
+                # coordination store. Pre-allocated ports can be taken by
+                # other processes before the group is initialized.
+                coord_store = get_cached_tcp_store_client(
+                    ip, parallel_config._coord_store_port
+                )
+                if rank == 0:
+                    # wait_for_workers=False: workers can only connect
+                    # once the port is published below; PG init
+                    # synchronizes through store keys as usual.
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        0,
+                        world_size=world_size,
+                        is_master=True,
+                        wait_for_workers=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+                    port = world_pg_store.port
+                    coord_store.set("world_pg_port", str(port).encode())
+                else:
+                    port = int(coord_store.get("world_pg_port").decode())
+                    world_pg_store = create_tcp_store(
+                        ip,
+                        port,
+                        world_size=world_size,
+                        is_master=False,
+                        timeout=timeout or default_pg_timeout,
+                        multi_tenant=True,
+                    )
+            else:
+                port = parallel_config.get_next_dp_init_port()
             distributed_init_method = get_distributed_init_method(ip, port)
             logger.debug(
                 "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
@@ -1816,8 +1856,8 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
-        store = None
-        if distributed_init_method.startswith("file://"):
+        store = world_pg_store
+        if store is None and distributed_init_method.startswith("file://"):
             store = torch.distributed.FileStore(
                 distributed_init_method.removeprefix("file://"), world_size
             )
