@@ -6,7 +6,6 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy
 from http import HTTPStatus
 from typing import Any, Final
 
@@ -99,6 +98,7 @@ from vllm.parser import Parser, ParserManager
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import projected_response_namespace_tool_name_chars
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -299,6 +299,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="logprobs",
             )
+        if not self.use_harmony:
+            maybe_error = self._validate_namespace_tool_name_budget(request)
+            if maybe_error is not None:
+                return maybe_error
         if request.store and not self.enable_store and request.background:
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -321,6 +325,35 @@ class OpenAIServingResponses(GenerateBaseServing):
                 param="previous_response_id",
             )
         return None
+
+    def _validate_namespace_tool_name_budget(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        projected_chars = projected_response_namespace_tool_name_chars(request.tools)
+        if projected_chars == 0:
+            return None
+
+        max_input_tokens = request.build_tok_params(self.model_config).max_input_tokens
+        if max_input_tokens is None:
+            return None
+
+        tokenizer = self.renderer.get_tokenizer()
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        if projected_chars <= max_input_chars:
+            return None
+
+        return self.create_error_response(
+            err_type="invalid_request_error",
+            message=(
+                "Namespace tool names would expand to "
+                f"{projected_chars} characters before rendering, which exceeds "
+                f"this model's maximum input character budget of {max_input_chars}. "
+                "Please reduce the namespace length or number of nested "
+                "function tools."
+            ),
+            status_code=HTTPStatus.BAD_REQUEST,
+            param="tools",
+        )
 
     async def create_responses(
         self,
@@ -1194,21 +1227,23 @@ class OpenAIServingResponses(GenerateBaseServing):
             if request_input or not request.previous_input_messages:
                 messages.append(get_user_message(request_input))
         else:
-            if prev_response is not None:
-                prev_outputs = copy(prev_response.output)
-            else:
-                prev_outputs = []
+            function_calls_by_id = {
+                output.call_id: output
+                for output in (
+                    prev_response.output if prev_response is not None else []
+                )
+                if isinstance(output, ResponseFunctionToolCall)
+            }
             for response_msg in request_input:
-                new_msg = response_input_to_harmony(response_msg, prev_outputs)
+                new_msg = response_input_to_harmony(response_msg, function_calls_by_id)
                 if new_msg is not None:
                     messages.append(new_msg)
 
-                # User passes in a tool call request and its output. We need
-                # to add the tool call request to prev_outputs so that
-                # response_input_to_harmony can find the tool call request when
-                # parsing the tool call output.
+                # Keep the latest prior tool call keyed by call_id so output
+                # conversion stays linear and duplicate IDs keep last-wins
+                # semantics.
                 if isinstance(response_msg, ResponseFunctionToolCall):
-                    prev_outputs.append(response_msg)
+                    function_calls_by_id[response_msg.call_id] = response_msg
         return messages
 
     async def _run_background_request_stream(
@@ -1271,6 +1306,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if getattr(event, "type", "unknown") == "response.completed":
                     return
                 current_index += 1
+
+            if event_deque and event_deque[-1].type == "response.completed":
+                return
 
             await new_event_signal.wait()
 
@@ -1349,13 +1387,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
+        include_output_logprobs = request.is_include_output_logprobs()
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
-            if not request.is_include_output_logprobs():
+            if not include_output_logprobs:
                 return []
             if hide_stream_metadata:
                 return []
