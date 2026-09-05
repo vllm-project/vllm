@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.platforms import current_platform
 
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
@@ -30,16 +31,48 @@ def vllm_topk_softmax(
     gating_output: torch.Tensor,
     renormalize: bool = False,
 ) -> tuple[torch.Tensor, ...]:
-    ops.topk_softmax(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
-    )
+    is_padding = _get_padding_mask(topk_indices.shape[0])
+    if _use_a100_small_topk(gating_output, topk_indices, renormalize):
+        ops.topk_softmax_a100(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            is_padding,
+        )
+    else:
+        ops.topk_softmax(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            is_padding=is_padding,
+        )
 
     return topk_weights, topk_indices
+
+
+def _use_a100_small_topk(
+    gating_output: torch.Tensor,
+    topk_indices: torch.Tensor,
+    renormalize: bool,
+) -> bool:
+    device_index = gating_output.device.index or 0
+    return (
+        gating_output.is_cuda
+        and current_platform.is_device_capability((8, 0), device_index)
+        and gating_output.dtype == torch.bfloat16
+        and gating_output.dim() == 2
+        and gating_output.is_contiguous()
+        and 0 < gating_output.shape[0] <= 64
+        and gating_output.shape[1] == 60
+        and topk_indices.dim() == 2
+        and topk_indices.is_contiguous()
+        and topk_indices.shape[1] == 4
+        and topk_indices.dtype == torch.int32
+        and not renormalize
+    )
 
 
 def vllm_topk_sigmoid(
