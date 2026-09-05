@@ -90,6 +90,21 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_deepep_v2_allow_hybrid_mode_defaults_to_true(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The runtime default must match the declared `bool = True` and DeepEP's
+    # own ElasticBuffer default (allow_hybrid_mode=True).
+    monkeypatch.delenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", raising=False)
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is True
+
+    monkeypatch.setenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0")
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is False
+
+    monkeypatch.setenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "1")
+    assert envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE is True
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
