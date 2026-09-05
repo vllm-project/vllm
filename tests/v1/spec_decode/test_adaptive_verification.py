@@ -15,6 +15,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
+# This batch has 42 non-draft rows, so index 43 prices its first draft.
+ZERO_BUDGET_VERIFY_COSTS = np.concatenate((np.ones(43), np.full(4, 100.0)))
+
 
 def make_manager(
     confidences: np.ndarray, verify_cost_ms: np.ndarray
@@ -30,7 +33,6 @@ def make_manager(
         prefill_len=SimpleNamespace(np=np.ones(num_reqs, dtype=np.int32)),
     )
     manager.cost_tables = (np.zeros(num_reqs + 1), verify_cost_ms)
-    manager._max_total_logits = 1 << 30
     manager.num_bonus_tokens = 1
     return manager
 
@@ -80,7 +82,6 @@ def test_manager_scopes_varlen_check_without_weakening_runner_cg_mode(monkeypatc
         req_states=object(),
         query_start_loc=object(),
         num_bonus_tokens=1,
-        max_total_logits=1,
         vllm_config=None,
         target_layer_names={"target"},
     )
@@ -171,65 +172,7 @@ def test_compact_batch_preserves_totals_and_bounds():
     assert compacted[2] == 40
 
 
-def test_budget_caps_at_one_rejection_sampler_chunk():
-    # The chunked verification path cannot address the compacted logits
-    # layout, so the budget must keep total logits within a single chunk.
-    manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32),
-        np.ones(7),
-    )
-    manager._max_total_logits = 3  # 2 bonus logits + at most 1 draft
-    manager.get_num_tokens(
-        {"low": 3, "high": 3},
-        {"low": [1, 2], "high": [3, 4]},
-    )
-    _, _, draft_budget = manager._batch_budget
-    assert draft_budget <= 1
-
-
-def test_zero_budget_rebuilds_cpu_cu_num_logits():
-    # When one bonus row per request already overflows a verification chunk, the
-    # budget clamps to zero but the batch still needs chunking. Every capacity is
-    # zeroed on device, so the CPU can name that layout exactly -- and must, since
-    # _iter_request_chunks slices the compacted logits with these offsets.
-    #
-    # The third request is a chunked prefill (no drafts, still mid-prompt). The
-    # runner gives *every* request num_bonus_tokens logits rows regardless
-    # (num_logits = num_draft_tokens_per_req + num_bonus_tokens), so the rebuilt
-    # offsets stay uniform rather than skipping non-verification rows.
-    manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
-        np.ones(64),
-    )
-    manager.req_states.req_id_to_index["prefill"] = 2
-    manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
-    manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
-    manager._max_total_logits = 2  # < 3 requests * 1 bonus token
-
-    manager.get_num_tokens(
-        {"low": 3, "high": 3, "prefill": 40},
-        {"low": [1, 2], "high": [3, 4]},
-    )
-    _, _, draft_budget = manager._batch_budget
-    assert draft_budget == 0
-
-    scheduled = np.array([3, 3, 40], dtype=np.int32)
-    drafts = np.array([2, 2, 0], dtype=np.int32)
-    scheduled_cu_num_logits = np.array([0, 3, 6, 7], dtype=np.int32)
-    compacted, cu_num_logits_np = manager.compact_batch(
-        drafts, scheduled, scheduled_cu_num_logits
-    )
-
-    # One bonus row per request, matching cumsum(capacities + num_bonus_tokens)
-    # with every capacity zeroed -- the prefill row included.
-    expected = np.arange(4, dtype=np.int32) * manager.num_bonus_tokens
-    assert np.array_equal(cu_num_logits_np, expected)
-    assert cu_num_logits_np.dtype == scheduled_cu_num_logits.dtype
-    # The prefill keeps its scheduled tokens; only drafts are dropped.
-    assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
-
-
-def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
+def test_zero_budget_keeps_grammar_metadata_aligned():
     # The scheduler sizes the grammar bitmask from the *scheduled* drafts
     # (len(drafts) + 1 rows per request), but a zero budget rewrites
     # cu_num_logits_np to bonus-only. Deriving the bitmask -> logits mapping
@@ -237,13 +180,11 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
     # `num_masks == len(mapping)` assert in apply_grammar_bitmask.
     manager = make_manager(
         np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
-        np.ones(64),
+        ZERO_BUDGET_VERIFY_COSTS,
     )
     manager.req_states.req_id_to_index["prefill"] = 2
     manager.req_states.num_computed_tokens_np = np.zeros(3, dtype=np.int32)
     manager.req_states.prefill_len.np = np.array([0, 0, 60], dtype=np.int32)
-    manager._max_total_logits = 2  # < 3 requests * 1 bonus token
-
     scheduled_spec_decode_tokens = {"low": [1, 2], "high": [3, 4]}
     manager.get_num_tokens(
         {"low": 3, "high": 3, "prefill": 40}, scheduled_spec_decode_tokens
@@ -252,11 +193,14 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
 
     req_ids = ["low", "high", "prefill"]
     num_draft_tokens_per_req = np.array([2, 2, 0], dtype=np.int32)
-    _, cu_num_logits_np = manager.compact_batch(
+    compacted, cu_num_logits_np = manager.compact_batch(
         num_draft_tokens_per_req,
         np.array([3, 3, 40], dtype=np.int32),
         np.array([0, 3, 6, 7], dtype=np.int32),
     )
+    assert np.array_equal(compacted, np.array([1, 1, 40], dtype=np.int32))
+    assert np.array_equal(cu_num_logits_np, np.arange(4, dtype=np.int32))
+    assert cu_num_logits_np.dtype == np.int32
 
     mask_stride = manager.num_speculative_steps + manager.num_bonus_tokens
     mapping = _build_grammar_mapping(

@@ -1017,7 +1017,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
+        # The speculative sampler never applies min_p, so even a tiny value
+        # must be rejected rather than silently ignored.
+        if self.min_p > 0 or self.logit_bias:
             raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."

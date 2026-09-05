@@ -347,13 +347,20 @@ def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
 
 
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    temperatures: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if p is None and k is None:
         return logits
 
+    # Only the Triton kernel understands per-row temperatures; the PyTorch
+    # fallback would silently mask an unscaled distribution.
+    assert temperatures is None or HAS_TRITON
+
     if HAS_TRITON:
-        return apply_top_k_top_p_triton(logits, k, p)
+        return apply_top_k_top_p_triton(logits, k, p, temperatures)
 
     is_cpu = current_platform.is_cpu()
     return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=is_cpu)
@@ -392,7 +399,7 @@ def apply_top_k_top_p_pytorch(
 
     if p is not None:
         # Apply top-p.
-        probs_sort = logits_sort.softmax(dim=-1)
+        probs_sort = logits_sort.softmax(dim=-1, dtype=torch.float32)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
         # at least one

@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
     apply_top_k_top_p_pytorch,
     random_sample,
 )
@@ -161,6 +162,26 @@ def test_topk_impl_equivalence():
     assert torch.allclose(result1, result2)
 
 
+@pytest.mark.parametrize("vocab_size", [8192, 129280])
+@pytest.mark.parametrize("top_p", [0.9, 0.99])
+def test_pytorch_top_p_bfloat16_matches_float32(vocab_size: int, top_p: float):
+    """Top-p must accumulate in FP32 regardless of the logits dtype.
+
+    Accumulating the nucleus in the logits dtype loses the small tail
+    increments, so the running sum crosses ``1 - top_p`` too late and extra
+    low-probability tokens stay in the nucleus. The error grows with the
+    vocabulary: with BF16 accumulation this input keeps 2 extra tokens at
+    vocab_size=8192 and 23 at vocab_size=129280.
+    """
+    logits = torch.linspace(-4, 4, vocab_size).to(torch.bfloat16).unsqueeze(0)
+    p = torch.tensor([top_p], dtype=torch.float32)
+
+    actual = apply_top_k_top_p_pytorch(logits.clone(), k=None, p=p)
+    expected = apply_top_k_top_p_pytorch(logits.float(), k=None, p=p)
+
+    assert torch.equal(torch.isfinite(actual), torch.isfinite(expected))
+
+
 @pytest.mark.skip(
     reason="FlashInfer top-k/top-p renorm comparison fails; "
     "needs investigation of tolerance threshold or "
@@ -297,6 +318,48 @@ class TestTritonTopkTopp:
                     f"Top-p mask difference too large: {diff_pct:.2f}% "
                     f"(max diff {max_diff} values out of {max_kept})"
                 )
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("k_value", [None, 2], ids=["top-p", "top-k-top-p"])
+    def test_scaled_mask_preserves_stored_logits(
+        self, dtype: torch.dtype, k_value: int | None
+    ):
+        # Setting temperatures keeps this on the monolithic kernel: the
+        # small-batch top-p split pipeline cannot scale on load.
+        batch_size, vocab_size = 3, 257
+        backing = torch.full(
+            (batch_size, vocab_size + 3),
+            -float("inf"),
+            dtype=dtype,
+        )
+        logits = backing[:, :vocab_size]
+        logits[:, :5] = torch.tensor([4.0, 3.0, 2.0, 1.0, 0.0])
+        stored = logits.clone()
+        temperatures = torch.tensor([0.5, 2.0, 0.0])
+        effective_temperatures = torch.where(temperatures == 0.0, 1.0, temperatures)
+        k = (
+            torch.tensor([vocab_size, k_value, vocab_size], dtype=torch.int32)
+            if k_value is not None
+            else None
+        )
+        p = torch.tensor([0.8, 0.8, 1.0], dtype=torch.float32)
+
+        expected = apply_top_k_top_p_pytorch(
+            stored.float() / effective_temperatures.unsqueeze(1), k, p
+        )
+        if k_value is not None:
+            top_p_only = apply_top_k_top_p_pytorch(
+                stored.float() / effective_temperatures.unsqueeze(1), None, p
+            )
+            assert (
+                torch.isfinite(expected[1]).sum() < torch.isfinite(top_p_only[1]).sum()
+            )
+        result = apply_top_k_top_p(logits, k, p, temperatures)
+        kept = torch.isfinite(expected)
+
+        assert result.data_ptr() == logits.data_ptr()
+        assert torch.equal(torch.isfinite(result), kept)
+        assert torch.equal(result[kept], stored[kept])
 
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])

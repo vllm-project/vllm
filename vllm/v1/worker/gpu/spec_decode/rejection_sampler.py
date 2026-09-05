@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
-
 import numpy as np
 import torch
 
@@ -22,34 +20,6 @@ from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
-
-# Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
-# TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
-# per vocab block on load and apply ops like temperature and gumbel, so folding
-# sampling-param application into those kernels would remove this buffer and
-# its traffic entirely.
-MAX_CHUNK_BYTES = 2**30  # 1GB
-_FP32_BYTES = 4
-
-
-def get_max_chunk_logits(vocab_size: int) -> int:
-    """Largest number of logits rows one verification chunk may hold."""
-    return max(1, MAX_CHUNK_BYTES // (vocab_size * _FP32_BYTES))
-
-
-def _iter_request_chunks(
-    cu_num_logits: np.ndarray, max_chunk_logits: int
-) -> Iterator[tuple[int, int]]:
-    """Yield maximally packed request ranges without splitting requests."""
-    assert max_chunk_logits > 0
-    num_reqs = cu_num_logits.size - 1
-    start = 0
-    while start < num_reqs:
-        max_logit = int(cu_num_logits[start]) + max_chunk_logits
-        end = int(np.searchsorted(cu_num_logits, max_logit, side="right") - 1)
-        end = min(num_reqs, max(start + 1, end))
-        yield start, end
-        start = end
 
 
 @triton.jit
@@ -105,8 +75,11 @@ class RejectionSampler:
         cu_num_logits: torch.Tensor,
         cu_num_logits_np: np.ndarray,
         max_num_logprobs: int,
+        max_per_req_token_ids: int,
+        expanded_idx_mapping: torch.Tensor,
+        temperatures: torch.Tensor | None = None,
     ) -> LogprobsTensors | None:
-        if max_num_logprobs == NO_LOGPROBS:
+        if max_num_logprobs == NO_LOGPROBS and max_per_req_token_ids == 0:
             return None
 
         num_reqs = cu_num_logits.shape[0] - 1
@@ -134,11 +107,15 @@ class RejectionSampler:
                 cu_num_generated_tokens = cu_num_logits_np.tolist()
         return compute_topk_scores(
             logits,
-            max_num_logprobs,
+            max(max_num_logprobs, 0),
             flat_sampled,
             cu_num_generated_tokens,
+            logprob_token_ids_state=self.sampler.logprob_token_ids_state,
+            expanded_idx_mapping=expanded_idx_mapping,
+            max_per_req_token_ids=max_per_req_token_ids,
             logits_mode=self.sampler.logprobs_mode
             in ("raw_logits", "processed_logits"),
+            temperatures=temperatures,
         )
 
     def _verify(
@@ -161,6 +138,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             expanded_local_pos,
+            use_head_dtype=True,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
@@ -180,83 +158,6 @@ class RejectionSampler:
         )
         return processed_logits, sampled, num_sampled
 
-    def _verify_in_chunks(
-        self,
-        logits: torch.Tensor,
-        input_batch: InputBatch,
-        draft_logits: torch.Tensor | None,
-        draft_sampled: torch.Tensor,
-        pos: torch.Tensor,
-        max_chunk_logits: int,
-        max_num_logprobs: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
-        cu_num_logits_np = input_batch.cu_num_logits_np
-        use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
-        num_reqs = input_batch.num_reqs
-
-        if logits.shape[0] <= max_chunk_logits:
-            # One chunk covers the batch. Adaptive verification compacts the logits
-            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
-            # so the stale sums must not pick chunk boundaries; its budget cap
-            # guarantees the compacted batch always lands here.
-            request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
-        else:
-            assert not self.enable_adaptive_verification
-            request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
-
-        sampled_chunks: list[torch.Tensor] = []
-        num_sampled_chunks: list[torch.Tensor] = []
-        logprobs_chunks: list[LogprobsTensors] = []
-
-        for start, end in request_chunks:
-            lo = int(cu_num_logits_np[start])
-            hi = int(cu_num_logits_np[end])
-            chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
-            chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
-            # draft_logits uses persistent request-state indices and stays global.
-            processed_logits, sampled, num_sampled = self._verify(
-                logits[lo:hi],
-                draft_logits,
-                draft_sampled[lo:hi],
-                pos[lo:hi],
-                chunk_cu_num_logits,
-                input_batch.idx_mapping[start:end],
-                input_batch.idx_mapping_np[start:end],
-                input_batch.expanded_idx_mapping[lo:hi],
-                input_batch.expanded_local_pos[lo:hi],
-            )
-            chunk_logprobs = self._get_logprobs_tensors(
-                sampled,
-                num_sampled,
-                processed_logits if use_processed_logits else logits[lo:hi],
-                chunk_cu_num_logits,
-                chunk_cu_num_logits_np,
-                max_num_logprobs,
-            )
-            if chunk_logprobs is not None:
-                logprobs_chunks.append(chunk_logprobs)
-            del processed_logits
-            sampled_chunks.append(sampled)
-            num_sampled_chunks.append(num_sampled)
-
-        if len(sampled_chunks) == 1:
-            logprobs_tensors = logprobs_chunks[0] if logprobs_chunks else None
-            return sampled_chunks[0], num_sampled_chunks[0], logprobs_tensors
-
-        logprobs_tensors = None
-        if logprobs_chunks:
-            expanded_logits = logits.shape[0] != input_batch.num_reqs
-            logprobs_tensors = LogprobsTensors.cat(
-                logprobs_chunks,
-                cu_num_generated_tokens=(
-                    cu_num_logits_np.tolist() if expanded_logits else None
-                ),
-            )
-
-        sampled = torch.cat(sampled_chunks)
-        num_sampled = torch.cat(num_sampled_chunks)
-        return sampled, num_sampled, logprobs_tensors
-
     def __call__(
         self,
         logits: torch.Tensor,
@@ -273,15 +174,54 @@ class RejectionSampler:
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
-        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
-        sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
+        max_per_req_token_ids = self.sampler.logprob_token_ids_state.max_num_token_ids(
+            input_batch.idx_mapping_np
+        )
+        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
+        use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        # Verification writes the processed values into the head-dtype logits.
+        # Raw reporting must still see the pre-processing values, so keep one
+        # head-dtype snapshot -- and only when a processor would overwrite them.
+        raw_logits = logits
+        if (
+            return_logprobs
+            and not use_processed_logits
+            and np.any(
+                self.sampler.needs_stored_logits_processing[input_batch.idx_mapping_np]
+            )
+        ):
+            logits = logits.clone()
+
+        processed_logits, sampled, num_sampled = self._verify(
             logits,
-            input_batch,
             draft_logits,
             draft_sampled,
             pos,
-            chunk_logit_limit,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            input_batch.idx_mapping_np,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+        )
+        # Stored logits are never scaled, so processed reporting divides by the
+        # request temperature while the scorer loads them.
+        temperatures = (
+            self.sampler.sampling_states.temperature.gpu[
+                input_batch.expanded_idx_mapping
+            ]
+            if return_logprobs and use_processed_logits
+            else None
+        )
+        logprobs_tensors = self._get_logprobs_tensors(
+            sampled,
+            num_sampled,
+            processed_logits if use_processed_logits else raw_logits,
+            input_batch.cu_num_logits,
+            input_batch.cu_num_logits_np,
             max_num_logprobs,
+            max_per_req_token_ids,
+            input_batch.expanded_idx_mapping,
+            temperatures,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(

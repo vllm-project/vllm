@@ -28,9 +28,8 @@ def _build_rejection_sample_inputs(
 ) -> dict:
     """Build rejection_sample kwargs from a fixed target and draft distribution.
 
-    target_logits_1d must already have temperature applied (the sampler applies
-    sampling params before verification), whereas draft_logits_1d must not:
-    rejection_sample divides the draft logits by the temperature on load.
+    Both target_logits_1d and draft_logits_1d are stored before temperature;
+    rejection_sample applies the temperature while loading them.
     """
     device = target_logits_1d.device
     vocab_size = target_logits_1d.shape[0]
@@ -148,9 +147,9 @@ def _assert_distribution_match(
         (3, 1.0),
     ],
 )
-@pytest.mark.parametrize("draft_logits_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.bfloat16])
 def test_stochastic_rejection_sample(
-    num_speculative_steps: int, temperature: float, draft_logits_dtype: torch.dtype
+    num_speculative_steps: int, temperature: float, logits_dtype: torch.dtype
 ):
     """
     Verify that rejection sampling produces the target distribution.
@@ -168,13 +167,12 @@ def test_stochastic_rejection_sample(
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE
 
-    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
-    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32).to(
-        draft_logits_dtype
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32).to(
+        logits_dtype
     )
-
-    if temperature > 0:
-        target_logits_1d /= temperature
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32).to(
+        logits_dtype
+    )
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -188,7 +186,7 @@ def test_stochastic_rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
-    target_probs = torch.softmax(target_logits_1d, dim=0)
+    target_probs = torch.softmax(target_logits_1d.float() / temperature, dim=0)
     for pos in range(num_speculative_steps + 1):
         accepted_mask = num_sampled >= pos + 1
         _assert_distribution_match(
@@ -291,6 +289,32 @@ def test_gumbel_drafted_rejection_sample_is_unbiased(num_speculative_steps: int)
         )
 
 
+@pytest.mark.parametrize("logits_dtype", [torch.bfloat16, torch.float16])
+def test_virtual_temperature_matches_scaled_fp32_sampling(logits_dtype: torch.dtype):
+    torch.manual_seed(0)
+    temperature = 0.6
+    inputs = _build_rejection_sample_inputs(
+        torch.randn(VOCAB_SIZE, device="cuda").to(logits_dtype),
+        torch.randn(VOCAB_SIZE, device="cuda").to(logits_dtype),
+        num_speculative_steps=3,
+        temperature=temperature,
+        num_trials=128,
+    )
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=3)
+    scaled_inputs = dict(inputs)
+    scaled_inputs["target_logits"] = inputs["target_logits"].float() / temperature
+    scaled_inputs["draft_logits"] = inputs["draft_logits"].float() / temperature
+    scaled_inputs["temperature"] = torch.ones_like(inputs["temperature"])
+    expected_sampled, expected_num_sampled = rejection_sample(
+        **scaled_inputs, num_speculative_steps=3
+    )
+
+    assert torch.equal(num_sampled, expected_num_sampled)
+    valid = torch.arange(sampled.shape[1], device="cuda") < num_sampled[:, None]
+    assert torch.equal(sampled[valid], expected_sampled[valid])
+
+
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 def test_greedy_rejection_sample(num_speculative_steps: int):
     """
@@ -360,9 +384,6 @@ def test_synthetic_rejection_sample(
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
-
-    if temperature > 0:
-        target_logits_1d /= temperature
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -444,7 +465,7 @@ def test_placeholder_draft_token_rejected():
     K = 1
     temperature = 0.6
 
-    target_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
 
     inputs = _build_rejection_sample_inputs(
@@ -479,7 +500,7 @@ def test_block_verification_placeholder_truncates_block(
     K = 3
     temperature = 1.0
 
-    target_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
 
     inputs = _build_rejection_sample_inputs(
@@ -558,9 +579,9 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
 
     # An identical draft is accepted with probability ~1, so any token after
     # the placeholder would be accepted unless it is explicitly blocked. The
-    # draft logits are stored pre-temperature, so pass the unscaled base.
+    # Both target and draft logits are stored pre-temperature.
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
-    target_logits_1d = draft_logits_1d / temperature
+    target_logits_1d = draft_logits_1d
 
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
@@ -614,9 +635,6 @@ def test_block_verification_rejection_sample(
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
     draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
 
-    if temperature > 0:
-        target_logits_1d /= temperature
-
     inputs = _build_rejection_sample_inputs(
         target_logits_1d,
         draft_logits_1d,
@@ -633,7 +651,7 @@ def test_block_verification_rejection_sample(
         use_block_verification=True,
     )
 
-    target_probs = torch.softmax(target_logits_1d, dim=0)
+    target_probs = torch.softmax(target_logits_1d.float() / temperature, dim=0)
     for pos in range(num_speculative_steps + 1):
         accepted_mask = num_sampled >= pos + 1
         _assert_distribution_match(
