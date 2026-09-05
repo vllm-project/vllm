@@ -247,6 +247,7 @@ class FinishedRequestStats:
     num_prompt_tokens: int = 0
     num_preemptions: int = 0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
     max_tokens_param: int | None = None
     queued_time: float = 0.0
     prefill_time: float = 0.0
