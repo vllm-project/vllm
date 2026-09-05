@@ -304,6 +304,7 @@ class DeepseekV32Attention(MLAAttention):
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
+        attn_metadata = forward_context.attn_metadata
 
         if self.indexer is not None and not self.skip_topk:
             has_indexer = True
@@ -326,11 +327,35 @@ class DeepseekV32Attention(MLAAttention):
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
-        if forward_context.attn_metadata is None or self.use_pcp:
+        if self.use_pcp:
             mla_kv_cache = None
             mla_k_scale = None
             indexer_k_cache = None
             mla_slot = None
+        elif attn_metadata is None:
+            # PIECEWISE capture runs this code without attention metadata. The
+            # cache views and slot mapping chosen here are baked into the
+            # captured fused_norm_rope launch, so they must be the real bound
+            # caches and the persistent slot-mapping buffer: during capture the
+            # buffer holds PAD_SLOT_ID (-1), which the kernel treats as
+            # "no write", and at replay it carries the real per-token slots.
+            # Passing None here would permanently disable the fused cache
+            # writes in the captured graph.
+            if mla_slot is not None and self.kv_cache.numel() > 0:
+                mla_kv_cache = self.kv_cache
+                mla_k_scale = self._k_scale
+            else:
+                mla_kv_cache = None
+                mla_k_scale = None
+                mla_slot = None
+            if (
+                mla_slot is not None
+                and self.indexer is not None
+                and self.indexer.k_cache.kv_cache.numel() > 0
+            ):
+                indexer_k_cache = self.indexer.k_cache.kv_cache
+            else:
+                indexer_k_cache = None
         else:
             mla_kv_cache = self.kv_cache
             mla_k_scale = self._k_scale
