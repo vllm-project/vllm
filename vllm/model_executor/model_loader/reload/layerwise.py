@@ -3,6 +3,7 @@
 import inspect
 from collections.abc import Callable
 from functools import wraps
+from typing import TypeVar
 from weakref import WeakKeyDictionary, WeakSet
 
 import torch
@@ -31,9 +32,12 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+_ModuleT = TypeVar("_ModuleT", bound=torch.nn.Module)
+
 __all__ = [
     "get_layerwise_info",
     "record_metadata_for_reloading",
+    "make_deferred_module_factory",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
@@ -78,6 +82,21 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
         info.restore_device = torch.get_default_device()
+
+
+def make_deferred_module_factory(
+    factory: Callable[[], _ModuleT],
+) -> Callable[[], _ModuleT]:
+    """Preserve init-time device and reload metadata for late construction."""
+    device = torch.get_default_device()
+
+    def create() -> _ModuleT:
+        with device:
+            module = factory()
+            record_metadata_for_reloading(module)
+        return module
+
+    return create
 
 
 @torch.no_grad()
