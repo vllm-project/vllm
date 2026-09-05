@@ -500,6 +500,30 @@ def test_update_states_new_request(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
+def test_update_states_syncs_accepted_counts_before_row_moves(model_runner, dist_init):
+    # add_request and condense permute the same pinned buffer the previous step's
+    # accepted-token D2H writes into, so the copy has to be awaited first.
+    calls = []
+    input_batch = model_runner.input_batch
+    model_runner.num_accepted_tokens_event = SimpleNamespace(
+        synchronize=lambda: calls.append("sync")
+    )
+
+    def record(name, func):
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    for name in ("add_request", "condense"):
+        setattr(input_batch, name, record(name, getattr(input_batch, name)))
+
+    model_runner._update_states(_schedule_new_request("req_0"))
+
+    assert calls == ["sync", "add_request", "condense"]
+
+
 def test_update_states_request_finished(model_runner, dist_init):
     req_id = "req_0"
 
