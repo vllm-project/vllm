@@ -233,12 +233,14 @@ __device__ __noinline__ void histogram_2048_topk(
 
   if (pair_suffix >= TopK && (pair_suffix - h0) < TopK) {
     decode_smem[SBASE + sTHR] = 2 * tx;
+    if (h0 > DBUF) decode_smem[SBASE + sBUF0] = DBUF + 1;
   }
   {
     const int right_suf = pair_suffix - h0;
     const int next_suf = pair_suffix - pair_sum;
     if (right_suf >= TopK && next_suf < TopK) {
       decode_smem[SBASE + sTHR] = 2 * tx + 1;
+      if (pair_sum - h0 > DBUF) decode_smem[SBASE + sBUF0] = DBUF + 1;
     }
   }
   __syncthreads();
@@ -250,7 +252,9 @@ __device__ __noinline__ void histogram_2048_topk(
   const int sOUT_abs = SBASE + sOUT;
   const int sBUF0_abs = SBASE + sBUF0;
 
-  {
+  // Skip a collection pass when the histogram already proves that the
+  // threshold bin cannot fit in the fixed-size buffer.
+  if (__builtin_expect(decode_smem[sBUF0_abs] <= DBUF, 1)) {
     const uint32_t uthr = static_cast<uint32_t>(threshold);
     int item = 0;
     const int n_vec_iters = (n_vec + kThreadsPerBlock - 1) / kThreadsPerBlock;
@@ -305,6 +309,11 @@ __device__ __noinline__ void histogram_2048_topk(
 
   // If all buffered elements fit, output them all (common for short seqs)
   const int raw_buf0 = decode_smem[SBASE + sBUF0];
+  if (raw_buf0 > DBUF) {
+    topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock, true>(
+        logits, output_indices, static_cast<uint32_t>(seq_len), decode_smem);
+    return;
+  }
   if (raw_buf0 <= remaining_k) {
     const int nb = (raw_buf0 < DBUF) ? raw_buf0 : DBUF;
     const int base = decode_smem[SBASE + sOUT];
@@ -351,6 +360,11 @@ __device__ __noinline__ void histogram_2048_topk(
     const int dst = src ^ 1;
 
     const int raw_buf = decode_smem[SBASE + sBUF0 + src];
+    if (raw_buf > DBUF) {
+      topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock, true>(
+          logits, output_indices, static_cast<uint32_t>(seq_len), decode_smem);
+      return;
+    }
     const int num_buffered = (raw_buf < DBUF) ? raw_buf : DBUF;
 
     compute_suffix_sum();
@@ -475,7 +489,11 @@ __device__ __noinline__ void histogram_256_topk(
   if (thread_id < RADIX && shared_histogram[0][thread_id] > remaining_k &&
       shared_histogram[0][thread_id + 1] <= remaining_k) {
     shared_threshold_bin = thread_id;
-    shared_buffered_count[0] = 0;
+    const int threshold_bin_count = shared_histogram[0][thread_id] -
+                                    shared_histogram[0][thread_id + 1];
+    shared_buffered_count[0] = threshold_bin_count > MAX_BUFFERED_ITEMS
+                                   ? MAX_BUFFERED_ITEMS + 1
+                                   : 0;
     shared_output_count = 0;
   }
   __syncthreads();
@@ -501,19 +519,21 @@ __device__ __noinline__ void histogram_256_topk(
   }
   __syncthreads();
 
-  for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
-    const float logit_value = logits[idx + logits_offset];
-    const int bin = convert_to_uint8(logit_value);
-    if (bin > threshold_bin) {
-      const int output_pos = atomicAdd(&shared_output_count, 1);
-      output_indices[output_pos] = idx;
-    } else if (bin == threshold_bin) {
-      const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
-      if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
-        buffered_indices[0][buffer_pos] = idx;
-        const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
-        const int next_bin = (fp32_bits >> 24) & 0xFF;
-        atomicAdd(&shared_histogram[0][next_bin], 1);
+  if (__builtin_expect(shared_buffered_count[0] <= MAX_BUFFERED_ITEMS, 1)) {
+    for (int idx = thread_id; idx < seq_len; idx += kThreadsPerBlock) {
+      const float logit_value = logits[idx + logits_offset];
+      const int bin = convert_to_uint8(logit_value);
+      if (bin > threshold_bin) {
+        const int output_pos = atomicAdd(&shared_output_count, 1);
+        output_indices[output_pos] = idx;
+      } else if (bin == threshold_bin) {
+        const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
+        if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
+          buffered_indices[0][buffer_pos] = idx;
+          const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
+          const int next_bin = (fp32_bits >> 24) & 0xFF;
+          atomicAdd(&shared_histogram[0][next_bin], 1);
+        }
       }
     }
   }
@@ -524,6 +544,12 @@ __device__ __noinline__ void histogram_256_topk(
     const int src_buffer = pass % 2;
     const int dst_buffer = src_buffer ^ 1;
     const int raw_buffered = shared_buffered_count[src_buffer];
+    if (raw_buffered > MAX_BUFFERED_ITEMS) {
+      topk_histogram_4096::exact_topk_rescan<TopK, kThreadsPerBlock, true>(
+          logits + logits_offset, output_indices,
+          static_cast<uint32_t>(seq_len), medium_smem);
+      return;
+    }
     const int num_buffered =
         (raw_buffered < MAX_BUFFERED_ITEMS) ? raw_buffered : MAX_BUFFERED_ITEMS;
 
@@ -1001,21 +1027,25 @@ struct vec_t {
 template <typename DType>
 struct FilteredTopKTraits;
 
-// Specialization for float (32-bit): coarse histogram uses FP16 high 8 bits, 4
-// refinement rounds
+// Specialization for float (32-bit): use the high 11 ordered FP16 bits for
+// coarse selection, matching TensorRT-LLM's production radix selector. The
+// wider first stage sharply reduces candidate-buffer overflow before the exact
+// FP32 refinement rounds.
 template <>
 struct FilteredTopKTraits<float> {
   using OrderedType = uint32_t;
+  static constexpr int COARSE_BITS = 11;
+  static constexpr int COARSE_RADIX = 1 << COARSE_BITS;
   static constexpr int NUM_REFINE_ROUNDS = 4;
   static constexpr int FIRST_REFINE_SHIFT = 24;
 
-  __device__ __forceinline__ static uint8_t ToCoarseKey(float x) {
-    // Convert to FP16 representation and extract high 8 bits
+  __device__ __forceinline__ static uint16_t ToCoarseKey(float x) {
+    // Convert to an ordered FP16 representation and extract its high 11 bits.
     __half h = __float2half_rn(x);
     uint16_t bits = __half_as_ushort(h);
     uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
                                    : static_cast<uint16_t>(bits | 0x8000);
-    return static_cast<uint8_t>(key >> 8);
+    return static_cast<uint16_t>(key >> (16 - COARSE_BITS));
   }
 
   __device__ __forceinline__ static OrderedType ToOrdered(float x) {
@@ -1048,6 +1078,20 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
   constexpr int RADIX = 256;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
+  using Traits = FilteredTopKTraits<DType>;
+  constexpr int COARSE_RADIX = Traits::COARSE_RADIX;
+  static_assert(COARSE_RADIX == 2 * BLOCK_SIZE);
+  using CoarseScan = cub::BlockScan<int, BLOCK_SIZE>;
+  struct CoarseSmem {
+    int histogram[COARSE_RADIX + 1];
+    typename CoarseScan::TempStorage scan;
+  };
+  static_assert(sizeof(CoarseSmem) <= FILTERED_TOPK_SMEM_DYNAMIC);
+
+  // The long path's coarse histogram and candidate double-buffer are never
+  // live at the same time. Overlay them in the existing 128 KiB dynamic
+  // allocation so widening the histogram does not increase per-CTA SMEM.
+  extern __shared__ __align__(16) uint8_t dynamic_smem[];
 
   const uint32_t bid = blockIdx.x;
   const int tx = threadIdx.x;
@@ -1069,13 +1113,12 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   // Short path
   if (length <= 32768) {
-    extern __shared__ uint8_t _smem_reg[];
     if constexpr (UsePredicatedShortLoads) {
       hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(score, dst, length,
-                                                             _smem_reg);
+                                                             dynamic_smem);
     } else {
       hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
-                                                  _smem_reg);
+                                                  dynamic_smem);
     }
     return;
   }
@@ -1089,14 +1132,17 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 
   auto& s_histogram = s_histogram_buf[0];
 
-  // Dynamic shared memory for input double buffer
-  extern __shared__ int s_input_idx[][SMEM_INPUT_SIZE];
+  auto* coarse_smem = reinterpret_cast<CoarseSmem*>(dynamic_smem);
+  auto* s_coarse_histogram = coarse_smem->histogram;
+  auto* s_input_idx =
+      reinterpret_cast<int (*)[SMEM_INPUT_SIZE]>(dynamic_smem);
 
-  using Traits = FilteredTopKTraits<DType>;
   int topk = top_k;
 
-  // Stage 1: 8-bit coarse histogram with vectorized loads
-  if (tx < RADIX + 1) s_histogram[tx] = 0;
+  // Stage 1: 11-bit ordered-FP16 histogram with vectorized loads.
+  for (int bin = tx; bin < COARSE_RADIX + 1; bin += BLOCK_SIZE) {
+    s_coarse_histogram[bin] = 0;
+  }
   __syncthreads();
 
   vec_t<DType, VEC_SIZE> score_vec;
@@ -1109,18 +1155,36 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
       const auto bin = Traits::ToCoarseKey(score_vec[j]);
-      atomicAdd(&s_histogram[bin], 1);
+      atomicAdd(&s_coarse_histogram[bin], 1);
     }
   }
   // Handle tail
   for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
     const auto bin = Traits::ToCoarseKey(score[i]);
-    atomicAdd(&s_histogram[bin], 1);
+    atomicAdd(&s_coarse_histogram[bin], 1);
   }
   __syncthreads();
 
-  // Suffix sum
-  const auto run_cumsum = [&]() {
+  // One block scan covers two contiguous bins per thread. Converting its
+  // ascending exclusive prefix into suffix counts avoids eleven Hillis-Steele
+  // rounds over the 2048-bin coarse histogram.
+  const int coarse_bin0 = 2 * tx;
+  const int coarse_count0 = s_coarse_histogram[coarse_bin0];
+  const int coarse_count1 = s_coarse_histogram[coarse_bin0 + 1];
+  const int coarse_local_sum = coarse_count0 + coarse_count1;
+  int coarse_lower_prefix;
+  int coarse_total;
+  CoarseScan(coarse_smem->scan)
+      .ExclusiveSum(coarse_local_sum, coarse_lower_prefix, coarse_total);
+  __syncthreads();
+  s_coarse_histogram[coarse_bin0] = coarse_total - coarse_lower_prefix;
+  s_coarse_histogram[coarse_bin0 + 1] =
+      coarse_total - coarse_lower_prefix - coarse_count0;
+  if (tx == 0) s_coarse_histogram[COARSE_RADIX] = 0;
+  __syncthreads();
+
+  // Suffix sum for the later 8-bit exact-refinement histograms.
+  const auto run_refine_cumsum = [&]() {
 #pragma unroll 8
     for (int i = 0; i < 8; ++i) {
       if (tx < RADIX) {
@@ -1136,16 +1200,19 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     }
   };
 
-  run_cumsum();
-  if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
-    s_threshold_bin_id = tx;
-    s_num_input[0] = 0;
-    s_counter = 0;
+  for (int i = 0; i < 2; ++i) {
+    const int bin = coarse_bin0 + i;
+    if (s_coarse_histogram[bin] > topk &&
+        s_coarse_histogram[bin + 1] <= topk) {
+      s_threshold_bin_id = bin;
+      s_num_input[0] = 0;
+      s_counter = 0;
+    }
   }
   __syncthreads();
 
   const auto threshold_bin = s_threshold_bin_id;
-  topk -= s_histogram[threshold_bin + 1];
+  topk -= s_coarse_histogram[threshold_bin + 1];
 
   constexpr int NUM_ROUNDS = Traits::NUM_REFINE_ROUNDS;
   constexpr int FIRST_SHIFT = Traits::FIRST_REFINE_SHIFT;
@@ -1217,10 +1284,15 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
       const auto r_idx = round % 2;
 
       const auto _raw_num_input = s_num_input[r_idx];
+      if (_raw_num_input > SMEM_INPUT_SIZE) {
+        hist4096::exact_topk_rescan<MAX_K, BLOCK_SIZE, false, VEC_SIZE, true>(
+            score, dst, length, s_input_idx);
+        return;
+      }
       const auto num_input =
           (_raw_num_input < SMEM_INPUT_SIZE) ? _raw_num_input : SMEM_INPUT_SIZE;
 
-      run_cumsum();
+      run_refine_cumsum();
       if (tx < RADIX && s_histogram[tx] > topk && s_histogram[tx + 1] <= topk) {
         s_threshold_bin_id = tx;
         s_num_input[r_idx ^ 1] = 0;

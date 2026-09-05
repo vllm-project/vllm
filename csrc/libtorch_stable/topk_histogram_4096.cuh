@@ -7,6 +7,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cub/block/block_scan.cuh>
 #include <cstdint>
 
 namespace vllm {
@@ -71,6 +72,207 @@ __device__ __forceinline__ void load_float4_predicated(const float* ptr,
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   uint32_t bits = __float_as_uint(x);
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+template <uint32_t BlockSize, uint32_t VecSize, typename Visit>
+__device__ __forceinline__ void for_each_score(
+    const float* __restrict__ scores, uint32_t length, Visit visit) {
+  static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
+  const uint32_t tx = threadIdx.x;
+
+  if constexpr (VecSize == 1) {
+    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+      visit(idx, scores[idx]);
+    }
+  } else {
+    const uint32_t aligned_length = length - length % VecSize;
+
+    for (uint32_t base = tx * VecSize; base < aligned_length;
+         base += BlockSize * VecSize) {
+      if constexpr (VecSize == 4) {
+        const float4 values =
+            *reinterpret_cast<const float4*>(scores + base);
+        visit(base, values.x);
+        visit(base + 1, values.y);
+        visit(base + 2, values.z);
+        visit(base + 3, values.w);
+      } else {
+        const float2 values =
+            *reinterpret_cast<const float2*>(scores + base);
+        visit(base, values.x);
+        visit(base + 1, values.y);
+      }
+    }
+
+    for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
+      visit(idx, scores[idx]);
+    }
+  }
+}
+
+enum class PivotRelation : uint8_t { kGreater, kEqual };
+
+template <PivotRelation Relation, uint32_t TopK, uint32_t BlockSize,
+          uint32_t VecSize>
+__device__ __forceinline__ void collect_pivot_matches(
+    const float* __restrict__ scores, int32_t* __restrict__ output,
+    uint32_t length, uint32_t pivot, uint32_t* output_counter) {
+  for_each_score<BlockSize, VecSize>(
+      scores, length, [&](uint32_t idx, float score) {
+        const uint32_t ordered = convert_to_uint32_v2(score);
+        bool matches;
+        if constexpr (Relation == PivotRelation::kGreater) {
+          matches = ordered > pivot;
+        } else {
+          matches = ordered == pivot;
+        }
+        if (matches) {
+          const uint32_t pos = atomicAdd(output_counter, 1);
+          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+        }
+      });
+}
+
+// Exact, bounded-memory fallback for candidate-buffer overflow. Each radix
+// round rescans the full row, so correctness does not depend on how many
+// values share a coarse histogram bin. This is intentionally slower than the
+// buffered paths and is entered only after an overflow is detected.
+template <uint32_t TopK, uint32_t BlockSize, bool FuseOutputScan = false,
+          uint32_t VecSize = 1, bool UseWideRadix = false>
+__device__ void exact_topk_rescan(const float* __restrict__ scores,
+                                  int32_t* __restrict__ output,
+                                  uint32_t length, void* _smem) {
+  static_assert(BlockSize >= RADIX);
+  static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
+  constexpr uint32_t kHistogramBins = UseWideRadix ? 2048 : RADIX;
+  constexpr uint32_t kRadixRounds = UseWideRadix ? 3 : 4;
+  static_assert(!UseWideRadix || kHistogramBins % BlockSize == 0);
+  using BlockScan = cub::BlockScan<uint32_t, BlockSize>;
+  struct ExactSmem {
+    uint32_t histogram[kHistogramBins];
+    typename BlockScan::TempStorage scan;
+    uint32_t prefix;
+    uint32_t remaining;
+    uint32_t output_counter;
+  };
+
+  auto* smem = static_cast<ExactSmem*>(_smem);
+  const uint32_t tx = threadIdx.x;
+
+  if (tx == 0) {
+    smem->prefix = 0;
+    smem->remaining = TopK;
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (uint32_t round = 0; round < kRadixRounds; ++round) {
+    for (uint32_t bin = tx; bin < kHistogramBins; bin += BlockSize) {
+      smem->histogram[bin] = 0;
+    }
+    __syncthreads();
+
+    uint32_t shift;
+    uint32_t digit_mask;
+    uint32_t prefix_mask;
+    if constexpr (UseWideRadix) {
+      shift = (round == 0) ? 21 : ((round == 1) ? 10 : 0);
+      digit_mask = (round < 2) ? 0x7FFu : 0x3FFu;
+      prefix_mask =
+          (round == 0) ? 0u : ((round == 1) ? 0xFFE00000u : 0xFFFFFC00u);
+    } else {
+      shift = 24 - round * 8;
+      digit_mask = 0xFFu;
+      prefix_mask = (round == 0) ? 0u : (~0u << (32 - round * 8));
+    }
+    const uint32_t prefix = smem->prefix;
+
+    for_each_score<BlockSize, VecSize>(
+        scores, length, [&](uint32_t, float score) {
+          const uint32_t ordered = convert_to_uint32_v2(score);
+          if ((ordered & prefix_mask) == prefix) {
+            atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
+          }
+        });
+    __syncthreads();
+
+    if constexpr (UseWideRadix) {
+      constexpr uint32_t kBinsPerThread = kHistogramBins / BlockSize;
+      uint32_t counts[kBinsPerThread];
+      uint32_t local_sum = 0;
+#pragma unroll
+      for (uint32_t i = 0; i < kBinsPerThread; ++i) {
+        counts[i] = smem->histogram[tx * kBinsPerThread + i];
+        local_sum += counts[i];
+      }
+
+      uint32_t lower_prefix;
+      uint32_t total;
+      BlockScan(smem->scan).ExclusiveSum(local_sum, lower_prefix, total);
+      uint32_t count_above = total - lower_prefix - local_sum;
+      const uint32_t remaining = smem->remaining;
+#pragma unroll
+      for (int i = static_cast<int>(kBinsPerThread) - 1; i >= 0; --i) {
+        const uint32_t count = counts[i];
+        if (count_above < remaining && count_above + count >= remaining) {
+          const uint32_t bin = tx * kBinsPerThread + i;
+          smem->remaining = remaining - count_above;
+          smem->prefix |= bin << shift;
+        }
+        count_above += count;
+      }
+    } else if (tx == 0) {
+      uint32_t count_above = 0;
+      for (int bin = RADIX - 1; bin >= 0; --bin) {
+        const uint32_t count = smem->histogram[bin];
+        if (count_above + count >= smem->remaining) {
+          smem->remaining -= count_above;
+          smem->prefix |= static_cast<uint32_t>(bin) << shift;
+          break;
+        }
+        count_above += count;
+      }
+    }
+    __syncthreads();
+  }
+
+  const uint32_t pivot = smem->prefix;
+  if constexpr (FuseOutputScan) {
+    static_assert(VecSize == 1);
+    if (tx == 0) {
+      smem->output_counter = 0;
+      smem->histogram[0] = 0;
+    }
+    __syncthreads();
+
+    const uint32_t equal_count = smem->remaining;
+    const uint32_t equal_base = TopK - equal_count;
+    for_each_score<BlockSize, VecSize>(
+        scores, length, [&](uint32_t idx, float score) {
+          const uint32_t ordered = convert_to_uint32_v2(score);
+          if (ordered > pivot) {
+            const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+            output[pos] = static_cast<int32_t>(idx);
+          } else if (ordered == pivot) {
+            const uint32_t pos = atomicAdd(&smem->histogram[0], 1);
+            if (pos < equal_count) {
+              output[equal_base + pos] = static_cast<int32_t>(idx);
+            }
+          }
+        });
+    __syncthreads();
+  } else {
+    if (tx == 0) smem->output_counter = 0;
+    __syncthreads();
+
+    collect_pivot_matches<PivotRelation::kGreater, TopK, BlockSize, VecSize>(
+        scores, output, length, pivot, &smem->output_counter);
+    __syncthreads();
+
+    collect_pivot_matches<PivotRelation::kEqual, TopK, BlockSize, VecSize>(
+        scores, output, length, pivot, &smem->output_counter);
+    __syncthreads();
+  }
 }
 
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->
@@ -445,6 +647,13 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   // Phase 3: Scatter from registers
   const auto [thr_bin, num_above, num_equal] = smem->match;
   const bool need_tie = (num_equal + num_above > TopK);
+
+  // The scatter below intentionally stores at most TopK candidates even when
+  // the union is larger (kMaxTies for small K), so TopK is the real capacity.
+  if (need_tie && num_equal > TopK) {
+    exact_topk_rescan<TopK, kBlockSize>(scores, output, length, _smem);
+    return;
+  }
 
   done = false;
 #pragma unroll
