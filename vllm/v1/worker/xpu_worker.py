@@ -5,6 +5,7 @@ import os
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -123,6 +124,26 @@ class XPUWorker(Worker):
                 f"be less than or equal to the number of visible devices "
                 f"({visible_device_count})."
             )
+
+        # Offset local_rank by VLLM_XPU_DEVICE_OFFSET so the worker binds a
+        # specific physical card while all cards stay visible. Keeping every
+        # card visible is required for oneCCL/XCCL collectives across separate
+        # processes (e.g. RL weight sync between a trainer and a standalone
+        # vLLM server); narrowing visibility with ZE_AFFINITY_MASK breaks those
+        # collectives. Offsetting local_rank itself (not just the device index)
+        # keeps every downstream consumer consistent: the device communicator
+        # in parallel_state, LOCAL_RANK, and the memory query below.
+        offset = envs.VLLM_XPU_DEVICE_OFFSET
+        if offset:
+            device_count = torch.accelerator.device_count()
+            offset_local_rank = self.local_rank + offset
+            if not 0 <= offset_local_rank < device_count:
+                raise ValueError(
+                    f"XPU local rank {offset_local_rank} (local rank "
+                    f"{self.local_rank} + VLLM_XPU_DEVICE_OFFSET {offset}) is "
+                    f"out of range for {device_count} visible device(s)."
+                )
+            self.local_rank = offset_local_rank
 
         device = self.device_config.device
         if (
