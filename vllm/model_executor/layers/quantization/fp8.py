@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
+    FusedMoEParallelConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
+    fp8_round_up_hidden_size_and_intermediate_size,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     refine_fp8_moe_block_shape,
@@ -554,6 +556,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        original = (hidden_size, intermediate_size_per_partition)
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        rounded = fp8_round_up_hidden_size_and_intermediate_size(
+            self.fp8_backend, hidden_size, intermediate_size_per_partition
+        )
+        # The loader only narrow-copies the checkpoint into padded parameters, so
+        # padded expert weights (either dimension rounded up, by this method or by
+        # the base class) must be allocated zeroed; see create_weights.
+        self._pad_expert_weights = rounded != original
+        return rounded
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -605,8 +630,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 block_n, block_k = moe_block_shape
 
         # WEIGHTS
+        # Padded (rounded-up) expert weights must start zeroed: the loader only writes
+        # the checkpoint's real rows/columns and an uninitialized tail is live weight.
+        alloc = (
+            torch.zeros if getattr(self, "_pad_expert_weights", False) else torch.empty
+        )
         w13_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
@@ -618,7 +648,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(
+            alloc(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
