@@ -306,6 +306,39 @@ def chunked_prefill_paged_decode(
     is_block_table_ptr: bool = False,
     causal: bool = True,
 ):
+    """Run chunked prefill and paged decode over a mixed batch.
+
+    Prefill sequences go through the Triton chunked-prefill kernel; single-token
+    decode sequences go through paged attention, using the ROCm custom op where
+    `use_rocm_custom_paged_attention` allows it and the Triton paged-decode
+    kernel otherwise. Results are written into `output` in place.
+
+    Args:
+        query: Packed queries for the whole batch, [num_tokens, num_heads,
+            head_size].
+        key: Keys for the current forward pass.
+        value: Values for the current forward pass.
+        output: Destination tensor, written in place.
+        kv_cache_dtype: KV-cache dtype, e.g. "auto" or "fp8".
+        key_cache: Paged key cache.
+        value_cache: Paged value cache.
+        block_table: Per-sequence page table, or a pointer tensor when
+            `is_block_table_ptr` is set.
+        query_start_loc: Cumulative query offsets, length num_seqs + 1.
+        seq_lens: Total context length per sequence.
+        max_seq_len: Longest context length in the batch.
+        max_query_len: Longest query length in the batch; 1 means decode-only.
+        k_scale: Key dequantization scale for quantized KV caches.
+        v_scale: Value dequantization scale for quantized KV caches.
+        alibi_slopes: Per-head ALiBi slopes, or None.
+        sliding_window: Sliding-window size; None or <= 0 disables it.
+        sm_scale: Softmax scale; defaults to 1/sqrt(head_size).
+        output_scale: Output quantization scale, or None.
+        sinks: Optional per-head attention sinks.
+        is_block_table_ptr: Whether `block_table` holds row pointers rather
+            than page ids.
+        causal: Whether to apply the causal mask during prefill.
+    """
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
 
@@ -381,12 +414,15 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
+    # Force Triton for stride-padded hybrid layouts: they use
+    # reshape_and_cache_flash during cache update, so decode must stay on the
+    # matching stride-aware path. (The custom op now handles non-power-of-2
+    # block sizes like Qwen3's 544, so block size no longer forces Triton.)
     has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    # Force Triton for non-standard blocks like Qwen3's 544 and for
-    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
-    # during cache update, so keep decode on the matching stride-aware path.
+    # Still needed below to size the Triton block (non-pow2 blocks use 32); it
+    # no longer gates use_custom (the custom op now handles free block sizes).
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2 or not has_native_layout:
+    if not has_native_layout:
         use_custom = False
 
     if use_custom:
@@ -394,10 +430,22 @@ def chunked_prefill_paged_decode(
         max_num_partitions = (
             max_seq_len + _PARTITION_SIZE_ROCM - 1
         ) // _PARTITION_SIZE_ROCM
-        assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = block_table.shape[0]
+        # Extra space for multi-pass float4 reduction buffer.
+        # The float4 buffer starts at byte offset
+        # num_seqs * num_heads * max_num_partitions * head_size * elem_size
+        # which must be 16-byte aligned (sizeof(float4)).
+        assert (head_size * query.element_size()) % 16 == 0, (
+            f"head_size * element_size must be float4-aligned, "
+            f"got {head_size} * {query.element_size()}"
+        )
+        max_passes = (max_num_partitions + 511) // 512
+        float4_bytes = 16
+        elem_bytes = query.element_size()
+        extra_per_pass = 1 + (float4_bytes + elem_bytes - 1) // elem_bytes
+        padded_partitions = max_num_partitions + max_passes * extra_per_pass
         tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
+            size=(total_num_seq, num_query_heads, padded_partitions, head_size),
             dtype=query.dtype,
             device=output.device,
         )
