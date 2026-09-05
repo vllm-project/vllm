@@ -580,6 +580,15 @@ class FusedMoEExperts(ABC):
             moe_config.routing_method, weight_key, activation_key
         ):
             return False, _make_reason(f"routing method {moe_config.routing_method}")
+        elif (
+            moe_config.original_routing_method is not None
+            and not cls._supports_routing_method(
+                moe_config.original_routing_method, weight_key, activation_key
+            )
+        ):
+            return False, _make_reason(
+                f"original routing method {moe_config.original_routing_method}"
+            )
         elif not cls._supports_router_logits_dtype(
             moe_config.router_logits_dtype,
             moe_config.routing_method,

@@ -666,6 +666,8 @@ def _make_nvfp4_monolithic_experts(
     hidden_size: int,
     intermediate_size: int,
     device: torch.device,
+    routing_method: RoutingMethodType = RoutingMethodType.DeepSeekV3,
+    original_routing_method: RoutingMethodType | None = None,
 ) -> tuple[
     TrtLlmNvFp4ExpertsMonolithic,
     torch.Tensor,  # w13 (packed nvfp4 uint8)
@@ -700,7 +702,9 @@ def _make_nvfp4_monolithic_experts(
         in_dtype=torch.bfloat16,
         activation=MoEActivation.SILU,
         device=device,
-        routing_method=RoutingMethodType.DeepSeekV3,
+        routing_method=routing_method,
+        router_logits_dtype=torch.float32,
+        original_routing_method=original_routing_method,
         max_num_tokens=16,
     )
 
@@ -776,6 +780,8 @@ def _run_nvfp4_monolithic(
     router_logits: torch.Tensor,
     num_experts: int,
     routing_bias: torch.Tensor,
+    n_group: int = _DSV3_N_GROUP,
+    topk_group: int = _DSV3_TOPK_GROUP,
 ) -> torch.Tensor:
     """The monolithic NVFP4 apply expects packed fp4 hidden states + the
     matching fp8 per-block scale stored in the ``a1q_scale`` slot."""
@@ -792,27 +798,67 @@ def _run_nvfp4_monolithic(
         expert_map=None,
         a1q_scale=hidden_states_scale,
         apply_router_weight_on_input=False,
-        num_expert_group=_DSV3_N_GROUP,
-        topk_group=_DSV3_TOPK_GROUP,
+        num_expert_group=n_group,
+        topk_group=topk_group,
         e_score_correction_bias=routing_bias,
         routed_scaling_factor=1.0,
     )
 
 
-@pytest.mark.parametrize("num_tokens", [2, 7, 16])
-@pytest.mark.parametrize("top_k", [2, 4])
+@pytest.mark.parametrize(
+    (
+        "num_tokens",
+        "top_k",
+        "routing_method",
+        "original_routing_method",
+        "n_group",
+        "topk_group",
+    ),
+    [
+        pytest.param(2, 2, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m2-k2"),
+        pytest.param(7, 2, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m7-k2"),
+        pytest.param(16, 2, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m16-k2"),
+        pytest.param(2, 4, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m2-k4"),
+        pytest.param(7, 4, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m7-k4"),
+        pytest.param(16, 4, RoutingMethodType.DeepSeekV3, None, 4, 2, id="m16-k4"),
+        pytest.param(
+            2,
+            4,
+            RoutingMethodType.Simulated,
+            RoutingMethodType.DeepSeekV3,
+            1,
+            1,
+            id="simulated-dsv3-single-group",
+        ),
+    ],
+)
 def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
     num_tokens: int,
     top_k: int,
+    routing_method: RoutingMethodType,
+    original_routing_method: RoutingMethodType | None,
+    n_group: int,
+    topk_group: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end: ``TrtLlmNvFp4ExpertsMonolithic`` captures valid expert IDs
     on the DSV3 routing path."""
-    if top_k > _DSV3_N_GROUP * _DSV3_TOPK_GROUP:
+    if n_group > 1 and top_k > n_group * topk_group:
         pytest.skip(
             f"DSV3 requires top_k <= n_group * topk_group "
-            f"({_DSV3_N_GROUP * _DSV3_TOPK_GROUP})"
+            f"({n_group * topk_group})"
         )
+    import vllm.envs as envs
     from flashinfer import fp4_quantize
+
+    strategy = (
+        "uniform_random" if routing_method == RoutingMethodType.Simulated else ""
+    )
+    monkeypatch.setitem(
+        envs.environment_variables,
+        "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+        lambda: strategy,
+    )
 
     torch.manual_seed(0)
     device = torch.device("cuda:0")
@@ -828,6 +874,8 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         device=device,
+        routing_method=routing_method,
+        original_routing_method=original_routing_method,
     )
     # The apply() reads w1/w2 from its args, but we keep them on the experts
     # for convenience of the helper.
@@ -862,6 +910,8 @@ def test_trtllm_nvfp4_monolithic_routing_replay_records_valid_experts(
         router_logits=router_logits,
         num_experts=num_experts,
         routing_bias=routing_bias,
+        n_group=n_group,
+        topk_group=topk_group,
     )
 
     assert len(captured) == 1
