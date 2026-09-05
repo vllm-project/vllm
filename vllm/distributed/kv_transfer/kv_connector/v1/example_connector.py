@@ -135,7 +135,11 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            slot_mapping = slot_mapping.to(dst_kv_cache_layer.device, non_blocking=True)
+            # Deliberate bulk transfers in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping = slot_mapping.to(
+                    dst_kv_cache_layer.device, non_blocking=True
+                )
             if isinstance(attn_metadata, MLACommonMetadata):
                 # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
@@ -177,8 +181,10 @@ class ExampleConnector(KVConnectorBase_V1):
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
-                kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
+                # Deliberate bulk load in this reference connector.
+                with gpu_sync_allowed():
+                    kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
+                    kv_cache = kv_cache_cpu.to(kv_cache_layer.device, non_blocking=True)
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
@@ -224,7 +230,9 @@ class ExampleConnector(KVConnectorBase_V1):
 
             The layer is a standardized [B, H, N, C] per-layer view (H == 1 for MLA).
             """
-            slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
+            # Deliberate bulk transfer in this reference connector.
+            with gpu_sync_allowed():
+                slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
                 # [B, 1, N, C] -> [B * N, C]; slot_mapping indexes B * N slots.
                 return layer.reshape(-1, layer.shape[-1])[slot_mapping, ...]
