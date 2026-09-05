@@ -1045,11 +1045,29 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return True
 
 
-def get_max_concurrency_for_kv_cache_config(
+@dataclass(frozen=True)
+class KVCacheBlockBudget:
+    """The pool size and the per-request block cost it is divided by."""
+
+    # Blocks in the shared pool, i.e. `KVCacheConfig.num_blocks`.
+    num_gpu_blocks: int
+    # Blocks one request claims from each group, in `kv_cache_groups` order.
+    blocks_per_group: list[int]
+
+    @property
+    def num_blocks_per_request(self) -> int:
+        return sum(self.blocks_per_group)
+
+    @property
+    def max_concurrency(self) -> float:
+        return self.num_gpu_blocks / self.num_blocks_per_request
+
+
+def get_kv_cache_block_budget(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> float:
+) -> KVCacheBlockBudget:
     """
-    Get the maximum concurrency for the given KV cache configuration.
+    Get the per-request block budget for the given KV cache configuration.
 
     A request at max_model_len consumes whole blocks from each group's block
     table — cdiv(per-request bytes, page bytes) of the group's spec — and all
@@ -1059,15 +1077,16 @@ def get_max_concurrency_for_kv_cache_config(
     a representative per-layer spec (scheduler config), so both capacity
     call sites agree.
     """
-    num_blocks_per_request = sum(
-        cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
-            group.kv_cache_spec.page_size_bytes,
-        )
-        for group in kv_cache_config.kv_cache_groups
+    return KVCacheBlockBudget(
+        num_gpu_blocks=kv_cache_config.num_blocks,
+        blocks_per_group=[
+            cdiv(
+                group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                group.kv_cache_spec.page_size_bytes,
+            )
+            for group in kv_cache_config.kv_cache_groups
+        ],
     )
-    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
-    return max_concurrency
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -2290,31 +2309,55 @@ def generate_scheduler_kv_cache_config(
 
 def get_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> tuple[int, float]:
+) -> tuple[int, KVCacheBlockBudget]:
     """
-    Get the group-aware KV cache token capacity and max concurrency.
+    Get the group-aware KV cache token capacity and per-request block budget.
     """
     max_model_len = vllm_config.model_config.max_model_len
-    max_concurrency = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config
+    budget = get_kv_cache_block_budget(vllm_config, kv_cache_config)
+    return int(budget.max_concurrency * max_model_len), budget
+
+
+def _format_blocks_per_group(
+    kv_cache_config: KVCacheConfig, budget: KVCacheBlockBudget
+) -> str:
+    """Render the per-group share of `budget.num_blocks_per_request`.
+
+    Groups have no name, so they are identified by their index in
+    `kv_cache_groups` and the spec that priced them.
+    """
+    return "; ".join(
+        f"[{i}] {type(group.kv_cache_spec).__name__} "
+        f"(layers={len(group.layer_names)}, "
+        f"block_size={group.kv_cache_spec.block_size}): {blocks}"
+        for i, (group, blocks) in enumerate(
+            zip(kv_cache_config.kv_cache_groups, budget.blocks_per_group)
+        )
     )
-    return int(max_concurrency * max_model_len), max_concurrency
 
 
 def update_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
     """Store and log the resolved KV cache capacity."""
-    num_tokens, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
+    num_tokens, budget = get_kv_cache_capacity(vllm_config, kv_cache_config)
     vllm_config.cache_config.kv_cache_size_tokens = num_tokens
-    vllm_config.cache_config.kv_cache_max_concurrency = max_concurrency
+    vllm_config.cache_config.kv_cache_max_concurrency = budget.max_concurrency
     max_model_len = vllm_config.model_config.max_model_len
     logger.info_once(
-        "GPU KV cache size: %s tokens, "
+        "GPU KV cache size: %s tokens (max_concurrency × max_model_len), "
         "Maximum concurrency for %s tokens per request: %.2fx",
         f"{num_tokens:,}",
         f"{max_model_len:,}",
-        max_concurrency,
+        budget.max_concurrency,
+    )
+    logger.info_once(
+        "GPU KV cache blocks: %s in the pool, %s per request at %s tokens; "
+        "per group: %s",
+        f"{budget.num_gpu_blocks:,}",
+        f"{budget.num_blocks_per_request:,}",
+        f"{max_model_len:,}",
+        _format_blocks_per_group(kv_cache_config, budget),
     )
 
 

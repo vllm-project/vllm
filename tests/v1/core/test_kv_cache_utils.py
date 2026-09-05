@@ -41,10 +41,10 @@ from vllm.v1.core.kv_cache_utils import (
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
+    get_kv_cache_block_budget,
     get_kv_cache_capacity,
     get_kv_cache_configs,
     get_kv_cache_groups,
-    get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
@@ -1532,7 +1532,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
     assert estimated_max_len == want_estimated_max_len
 
 
-def test_get_max_concurrency_for_kv_cache_config():
+def test_get_kv_cache_block_budget():
     # Create a VllmConfig
     model_id = "Qwen/Qwen1.5-7B"
     max_model_len = 16384
@@ -1579,10 +1579,12 @@ def test_get_max_concurrency_for_kv_cache_config():
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)], full_attention_spec),
         ],
     )
-    max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
+    budget_full_attention = get_kv_cache_block_budget(
         vllm_config, kv_cache_config_full_attention
     )
-    assert max_concurrency_full_attention == 1.5
+    assert budget_full_attention.blocks_per_group == [1024]
+    assert budget_full_attention.num_blocks_per_request == 1024
+    assert budget_full_attention.max_concurrency == 1.5
 
     kv_cache_config_sliding_window = KVCacheConfig(
         num_blocks=129 * 3,
@@ -1591,10 +1593,11 @@ def test_get_max_concurrency_for_kv_cache_config():
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)], sliding_window_spec),
         ],
     )
-    max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
+    budget_sliding_window = get_kv_cache_block_budget(
         vllm_config, kv_cache_config_sliding_window
     )
-    assert max_concurrency_sliding_window == 3
+    assert budget_sliding_window.blocks_per_group == [129]
+    assert budget_sliding_window.max_concurrency == 3
 
     kv_cache_config_hybrid_model = KVCacheConfig(
         num_blocks=(1024 + 129) * 3,
@@ -1606,15 +1609,20 @@ def test_get_max_concurrency_for_kv_cache_config():
             ),
         ],
     )
-    max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
+    budget_hybrid_model = get_kv_cache_block_budget(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert max_concurrency_hybrid_model == 3
-    num_tokens, max_concurrency = get_kv_cache_capacity(
+    # The breakdown the boot log reports: one entry per group, summing to the
+    # per-request cost that divides the pool.
+    assert budget_hybrid_model.blocks_per_group == [1024, 129]
+    assert budget_hybrid_model.num_blocks_per_request == 1153
+    assert budget_hybrid_model.num_gpu_blocks == 1153 * 3
+    assert budget_hybrid_model.max_concurrency == 3
+    num_tokens, budget = get_kv_cache_capacity(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert num_tokens == max_concurrency_hybrid_model * max_model_len
-    assert max_concurrency == max_concurrency_hybrid_model
+    assert num_tokens == budget_hybrid_model.max_concurrency * max_model_len
+    assert budget == budget_hybrid_model
 
     # Unequal group sizes in the standard layout: each group's pages cost
     # whole pool blocks, so a request needs 1024 + 129 = 1153 blocks — the
@@ -1629,9 +1637,9 @@ def test_get_max_concurrency_for_kv_cache_config():
         ],
     )
     assert (
-        get_max_concurrency_for_kv_cache_config(
+        get_kv_cache_block_budget(
             vllm_config, kv_cache_config_unequal_groups
-        )
+        ).max_concurrency
         == 3
     )
 
@@ -1654,9 +1662,9 @@ def test_get_max_concurrency_for_kv_cache_config():
         ],
     )
     assert (
-        get_max_concurrency_for_kv_cache_config(
+        get_kv_cache_block_budget(
             vllm_config, kv_cache_config_uniform_group
-        )
+        ).max_concurrency
         == 3
     )
 
@@ -1667,11 +1675,9 @@ def test_get_max_concurrency_for_kv_cache_config():
     kv_cache_config_scheduler_shape = generate_scheduler_kv_cache_config(
         [copy.deepcopy(kv_cache_config_uniform_group)]
     )
-    assert get_max_concurrency_for_kv_cache_config(
+    assert get_kv_cache_block_budget(
         vllm_config, kv_cache_config_scheduler_shape
-    ) == get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config_uniform_group
-    )
+    ) == get_kv_cache_block_budget(vllm_config, kv_cache_config_uniform_group)
 
 
 def test_allocate_with_lookahead():
