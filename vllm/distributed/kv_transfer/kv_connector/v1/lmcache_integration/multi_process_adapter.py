@@ -146,6 +146,8 @@ class LMCacheMPSchedulerAdapter:
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy,
+        mq_timeout: float | None = None,
+        heartbeat_interval: float | None = None,
     ):
         """
         Args:
@@ -157,6 +159,10 @@ class LMCacheMPSchedulerAdapter:
             parallel_strategy:
                 The parallel strategy, which includes `use_mla`,
                 `world_size`, `worker_id` and so on
+            mq_timeout: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
+            heartbeat_interval: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -194,6 +200,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         block_hashes: list[bytes] | None = None,
         token_ids: list[int] | None = None,
+        cache_salt: str = "",
     ) -> None:
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -209,6 +216,8 @@ class LMCacheMPSchedulerAdapter:
                 from the same request
             block_hashes: Block hashes to lookup from LMCache (hash mode)
             token_ids: Token IDs to lookup from LMCache (token mode)
+            cache_salt: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
 
         Returns:
             None
@@ -353,7 +362,16 @@ class LMCacheMPWorkerAdapter:
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy,
+        mq_timeout: float | None = None,
+        heartbeat_interval: float | None = None,
     ):
+        """
+        Args:
+            mq_timeout: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
+            heartbeat_interval: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
+        """
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Instance id for GPU worker
@@ -502,6 +520,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -512,6 +531,8 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
         """
         all_keys: list[IPCCacheEngineKey] = []
         block_ids: list[int] = []
@@ -551,6 +572,7 @@ class LMCacheMPWorkerAdapter:
         request_ids: list[str],
         ops: list[LoadStoreOp],
         event: torch.cuda.Event,
+        cache_salts: list[str] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -561,6 +583,8 @@ class LMCacheMPWorkerAdapter:
                 the same length as request_ids
             event: The CUDA event that is recorded after the current
                 model inference step
+            cache_salts: Reserved for compatibility with newer LMCache MP
+                adapter interfaces.
         """
         all_keys: list[IPCCacheEngineKey] = []
         block_ids: list[int] = []
