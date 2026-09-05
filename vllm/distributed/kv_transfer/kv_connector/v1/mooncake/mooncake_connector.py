@@ -4,7 +4,8 @@ import asyncio
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -225,6 +226,125 @@ def _can_coalesce_block_transfers(
         and transfer_len == local_region_block_len
         and transfer_len == remote_region_block_len
     )
+
+
+@dataclass(frozen=True)
+class PageTransferGeometry:
+    """Whole-page transfer geometry for one KV-cache group.
+
+    With the unified paged KV layout every registered region (layer) of a
+    group stores one slot per block inside a common page whose width is the
+    block stride, so all layers of one block are physically contiguous. When
+    the remote worker registers the same slot offsets, a run of contiguous
+    blocks can be moved as a single ``run_len * page`` descriptor instead of
+    one descriptor per (layer, block).
+    """
+
+    page: int
+    local_origin: int
+    remote_origin: int
+
+
+def _compute_page_transfer_geometry(
+    local_regions: list[TransferRegion],
+    remote_regions: list[TransferRegion],
+    local_group_counts: dict[int, int],
+    remote_group_counts: dict[int, int],
+    transfer_plan: Callable[
+        [TransferRegion, TransferRegion], tuple[bool, int, int, int]
+    ],
+) -> dict[int, PageTransferGeometry]:
+    """Return the page geometry of every KV-cache group eligible for whole-page
+    transfers. Regions must already be aligned pairwise.
+
+    A group qualifies only when whole-page writes cannot touch data the local
+    rank does not own: every registered layer of the group (locally and
+    remotely, so no PP shard is missing) is part of the aligned regions, all
+    of them share one block stride (the page), every layer slot lies fully
+    inside the page at the same offset on both sides, and the per-region plan
+    is a full untranslated copy (no heterogeneous-TP slicing, no replicated
+    KV skip).
+    """
+    by_group: dict[int, list[tuple[TransferRegion, TransferRegion]]] = {}
+    for local_region, remote_region in zip(local_regions, remote_regions):
+        by_group.setdefault(local_region.group_index, []).append(
+            (local_region, remote_region)
+        )
+
+    geometry: dict[int, PageTransferGeometry] = {}
+    for group_index, pairs in by_group.items():
+        if len(pairs) != local_group_counts.get(group_index, -1) or len(
+            pairs
+        ) != remote_group_counts.get(group_index, -1):
+            continue
+        page = pairs[0][0].block_len
+        if page <= 0:
+            continue
+        local_origin = min(local_region.base_addr for local_region, _ in pairs)
+        remote_origin = min(remote_region.base_addr for _, remote_region in pairs)
+        eligible = True
+        for local_region, remote_region in pairs:
+            should_transfer, src_offset, dst_offset, transfer_len = transfer_plan(
+                local_region, remote_region
+            )
+            local_slot = local_region.base_addr - local_origin
+            remote_slot = remote_region.base_addr - remote_origin
+            if (
+                local_region.block_len != page
+                or remote_region.block_len != page
+                or not should_transfer
+                or src_offset != 0
+                or dst_offset != 0
+                or transfer_len != local_region.kv_block_len
+                or remote_region.kv_block_len != local_region.kv_block_len
+                or local_slot != remote_slot
+                or local_slot + local_region.kv_block_len > page
+            ):
+                eligible = False
+                break
+        if eligible:
+            geometry[group_index] = PageTransferGeometry(
+                page=page, local_origin=local_origin, remote_origin=remote_origin
+            )
+    return geometry
+
+
+def _append_page_transfers(
+    geometry: dict[int, PageTransferGeometry],
+    local_block_ids_by_group: list[list[int]],
+    remote_block_ids_by_group: list[list[int]],
+    src_ptrs: list[int],
+    dst_ptrs: list[int],
+    lengths: list[int],
+) -> set[int]:
+    """Emit one whole-page descriptor per contiguous block run for every group
+    in ``geometry`` and return the set of groups handled this way."""
+    handled: set[int] = set()
+    for group_index, geom in geometry.items():
+        if group_index >= len(local_block_ids_by_group):
+            continue
+        local_block_ids = local_block_ids_by_group[group_index]
+        remote_block_ids = remote_block_ids_by_group[group_index]
+        if not local_block_ids:
+            continue
+        # The null block carries no KV data; never overwrite its remote page.
+        pairs = [
+            (local_id, remote_id)
+            for local_id, remote_id in zip(local_block_ids, remote_block_ids)
+            if local_id != NULL_BLOCK_ID and remote_id != NULL_BLOCK_ID
+        ]
+        handled.add(group_index)
+        if not pairs:
+            continue
+        local_runs, remote_runs = group_concurrent_contiguous(
+            [local_id for local_id, _ in pairs],
+            [remote_id for _, remote_id in pairs],
+        )
+        for local_run, remote_run in zip(local_runs, remote_runs):
+            src_ptrs.append(geom.local_origin + local_run[0] * geom.page)
+            dst_ptrs.append(geom.remote_origin + remote_run[0] * geom.page)
+            lengths.append(len(local_run) * geom.page)
+    return handled
 
 
 def _validate_asymmetric_region_lengths(
@@ -1404,6 +1524,55 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
 
+    def _page_transfer_geometry(
+        self,
+        agent_meta: MooncakeXferMetadata,
+        local_regions: list[TransferRegion],
+        remote_regions: list[TransferRegion],
+    ) -> dict[int, PageTransferGeometry]:
+        """Whole-page geometry per KV group for this remote worker (cached per
+        remote session; registered regions never change after startup)."""
+        remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        cache = self.__dict__.setdefault("_page_transfer_geometry_cache", {})
+        if remote_session in cache:
+            return cache[remote_session]
+        geometry: dict[int, PageTransferGeometry] = {}
+        if agent_meta.registered_group_indices:
+
+            def transfer_plan(
+                local_region: TransferRegion, remote_region: TransferRegion
+            ) -> tuple[bool, int, int, int]:
+                return self._get_sender_transfer_plan(
+                    local_kv_block_len=local_region.kv_block_len,
+                    remote_kv_block_len=remote_region.kv_block_len,
+                    remote_tp_rank=agent_meta.remote_tp_rank,
+                    remote_tp_size=agent_meta.remote_tp_size,
+                )
+
+            geometry = _compute_page_transfer_geometry(
+                local_regions,
+                remote_regions,
+                Counter(self.registered_group_indices),
+                Counter(agent_meta.registered_group_indices),
+                transfer_plan,
+            )
+        if geometry:
+            logger.info(
+                "Mooncake whole-page KV transfer enabled towards %s for KV "
+                "groups %s (page=%d bytes)",
+                remote_session,
+                sorted(geometry),
+                next(iter(geometry.values())).page,
+            )
+        else:
+            logger.debug(
+                "Mooncake whole-page KV transfer not applicable towards %s; "
+                "using per-layer descriptors",
+                remote_session,
+            )
+        cache[remote_session] = geometry
+        return geometry
+
     async def _build_transfer_params(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
@@ -1503,7 +1672,25 @@ class MooncakeConnectorWorker:
                 remote_block_ids_by_group
             )
 
+            # Groups whose layers share one page per block are sent as whole
+            # pages (one descriptor per contiguous block run) and skipped by
+            # the per-layer loop below.
+            page_groups: set[int] = set()
+            if envs.VLLM_MOONCAKE_PAGE_TRANSFER:
+                page_groups = _append_page_transfers(
+                    self._page_transfer_geometry(
+                        agent_meta, local_regions, remote_regions
+                    ),
+                    local_block_ids_by_group,
+                    remote_block_ids_by_group,
+                    src_ptrs,
+                    dst_ptrs,
+                    lengths,
+                )
+
             for local_region, remote_region in zip(local_regions, remote_regions):
+                if local_region.group_index in page_groups:
+                    continue
                 assert local_region.group_index == remote_region.group_index, (
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."

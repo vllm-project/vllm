@@ -231,6 +231,7 @@ if TYPE_CHECKING:
     VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_PAGE_TRANSFER: bool = True
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
@@ -1704,6 +1705,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
+    ),
+    # Send disaggregated-prefill KV as whole pages (one RDMA descriptor per
+    # contiguous block run) whenever all layers of a KV group share one page
+    # per block on both sides. Set to 0 to always emit per-layer descriptors.
+    "VLLM_MOONCAKE_PAGE_TRANSFER": lambda: (
+        os.getenv("VLLM_MOONCAKE_PAGE_TRANSFER", "True").lower() in ("true", "1")
     ),
     # Log per-batch memory/disk tier breakdown on external GETs.
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (

@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,10 +23,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
+    PageTransferGeometry,
     PullReqMeta,
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _compute_page_transfer_geometry,
+    _compute_sender_transfer_plan,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -33,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -268,6 +273,213 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
         assert src_ptrs == expected_by_pp_rank[pp_rank]["src_ptrs"]
         assert dst_ptrs == expected_by_pp_rank[pp_rank]["dst_ptrs"]
         assert lengths == [2 * block_len, 2 * block_len]
+
+
+def _make_page_layout_worker(tp_size: int = 1):
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = tp_size
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
+    return worker
+
+
+def _page_regions(origin: int, page: int, slot_lens: list[int], group_index: int = 0):
+    """Regions of one KV group laid out as consecutive slots inside one page."""
+    regions = []
+    offset = 0
+    for layer_index, slot_len in enumerate(slot_lens):
+        regions.append(
+            TransferRegion(
+                layer_name=f"model.layers.{layer_index}.self_attn",
+                layer_index=layer_index,
+                base_addr=origin + offset,
+                block_len=page,
+                kv_block_len=slot_len,
+                group_index=group_index,
+            )
+        )
+        offset += slot_len
+    return regions
+
+
+def _xfer_meta(remote_regions, req_blocks, remote_tp_size: int = 1):
+    return MooncakeXferMetadata(
+        remote_hostname="consumer-host",
+        remote_port=54321,
+        remote_tp_size=remote_tp_size,
+        remote_tp_rank=0,
+        req_blocks=req_blocks,
+        kv_caches_base_addr=[r.base_addr for r in remote_regions],
+        block_lens=[r.block_len for r in remote_regions],
+        kv_block_lens=[r.kv_block_len for r in remote_regions],
+        registered_layer_names=[r.layer_name for r in remote_regions],
+        registered_layer_indices=[r.layer_index for r in remote_regions],
+        registered_group_indices=[r.group_index for r in remote_regions],
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_sends_whole_pages_per_block_run():
+    """Layers sharing one page per block collapse into one descriptor per
+    contiguous block run instead of one per (layer, block)."""
+    page = 4096
+    slot_lens = [1024, 1024, 512]  # three layers, page has 1536 B of padding
+    local_regions = _page_regions(0x10000, page, slot_lens)
+    remote_regions = _page_regions(0x80000, page, slot_lens)
+    worker = _make_page_layout_worker()
+    worker.registered_group_indices = [0, 0, 0]
+
+    transfer_id = "xfer-page"
+    send_meta = SendBlockMeta(
+        p_req_id="p-req-page",
+        transfer_id=transfer_id,
+        # Two contiguous runs: [3, 4, 5] and [9, 10].
+        local_block_ids=[[3, 4, 5, 9, 10]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-req-page": (transfer_id, [[20, 21, 22, 30, 31]])}
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-req-page", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [0x10000 + 3 * page, 0x10000 + 9 * page]
+    assert dst_ptrs == [0x80000 + 20 * page, 0x80000 + 30 * page]
+    assert lengths == [3 * page, 2 * page]
+
+
+@pytest.mark.asyncio
+async def test_build_transfer_params_page_path_skips_null_blocks(monkeypatch):
+    page = 4096
+    slot_lens = [1024, 1024]
+    local_regions = _page_regions(0x10000, page, slot_lens)
+    remote_regions = _page_regions(0x80000, page, slot_lens)
+    worker = _make_page_layout_worker()
+    worker.registered_group_indices = [0, 0]
+
+    transfer_id = "xfer-null"
+    send_meta = SendBlockMeta(
+        p_req_id="p-req-null",
+        transfer_id=transfer_id,
+        local_block_ids=[[NULL_BLOCK_ID, 7, 8]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-req-null": (transfer_id, [[NULL_BLOCK_ID, 40, 41]])}
+    )
+
+    src_ptrs, dst_ptrs, lengths, _, _ = await worker._build_transfer_params(
+        ready_reqs=[("d-req-null", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    assert src_ptrs == [0x10000 + 7 * page]
+    assert dst_ptrs == [0x80000 + 40 * page]
+    assert lengths == [2 * page]
+
+    # Kill switch restores the per-layer descriptors.
+    monkeypatch.setattr(envs, "VLLM_MOONCAKE_PAGE_TRANSFER", False)
+    worker = _make_page_layout_worker()
+    worker.registered_group_indices = [0, 0]
+    src_ptrs, dst_ptrs, lengths, _, _ = await worker._build_transfer_params(
+        ready_reqs=[("d-req-null", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+    # Per-layer path: one descriptor per (layer, block), null block included,
+    # since the layer slot (1024 B) is smaller than the block stride (page).
+    assert len(src_ptrs) == 2 * 3
+    assert lengths == [1024] * 6
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "layer_stride_differs",
+        "slot_crosses_page",
+        "remote_offsets_differ",
+        "remote_has_extra_layer",
+        "heterogeneous_tp",
+    ],
+)
+def test_page_transfer_geometry_falls_back_when_layout_does_not_qualify(case):
+    page = 4096
+    slot_lens = [1024, 1024]
+    local_regions = _page_regions(0x10000, page, slot_lens)
+    remote_regions = _page_regions(0x80000, page, slot_lens)
+    local_counts = {0: 2}
+    remote_counts = {0: 2}
+    remote_tp_size = 1
+
+    if case == "layer_stride_differs":
+        local_regions[1] = dataclasses.replace(local_regions[1], block_len=page // 2)
+    elif case == "slot_crosses_page":
+        local_regions[1] = dataclasses.replace(local_regions[1], kv_block_len=page)
+        remote_regions[1] = dataclasses.replace(remote_regions[1], kv_block_len=page)
+    elif case == "remote_offsets_differ":
+        remote_regions[1] = dataclasses.replace(
+            remote_regions[1], base_addr=0x80000 + 2048
+        )
+    elif case == "remote_has_extra_layer":
+        remote_counts = {0: 3}
+    elif case == "heterogeneous_tp":
+        # A TP-2 consumer holds half of each layer's KV per rank.
+        remote_tp_size = 2
+        remote_regions = [
+            dataclasses.replace(region, kv_block_len=region.kv_block_len // 2)
+            for region in remote_regions
+        ]
+
+    def transfer_plan(local_region, remote_region):
+        return _compute_sender_transfer_plan(
+            local_tp_rank=0,
+            local_tp_size=1,
+            remote_tp_rank=0,
+            remote_tp_size=remote_tp_size,
+            local_kv_block_len=local_region.kv_block_len,
+            remote_kv_block_len=remote_region.kv_block_len,
+            producer_cache_replicated=False,
+        )
+
+    assert (
+        _compute_page_transfer_geometry(
+            local_regions, remote_regions, local_counts, remote_counts, transfer_plan
+        )
+        == {}
+    )
+
+    # The unmodified layout qualifies.
+    good_local = _page_regions(0x10000, page, slot_lens)
+    good_remote = _page_regions(0x80000, page, slot_lens)
+    if case != "heterogeneous_tp":
+        assert _compute_page_transfer_geometry(
+            good_local, good_remote, {0: 2}, {0: 2}, transfer_plan
+        ) == {
+            0: PageTransferGeometry(
+                page=page, local_origin=0x10000, remote_origin=0x80000
+            )
+        }
 
 
 @pytest.mark.asyncio
