@@ -222,6 +222,8 @@ class CacheConfig:
     for hybrid models where requests occupy multiple KV cache groups."""
     kv_cache_max_concurrency: float | None = field(default=None, init=False)
     """Per-DP-engine maximum concurrency at max_model_len tokens."""
+    kv_cache_capacity_bytes: dict[int, int] = field(default_factory=dict, init=False)
+    """Physical KV cache capacity in bytes keyed by global DP rank."""
 
     kv_sharing_fast_prefill: bool = False
     """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
@@ -284,6 +286,7 @@ class CacheConfig:
             "num_cpu_blocks",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
+            "kv_cache_capacity_bytes",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
