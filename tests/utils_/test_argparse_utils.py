@@ -472,7 +472,26 @@ def test_compilation_mode_string_values(parser):
     assert args.compilation_config == {"mode": "vllm_compile"}
 
 
-def test_compilation_config_mode_validator():
+def test_compilation_config_long_alias_dotted_form(parser):
+    """Test that --cc (long-form alias) works with dotted-arg syntax.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/55125
+    """
+    # These should all work with --cc (long-form alias) just like -cc
+    args = parser.parse_args(["--cc.mode=none"])
+    assert args.compilation_config == {"mode": "none"}
+
+    args = parser.parse_args(["--cc.mode", "VLLM_COMPILE"])
+    assert args.compilation_config == {"mode": "VLLM_COMPILE"}
+
+    args = parser.parse_args(["--cc.mode=STOCK_TORCH_COMPILE"])
+    assert args.compilation_config == {"mode": "STOCK_TORCH_COMPILE"}
+
+    args = parser.parse_args(["--cc.mode", "0"])
+    assert args.compilation_config == {"mode": 0}
+
+
+def test_compilation_mode_string_values(parser):
     """Test that CompilationConfig.mode field validator converts strings to integers."""
     from vllm.config.compilation import CompilationConfig, CompilationMode
 
