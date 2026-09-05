@@ -258,13 +258,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-        # Positions past the computed tokens that the drafter reads mid-prefill.
-        # Eagle-family drafters read 1 ahead, but multi-module MTP reads
-        # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
-        # encoder scheduling shift, the deferred encoder free, the KV cache
-        # manager's re-prefillable window (this minus 1), and how many tokens to
-        # reserve between a chunk boundary and the prefill end.
-        self.num_prefill_lookahead = 0
+        self.num_prefill_lookahead = vllm_config.num_prefill_lookahead_tokens
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -274,12 +268,6 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
-            if self.use_eagle:
-                self.num_prefill_lookahead = (
-                    self.num_spec_tokens
-                    if speculative_config.use_multi_module_mtp()
-                    else 1
-                )
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if self.use_eagle and not self.use_eagle_block_drop:
                 logger.warning(
