@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    compute_target_normalization,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -930,7 +931,8 @@ def test_sample_recovered_tokens(
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids,
         None if no_draft_probs else draft_probs,
-        target_probs,
+        target_logits,
+        *compute_target_normalization(target_logits, vocab_size, block_size=8192),
         sampling_metadata,
         device=DEVICE_TYPE,
     )
@@ -971,6 +973,7 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
         draft_token_ids.reshape(batch_size, max_spec_len).tolist(),
         target_probs.log(),
     )
+    target_logits = target_probs.log()
 
     expected = native_sample_recovered_tokens(
         max_spec_len,
@@ -989,7 +992,8 @@ def test_sample_recovered_tokens_uses_fp64_exponential_race_when_requested():
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids,
         draft_probs,
-        target_probs,
+        target_logits,
+        *compute_target_normalization(target_logits, vocab_size, block_size=8192),
         sampling_metadata,
         device=torch.device(DEVICE_TYPE),
         use_fp64_gumbel=True,
@@ -1076,7 +1080,8 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
         spec_decode_metadata.cu_num_draft_tokens,
         draft_token_ids.squeeze(-1),
         None if no_draft_probs else draft_probs,
-        target_probs,
+        target_probs.log(),
+        *compute_target_normalization(target_probs.log(), vocab_size, block_size=8192),
         sampling_metadata,
         device=DEVICE_TYPE,
     )
@@ -1089,6 +1094,75 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
         f"Recovered token IDs >= vocab_size ({vocab_size}): "
         f"{recovered[recovered >= vocab_size].tolist()}"
     )
+
+
+def test_compute_target_normalization_enforces_dense_row_stride_contract():
+    logits = torch.randn(4, 8, dtype=torch.float32)
+
+    with pytest.raises(AssertionError):
+        compute_target_normalization(logits, vocab_size=7, block_size=4)
+
+    with pytest.raises(AssertionError):
+        compute_target_normalization(logits[:, ::2], vocab_size=4, block_size=4)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_target_normalization_matches_fp64_lse_reference():
+    """Fused normalization state should match an fp64 logsumexp oracle closely.
+
+    The production kernel consumes row max and inverse normalized sum to
+    reconstruct target probabilities. Compare the implied LSE against fp64
+    rather than torch's fp32 logsumexp so the test bounds numerical error
+    against a stronger reference.
+    """
+    torch.manual_seed(0)
+    num_tokens = 64
+    vocab_size = 8193
+    logits = torch.randn(
+        num_tokens, vocab_size, dtype=torch.float32, device="cuda"
+    )
+
+    # Simulate top-k/top-p masks. Keep at least one finite value per row.
+    mask = torch.rand(num_tokens, vocab_size, device="cuda") < 0.2
+    logits = logits.masked_fill(mask, float("-inf"))
+    logits[:, 0] = torch.maximum(logits[:, 0], torch.zeros_like(logits[:, 0]))
+
+    target_max, target_inv_sum = compute_target_normalization(
+        logits, vocab_size, block_size=4096
+    )
+    fused_lse = target_max - torch.log(target_inv_sum)
+    fp64_lse = torch.logsumexp(logits.double(), dim=-1).float()
+
+    assert torch.max(torch.abs(fused_lse - fp64_lse)).item() < 2e-6
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fused_target_normalization_handles_full_negative_infinity_tiles():
+    """Rows with entire masked tiles must not poison online state with NaNs.
+
+    Top-k/top-p can mask complete vocab tiles to -inf. The online update must
+    skip those tiles instead of evaluating -inf - -inf into a persistent NaN.
+    """
+    block_size = 4096
+    vocab_size = block_size * 3 + 17
+    logits = torch.full((2, vocab_size), float("-inf"), device="cuda")
+
+    # First two full tiles are -inf; all finite values are in the final tile.
+    logits[0, block_size * 2 + 3] = 0.25
+    logits[0, block_size * 2 + 11] = -1.0
+    logits[1, block_size * 3 + 7] = 2.0
+
+    target_max, target_inv_sum = compute_target_normalization(
+        logits, vocab_size, block_size=block_size
+    )
+    fused_lse = target_max - torch.log(target_inv_sum)
+    fp64_lse = torch.logsumexp(logits.double(), dim=-1).float()
+
+    assert torch.isfinite(target_max).all()
+    assert torch.isfinite(target_inv_sum).all()
+    torch.testing.assert_close(fused_lse, fp64_lse, atol=2e-6, rtol=0)
 
 
 ########################### Tests for Synthetic Rejection Sampling #########
