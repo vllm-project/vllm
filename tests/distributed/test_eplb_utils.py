@@ -6,9 +6,15 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+import vllm.distributed.eplb.eplb_state as eplb_state
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
+)
+from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbCycleComplete,
+    AsyncEplbLayerResult,
 )
 
 
@@ -152,3 +158,81 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def test_move_to_workspace_completes_empty_cycle(monkeypatch: pytest.MonkeyPatch):
+    consumed_event = MagicMock()
+    model_state = MagicMock(
+        pending_result=AsyncEplbCycleComplete(consumed_event=consumed_event),
+        rebalanced=True,
+    )
+    move_from_buffer = MagicMock()
+    commit_maps = MagicMock()
+    monkeypatch.setattr(eplb_state, "move_from_buffer", move_from_buffer)
+    monkeypatch.setattr(eplb_state, "_commit_eplb_maps_for_layer", commit_maps)
+
+    eplb_state._move_to_workspace(model_state, ep_rank=0)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    move_from_buffer.assert_not_called()
+    commit_maps.assert_not_called()
+    consumed_event.record.assert_called_once_with()
+
+
+def test_move_to_workspace_completes_on_last_changed_layer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    consumed_event = MagicMock()
+    result = AsyncEplbLayerResult(
+        layer_idx=1,
+        new_physical_to_logical_map=torch.tensor([1, 0]),
+        transfer_metadata=MagicMock(),
+        completes_cycle=True,
+        consumed_event=consumed_event,
+    )
+    model_state = MagicMock(
+        expert_buffer=MagicMock(),
+        model=MagicMock(expert_weights=[MagicMock(), MagicMock(), MagicMock()]),
+        pending_result=result,
+        rebalanced=True,
+    )
+    move_from_buffer = MagicMock()
+    commit_maps = MagicMock()
+    monkeypatch.setattr(eplb_state, "move_from_buffer", move_from_buffer)
+    monkeypatch.setattr(eplb_state, "_commit_eplb_maps_for_layer", commit_maps)
+
+    eplb_state._move_to_workspace(model_state, ep_rank=0)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    move_from_buffer.assert_called_once()
+    commit_maps.assert_called_once_with(
+        model_state,
+        new_physical_to_logical_map=result.new_physical_to_logical_map,
+        layer=1,
+    )
+    consumed_event.record.assert_called_once_with()
+
+
+def test_drain_async_uses_explicit_cycle_completion():
+    consumed_event = MagicMock()
+    result = AsyncEplbLayerResult(
+        layer_idx=1,
+        new_physical_to_logical_map=torch.tensor([1, 0]),
+        transfer_metadata=MagicMock(),
+        completes_cycle=True,
+        consumed_event=consumed_event,
+    )
+    model_state = MagicMock(pending_result=result, rebalanced=True)
+    state = MagicMock(
+        is_async=True,
+        model_states={"model": model_state},
+    )
+    state._all_ranks_result_ready.return_value = True
+
+    EplbState.drain_async(state)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()

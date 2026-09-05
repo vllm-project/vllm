@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import random
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.distributed
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb import async_worker
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
     has_nixl,
 )
 from vllm.distributed.eplb.rebalance_execute import (
+    AsyncEplbCycleComplete,
+    AsyncEplbLayerResult,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -667,6 +673,162 @@ def test_async_transfer_layer_without_mtp(
         num_logical_experts,
         eplb_communicator,
     )
+
+
+@pytest.mark.parametrize(
+    "changed_layers",
+    [set(), {2}, {3}, {0, 2}],
+    ids=["unchanged", "middle", "last", "non_contiguous"],
+)
+def test_async_worker_skips_unchanged_layers_without_changing_output(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_layers: set[int],
+):
+    """Match the tensor output of the legacy all-layer transfer behavior."""
+
+    class CycleComplete(Exception):
+        pass
+
+    class RearrangeEvent:
+        def __init__(self):
+            self.wait_count = 0
+
+        def wait(self, stream):
+            del stream
+            if self.wait_count:
+                raise CycleComplete
+            self.wait_count += 1
+
+    class Stream:
+        def __init__(self):
+            self.synchronize_count = 0
+
+        def synchronize(self):
+            self.synchronize_count += 1
+
+    num_layers = 4
+    old_map = torch.arange(num_layers * 2).reshape(num_layers, 2)
+    new_map = old_map.clone()
+    for layer_idx in changed_layers:
+        new_map[layer_idx] = new_map[layer_idx].flip(0)
+
+    initial_weights = torch.arange(num_layers * 2 * 3).reshape(num_layers, 2, 3)
+
+    def rearrange_layer(
+        weights: torch.Tensor,
+        old_indices: torch.Tensor,
+        new_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        source_indices = torch.tensor(
+            [(old_indices == logical).nonzero().item() for logical in new_indices]
+        )
+        return weights[source_indices]
+
+    expected_weights = torch.stack(
+        [
+            rearrange_layer(
+                initial_weights[layer_idx],
+                old_map[layer_idx],
+                new_map[layer_idx],
+            )
+            for layer_idx in range(num_layers)
+        ]
+    )
+
+    model_state = SimpleNamespace(
+        communicator=MagicMock(),
+        expert_buffer=torch.empty_like(initial_weights[0]),
+        model=SimpleNamespace(
+            expert_weights=[weights.clone() for weights in initial_weights],
+            num_moe_layers=num_layers,
+        ),
+        pending_result=None,
+        physical_to_logical_map=old_map.clone(),
+        rebalanced=True,
+    )
+    state = SimpleNamespace(
+        is_async=True,
+        model_states={"model": model_state},
+        rearrange_event=RearrangeEvent(),
+    )
+    group = SimpleNamespace(rank=lambda: 0, size=lambda: 1)
+    eplb_group = SimpleNamespace(device_group=group, cpu_group=group)
+
+    def transfer_layer(**kwargs):
+        model_state.expert_buffer.copy_(
+            rearrange_layer(
+                kwargs["expert_weights"],
+                kwargs["old_layer_indices"],
+                kwargs["new_layer_indices"],
+            )
+        )
+        return MagicMock()
+
+    transfer = MagicMock(side_effect=transfer_layer)
+    all_reduce = MagicMock()
+    results = []
+
+    class ConsumedEvent:
+        def wait(self, stream):
+            del stream
+            result = model_state.pending_result
+            assert result is not None
+            results.append(result)
+            if isinstance(result, AsyncEplbLayerResult):
+                model_state.model.expert_weights[result.layer_idx].copy_(
+                    model_state.expert_buffer
+                )
+                model_state.physical_to_logical_map[result.layer_idx].copy_(
+                    result.new_physical_to_logical_map
+                )
+            if result.completes_cycle:
+                model_state.rebalanced = False
+            model_state.pending_result = None
+
+    monkeypatch.setattr(async_worker, "get_eplb_group", lambda: eplb_group)
+    monkeypatch.setattr(
+        async_worker,
+        "run_rebalance_experts",
+        lambda *args, **kwargs: new_map,
+    )
+    monkeypatch.setattr(async_worker, "transfer_layer", transfer)
+    monkeypatch.setattr(async_worker, "CpuGpuEvent", ConsumedEvent)
+    monkeypatch.setattr(async_worker.torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(
+        async_worker.torch.cuda,
+        "stream",
+        lambda stream: contextlib.nullcontext(stream),
+    )
+
+    stream = Stream()
+    with pytest.raises(CycleComplete):
+        async_worker.transfer_run_periodically(state, stream)
+
+    transferred_layers = [call.kwargs["layer_idx"] for call in transfer.call_args_list]
+    assert transferred_layers == sorted(changed_layers)
+    assert all_reduce.call_count == len(changed_layers)
+    assert stream.synchronize_count == len(changed_layers)
+    assert len(results) == max(1, len(changed_layers))
+    torch.testing.assert_close(
+        torch.stack(model_state.model.expert_weights),
+        expected_weights,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        model_state.physical_to_logical_map,
+        new_map,
+        rtol=0,
+        atol=0,
+    )
+
+    if changed_layers:
+        assert all(isinstance(result, AsyncEplbLayerResult) for result in results)
+        assert [result.completes_cycle for result in results] == [False] * (
+            len(results) - 1
+        ) + [True]
+    else:
+        assert isinstance(results[0], AsyncEplbCycleComplete)
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
