@@ -24,6 +24,7 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.mirostat_state import MirostatStateHolder
 from vllm.v1.sample.thinking_budget_state import (
     maybe_create_thinking_budget_state_holder,
 )
@@ -109,6 +110,10 @@ class InputBatch:
         use_replayssm: bool = False,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
     ):
+        # Always created; a no-op unless a request sets mirostat_mode != 0.
+        self.mirostat_state_holder = MirostatStateHolder(
+            max_num_reqs=max_num_reqs, device=device
+        )
         self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
             reasoning_config,
             max_num_reqs,
@@ -848,6 +853,8 @@ class InputBatch:
         # reset batch update tracking.
         # Update sampling metadata if batch state is changed.
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        if batch_update:
+            self.mirostat_state_holder.sync_batch(batch_update)
         if self.thinking_budget_state_holder is not None and batch_update:
             self.thinking_budget_state_holder.sync_batch(batch_update)
         for logit_proc in self.logitsprocs.all:
@@ -958,6 +965,7 @@ class InputBatch:
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
             thinking_budget_state_holder=self.thinking_budget_state_holder,
+            mirostat_state_holder=self.mirostat_state_holder,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:

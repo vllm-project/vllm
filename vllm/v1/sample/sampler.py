@@ -283,6 +283,15 @@ class Sampler(nn.Module):
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
             logits = processor.apply(logits)
 
+        # Mirostat v2 truncation (argmax-invariant): drop tokens whose surprise
+        # exceeds the per-request ``mu``. Requests using Mirostat disable
+        # top_k/top_p, so ``logits`` for those rows is unchanged by the sampler
+        # below and can be reused to update ``mu`` from the sampled token.
+        mirostat = sampling_metadata.mirostat_state_holder
+        mirostat_active = mirostat is not None and mirostat.has_tracked_requests()
+        if mirostat_active:
+            logits = mirostat.apply_to_logits(logits)
+
         # Apply top_k and/or top_p.
         random_sampled, processed_logprobs = self.topk_topp_sampler(
             logits,
@@ -290,6 +299,9 @@ class Sampler(nn.Module):
             sampling_metadata.top_k,
             sampling_metadata.top_p,
         )
+
+        if mirostat_active:
+            mirostat.update_mu(random_sampled)
 
         if greedy_sampled is None:
             return random_sampled, processed_logprobs
