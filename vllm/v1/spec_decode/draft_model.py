@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from typing_extensions import override
@@ -31,31 +33,48 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self._raise_if_draft_tp_mismatch()
 
-        self.use_heterogeneous_vocab = self.speculative_config.use_heterogeneous_vocab
+        spec = self.speculative_config
+        self.use_heterogeneous_vocab = spec.use_heterogeneous_vocab
+        self.heterogeneous_vocab_method = spec.heterogeneous_vocab_method
+
+        if self.use_heterogeneous_vocab:
+            self._init_heterogeneous_vocab(device)
+        else:
+            self._raise_if_vocab_size_mismatch()
+            self.vocab_mapping = None
+            self.slem_mapper = None
+
+    def _init_heterogeneous_vocab(self, device: torch.device):
+        from vllm.v1.spec_decode.slem import SlemMapper
 
         spec = self.speculative_config
-        if self.use_heterogeneous_vocab:
-            # Heterogeneous vocabularies: build a VocabMapping to translate
-            # token IDs between the two tokenizers and constrain draft logits
-            # to the intersection so rejection sampling stays lossless.
-            target_tokenizer = get_tokenizer(
-                spec.target_model_config.tokenizer,
-                trust_remote_code=spec.target_model_config.trust_remote_code,
+
+        target_tokenizer = get_tokenizer(
+            spec.target_model_config.tokenizer,
+            trust_remote_code=spec.target_model_config.trust_remote_code,
+        )
+        draft_tokenizer = get_tokenizer(
+            spec.draft_model_config.model,
+            trust_remote_code=spec.draft_model_config.trust_remote_code,
+        )
+
+        if self.heterogeneous_vocab_method == "slem":
+            self.slem_mapper: SlemMapper | None = SlemMapper(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                device=device,
             )
-            draft_tokenizer = get_tokenizer(
-                spec.draft_model_config.model,
-                trust_remote_code=spec.draft_model_config.trust_remote_code,
-            )
-            self.vocab_mapping: VocabMapping | None = VocabMapping(
+            self.vocab_mapping: VocabMapping | None = None
+        else:
+            # TLI: Token-Level Intersection
+            self.slem_mapper = None
+            self.vocab_mapping = VocabMapping(
                 target_tokenizer=target_tokenizer,
                 draft_tokenizer=draft_tokenizer,
                 target_vocab_size=spec.target_model_config.get_vocab_size(),
                 draft_vocab_size=spec.draft_model_config.get_vocab_size(),
                 device=device,
             )
-        else:
-            self._raise_if_vocab_size_mismatch()
-            self.vocab_mapping = None
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()
