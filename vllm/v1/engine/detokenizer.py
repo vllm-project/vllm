@@ -107,13 +107,17 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             return None
 
         skipped_stop_token_ids: list[int] = []
-        if not self.include_stop_str_in_output:
-            skip_from = self._stop_token_skip_index(new_token_ids, stop_terminated)
-            if skip_from is not None:
-                # Exclude the matched stop token (and anything after it) from
-                # detokenization so its text is not emitted, including deltas.
-                skipped_stop_token_ids = new_token_ids[skip_from:]
-                new_token_ids = new_token_ids[:skip_from]
+        stop_idx = self._matched_stop_token_index(new_token_ids)
+        if stop_idx is not None:
+            # Always drop tokens after a matched stop id. Keep the stop
+            # token itself only when the caller asked to include it.
+            keep_until = stop_idx + int(self.include_stop_str_in_output)
+            skipped_stop_token_ids = new_token_ids[keep_until:]
+            new_token_ids = new_token_ids[:keep_until]
+        elif stop_terminated and not self.include_stop_str_in_output:
+            # Engine-core EOS/stop finishes skip the last token (typically EOS).
+            skipped_stop_token_ids = new_token_ids[-1:]
+            new_token_ids = new_token_ids[:-1]
 
         # 1) Detokenize the new token ids incrementally.
         stop_check_offset = len(self.output_text)
@@ -144,24 +148,17 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         return stop_string
 
-    def _stop_token_skip_index(
-        self, new_token_ids: list[int], stop_terminated: bool
-    ) -> int | None:
-        """Return the index of the first token that should not be detokenized.
-
-        Stop token ids are excluded even when ``stop_terminated`` is false.
-        Engine-core EOS/stop finishes also set ``stop_terminated``, which
-        skips the last token (typically EOS).
-        """
-        if (
-            self.stop_token_ids
-            and self.num_output_tokens() + len(new_token_ids) > self.min_tokens
-        ):
-            for i, token_id in enumerate(new_token_ids):
-                if token_id in self.stop_token_ids:
-                    return i
-        if stop_terminated:
-            return len(new_token_ids) - 1
+    def _matched_stop_token_index(self, new_token_ids: list[int]) -> int | None:
+        """Return the first stop-token-id index that is past ``min_tokens``."""
+        if not self.stop_token_ids:
+            return None
+        output_token_count = self.num_output_tokens()
+        for i, token_id in enumerate(new_token_ids):
+            if (
+                output_token_count + i >= self.min_tokens
+                and token_id in self.stop_token_ids
+            ):
+                return i
         return None
 
     @abstractmethod

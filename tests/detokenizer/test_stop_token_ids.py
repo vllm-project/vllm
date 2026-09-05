@@ -124,6 +124,44 @@ def test_stop_token_id_in_same_step_as_prior_tokens():
     assert detok.output_token_ids == _ids("hello!more")
 
 
+def test_include_stop_token_drops_suffix_in_same_step():
+    """include=True keeps the stop token text and drops tokens after it."""
+    stop_id = ord("!")
+    req = _make_request(
+        stop_token_ids=[stop_id],
+        include_stop_str_in_output=True,
+    )
+    detok = _DummyDetokenizer(req)
+
+    detok.update(_ids("hello!more"), stop_terminated=False)
+    assert detok.output_text == "hello!"
+    assert detok.output_token_ids == _ids("hello!more")
+    assert detok.get_next_output_text(finished=True, delta=False) == "hello!"
+
+
+def test_stop_token_id_before_min_tokens_is_ordinary_output():
+    """A stop id before min_tokens is decoded as normal text."""
+    stop_id = ord("!")
+    req = _make_request(
+        stop_token_ids=[stop_id],
+        include_stop_str_in_output=False,
+        min_tokens=5,
+    )
+    detok = _DummyDetokenizer(req)
+
+    detok.update(_ids("hi!x"), stop_terminated=False)
+    assert detok.output_text == "hi!x"
+    assert detok.output_token_ids == _ids("hi!x")
+
+    # 4 tokens so far; the next stop id is still below min_tokens=5.
+    detok.update(_ids("y"), stop_terminated=False)
+    assert detok.output_text == "hi!xy"
+
+    detok.update(_ids("!z"), stop_terminated=False)
+    assert detok.output_text == "hi!xy"
+    assert detok.output_token_ids == _ids("hi!xy!z")
+
+
 def test_stop_strings_still_truncate_when_stop_token_ids_set():
     stop_id = ord("Z")
     req = _make_request(
